@@ -29,6 +29,7 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
   let wrongCloud = false;
   let healthFailure = true;
   let healthProbeGate: ((path: string) => Promise<void>) | null = null;
+  let mutation: ((request: Request) => Promise<Response>) | null = null;
   const synced: Array<{ user: string; session: string }> = [];
   const publicIngress = process.env.PI_ROUTER_TEST_CASE === "android-public";
   let accessVersion = 1;
@@ -49,6 +50,7 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
     const wire = new URL(request.url);
     if (wire.origin === "https://router.test") expect(wire.pathname.startsWith(`${prefix}/v1/`)).toBe(true);
     const path = wire.pathname.slice(wire.origin === "https://router.test" ? prefix.length : 0);
+    const original = request.clone();
     const body = request.method === "POST" ? await request.json() : null;
     const call = { path, search: new URL(request.url).search, headers: request.headers, body };
     calls.push(call);
@@ -83,6 +85,7 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
       { id: "local", name: "Home", baseUrl: "", icon: "house" },
       ...(user === "sybil" ? [{ id: "cloud", name: "Cloud", baseUrl: "/v1/remotes/cloud", icon: "cloud" }] : []),
     ] });
+    if (mutation && request.method === "POST" && /\/v1\/sessions(?:$|\/[^/]+\/prompt$)/.test(path)) return mutation(original);
     return json({ ok: true, user });
   };
   try {
@@ -164,6 +167,37 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
     expect(calls.at(-1)!.path).toBe("/v1/remotes/cloud/v1/sessions/pinned/prompt");
     expect(calls.at(-1)!.body).toEqual({ requestId: "retained" });
     expect(calls.at(-1)!.headers.get("x-pi-remote-session")).toBe("token-1");
+    for (const creation of [true, false]) {
+      const wire: Array<{ url: string; body: string; headers: [string, string][] }> = [];
+      const body = creation ? { requestId: crypto.randomUUID(), sessionId: crypto.randomUUID(), destination: "home", model: null }
+        : { requestId: crypto.randomUUID(), text: "Same message", delivery: "steer" };
+      mutation = async request => {
+        wire.push({ url: request.url, body: await request.clone().text(), headers: [...request.headers] });
+        if (wire.length === 1) {
+          if (creation) throw new TypeError("Controller listener was replaced");
+          return json({ error: "Supervisor handing over" }, 503);
+        }
+        return creation ? json({ session: { id: body.sessionId } }, 201)
+          : json({ accepted: true, workId: body.requestId, delivery: "steer" }, 202);
+      };
+      if (creation) expect(await client.api("POST", "/v1/sessions", body)).toMatchObject({ session: { id: body.sessionId } });
+      else expect(await native.pinnedFetch(cloudEndpoint, "sybil", "/v1/sessions/pinned/prompt", { method: "POST", body: JSON.stringify(body) }).then(response => response.json()))
+        .toMatchObject({ accepted: true, workId: body.requestId });
+      expect(wire).toHaveLength(2);
+      expect(wire[1]).toEqual(wire[0]);
+      expect(wire[0].url).toContain("/v1/remotes/cloud/v1/sessions");
+      expect(wire[0].body).toBe(JSON.stringify(body));
+    }
+    let staleCalls = 0;
+    mutation = async () => {
+      staleCalls++;
+      await window.KenanRemote!.select({ id: "local", user: "sybil" });
+      return json({ error: "Replacing" }, 503);
+    };
+    await expect(client.api("POST", "/v1/sessions", { requestId: crypto.randomUUID() })).rejects.toThrow("Request owner changed");
+    expect(staleCalls).toBe(1);
+    mutation = null;
+    await window.KenanRemote!.select({ id: "cloud", user: "sybil" });
     const { beginRequest, inFlight, SLOW_REQUEST_MS } = await import("./src/in-flight");
     const diagnostic = new Promise<(typeof calls)[number]>(resolve => { reportResolve = resolve; });
     beginRequest("POST", "/v1/sessions/123?message=secret", performance.now() - SLOW_REQUEST_MS - 1)();

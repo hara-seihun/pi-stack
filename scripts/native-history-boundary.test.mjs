@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { request } from 'node:http';
 import { once } from 'node:events';
-import { installFence, removeFence, serviceBusy, bridgeSocket, legacyFleetLedger, attachLegacyRuntime, reconcileLegacyRuntime, installLegacyMaintenance } from '../deploy/native-history-bridge.mjs';
+import { installObservation, MAINTENANCE_INTAKE, removeFence, serviceBusy, bridgeSocket, legacyFleetLedger, attachLegacyRuntime, reconcileLegacyRuntime, installLegacyMaintenance } from '../deploy/native-history-bridge.mjs';
 import { allOwnersReady, stageRemote, stageFleet, selectPointer, fleetInventory, fleetCompletionBarrier, maintenanceStatus, restorationPort } from '../deploy/native-history-coordinator.mjs';
 const old = 'a'.repeat(40), candidate = 'b'.repeat(40);
 function directory(t) { const path = mkdtempSync(join(tmpdir(), 'history-boundary-')); t.after(() => rmSync(path, { recursive: true, force: true })); return path; }
@@ -23,21 +23,24 @@ function database(path) {
     INSERT INTO thread(id) VALUES('accepted');`);
   return { db, sql: sql => db.prepare(sql), runtimes: new Map(), operations: new Map(), opening: new Map(), halts: new Map(), dependencyOperations: new Map() };
 }
-test('durable admission fence preserves admitted roots/children/receipts but refuses new external roots and incompatible custody', t => {
+test('history observation never fences new roots, external input, answers or due wakes', t => {
   const path = directory(t), service = database(join(path, 'threads.sqlite3'));
   service.sql("INSERT INTO thread_work VALUES('receipt','accepted',NULL,'queued')").run();
-  installFence(service, { candidate, legacySource: old });
+  assert.equal(MAINTENANCE_INTAKE, 'always-open-v1');
+  installObservation(service, { candidate, legacySource: old });
   assert.equal(serviceBusy(service).work, 1);
-  assert.throws(() => service.sql("INSERT INTO thread_work VALUES('external','accepted',NULL,'queued')").run(), /admission is closed/);
+  service.sql("INSERT INTO thread_work VALUES('external','accepted',NULL,'queued')").run();
   service.sql("INSERT INTO thread(id,parent_id) VALUES('child','accepted')").run();
   service.sql("INSERT INTO thread_work VALUES('child-receipt','child','accepted','queued')").run();
   service.sql("INSERT INTO thread_work VALUES('result-receipt','accepted','child','queued')").run();
   service.sql("INSERT INTO thread_question VALUES('pending-question','accepted')").run();
   service.sql("INSERT INTO thread_work VALUES('question-answer:pending-question','accepted',NULL,'queued')").run();
-  assert.equal(service.sql('SELECT count(*) AS n FROM thread_work').get().n, 4);
+  assert.equal(service.sql('SELECT count(*) AS n FROM thread_work').get().n, 5);
   service.sql("INSERT INTO pi_history_bridge VALUES('closing','1')").run();
-  assert.throws(() => service.sql("INSERT INTO thread_work VALUES('raced','accepted','child','queued')").run(), /admission is closed/);
-  assert.throws(() => installFence(service, { candidate: 'c'.repeat(40), legacySource: old }), /Another publication/);
+  service.sql("INSERT INTO thread_work VALUES('raced','accepted','child','queued')").run();
+  service.sql("INSERT INTO thread_work VALUES('wake','accepted','accepted','queued')").run();
+  assert.equal(service.sql("SELECT count(*) AS n FROM sqlite_master WHERE type='trigger'").get().n, 0);
+  assert.throws(() => installObservation(service, { candidate: 'c'.repeat(40), legacySource: old }), /Another publication/);
   removeFence(service);
   service.sql("INSERT INTO thread_work VALUES('after','accepted',NULL,'queued')").run();
   service.db.close();
@@ -129,7 +132,10 @@ test('every registered active fleet joins the owner inventory and a non-admin co
   const barrier = fleetCompletionBarrier(owners, item => { checked.push(item.user); return receipts.get(item.user); });
   assert.equal(barrier.ready, false); assert.equal(barrier.waiting[0].user, 'ordinary'); assert.deepEqual(checked, ['ordinary', 'admin']);
   const admin = new DatabaseSync(adminLedger);
-  assert.throws(() => admin.exec("INSERT INTO run VALUES('fresh-admin','queued',NULL)"), /admission is closed/); admin.close();
+  admin.exec("INSERT INTO run VALUES('fresh-admin','queued',NULL)");
+  assert.throws(() => admin.exec("UPDATE run SET state='starting',worker_unit='completion:fresh-admin' WHERE id='fresh-admin'"), /dispatch paused/);
+  assert.equal(admin.prepare("SELECT state FROM run WHERE id='fresh-admin'").get().state, 'queued');
+  admin.close();
 });
 function control(socketPath, method, path) {
   return new Promise((resolve, reject) => { const req = request({ socketPath, method, path }, res => { let body = ''; res.on('data', chunk => body += chunk); res.on('end', () => { try { resolve(JSON.parse(body)); } catch (error) { reject(error); } }); }); req.on('error', reject); req.end(); });
@@ -161,7 +167,7 @@ test('old owner drains existing work/output, closes before private migration, an
     async rpc(){if(existsSync(this.options.databasePath+'.race')&&!this.raced){this.raced=true;console.log('STATUS_WAITING');await new Promise(resolve=>setTimeout(resolve,100));}return {isStreaming:false,isCompacting:false,localTools:0,pendingCommandCount:0}}
     busy(state){return state.isStreaming||state.isCompacting||state.localTools>0||state.pendingCommandCount>0} adoptReference(){} wake(){}
     async send(){return {ok:true}} async spawn(){return {ok:true}} deliverScheduledWakes(){}
-    async close(){this.db.exec("UPDATE thread SET metadata=json_remove(metadata,'$.runnerReference')");this.db.close();this.closed=true;return {ok:true}}
+    async close(){console.log('CLOSE_WAITING');await new Promise(resolve=>setTimeout(resolve,40));this.db.exec("UPDATE thread SET metadata=json_remove(metadata,'$.runnerReference')");this.db.close();this.closed=true;return {ok:true}}
   }`);
   const harness = join(root, 'harness.mjs');
   writeFileSync(harness, `import {installLegacyMaintenance} from ${JSON.stringify(pathToFileURL(bridge).href)}; import {ThreadService} from './api.mjs';
@@ -178,7 +184,7 @@ test('old owner drains existing work/output, closes before private migration, an
   let errors = ''; child.stderr.on('data', chunk => errors += chunk);
   t.after(() => { if (child.exitCode === null) child.kill('SIGKILL'); });
   const [started] = await once(child.stdout, 'data');
-  assert.deepEqual(JSON.parse(started.toString()), { admitted: true, crossOwner: true, denied: false, replay: true });
+  assert.deepEqual(JSON.parse(started.toString()), { admitted: true, crossOwner: true, denied: true, replay: true });
   const socket = bridgeSocket(process.getuid(), root);
   const busy = await control(socket, 'GET', '/status');
   assert.equal(busy.ready, false); assert.equal(busy.owners[0].busy.executions, 1);
@@ -192,15 +198,23 @@ test('old owner drains existing work/output, closes before private migration, an
   const concurrentStatus = control(socket, 'GET', '/status').catch(error => ({ error: String(error) }));
   const [marker] = await waiting; assert.match(marker.toString(), /STATUS_WAITING/);
   const exit = once(child, 'exit');
+  const paused = once(child.stdout, 'data');
   const retiring = control(socket, 'POST', '/close').catch(() => {});
   const observed = await concurrentStatus;
   assert.equal(observed.ready, true, JSON.stringify(observed));
+  const [pausedMarker] = await paused; assert.match(pausedMarker.toString(), /CLOSE_WAITING/);
+  const lateIntake = new DatabaseSync(threadPath);
+  lateIntake.prepare("INSERT INTO thread_work VALUES('late-accepted','accepted',NULL,'queued')").run();
+  lateIntake.close();
   await retiring;
   const [code] = await exit; assert.equal(code, 75, errors);
   const preserved = readFileSync(native, 'utf8'); assert.ok(preserved.includes(receipt)); assert.match(preserved, /retained thinking/);
   const readiness = JSON.parse(readFileSync(join(root, 'native-history-readiness.json'), 'utf8'));
   assert.equal(readiness.writersStopped, true); assert.equal(readiness.retainedOutput, 'acknowledged');
   assert.equal(JSON.parse(readFileSync(join(root, 'native-history-maintenance.json'), 'utf8')).phase, 'migrated');
+  const retainedQueue = new DatabaseSync(threadPath);
+  assert.equal(retainedQueue.prepare("SELECT status FROM thread_work WHERE id='late-accepted'").get().status, 'queued');
+  retainedQueue.close();
   const snapshotFiles = new DatabaseSync(join(root, 'supervisor.sqlite3'));
   assert.equal(snapshotFiles.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name='session_contexts'").get().n, 0); snapshotFiles.close();
 }, { timeout: 5000 });
@@ -219,7 +233,7 @@ test('normal fleet shutdown retires bridge control without inventing producer cl
     async detach(){this.closed=true;this.db.close();return {ok:true}}
   }`);
   writeFileSync(join(root, 'daemon.js'), `import {once} from 'node:events';import {ThreadService} from './api.js'; export class Daemon {
-    constructor(path){this.threads=new ThreadService(path);this.completionPool={size:0};this.reconciling=false;} loadManifest(){} fillCapacity(){}
+    constructor(path){this.threads=new ThreadService(path);this.completionPool={size:0};this.reconciling=false;} loadManifest(){} fillCapacity(){} reconcile(){}
     async start(){const resume=once(process,'SIGUSR1');console.log('CONSTRUCTED');await resume;await this.threads.start();console.log('STARTED');await once(process,'SIGTERM');await this.threads.detach();}
   }`);
   const harness = join(root, 'shutdown.mjs');
@@ -244,7 +258,7 @@ test('normal fleet shutdown retires bridge control without inventing producer cl
   assert.equal(receipt.phase, 'draining'); assert.equal(receipt.controllerStopped, true); assert.equal(receipt.ready, false);
   assert.equal(receipt.databases, undefined); assert.equal(receipt.error, undefined);
 });
-test('fleet adoption fences fresh completions while old accepted provider work settles, without cancellation', async t => {
+test('short fleet replacement pauses dispatch, accepts fresh completion receipts and preserves running work', async t => {
   const root = directory(t), path = join(root, 'ledger.sqlite3'), db = new DatabaseSync(path);
   db.exec(`CREATE TABLE control(key TEXT PRIMARY KEY,value TEXT); CREATE TABLE run(id TEXT PRIMARY KEY,state TEXT,worker_unit TEXT);
     INSERT INTO run VALUES('accepted','running','completion:accepted');`);
@@ -253,11 +267,13 @@ test('fleet adoption fences fresh completions while old accepted provider work s
   assert.equal(db.prepare('SELECT count(*) AS n FROM control').get().n, 0);
   assert.deepEqual(await legacyFleetLedger(path, identity), { ready: false, pendingCompletions: 1 });
   assert.equal(db.prepare("SELECT state FROM run WHERE id='accepted'").get().state, 'running');
-  assert.throws(() => db.exec("INSERT INTO run VALUES('new','queued',NULL)"), /admission is closed/);
+  db.exec("INSERT INTO run VALUES('new','queued',NULL)");
+  assert.throws(() => db.exec("UPDATE run SET state='starting',worker_unit='completion:new' WHERE id='new'"), /dispatch paused/);
   await assert.rejects(legacyFleetLedger(path, { ...identity, candidate: 'c'.repeat(40) }), /Another publication/);
   assert.deepEqual(await legacyFleetLedger(path, { ...identity, candidate: 'c'.repeat(40) }, 'restore-owned'), { ready: true, ownership: 'foreign-preserved' });
   assert.equal(JSON.parse(db.prepare("SELECT value FROM control WHERE key='native-history-maintenance'").get().value).candidate, candidate);
-  assert.throws(() => db.exec("INSERT INTO run VALUES('foreign-release','queued',NULL)"), /admission is closed/);
+  db.exec("INSERT INTO run VALUES('foreign-release','queued',NULL)");
+  assert.throws(() => db.exec("UPDATE run SET state='starting',worker_unit='completion:foreign-release' WHERE id='foreign-release'"), /dispatch paused/);
   db.exec("UPDATE run SET state='done'");
   assert.deepEqual(await legacyFleetLedger(path, identity), { ready: true, pendingCompletions: 0 });
   await legacyFleetLedger(path, identity, 'restore');
@@ -266,7 +282,7 @@ test('fleet adoption fences fresh completions while old accepted provider work s
 test('interrupted fleet closure releases its durable fences and locked bootstrap advances without reopening old work', async t => {
   const root = directory(t), threadPath = join(root, 'threads.sqlite3');
   const service = database(threadPath);
-  installFence(service, { candidate, legacySource: old }); service.db.close();
+  installObservation(service, { candidate, legacySource: old }); service.db.close();
   const ledgerPath = join(root, 'ledger.sqlite3'), ledger = new DatabaseSync(ledgerPath);
   ledger.exec('CREATE TABLE control(key TEXT PRIMARY KEY,value TEXT); CREATE TABLE run(id TEXT PRIMARY KEY,state TEXT,worker_unit TEXT);'); ledger.close();
   await legacyFleetLedger(ledgerPath, { candidate, legacySource: old });

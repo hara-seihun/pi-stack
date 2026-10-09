@@ -65,31 +65,22 @@ export async function prepareBridgeSocket(path) {
   } catch (error) { return { ok: false, error: { code: 'unavailable', message: String(error) } }; }
 }
 
-export function installFence(service, identity) {
+export const MAINTENANCE_INTAKE = 'always-open-v1';
+export function installObservation(service, identity) {
   service.db.exec('SAVEPOINT history_fence');
   try {
   const row = service.sql("SELECT name FROM sqlite_master WHERE type='table' AND name='pi_history_bridge'").get();
   service.db.exec(`CREATE TABLE IF NOT EXISTS pi_history_bridge(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS pi_history_cohort(id TEXT PRIMARY KEY);
-    CREATE TABLE IF NOT EXISTS pi_history_questions(id TEXT PRIMARY KEY,thread_id TEXT NOT NULL);`);
+    CREATE TABLE IF NOT EXISTS pi_history_observation(version INTEGER PRIMARY KEY CHECK(version=1));`);
   if (!row) {
     service.sql("INSERT INTO pi_history_bridge VALUES('identity',?)").run(JSON.stringify(identity));
-    service.db.exec('INSERT INTO pi_history_cohort SELECT id FROM thread; INSERT INTO pi_history_questions SELECT id,thread_id FROM thread_question;');
+    service.sql('INSERT OR IGNORE INTO pi_history_observation VALUES(1)').run();
   } else {
     const recorded = JSON.parse(service.sql("SELECT value FROM pi_history_bridge WHERE key='identity'").get().value);
-    if (recorded.candidate !== identity.candidate || recorded.legacySource !== identity.legacySource) throw new Error('Another publication owns the native history admission fence');
+    if (recorded.candidate !== identity.candidate || recorded.legacySource !== identity.legacySource) throw new Error('Another publication owns the native history observation');
   }
-  service.db.exec(`CREATE TRIGGER IF NOT EXISTS pi_history_children AFTER INSERT ON thread
-    WHEN NEW.parent_id IN (SELECT id FROM pi_history_cohort)
-    BEGIN INSERT OR IGNORE INTO pi_history_cohort VALUES(NEW.id); END;
-    CREATE TRIGGER IF NOT EXISTS pi_history_question_cohort AFTER INSERT ON thread_question
-    WHEN NEW.thread_id IN (SELECT id FROM pi_history_cohort)
-    BEGIN INSERT OR IGNORE INTO pi_history_questions VALUES(NEW.id,NEW.thread_id); END;
-    CREATE TRIGGER IF NOT EXISTS pi_history_admission BEFORE INSERT ON thread_work
-    WHEN EXISTS(SELECT 1 FROM pi_history_bridge WHERE key='closing') OR
-      ((NEW.sender_id IS NULL OR NEW.sender_id NOT IN (SELECT id FROM pi_history_cohort)) AND
-       NOT EXISTS(SELECT 1 FROM pi_history_questions WHERE thread_id=NEW.thread_id AND NEW.id='question-answer:'||id))
-    BEGIN SELECT RAISE(ABORT,'Native history maintenance admission is closed; retry the same receipt after publication'); END;`);
+  const admission = service.sql("SELECT name FROM sqlite_master WHERE type='trigger' AND name='pi_history_admission'").get();
+  if (admission) throw new Error('An earlier gated owner must restore before always-open observation');
   service.db.exec('RELEASE history_fence');
   } catch (error) {
     service.db.exec('ROLLBACK TO history_fence; RELEASE history_fence');
@@ -97,13 +88,13 @@ export function installFence(service, identity) {
   }
 }
 export function removeFence(service) {
-  service.db.exec('DROP TRIGGER IF EXISTS pi_history_admission; DROP TRIGGER IF EXISTS pi_history_children; DROP TRIGGER IF EXISTS pi_history_question_cohort; DROP TABLE IF EXISTS pi_history_questions; DROP TABLE IF EXISTS pi_history_cohort; DROP TABLE IF EXISTS pi_history_bridge;');
+  service.db.exec('DROP TRIGGER IF EXISTS pi_history_admission; DROP TRIGGER IF EXISTS pi_history_children; DROP TRIGGER IF EXISTS pi_history_question_cohort; DROP TABLE IF EXISTS pi_history_questions; DROP TABLE IF EXISTS pi_history_cohort; DROP TABLE IF EXISTS pi_history_bridge; DROP TABLE IF EXISTS pi_history_observation;');
 }
 export async function legacyFleetLedger(path, identity, action = 'prepare') {
   const { DatabaseSync } = await import('node:sqlite');
   const db = new DatabaseSync(path, { readOnly: action === 'probe' });
   db.exec('PRAGMA busy_timeout=2000');
-  const pendingCompletions = () => db.prepare(`SELECT count(*) AS n FROM run r WHERE r.state IN ('queued','starting','running')
+  const pendingCompletions = () => db.prepare(`SELECT count(*) AS n FROM run r WHERE r.state IN ('starting','running')
     AND (r.worker_unit LIKE 'completion:%' OR EXISTS(SELECT 1 FROM control WHERE key='completion-run:'||r.id))`).get().n;
   if (action === 'probe') {
     try { const pending = pendingCompletions(); return { ready: pending === 0, pendingCompletions: pending }; }
@@ -120,15 +111,17 @@ export async function legacyFleetLedger(path, identity, action = 'prepare') {
         db.exec('COMMIT'); return { ready: true, ownership: 'foreign-preserved' };
       }
       if (!row && db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='pi_history_completion_admission'").get()) throw new Error('Fleet admission fence has no declared identity');
-      db.exec('DROP TRIGGER IF EXISTS pi_history_completion_admission');
+      db.exec('DROP TRIGGER IF EXISTS pi_history_completion_admission; DROP TRIGGER IF EXISTS pi_history_completion_dispatch');
       db.prepare("DELETE FROM control WHERE key='native-history-maintenance'").run();
       db.exec('COMMIT'); return { ready: true };
     }
     const row = db.prepare("SELECT value FROM control WHERE key='native-history-maintenance'").get();
     if (row && row.value !== JSON.stringify(identity)) throw new Error('Another publication owns the fleet admission fence');
     db.prepare("INSERT OR REPLACE INTO control(key,value) VALUES('native-history-maintenance',?)").run(JSON.stringify(identity));
-    db.exec(`CREATE TRIGGER IF NOT EXISTS pi_history_completion_admission BEFORE INSERT ON run
-      BEGIN SELECT RAISE(ABORT,'Native history maintenance admission is closed; retry the same completion receipt after publication'); END;`);
+    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='pi_history_completion_admission'").get()) throw new Error('An earlier gated fleet must restore before dispatch replacement');
+    db.exec(`CREATE TRIGGER IF NOT EXISTS pi_history_completion_dispatch BEFORE UPDATE ON run
+      WHEN OLD.state='queued' AND NEW.state='starting' AND NEW.worker_unit LIKE 'completion:%'
+      BEGIN SELECT RAISE(ABORT,'Controller replacement dispatch paused; queued completion receipt is retained'); END;`);
     const pending = pendingCompletions();
     db.exec('COMMIT'); return { ready: pending === 0, pendingCompletions: pending };
   } catch (error) {
@@ -194,6 +187,8 @@ export async function installLegacyMaintenance(options) {
   if (receipt.phase === 'restored') return true;
   if (receipt.phase === 'closing') save('draining');
   const services = new Set(), controls = new Set(), daemons = new Set(), detaching = new WeakSet(), startedServices = new WeakSet();
+  const dispatchPaused = new WeakSet(), daemonDispatchPaused = new WeakSet();
+  let handingOff = false;
   let controlServer, autoTimer;
   let ownerQueue = Promise.resolve();
   const ownerOperation = action => {
@@ -212,21 +207,23 @@ export async function installLegacyMaintenance(options) {
     receipt.controllerStopped = true; receipt.ready = false; save(receipt.phase);
     controlServer?.close(); controlServer?.closeIdleConnections();
   }
-  let restoreDaemonAdmission = () => {};
+  let restoreDaemonDispatch = () => {};
   if (options.mode === 'fleet' && receipt.phase === 'draining') {
     if (typeof options.ledgerPath !== 'string' || !options.ledgerPath.startsWith('/')) throw new Error('Fleet maintenance needs its exact owner ledger');
     receipt.ledgerPath = options.ledgerPath;
     const { Daemon } = await import(pathToFileURL(join(dirname(options.oldApi), 'daemon.js')).href);
     if (!['start','loadManifest','fillCapacity'].every(key => typeof Daemon?.prototype[key] === 'function')) throw new Error('Selected old fleet has no completion custody seam');
-    const loadManifest = Daemon.prototype.loadManifest, fillCapacity = Daemon.prototype.fillCapacity;
-    Daemon.prototype.loadManifest = async function() {}; Daemon.prototype.fillCapacity = async function() {};
-    restoreDaemonAdmission = () => { Daemon.prototype.loadManifest = loadManifest; Daemon.prototype.fillCapacity = fillCapacity; };
+    const reconcile = Daemon.prototype.reconcile;
+    if (typeof reconcile !== 'function') throw new Error('Selected old fleet has no dispatch reconciliation seam');
+    Daemon.prototype.reconcile = function(...args) { return daemonDispatchPaused.has(this) ? Promise.resolve() : reconcile.apply(this, args); };
+    restoreDaemonDispatch = () => { Daemon.prototype.reconcile = reconcile; };
     const start = Daemon.prototype.start;
     Daemon.prototype.start = async function(...args) {
       if (!(this.threads instanceof api.ThreadService) || typeof this.threads.options?.databasePath !== 'string'
         || !this.threads.options.databasePath.startsWith('/')) throw new Error('Legacy daemon uses an uninstrumented or unbound thread service');
       services.add(this.threads);
       daemons.add(this);
+      releaseFleetLedger();
       try { return await start.apply(this, args); }
       finally {
         if (receipt.phase === 'owners-closed') {
@@ -240,40 +237,20 @@ export async function installLegacyMaintenance(options) {
   const api = await import(pathToFileURL(options.oldApi).href);
   const prototype = api.ThreadService?.prototype;
   if (!prototype || !['start','close','attach','send','spawn','deliverScheduledWakes','rpc','busy','adoptReference','wake'].every(key => typeof prototype[key] === 'function')) throw new Error('Selected legacy ThreadService has no supported maintenance seam');
-  const originalStart = prototype.start, originalSend = prototype.send, originalSpawn = prototype.spawn, originalWakes = prototype.deliverScheduledWakes, originalAttach = prototype.attach, originalDetach = prototype.detach;
+  const originalStart = prototype.start, originalAttach = prototype.attach, originalDetach = prototype.detach;
+  const originalWake = prototype.wake, originalDrain = prototype.drain;
+  prototype.wake = function(...args) { if (!dispatchPaused.has(this)) return originalWake.apply(this, args); };
+  if (typeof originalDrain === 'function') prototype.drain = function(...args) { return dispatchPaused.has(this) ? Promise.resolve() : originalDrain.apply(this, args); };
   if (typeof originalDetach === 'function') prototype.detach = async function(...args) {
     detaching.add(this);
     try { return await originalDetach.apply(this, args); }
     finally { if (!this.closed) detaching.delete(this); }
   };
   prototype.attach = function(id, recoverMissing = false) { return attachLegacyRuntime(this, originalAttach, id, recoverMissing); };
-  const rejecting = () => ({ ok: false, error: { code: 'unavailable', retryable: true, message: 'Native history maintenance admission is closed; retry the same receipt after publication' } });
-  const allowed = async (service, id) => {
-    installFence(service, identity);
-    if (typeof id !== 'string') return false;
-    if (service.sql('SELECT id FROM pi_history_cohort WHERE id=?').get(id)) return true;
-    // The fleet/person directory can route an admitted parent or completion across
-    // ledgers. Resolve only its public ancestry; no other owner's history is read.
-    if (!service.directory || !Number.isSafeInteger(receipt.admittedAt)) return false;
-    const visited = new Set(); let ancestor = id;
-    for (let depth = 0; depth < 64 && ancestor && !visited.has(ancestor); depth++) {
-      visited.add(ancestor);
-      const found = await service.directory.list({ id: ancestor, limit: 1 });
-      if (!found.ok) return false;
-      const thread = found.value.threads.find(thread => thread.id === ancestor);
-      if (!thread) return false;
-      if (service.sql('SELECT id FROM pi_history_cohort WHERE id=?').get(ancestor)
-        || (Number.isSafeInteger(thread.createdAt) && thread.createdAt <= receipt.admittedAt)) {
-        service.sql('INSERT OR IGNORE INTO pi_history_cohort VALUES(?)').run(id); return true;
-      }
-      ancestor = thread.parentId;
-    }
-    return false;
-  };
   prototype.start = async function(...args) {
-    if (receipt.phase !== 'draining') return rejecting();
     services.add(this);
-    installFence(this, identity); this.sql("DELETE FROM pi_history_bridge WHERE key='closing'").run();
+    installObservation(this, identity);
+    if (handingOff) dispatchPaused.add(this);
     const result = await originalStart.apply(this, args);
     if (result?.ok === true) {
       startedServices.add(this);
@@ -281,19 +258,6 @@ export async function installLegacyMaintenance(options) {
     }
     return result;
   };
-  const recordedRequest = (service, input) => typeof input?.requestId === 'string'
-    && !!service.sql('SELECT id FROM thread_request WHERE id=?').get(input.requestId);
-  prototype.send = async function(input) {
-    if (receipt.phase !== 'draining') return rejecting();
-    if (recordedRequest(this, input)) return originalSend.call(this, input); // Old owner validates the exact receipt/hash.
-    return await allowed(this, input.senderId) && receipt.phase === 'draining' ? originalSend.call(this, input) : rejecting();
-  };
-  prototype.spawn = async function(input) {
-    if (receipt.phase !== 'draining') return rejecting();
-    if (recordedRequest(this, input)) return originalSpawn.call(this, input);
-    return await allowed(this, input.parentId) && receipt.phase === 'draining' ? originalSpawn.call(this, input) : rejecting();
-  };
-  prototype.deliverScheduledWakes = function() {}; // Schedules remain durable; new wakes resume on the candidate.
   const extension = options.oldApi.endsWith('.ts') ? '.ts' : options.oldApi.endsWith('.js') ? '.js' : null;
   const transportPath = options.transportModule ?? (extension ? join(dirname(options.oldApi), 'threads', `runner-transport${extension}`) : null);
   if (!transportPath) throw new Error('Selected legacy runner transport source is unknown');
@@ -353,9 +317,17 @@ export async function installLegacyMaintenance(options) {
       const current = await status(); if (!current.ready) return current;
       const active = activeServices();
       if (active === null || !active.length) return awaitingReplacement();
-      for (const service of active) service.sql("INSERT OR REPLACE INTO pi_history_bridge VALUES('closing','1')").run();
-      const raced = active.some(service => Object.values(serviceBusy(service)).some(Boolean));
-      if (raced) { for (const service of active) service.sql("DELETE FROM pi_history_bridge WHERE key='closing'").run(); return { ...receipt, ready: false, reason: 'Accepted work raced final admission closure' }; }
+      handingOff = true;
+      for (const service of active) dispatchPaused.add(service);
+      for (const daemon of daemons) daemonDispatchPaused.add(daemon);
+      const raced = active.some(service => Object.entries(serviceBusy(service)).some(([key, count]) => key !== 'work' && count !== 0))
+        || [...daemons].some(daemon => daemon.completionPool.size || daemon.reconciling);
+      if (raced) {
+        handingOff = false;
+        for (const service of active) dispatchPaused.delete(service);
+        for (const daemon of daemons) daemonDispatchPaused.delete(daemon);
+        return { ...receipt, ready: false, reason: 'In-flight dispatch raced the short controller replacement; intake remains open' };
+      }
       save('closing');
       for (const service of active) { const result = await service.close(); if (!result.ok) throw new Error(`Legacy owner close refused: ${result.error.message}`); }
       for (const control of controls) {
@@ -384,13 +356,13 @@ export async function installLegacyMaintenance(options) {
     if (released.status !== 0) throw new Error(`Cannot release fleet admission fence: ${released.stderr}`);
   }
   function dropFenceFile(path) {
-    const removed = spawnSync(options.node ?? '/usr/local/bin/node', ['--input-type=module', '-e', `import {DatabaseSync} from 'node:sqlite'; const db=new DatabaseSync(process.argv[1]); db.exec('DROP TRIGGER IF EXISTS pi_history_admission; DROP TRIGGER IF EXISTS pi_history_children; DROP TRIGGER IF EXISTS pi_history_question_cohort; DROP TABLE IF EXISTS pi_history_questions; DROP TABLE IF EXISTS pi_history_cohort; DROP TABLE IF EXISTS pi_history_bridge;'); db.close();`, path], { encoding: 'utf8', timeout: 3000 });
+    const removed = spawnSync(options.node ?? '/usr/local/bin/node', ['--input-type=module', '-e', `import {DatabaseSync} from 'node:sqlite'; const db=new DatabaseSync(process.argv[1]); db.exec('DROP TRIGGER IF EXISTS pi_history_admission; DROP TRIGGER IF EXISTS pi_history_children; DROP TRIGGER IF EXISTS pi_history_question_cohort; DROP TABLE IF EXISTS pi_history_questions; DROP TABLE IF EXISTS pi_history_cohort; DROP TABLE IF EXISTS pi_history_bridge; DROP TABLE IF EXISTS pi_history_observation;'); db.close();`, path], { encoding: 'utf8', timeout: 3000 });
     if (removed.status !== 0) throw new Error(`Cannot release preserved maintenance fence: ${removed.stderr}`);
   }
   async function migrate() {
     const result = spawnSync(options.node ?? '/usr/local/bin/node', [options.migrator, '--supervisor-db', join(dataDir, 'supervisor.sqlite3'), '--thread-db', join(dataDir, 'threads.sqlite3'), '--output-dir', join(dataDir, 'native-history-retirement'), '--writers-stopped'], { encoding: 'utf8', timeout: 45000 });
     if (result.status !== 0) { receipt.error = result.error?.message ?? result.stderr; save('migration-pending'); return; }
-    // Maintenance admission tables belong only to the old controller, not the new runtime.
+    // The source-bound observation belongs to the retiring controller.
     dropFenceFile(join(dataDir, 'threads.sqlite3'));
     atomicJson(join(dataDir, 'native-history-readiness.json'), { version: 1, contract: 'native-history-v1', uid, dataDir, state: 'ready', writersStopped: true, retainedOutput: 'acknowledged', ...identity, migratedAt: new Date().toISOString() });
     delete receipt.error; save('migrated');
@@ -415,8 +387,9 @@ export async function installLegacyMaintenance(options) {
       if (receipt.phase !== 'draining' && receipt.phase !== 'restored') throw new Error('Native owner closure has started; resume preserving migration instead of restoring the old decoder');
       for (const service of services) if (!service.closed) removeFence(service);
       if (options.mode === 'fleet') releaseFleetLedger();
-      restoreDaemonAdmission();
-      prototype.start = originalStart; prototype.send = originalSend; prototype.spawn = originalSpawn; prototype.deliverScheduledWakes = originalWakes; prototype.attach = originalAttach;
+      restoreDaemonDispatch();
+      prototype.start = originalStart; prototype.attach = originalAttach; prototype.wake = originalWake;
+      if (originalDrain) prototype.drain = originalDrain;
       if (originalDetach) prototype.detach = originalDetach;
       delete receipt.error; save('restored'); value = receipt;
     }

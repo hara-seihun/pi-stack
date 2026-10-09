@@ -2,6 +2,7 @@ import { API } from "../../server/api";
 import type { IdleNotificationFeed } from "../../server/protocol";
 import { appBase, appStorageKey } from "./app-path";
 import { abortable, deadline } from "./abortable";
+import { controllerReplacementFetch } from "./controller-replacement";
 import { ensureUnlocked, registerAuthenticationBootstrap } from "./client";
 import { beginRequest, reportingBridge, setRequestTimingReporter } from "./in-flight";
 import type { RequestTimingReport } from "../../server/request-timings";
@@ -320,9 +321,18 @@ export async function pinnedFetch(endpoint: Endpoint, user: string, path: string
   signal.throwIfAborted();
   const headers = auth.headers(init.headers);
   const token = auth.session;
+  const selection = selectionRevision;
+  const target = new URL(`${endpoint.baseUrl}${path}`, location.href);
+  const request = { ...init, headers, signal, redirect: "error" as const };
+  const assertOwner = () => {
+    if (revision !== generation || selection !== selectionRevision || user !== auth.user || token !== auth.session) {
+      throw new DOMException("Request owner changed", "AbortError");
+    }
+  };
   const settle = beginRequest(init.method ?? "GET", path);
   try {
-    const response = await abortable(browserFetch(new URL(`${endpoint.baseUrl}${path}`, location.href), { ...init, headers, signal, redirect: "error" }), signal);
+    const response = await controllerReplacementFetch(path, request,
+      attemptSignal => browserFetch(target, { ...request, signal: attemptSignal }), assertOwner);
     if (response.status === 423) auth.clear(token);
     return response;
   } finally { settle(); }
@@ -373,9 +383,18 @@ window.fetch = async (input, init) => {
     url.searchParams.delete("session");
     // Classify at the shared transport: user actions are visible, while
     // nested item/media requests and stream maintenance remain background.
+    const user = auth.user, revision = generation, selection = selectionRevision;
+    const assertOwner = () => {
+      if (user !== auth.user || revision !== generation || selection !== selectionRevision || !publicRoute && token !== auth.session) {
+        throw new DOMException("Request owner changed", "AbortError");
+      }
+    };
+    const targetRequest = request ? new Request(url, request) : url;
+    const options = { ...init, headers, signal: combined, redirect: "error" as const };
     const settle = beginRequest(init?.method ?? request?.method ?? "GET", pathname);
     try {
-      const response = await browserFetch(request ? new Request(url, request) : url, { ...init, headers, signal: combined, redirect: "error" });
+      const response = await controllerReplacementFetch(pathname, options,
+        attemptSignal => browserFetch(targetRequest, { ...options, signal: attemptSignal }), assertOwner);
       combined.throwIfAborted();
       if (response.status === 423 && !publicRoute) auth.clear(token);
       return response;
