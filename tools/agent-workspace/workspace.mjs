@@ -956,10 +956,11 @@ function spawnRemoval(target) {
   child.unref();
 }
 
-function drainGc(statePath) {
+function drainGc(statePath, scopedIds) {
   const root = path.join(path.dirname(statePath), "gc");
   if (!existsSync(root)) return;
   for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (scopedIds !== undefined && !scopedIds.some(id => entry.name.startsWith(`${id}-`))) continue;
     if (entry.isDirectory() || entry.isFile() || entry.isSymbolicLink()) spawnRemoval(path.join(root, entry.name));
   }
 }
@@ -1193,7 +1194,7 @@ function reconcileRecord(database, record, options) {
     }
     return { record, inspection, action: options.execute ? "forgot-missing" : "would-forget-missing" };
   }
-  if (inspection.classification === "referenced" && options.execute && options.reapExpired) {
+  if (inspection.classification === "referenced" && options.execute && options.reapExpired && !options.preserveRuntime) {
     const current = recordBy(database, { id: record.id });
     if (current.leaseExpiresAt > Date.now()) return { record: current, inspection: inspectRecord(current), action: "lease-renewed" };
     updateState(database, current, "reclaiming", "expired lease is fencing live references");
@@ -1270,7 +1271,7 @@ function groupReconciliation(database, records, options) {
 
   let inspections = records.map((record) => inspectRecord(record,
     groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline })));
-  if (options.execute && options.reapExpired && inspections.some((inspection) => inspection.classification === "referenced")) {
+  if (options.execute && options.reapExpired && !options.preserveRuntime && inspections.some((inspection) => inspection.classification === "referenced")) {
     const current = records.map((record) => recordBy(database, { id: record.id }));
     if (!options.ignoreLease && current.some((record) => record.leaseExpiresAt > Date.now())) {
       return groupReconciliation(database, current, { ...options, execute: false });
@@ -1721,11 +1722,14 @@ function sourceImportCapacity(repository, sourceCommit, mirror) {
   return bytes;
 }
 
-function capacityRequirement(plan, reservations) {
-  for (const value of [plan.constructionBytes, plan.growthBytes, plan.headroomBytes, ...reservations]) {
+function capacityRequirement(plan, reservations, sharedHeadroomBytes = 0) {
+  for (const value of [plan.constructionBytes, plan.growthBytes, plan.headroomBytes, sharedHeadroomBytes, ...reservations]) {
     if (!Number.isSafeInteger(value) || value < 0) fail("invalid capacity ledger byte budget");
   }
-  const requiredBytes = plan.constructionBytes + plan.growthBytes + plan.headroomBytes + reservations.reduce((sum, bytes) => sum + bytes, 0);
+  const unestimated = plan.intent === "unestimated";
+  const constructionBytes = unestimated ? 0 : plan.constructionBytes;
+  const headroomBytes = unestimated ? Math.max(plan.constructionBytes, plan.headroomBytes) : plan.headroomBytes;
+  const requiredBytes = constructionBytes + plan.growthBytes + Math.max(headroomBytes, sharedHeadroomBytes) + reservations.reduce((sum, bytes) => sum + bytes, 0);
   if (!Number.isSafeInteger(requiredBytes)) fail("capacity ledger total exceeds supported byte range");
   return requiredBytes;
 }
@@ -1746,7 +1750,7 @@ function creationFenceBusy(database, workspacePath) {
 }
 
 function capacityReservations(database, device, reservedPath) {
-  if (database === undefined) return { priced: [], unpricedDormant: 0 };
+  if (database === undefined) return { priced: [], headroomBytes: 0, unpricedDormant: 0 };
   const unknown = database.prepare(`SELECT w.path, w.root FROM workspace w LEFT JOIN workspace_capacity c ON c.workspace_id=w.id
     WHERE w.state='creating' AND c.workspace_id IS NULL AND w.path!=?`).all(reservedPath ?? "");
   let unpricedDormant = 0;
@@ -1757,6 +1761,7 @@ function capacityReservations(database, device, reservedPath) {
     if (creationFenceBusy(database, row.path)) fail(`capacity estimate unknown: active legacy creation at ${row.path}; await its owning creator`);
     unpricedDormant += 1;
   }
+  let headroomBytes = 0;
   const priced = database.prepare(`SELECT c.plan_json, w.state FROM workspace_capacity c JOIN workspace w ON w.id=c.workspace_id
     WHERE c.device_id=? AND w.path!=? AND w.state!='released'`)
     .all(device, reservedPath ?? "").map(row => {
@@ -1764,10 +1769,11 @@ function capacityReservations(database, device, reservedPath) {
       if (!["source-only", "budgeted", "unestimated"].includes(plan.intent) ||
         plan.estimate !== (plan.intent === "unestimated" ? "unknown" : "whole-tree-upper-bound")) fail("invalid capacity ledger intent or estimate");
       capacityRequirement(plan, []);
-      return plan.intent === "unestimated" ? plan.constructionBytes
-        : plan.growthBytes + (row.state === "creating" ? plan.constructionBytes : 0);
-    });
-  return { priced, unpricedDormant };
+      headroomBytes = Math.max(headroomBytes, plan.headroomBytes,
+        plan.intent === "unestimated" ? plan.constructionBytes : 0);
+      return plan.growthBytes + (row.state === "creating" ? plan.constructionBytes : 0);
+    }).filter(bytes => bytes > 0);
+  return { priced, headroomBytes, unpricedDormant };
 }
 
 function assertCapacity(root, args, database, reservedPath, plan) {
@@ -1785,12 +1791,13 @@ function assertCapacity(root, args, database, reservedPath, plan) {
   const device = String(statSync(root).dev);
   const reservations = capacityReservations(database, device, reservedPath);
   const minimum = Math.ceil(numberFlag(args, "min-free-gib", DEFAULT_MIN_FREE_GIB) * 1024 ** 3);
-  const requirement = capacityRequirement(plan ?? { constructionBytes: minimum, headroomBytes: 0, growthBytes: 0 }, reservations.priced);
+  const requirement = capacityRequirement(plan ?? { intent: "unestimated", constructionBytes: minimum, headroomBytes: 0, growthBytes: 0 }, reservations.priced, reservations.headroomBytes);
   if (freeBytes < requirement) fail(`${(freeBytes / 1024 ** 3).toFixed(2)} GiB is free; ${(requirement / 1024 ** 3).toFixed(2)} GiB is required${plan?.intent !== undefined && plan.intent !== "unestimated" ? " (source forecast + declared growth + operating headroom + other reservations)" : " (unestimated full work + other reservations)"}`);
   const freeInodes = stats.files > 0 ? 100 * stats.ffree / stats.files : 100;
   const minFreeInodes = numberFlag(args, "min-free-inodes-percent", DEFAULT_MIN_FREE_INODES_PERCENT);
   if (freeInodes < minFreeInodes) fail(`${freeInodes.toFixed(2)}% of inodes are free; ${minFreeInodes.toFixed(2)}% is required`);
-  return { freeBytes, requiredBytes: requirement, unpricedDormant: reservations.unpricedDormant };
+  return { freeBytes, requiredBytes: requirement, reservedBytes: reservations.priced.reduce((sum, bytes) => sum + bytes, 0),
+    sharedHeadroomBytes: reservations.headroomBytes, unpricedDormant: reservations.unpricedDormant };
 }
 
 function safeName(value) {
@@ -2369,7 +2376,7 @@ function heartbeatCommand(database, args) {
 }
 
 function releaseCommand(database, args, statePath) {
-  assertOnly(args, ["id", "path", "reap-expired", "json"]);
+  assertOnly(args, ["id", "path", "reap-expired", "preserve-runtime", "json"]);
   const record = recordBy(database, selectorFrom(args));
   const records = recordsInGroup(database, record);
   const statement = database.prepare("UPDATE workspace SET lease_expires_at = 0, updated_at = ?, detail = 'owner released lease' WHERE id = ?");
@@ -2379,6 +2386,7 @@ function releaseCommand(database, args, statePath) {
   const result = reconcileRecords(database, current, {
     execute: true,
     reapExpired: bool(args, "reap-expired"),
+    preserveRuntime: bool(args, "preserve-runtime"),
     ignoreLease: true,
     statePath,
     safety: safetySnapshot(database),
@@ -2390,8 +2398,10 @@ function releaseCommand(database, args, statePath) {
 // of it for questions like "what happened to that checkout" and no more; a
 // busy fleet registers thousands of checkouts and each one used to stay forever.
 const RELEASED_RETENTION_MS = 30 * 24 * 60 * 60_000;
-function pruneReleased(database, now = Date.now()) {
-  const stale = database.prepare("SELECT id, path FROM workspace WHERE state = 'released' AND updated_at < ?").all(now - RELEASED_RETENTION_MS);
+function pruneReleased(database, now = Date.now(), root) {
+  const stale = root === undefined
+    ? database.prepare("SELECT id, path FROM workspace WHERE state = 'released' AND updated_at < ?").all(now - RELEASED_RETENTION_MS)
+    : database.prepare("SELECT id, path FROM workspace WHERE state = 'released' AND updated_at < ? AND root=?").all(now - RELEASED_RETENTION_MS, path.resolve(root));
   const remove = database.prepare("DELETE FROM workspace WHERE id = ?");
   let pruned = 0;
   for (const row of stale) {
@@ -2404,14 +2414,14 @@ function pruneReleased(database, now = Date.now()) {
 }
 
 function reconcileCommand(database, args, statePath) {
-  assertOnly(args, ["root", "id", "path", "execute", "reap-expired", "ignore-lease", "json", "max-groups", "budget-ms", "after"]);
+  assertOnly(args, ["root", "id", "path", "execute", "reap-expired", "preserve-runtime", "ignore-lease", "json", "max-groups", "budget-ms", "after"]);
   const started = Date.now();
   const budget = numberFlag(args, "budget-ms", 20_000);
   const maxGroups = numberFlag(args, "max-groups", 32);
   if (budget < 1 || budget > 40_000) fail("--budget-ms must be between 1 and 40000");
   if (!Number.isSafeInteger(maxGroups) || maxGroups < 1) fail("--max-groups must be a positive integer");
   const execute = bool(args, "execute");
-  if (execute) pruneReleased(database);
+  if (execute) pruneReleased(database, Date.now(), one(args, "root"));
   let records;
   if (one(args, "id") !== undefined || one(args, "path") !== undefined) records = [recordBy(database, selectorFrom(args))];
   else records = listRecords(database, one(args, "root"));
@@ -2438,6 +2448,7 @@ function reconcileCommand(database, args, statePath) {
   const results = reconcileRecords(database, records, {
     execute,
     reapExpired: bool(args, "reap-expired"),
+    preserveRuntime: bool(args, "preserve-runtime"),
     ignoreLease: bool(args, "ignore-lease"),
     statePath,
     safety,
@@ -2553,8 +2564,8 @@ function help() {
   agent-workspace cancel-creation (--id ID|--path PATH)
   agent-workspace finalize-creation (--id ID|--path PATH)
   agent-workspace heartbeat (--id ID|--path PATH) [--lease-seconds N]
-  agent-workspace release (--id ID|--path PATH) [--reap-expired]
-  agent-workspace reconcile [--root PATH] [--execute] [--reap-expired]
+  agent-workspace release (--id ID|--path PATH) [--reap-expired] [--preserve-runtime]
+  agent-workspace reconcile [--root PATH] [--execute] [--reap-expired] [--preserve-runtime]
                             [--budget-ms 20000] [--max-groups 32] [--after ID|start]
   agent-workspace maintain [--root PATH | --path PATH] [--execute] [--json]
   agent-workspace status [--root PATH] [--path SUBSTRING] [--owner SUBSTRING] [--limit 100] [--after CURSOR|start] [--json]
@@ -2608,10 +2619,15 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
     }
     creationDeadline = Date.now() + budgetMs;
   }
-  if (!["status", "list", "maintain", "cancel-creation", "finalize-creation", "reassign"].includes(commandName)
-    && (commandName !== "reconcile" || bool(args, "execute"))) drainGc(statePath);
   const database = openRegistry(statePath);
   try {
+    if (!["status", "list", "maintain", "cancel-creation", "finalize-creation", "reassign"].includes(commandName)
+      && (commandName !== "reconcile" || bool(args, "execute"))) {
+      const scopedRoot = commandName === "reconcile" ? one(args, "root") : undefined;
+      const scopedIds = scopedRoot === undefined ? undefined
+        : database.prepare("SELECT id FROM workspace WHERE root=?").all(path.resolve(scopedRoot)).map(row => row.id);
+      drainGc(statePath, scopedIds);
+    }
     if (commandName === "create") createCommand(database, args, statePath);
     else if (commandName === "register") registerCommand(database, args);
     else if (commandName === "reassign") reassignCommand(database, args);
