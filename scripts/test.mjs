@@ -2,9 +2,11 @@ import { pathToFileURL } from "node:url";
 import { runJobs } from "./run-jobs.mjs";
 import { workspaceChecks } from "../tools/agent-workspace/check.mjs";
 import { orchestratorTestChecks } from "../packages/orchestrator/scripts/check.mjs";
+import { checkExecutor } from './check-cache.mjs';
+import { fileURLToPath } from 'node:url';
 
 const jobs = [
-  ["job lifecycle", "node", ["--test", "scripts/run-jobs.test.mjs", "scripts/orchestrator-check.test.mjs", "scripts/check-state-dispatch.test.mjs"]],
+  ["job lifecycle", "node", ["--test", "scripts/run-jobs.test.mjs", "scripts/check-cache.test.mjs", "scripts/orchestrator-check.test.mjs", "scripts/check-state-dispatch.test.mjs"]],
   ["explicit state dispatch", "node", ["scripts/check-state-dispatch.mjs"]],
   ...orchestratorTestChecks([
     { name: "orchestrator routing runtime", args: ["tests/routing-runtime.test.ts"] },
@@ -13,7 +15,8 @@ const jobs = [
       args: ["--exclude=tests/routing-runtime.test.ts", `--shard=${index + 1}/6`],
     })),
   ]),
-  ["Kenan build", "npm", ["run", "build", "--workspace=kenan"]],
+  ["Remote build", "node", ["scripts/build-workspace.mjs", "remote"]],
+  ["Kenan build", "npm", ["run", "build", "--workspace=kenan"], { dependsOn: ["Remote build"] }],
   ["manifests", "node", ["scripts/check-manifests.mjs"]],
   ["account deployment", "node", ["--test", "scripts/deploy-skills.test.mjs", "scripts/deploy-account.test.mjs", "scripts/deploy-person-configs.test.mjs"]],
   ["deploy lock", "node", ["--test", "--test-skip-pattern=^host deployment activates Pi Remote", "scripts/deploy-lock.test.mjs", "scripts/deploy-runtime.test.mjs", "scripts/deploy-build.test.mjs", "scripts/deploy-prepare.test.mjs", "scripts/deploy-download.test.mjs", "scripts/deploy-retain.test.mjs", "scripts/release-checkout.test.mjs", "scripts/check-services.test.mjs"]],
@@ -23,7 +26,7 @@ const jobs = [
       "scripts/deploy-lock.test.mjs"],
   ]),
   ["publication", "node", ["--test", "scripts/publication-config.test.mjs", "scripts/publication-transport.test.mjs", "scripts/publication-roots.test.mjs", "scripts/publication.test.mjs", "scripts/publication-gate.test.mjs", "scripts/publication-source.test.mjs", "scripts/publication-progress.test.mjs", "scripts/publication-proof.test.mjs"]],
-  ["Android publication", "node", ["--test", "scripts/android-update.test.mjs"]],
+  ["Android publication", "node", ["--test", "scripts/android-update.test.mjs", "scripts/android-prepared-native.test.mjs"]],
   ["remote deployment", "node", ["--test", "scripts/deploy-remote.test.mjs", "scripts/deploy-voice.test.mjs", "scripts/deploy-phone.test.mjs", "scripts/meet-recognition-service.test.mjs", "scripts/meet-recognition-host.test.mjs", "scripts/meet-recognition-retain.test.mjs", "scripts/supervisor-health.test.mjs"]],
   ["tools", "node", ["scripts/check-tools.mjs"]],
   ["user usage", "node", ["--test", "tools/user-usage/usage.test.mjs"]],
@@ -37,7 +40,7 @@ const jobs = [
   ["Kenan memory", "npm", ["test", "--workspace=kenan-memory"]],
   ["life import", "bun", ["test", "scripts/life-import.test.ts"]],
   ["Root Kenan", "npm", ["test", "--workspace=kenan-root"]],
-  ["remote", "npm", ["test", "--workspace=pi-remote"]],
+  ["remote", "npm", ["test", "--workspace=pi-remote"], { dependsOn: ["Remote build"] }],
   ["mcp", "npm", ["test", "--workspace=@hara-seihun/mcp-cli"]],
   ["mcp-script", "npm", ["test", "--workspace=@hara-seihun/mcp-script"]],
   ["session readers", "npm", ["test", "--workspace=@hara-seihun/read-condensed-session"]],
@@ -48,5 +51,9 @@ export const checkJobs = jobs.map(([name, command, args, ...options]) => [
 ]);
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  await runJobs(checkJobs);
+  const directory = process.env.PI_STACK_CHECK_CACHE_DIR;
+  if (directory !== undefined && !directory.startsWith('/')) throw new Error('PI_STACK_CHECK_CACHE_DIR must be absolute');
+  await runJobs(checkJobs, directory === undefined ? {} : {
+    execute: checkExecutor({ root: fileURLToPath(new URL('../', import.meta.url)).replace(/\/$/, ''), directory }),
+  });
 }

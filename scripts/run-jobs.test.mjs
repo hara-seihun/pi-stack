@@ -102,10 +102,11 @@ test("publication partitions deployment checks without dropping or repeating con
 });
 
 test("publication schedules every workspace shard directly under the shared budget", async () => {
-  const shards = checkJobs.filter(([name]) => /^agent workspace \d+\/6$/.test(name));
-  assert.equal(shards.length, 6);
-  assert.deepEqual(shards.map(job => job[3].env.AGENT_WORKSPACE_TEST_SHARD), ["0/6", "1/6", "2/6", "3/6", "4/6", "5/6"]);
-  assert.deepEqual(shards.map(job => job[0]), workspaceChecks.filter(([name]) => /^agent workspace \d+\/6$/.test(name)).map(job => job[0]));
+  const shards = checkJobs.filter(([name]) => /^agent workspace \d+\/\d+$/.test(name));
+  const declared = workspaceChecks.filter(([name]) => /^agent workspace \d+\/\d+$/.test(name));
+  assert.equal(shards.length, declared.length);
+  assert.deepEqual(shards.map(job => job[3].env.AGENT_WORKSPACE_TEST_SHARD), declared.map(job => job[3].env.AGENT_WORKSPACE_TEST_SHARD));
+  assert.deepEqual(shards.map(job => job[0]), declared.map(job => job[0]));
   assert.equal(checkJobs.filter(([name]) => name === "agent workspace component deployment").length, 1);
   assert.equal(checkJobs.some(([, command, args]) => command === "npm" && args.includes("--workspace=@hara-seihun/agent-workspace")), false);
   let active = 0, peak = 0;
@@ -119,17 +120,17 @@ test("publication schedules every workspace shard directly under the shared budg
   });
   assert.equal(peak, 2);
   assert.equal(active, 0);
-  assert.deepEqual(results.map(result => result.code), [0, 0, 0, 0, 0, 0]);
+  assert.deepEqual(results.map(result => result.code), shards.map(() => 0));
 });
 
 test("workspace shards execute a selected contract exactly once across the publication plan", async () => {
-  const shards = checkJobs.filter(([name]) => /^agent workspace \d+\/6$/.test(name));
+  const shards = checkJobs.filter(([name]) => /^agent workspace \d+\/\d+$/.test(name));
   let output = "";
   const results = await runJobs(shards.map(([name, command, args, options]) => [name, command,
     [args[0], "--test-name-pattern=cache discovery walks each directory once", ...args.slice(1)], options]), {
     concurrency: 2, write(text) { output += text; },
   });
-  assert.deepEqual(results.map(result => result.code), [0, 0, 0, 0, 0, 0], output);
+  assert.deepEqual(results.map(result => result.code), shards.map(() => 0), output);
   assert.equal((output.match(/✔ cache discovery walks each directory once/g) ?? []).length, 1, output);
 });
 

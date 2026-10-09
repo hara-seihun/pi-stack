@@ -224,7 +224,7 @@ esac
   assert.equal(failed.checks.status, "failed");
   assert.equal(failed.failure.step, "checks");
   assert.equal(failed.failure.progress.command, "bash");
-  assert.deepEqual(failed.failure.progress.args, ["-c", 'set -euo pipefail\nsource deploy/lib\npi_stack_prepare_dependencies "$PWD"\nnpm run check\nnpm run android:test --workspace=kenan']);
+  assert.deepEqual(failed.failure.progress.args, ["-c", 'set -euo pipefail\nsource deploy/lib\npi_stack_prepare_dependencies "$PWD"\nnpm run check']);
   assert.equal(failed.failure.progress.cwd, join(root, "repository"));
   assert.match(failed.failure.excerpt, /integration fixture rejects wrong core/);
   assert.match(failed.failure.excerpt, /Received: 409/);

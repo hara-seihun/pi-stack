@@ -92,6 +92,7 @@ export function commandResult(command, args, options = {}) {
     ["--kill-after=10s", `${timeoutSeconds}s`, command, ...args],
     {
       cwd: options.cwd,
+      env: options.env,
       encoding: "utf8",
       input: options.input,
       maxBuffer: 4 * 1024 * 1024,
@@ -482,6 +483,7 @@ function runLogged(request, step, command, args, timeoutSeconds, logPath, option
   try {
     result = commandResult(command, args, {
       cwd: options.cwd,
+      env: options.env,
       input: options.input,
       timeoutSeconds,
       stdio: [options.input === undefined ? "ignore" : "pipe", descriptor, descriptor],
@@ -781,7 +783,9 @@ function prepareCheckout(request, logPath) {
   if (remote !== repositoryUrl) return { ok: false, status: 1, stderr: `publication checkout has wrong origin: ${remote}` };
   let result = runLogged(request, "reset-publication-checkout", "git", ["-C", checkout, "reset", "--hard"], 30, logPath);
   if (!result.ok) return result;
-  result = runLogged(request, "clean-publication-checkout", "git", ["-C", checkout, "clean", "-dffx", "-e", "/node_modules/", "-e", "**/node_modules/"], 30, logPath);
+  result = runLogged(request, "clean-publication-checkout", "git", ["-C", checkout, "clean", "-dffx", "-e", "/node_modules/", "-e", "**/node_modules/",
+    "-e", "/packages/*/dist/", "-e", "/apps/remote/web/dist/", "-e", "/apps/remote/server/phone/dist/", "-e", "/apps/remote/server/meet/adapter-dist/",
+    "-e", "/apps/kenan/dist/", "-e", "/apps/kenan/android/.gradle/", "-e", "/apps/kenan/android/app/build/"], 30, logPath);
   if (!result.ok) return result;
   return runLogged(request, "fetch-main", "git", ["-C", checkout, "fetch", "--quiet", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"], 60, logPath);
 }
@@ -835,7 +839,7 @@ function createIntegration(request, logPath) {
   request.baseSha = baseSha;
   request.integrationSha = integrationSha;
   const androidPlan = existsSync(join(checkout, "deploy/android-update"))
-    ? JSON.parse(runCapture("bun", [join(checkout, "deploy/android-update"), "plan"], { timeoutSeconds: 30, cwd: checkout }))
+    ? JSON.parse(runCapture("bun", [join(checkout, "deploy/android-update"), "plan", requestRoot], { timeoutSeconds: 30, cwd: checkout }))
     : { kind: "native" };
   if (!["native", "web"].includes(androidPlan.kind) || androidPlan.identity && androidPlan.identity.revision !== integrationSha) throw new Error("Invalid Android artifact build plan");
   const androidChecks = androidPlan.kind === "native" ? "npm run android:test --workspace=kenan"
@@ -847,12 +851,19 @@ function createIntegration(request, logPath) {
     request,
     "checks",
     "bash",
-    ["-c", `set -euo pipefail\nsource deploy/lib\npi_stack_prepare_dependencies "$PWD"\nnpm run check\n${androidChecks}`],
+    ["-c", 'set -euo pipefail\nsource deploy/lib\npi_stack_prepare_dependencies "$PWD"\nnpm run check'],
     900,
     logPath,
-    { cwd: checkout },
+    { cwd: checkout, env: { ...process.env, PI_STACK_CHECK_CACHE_DIR: join(stateRoot, 'check-cache') } },
   );
   if (!result.ok) return result;
+  result = runLogged(request, 'android-checks', 'bash', ['-c', `set -euo pipefail\n${androidChecks}`], 180, logPath, { cwd: checkout });
+  if (!result.ok) return result;
+  if (androidPlan.kind === 'native') {
+    request.nativeChecks = { status: 'passed', revision: integrationSha, identity: androidPlan.identity,
+      command: 'npm run android:test --workspace=kenan', at: new Date().toISOString() };
+    writeRequest(request);
+  }
   request.baseSha = baseSha;
   request.integrationSha = integrationSha;
   request.checks = {
@@ -870,10 +881,6 @@ function createIntegration(request, logPath) {
 function prepareAndroidArtifact(request, logPath) {
   const supported = commandResult("git", ["-C", checkout, "cat-file", "-e", `${request.integrationSha}:deploy/android-update`]);
   if (!supported.ok) { delete request.android; return; }
-  if (request.android && (request.android.web?.revision ?? request.android.release.revision) !== request.integrationSha) {
-    rmSync(join(request.android.directory, request.android.release.fileName), { force: true });
-    rmSync(join(request.android.directory, `${request.android.web?.revision ?? request.android.release.revision}.web.zip`), { force: true });
-  }
   const directory = join(proofRoot, request.requestId, "android-artifact", request.integrationSha);
   if ((request.android?.web?.revision ?? request.android?.release?.revision) === request.integrationSha && existsSync(join(directory, request.android.release.fileName))
     && existsSync(join(directory, `${request.integrationSha}.web.zip`))) {
