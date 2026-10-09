@@ -12,7 +12,13 @@ export type DeliveryResult<T> = { ok: true; value: T } | { ok: false; error: Del
 export type MessageDeliveryReceipt = { key: string; originalTimestamp: number; deliveredAt: number; timezone: PersonTimezone | null; prefix: string };
 type DeliveryManager = Pick<SessionManager, "getBranch" | "appendCustomEntry">;
 const stamped = Symbol("model-message-delivery");
-type StampedMessage = AgentMessage & { [stamped]?: true };
+/**
+ * Registered-symbol contract for synthetic provider placeholders that their owner replaces before the
+ * request leaves the process (the Codex checkpoint marker). They are never delivered to the model, so
+ * they get neither a stamp nor a receipt; stamping one would corrupt the text its owner must find.
+ */
+export const MODEL_DELIVERY_EXEMPT = Symbol.for("pi-stack.model-delivery.exempt");
+type StampedMessage = AgentMessage & { [stamped]?: true; [MODEL_DELIVERY_EXEMPT]?: unknown };
 const deliveryScope = new AsyncLocalStorage<"preview">();
 
 export function previewMessageDelivery<T>(operation: () => Promise<T>): Promise<T> {
@@ -107,6 +113,11 @@ export function createMessageDeliveryProjection(manager: DeliveryManager, env: N
       occurrences.set(provenance, occurrence + 1);
       const sourceId = sources.get(provenance)?.[occurrence];
       const key = sourceId ? `entry:${sourceId}:${message.role}` : `generated:${provenance}:${occurrence}`;
+      const exempt = (message as StampedMessage)[MODEL_DELIVERY_EXEMPT];
+      if (exempt !== undefined) {
+        if (exempt !== true) return { ok: false, error: { code: "invalid", message: "Model delivery exemption must be true when present" } };
+        projected.push(message); continue;
+      }
       if (!Number.isFinite(message.timestamp)) return { ok: false, error: { code: "invalid", message: "Incoming model message is missing timestamp provenance" } };
       let receipt = receipts.get(key);
       if (!receipt) {

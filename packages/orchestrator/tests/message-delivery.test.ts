@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { convertToLlm, createAgentSession, DefaultResourceLoader, ModelRuntime, SettingsManager, SessionManager, type AgentSession } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import { createMessageDeliveryProjection, deliveryPrefix, installMessageDelivery, MESSAGE_DELIVERY_RECEIPT, previewMessageDelivery } from "../src/threads/message-delivery.js";
+import { createMessageDeliveryProjection, deliveryPrefix, installMessageDelivery, MESSAGE_DELIVERY_RECEIPT, MODEL_DELIVERY_EXEMPT, previewMessageDelivery } from "../src/threads/message-delivery.js";
 import { writePersonSetting } from "../src/person-settings.js";
 
 const directories: string[] = [];
@@ -119,6 +119,28 @@ it("common final adapter prefixes converted compaction/custom/bash before native
   expect(text(result[0])).toContain("approved callee boundary");
   expect(text(result[2])).toContain("EXTERNAL callee");
   expect(messages[1]).toMatchObject({ summary: "retained raw summary" });
+});
+it("leaves exempt provider placeholders such as the Codex checkpoint marker byte-identical and unreceipted", async () => {
+  const manager = SessionManager.inMemory();
+  manager.appendMessage({ role: "user", content: "before", timestamp: 1 });
+  const compactionId = manager.appendCompaction("summary", manager.getBranch()[0]!.id, 100);
+  const compactedAt = Date.parse(manager.getBranch().at(-1)!.timestamp);
+  const marker = `Pi Codex checkpoint ${compactionId}`;
+  // Exactly what the codex-compaction context handler returns: a registered-symbol exemption, no shared import.
+  const messages = [
+    { role: "user", content: marker, timestamp: compactedAt, [Symbol.for("pi-stack.model-delivery.exempt")]: true },
+    { role: "user", content: "after", timestamp: compactedAt + 1 },
+  ] as AgentMessage[];
+  expect(Symbol.for("pi-stack.model-delivery.exempt")).toBe(MODEL_DELIVERY_EXEMPT);
+  const session = { sessionManager: manager, agent: { convertToLlm } } as unknown as Pick<AgentSession, "agent" | "sessionManager">;
+  installMessageDelivery(session, { PI_MODEL_DELIVERY_TIMEZONE: "null" });
+  const result = await session.agent.convertToLlm(messages);
+  expect(result[0]!.content).toBe(marker);
+  expect(text(result[1]!)).toMatch(/^\[Model delivery: .*\]\nafter$/);
+  const receipts = manager.getBranch().filter(entry => entry.type === "custom" && entry.customType === MESSAGE_DELIVERY_RECEIPT);
+  expect(JSON.stringify(receipts)).not.toContain(`entry:${compactionId}:user`);
+  const invalid = [{ role: "user", content: marker, timestamp: compactedAt, [MODEL_DELIVERY_EXEMPT]: "yes" }] as unknown as AgentMessage[];
+  expect(createMessageDeliveryProjection(manager, { PI_MODEL_DELIVERY_TIMEZONE: "null" })(invalid)).toMatchObject({ ok: false, error: { code: "invalid" } });
 });
 it("actual SDK sends current live/queued prefixes but never persists transformed history or changes receipts", async () => {
   const root = data("Europe/London");
