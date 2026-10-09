@@ -24,8 +24,8 @@ ExecCondition=/usr/bin/jq -e .oneKenan==true @HOST_FILE@
 ExecStart=+@RUNTIME_LAUNCHER@ root
 Restart=on-failure
 RestartSec=2
-KillMode=control-group
-TimeoutStopSec=15
+KillMode=mixed
+TimeoutStopSec=infinity
 UMask=0077
 MemorySwapMax=0
 LimitCORE=0
