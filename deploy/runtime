@@ -106,6 +106,14 @@ clean_live_spills() {
   printf 'shell output custody proof passed; removed %s preexisting /tmp/pi-bash-*.log files\n' "$spill_count"
 }
 
+runtime_required_pattern() {
+  local label=$1 file=$2 pattern=$3
+  if ! grep -Fq "$pattern" "$file"; then
+    printf 'runtime contract missing: %s (%s)\n' "$label" "$file" >&2
+    return 66
+  fi
+}
+
 check_release() {
   local release=$1 version browser_version
   version=$("$release/node_modules/.bin/pi" --version)
@@ -114,18 +122,16 @@ check_release() {
   [[ $browser_version == "$BROWSER_VERSION" ]] || { echo "unexpected agent-browser version: $browser_version" >&2; exit 1; }
   local claude_version
   claude_version=$(node -p 'require(process.argv[1]).claudeCodeVersion' "$runtime_source/extensions/claude-oauth/client.json")
-  grep -Fq "const CLAUDE_CODE_VERSION = \"$claude_version\";" "$release/node_modules/@pi-plugins/claude-oauth/dist/index.mjs"
+  runtime_required_pattern 'Claude client identity' "$release/node_modules/@pi-plugins/claude-oauth/dist/index.mjs" "const CLAUDE_CODE_VERSION = \"$claude_version\";"
   node --check "$release/node_modules/@earendil-works/pi-coding-agent/dist/modes/rpc/shared-rpc-mode.js"
-  grep -q 'replaceSessionFileDurably(this.sessionFile' "$release/node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js"
-  grep -rlq 'replaceSessionFileDurably(this.sessionFile' "$release/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks"
+  runtime_required_pattern 'durable SDK session rewrite' "$release/node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js" 'replaceSessionFileDurably(this.sessionFile'
   for writer in session-manager settings-manager auth-storage; do
-    grep -q 'PiStack shared filesystem custody' "$release/node_modules/@earendil-works/pi-coding-agent/dist/core/$writer.js"
+    runtime_required_pattern "shared SDK $writer custody" "$release/node_modules/@earendil-works/pi-coding-agent/dist/core/$writer.js" 'PiStack shared filesystem custody'
     node --check "$release/node_modules/@earendil-works/pi-coding-agent/dist/core/$writer.js"
   done
-  grep -rlq 'PiStack shared filesystem custody' "$release/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks"
-  grep -q 'Sensitive form values are redacted' "$release/node_modules/pi-agent-browser-native/dist/extensions/agent-browser/index.js"
-  grep -q 'Pi Stack sensitive form outputs' "$release/node_modules/pi-agent-browser-native/docs/TOOL_CONTRACT.md"
-  grep -q 'Closing is recovery, not reuse' "$release/node_modules/pi-agent-browser-native/dist/extensions/agent-browser/lib/orchestration/browser-run/managed-session-daemon-policy.js"
+  runtime_required_pattern 'browser sensitive output redaction' "$release/node_modules/pi-agent-browser-native/dist/extensions/agent-browser/index.js" 'Sensitive form values are redacted'
+  runtime_required_pattern 'browser sensitive output contract' "$release/node_modules/pi-agent-browser-native/docs/TOOL_CONTRACT.md" 'Pi Stack sensitive form outputs'
+  runtime_required_pattern 'browser recovery ownership' "$release/node_modules/pi-agent-browser-native/dist/extensions/agent-browser/lib/orchestration/browser-run/managed-session-daemon-policy.js" 'Closing is recovery, not reuse'
   node --input-type=module - "$release/node_modules/pi-agent-browser-native" <<'JS'
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
@@ -135,14 +141,12 @@ for (const target of [{selector:'#input'}, {locator:'label',value:'Input'}]) {
   assert.equal(compile({action:'fill', ...target}).error, 'semanticAction.text is required for fill.');
 }
 JS
-  grep -q 'Anthropic error tool results require text' "$release/node_modules/@earendil-works/pi-ai/dist/api/anthropic-messages.js"
-  grep -rlq 'Anthropic error tool results require text' "$release/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks"
+  runtime_required_pattern 'Anthropic error content' "$release/node_modules/@earendil-works/pi-ai/dist/api/anthropic-messages.js" 'Anthropic error tool results require text'
   local shell_source
   for shell_source in core/bash-executor.js core/tools/output-accumulator.js core/tools/bash.js; do
-    grep -q 'PiStack shell output stays in memory' "$release/node_modules/@earendil-works/pi-coding-agent/dist/$shell_source"
+    runtime_required_pattern "bounded SDK $shell_source output" "$release/node_modules/@earendil-works/pi-coding-agent/dist/$shell_source" 'PiStack shell output stays in memory'
     node --check "$release/node_modules/@earendil-works/pi-coding-agent/dist/$shell_source"
   done
-  grep -rlq 'PiStack shell output stays in memory' "$release/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks"
   PI_TEST_RUNTIME_ENTRY="file://$release/node_modules/@earendil-works/pi-coding-agent/dist/index.js" \
     node --test "$runtime_source/bash-spill.test.mjs"
   PI_TEST_RUNTIME_ENTRY="file://$release/node_modules/@earendil-works/pi-coding-agent/dist/index.js" \
@@ -156,7 +160,7 @@ JS
   cmp -s "$runtime_source/native-guardian.mjs" "$release/native-guardian.mjs" || { echo 'native namespace watcher does not match this release' >&2; exit 1; }
   node --check "$release/native-guardian.mjs"
   cmp -s "$runtime_source/managed-agent.mjs" "$release/managed-agent.mjs" || { echo 'native ThreadService adapter does not match this release' >&2; exit 1; }
-  grep -q 'PiStack native ThreadService owner' "$release/node_modules/@earendil-works/pi-coding-agent/dist/main.js"
+  runtime_required_pattern 'mandatory native ThreadService owner' "$release/node_modules/@earendil-works/pi-coding-agent/dist/main.js" 'PiStack native ThreadService owner'
   node --check "$release/node_modules/@earendil-works/pi-coding-agent/dist/main.js"
   [[ -f $release/capacity/native-session.js ]] || { echo 'native ThreadService owner is missing' >&2; exit 1; }
   local doctor command
@@ -301,7 +305,7 @@ if [[ ! -x $dependency_release/node_modules/.bin/pi ]]; then
   stage=""
 fi
 settings_manager="$dependency_release/node_modules/@earendil-works/pi-coding-agent/dist/core/settings-manager.js"
-grep -q 'renameSync(temporary, path)' "$settings_manager"
+runtime_required_pattern 'atomic SDK settings replacement' "$settings_manager" 'renameSync(temporary, path)'
 node --check "$settings_manager"
 
 stage=$(mktemp -d "${TMPDIR:-/tmp}/pi-runtime.XXXXXXXX")

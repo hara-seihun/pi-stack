@@ -66,7 +66,13 @@ pi_stack_publish_release() {
   command('git', `printf '%s\\n' '${commit}'`);
   command('sha256sum', `if (( $# == 0 )); then /bin/cat >/dev/null; fi; printf '%s  fixture\\n' '${dependency}'`);
   // The lifecycle is real; expensive dependency/patch contract commands are fakes.
-  command('grep', 'exit 0');
+  command('grep', `
+if [[ $* == */dist/bundle/chunks* ]]; then
+  echo 'Unmanaged bundled CLI is not part of this SDK runtime' >&2
+  exit 66
+fi
+if [[ -n \${TEST_MISSING_CONTRACT:-} && $* == *"$TEST_MISSING_CONTRACT"* ]]; then exit 1; fi
+exit 0`);
   command('cmp', 'exit 0');
   command('node', `
 printf '%s\\n' "$*" >> "$TEST_LOG"
@@ -149,6 +155,16 @@ test('activation rejects absent and mismatched positive proof before changing an
   assert.match(result.stderr, /commit mismatch/);
   unchanged(f);
   assert.doesNotMatch(f.calls(), /select|--test|dependency-install/);
+});
+
+test('missing managed SDK durability refuses preparation with a named contract, leaving serving state unchanged', t => {
+  const f = fixture(t);
+  const result = f.run(['--prepare'], { TEST_MISSING_CONTRACT: 'replaceSessionFileDurably(this.sessionFile' });
+  assert.equal(result.status, 66, result.stderr);
+  assert.match(result.stderr, /runtime contract missing: durable SDK session rewrite/);
+  assert.equal(fs.existsSync(f.candidate), false);
+  assert.equal(fs.existsSync(f.proof), false);
+  unchanged(f);
 });
 
 test('failed preparation cannot leave a selectable candidate or positive proof', t => {
