@@ -36,16 +36,19 @@ const bridge = createConsentBridge(process.env.PI_KENAN_ROOT_ROUTER_URL ?? "http
 consent = new RootConsentManager(consentStore, {
   bridge,
   memory: rootMemoryRpc(memoryUrl, memoryRootToken), executor, enabled: oneKenanEnabled });
-const releaseState: RootReleaseState = { quiescing: false, consentActive: false };
-const timer = setInterval(async () => {
-  if (releaseState.consentActive || releaseState.quiescing || closing.signal.aborted) return;
+const releaseState: RootReleaseState = { dispatchPaused: false, consentActive: false };
+let reconciliation: Promise<void> | undefined;
+const timer = setInterval(() => {
+  if (releaseState.consentActive || releaseState.dispatchPaused || closing.signal.aborted) return;
   releaseState.consentActive = true;
-  try {
-    const [result, requests] = await Promise.all([consent.drain(), handle.drain()]);
-    if (result.errors) console.error(`Root consent: ${result.errors} pending exchanges require retry; state retained`);
-    if (requests.errors) console.error(`Root requests: ${requests.errors} pending replies require retry; state retained`);
-  }
-  finally { releaseState.consentActive = false; }
+  reconciliation = (async () => {
+    try {
+      const [result, requests] = await Promise.all([consent.drain(), handle.drain()]);
+      if (result.errors) console.error(`Root consent: ${result.errors} pending exchanges require retry; state retained`);
+      if (requests.errors) console.error(`Root requests: ${requests.errors} pending replies require retry; state retained`);
+    }
+    finally { releaseState.consentActive = false; }
+  })();
 }, 2_000);
 const requestStorePath = resolve(process.env.PI_KENAN_ROOT_REQUEST_STORE ?? join(privateDir, "root/requests.sqlite3"));
 if (!requestStorePath.startsWith(resolve(privateDir) + sep)) throw new Error("Root requests must remain inside the mounted encrypted private store");
@@ -55,5 +58,17 @@ const handle = rootService({ enabled: oneKenanEnabled, memoryUrl, requestStore, 
   releaseCommit: process.env.PI_STACK_RELEASE_COMMIT, releaseState });
 const server = Bun.serve({ hostname: "127.0.0.1", port: Number(process.env.PI_KENAN_ROOT_PORT ?? KENAN_ROOT_DEFAULT_PORT), idleTimeout: 255,
   fetch: handle });
-closing.signal.addEventListener("abort", () => { clearInterval(timer); server.stop(true); process.exit(0); }, { once: true });
+closing.signal.addEventListener("abort", () => {
+  releaseState.dispatchPaused = true;
+  clearInterval(timer);
+  void (async () => {
+    await reconciliation;
+    await handle.settled();
+    await server.stop(false);
+    await handle.settled();
+    consent.close();
+    requestStore.close();
+    process.exit(0);
+  })();
+}, { once: true });
 console.log(`Root Kenan ready on loopback:${server.port}`);

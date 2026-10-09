@@ -399,15 +399,14 @@ if (( activation_failed == 0 )); then
   daemon_activation_pid=$!
 fi
 
-# Refresh the additive gates before rolling the shared-room supervisor. Root,
-# memory and encrypted custody remain untouched by the ordinary host release.
+# Refresh additive access and hand enabled consumers to their owning activator.
+# Root replacement pauses dispatch only; durable intake remains accepting.
 if ! "$root/deploy/one-kenan-access-release" "$PI_STACK_HOST_FILE"; then
   activation_failed=1
 elif jq -e '.oneKenan == true' "$PI_STACK_HOST_FILE" >/dev/null; then
   if [[ ${PI_STACK_DEPLOY_NO_SUDO:-0} != 1 ]]; then
-    pi_stack_as_root python3 "$root/deploy/native-history-root-activate" "$PI_STACK_HOST_FILE" "$expected" || activation_failed=1
+    pi_stack_as_root python3 "$root/deploy/one-kenan-activate" activate --host "$PI_STACK_HOST_FILE" --expected "$expected" || activation_failed=1
   fi
-  pi_stack_as_root python3 "$root/deploy/one-kenan-activate" rooms --host "$PI_STACK_HOST_FILE" --expected "$expected" || activation_failed=1
 fi
 if (( recognition )); then
   wait "$recognition_pid" || activation_failed=1

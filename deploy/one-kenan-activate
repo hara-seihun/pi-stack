@@ -1,16 +1,12 @@
 #!/usr/bin/python3
-"""Activate and prove enabled One Kenan consumers without touching custody or private state."""
+"""Gracefully replace One Kenan executors; durable request intake stays open."""
 import argparse
 import fcntl
-import hashlib
 import http.client
 import json
 import os
 import pathlib
 import re
-import secrets
-import socket
-import struct
 import subprocess
 import sys
 import time
@@ -18,59 +14,23 @@ import urllib.error
 import urllib.request
 
 UNITS = {'memory': 'pi-kenan-memory.service', 'root': 'pi-kenan-root.service', 'rooms': 'pi-rooms.service'}
-MIGRATION_TABLE = 'pi_kenan_migration'
-# Only this inspected pre-protocol source has the durable idle invariants below.
-MIGRATION_SOURCE = '1cd80555c5ce5b8f51e8e467fb6d598fcebcf73e'
-MIGRATION_HASHES = {
-    'remote/kenan-root/src/main.ts': '2fc15b5848e23d7cac9c6d8dad09722373389377a66cadb2fffe9422a8e7ec5c',
-    'remote/kenan-root/src/service.ts': 'b26de1911fcc95ba4acf29800a38cacd931e15639ffd977cc7766fa809021ed9',
-    'remote/kenan-root/src/root-runtime.ts': 'cae465ead589200cfe33e0a7f9ef43c7d1f11e48927d991a2ad2d9c064539634',
-    'remote/kenan-root/src/consent.ts': 'a6a0f017b406cd78a9b66fd6a78a599f503f26d17e7e0d57624940f30145cd2a',
-    'runtime/src/main.ts': '718c198f1a461e386ea688477ca10d77bbc96ad39fc8578ee71d9fa839d8ff21',
-    'runtime/src/service.ts': '3669cda57f6bf0c714a6a751bac654b48bc94be00ad52661421e3330cf6440cc',
-    'runtime/src/store.ts': 'fdf6773267a8fa14ed29931c6fd82fff7c671b5044c4e7eab81cb6488fdfd75c',
-}
 
-# This subprocess sees only aggregate lifecycle counts, never row identifiers/body.
-IDLE_QUERY = '''
-import json, sqlite3, sys
-try:
-    result = {}
-    for name, path, query in [
-        ('rootSessions', sys.argv[1], "SELECT COUNT(*) FROM sessions WHERE role='root'"),
-        ('pendingConsents', sys.argv[2], "SELECT COUNT(*) FROM root_consent WHERE state!='delivered'")]:
-        db = sqlite3.connect('file:' + path + '?mode=ro', uri=True, timeout=.2)
-        db.execute('PRAGMA query_only=ON')
-        result[name] = db.execute(query).fetchone()[0]
-        db.close()
-    print(json.dumps(result))
-except Exception:
-    print(json.dumps({'error': 'Idle metadata unavailable'}))
-    sys.exit(1)
-'''
-
-class MarkedConnection(http.client.HTTPConnection):
-    def __init__(self, *args, mark, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.mark = mark
-    def connect(self):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.settimeout(self.timeout)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_MARK, struct.pack('=I', self.mark))
-        self.sock.connect((self.host, self.port))
 
 class Deferred(Exception):
     pass
+
 
 class Host:
     def __init__(self, config, expected):
         self.config, self.expected = config, expected
         self.deadline = time.monotonic() + 40
-        self.mark = None
+
     def command(self, *args):
         return subprocess.check_output(args, text=True, timeout=min(5, max(.1, self.deadline-time.monotonic()))).strip()
+
     def health(self, role):
         return self.http(role, '/v1/health')[1]
+
     def http(self, role, path, method='GET'):
         port = self.config.get(role+'Port', {'memory': 18820, 'root': 18821, 'rooms': 18822}[role])
         if not isinstance(port, int) or not 0 < port < 65536:
@@ -81,16 +41,6 @@ class Host:
             if not re.fullmatch('[0-9a-f]{64}', token):
                 raise RuntimeError('Invalid root release capability')
             headers['x-pi-kenan-admin'] = token
-        if self.mark is not None and role == 'root':
-            connection = MarkedConnection('127.0.0.1', port, timeout=2, mark=self.mark)
-            try:
-                connection.request(method, path, headers={**headers, 'Connection': 'close'})
-                response = connection.getresponse()
-                return response.status, json.loads(response.read(16384))
-            except (OSError, http.client.HTTPException, ValueError):
-                return 0, {}
-            finally:
-                connection.close()
         request = urllib.request.Request(f'http://127.0.0.1:{port}{path}', method=method, headers=headers)
         try:
             with urllib.request.urlopen(request, timeout=2) as response:
@@ -99,82 +49,10 @@ class Host:
             return error.code, {}
         except (OSError, http.client.HTTPException, ValueError):
             return 0, {}
-    def validate_migration(self, args):
-        if args.preprotocol_commit != MIGRATION_SOURCE or not args.preprotocol_pid or args.preprotocol_pid < 1:
-            raise RuntimeError('migrate requires the inspected --preprotocol-commit and --preprotocol-pid')
-        if self.health('root').get('releaseProtocol') is not None:
-            raise RuntimeError('Use activate for a protocol-enabled root')
-        if self.command('systemctl', 'show', UNITS['root'], '-p', 'MainPID', '--value') != str(args.preprotocol_pid):
-            raise Deferred('The inspected pre-protocol root PID changed; inspect its generation before migration')
-        root = pathlib.Path(self.config.get('remoteRoot', '/srv/pi/pi-remote')).resolve()
-        runtime = pathlib.Path(self.config.get('memoryRuntime', '/srv/pi/runtime/node_modules/kenan-memory')).parents[1].resolve()
-        # Resolve the release root, not its package symlink into shared dependencies.
-        remote_source = root.parent / MIGRATION_SOURCE
-        memory_source = runtime.parent / MIGRATION_SOURCE / 'node_modules/kenan-memory'
-        for name, digest in MIGRATION_HASHES.items():
-            role, relative = name.split('/', 1)
-            path = (remote_source if role == 'remote' else memory_source) / relative
-            if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
-                raise RuntimeError('Pre-protocol source does not match the inspected idle contract')
-        return str(args.preprotocol_pid)
-    def fence(self):
-        port = self.config.get('rootPort', 18821)
-        if not isinstance(port, int) or not 0 < port < 65536:
-            raise RuntimeError('Invalid root listener port')
-        mark = secrets.randbelow(0xffffffff - 1) + 1
-        # SYN-only rejection leaves every accepted connection untouched. Only this
-        # administrator's marked health/control sockets can open new connections.
-        rules = f'''add table inet {MIGRATION_TABLE}
-add chain inet {MIGRATION_TABLE} output {{ type filter hook output priority -20; policy accept; }}
-add rule inet {MIGRATION_TABLE} output fib daddr type local tcp dport {port} tcp flags & (syn | ack) == syn meta mark != {mark} reject with tcp reset
-'''
-        # A stale table is evidence of interrupted migration, not ours to overwrite.
-        existing = subprocess.run(['nft', 'list', 'table', 'inet', MIGRATION_TABLE], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
-        if existing.returncode == 0:
-            raise RuntimeError('Migration fence already exists; thaw root and remove only pi_kenan_migration before retrying')
-        subprocess.run(['nft', '-f', '-'], input=rules, text=True, check=True, timeout=2)
-        self.mark = mark
-    def unfence(self):
-        # Cleanup gets a fresh timeout even after the activation deadline.
-        subprocess.run(['nft', 'delete', 'table', 'inet', MIGRATION_TABLE], check=True, timeout=5)
-        self.mark = None
-    def freeze(self):
-        self.command('systemctl', 'freeze', UNITS['root'])
-        if self.command('systemctl', 'show', UNITS['root'], '-p', 'FreezerState', '--value') != 'frozen':
-            raise Deferred('Root cgroup did not reach its frozen checkpoint')
-    def thaw(self):
-        subprocess.run(['systemctl', 'thaw', UNITS['root']], check=True, timeout=5)
+
     def idle(self, pid):
         if self.command('systemctl', 'show', UNITS['root'], '-p', 'MainPID', '--value') != pid:
             raise Deferred('Root PID changed while obtaining idle evidence')
-        env_file = pathlib.Path('/etc/pi-stack/one-kenan.env')
-        info = env_file.stat()
-        if info.st_uid != 0 or info.st_mode & 0o022:
-            raise RuntimeError('One Kenan runtime paths must be administrator-owned')
-        env = env_file.read_text().splitlines()
-        paths = dict(line.split('=', 1) for line in env if line.startswith(('PI_KENAN_PRIVATE_DIR=', 'PI_KENAN_MEMORY_STORE=', 'PI_KENAN_ROOT_CONSENT_STORE=')))
-        private = paths.get('PI_KENAN_PRIVATE_DIR', '/var/lib/pi-kenan/private')
-        memory = paths.get('PI_KENAN_MEMORY_STORE', private + '/memory/memory.sqlite3')
-        consent = paths.get('PI_KENAN_ROOT_CONSENT_STORE', private + '/root/consent.sqlite3')
-        if any(not os.path.isabs(path) or any(c in path for c in '\n\r?#') for path in [private, memory, consent]):
-            raise RuntimeError('Invalid aggregate metadata paths')
-        result = json.loads(self.command('nsenter', '-t', pid, '-m', '--', 'python3', '-c', IDLE_QUERY, memory, consent))
-        if set(result) != {'rootSessions', 'pendingConsents'} or any(type(v) is not int or v < 0 for v in result.values()):
-            raise RuntimeError('Invalid aggregate idle evidence')
-        port = self.config.get('rootPort', 18821)
-        sockets = self.command('ss', '-Htn', 'state', 'all', f'( sport = :{port} )').splitlines()
-        result['listenerConnections'] = sum(line.split()[0] not in ['LISTEN', 'TIME-WAIT'] for line in sockets if line.strip())
-        # Include root's outbound admission/model/consent sockets, not just asks.
-        inodes = set()
-        for fd in pathlib.Path(f'/proc/{pid}/fd').iterdir():
-            try: target = os.readlink(fd)
-            except FileNotFoundError: continue
-            match = re.fullmatch(r'socket:\[(\d+)\]', target)
-            if match: inodes.add(match[1])
-        result['runtimeConnections'] = 0
-        for name in ['tcp', 'tcp6']:
-            lines = pathlib.Path(f'/proc/{pid}/net/{name}').read_text().splitlines()[1:]
-            result['runtimeConnections'] += sum(line.split()[9] in inodes and line.split()[3] not in ['0A', '06'] for line in lines)
         group = self.command('systemctl', 'show', UNITS['root'], '-p', 'ControlGroup', '--value')
         if not group.startswith('/') or '..' in group.split('/'):
             raise RuntimeError('Invalid root cgroup path')
@@ -184,8 +62,8 @@ add rule inet {MIGRATION_TABLE} output fib daddr type local tcp dport {port} tcp
                 pids.update(pathlib.Path(directory, 'cgroup.procs').read_text().split())
         if pid not in pids:
             raise Deferred('Inspected root PID no longer belongs to its service')
-        result['childProcesses'] = len(pids - {pid})
-        return result
+        return {'childProcesses': len(pids - {pid})}
+
     def ready(self, role, previous_pid=None):
         while time.monotonic() < self.deadline:
             health = self.health(role)
@@ -193,11 +71,11 @@ add rule inet {MIGRATION_TABLE} output fib daddr type local tcp dport {port} tcp
             if replaced and health.get('ok') is True and health.get('releaseCommit') == self.expected:
                 return health
             time.sleep(.1)
-        raise Deferred(f'{UNITS[role]} has not activated {self.expected}; no active turn was killed')
+        raise Deferred(f'{UNITS[role]} has not activated {self.expected}; graceful replacement remains owned by systemd')
+
     def install_room_launcher(self):
         remote = self.config.get('remoteRoot', '/srv/pi/pi-remote')
         bun = self.config.get('bun', '/usr/local/bin/bun')
-        # Configuration is host-owned. Refuse systemd directive/argument injection.
         if any(not os.path.isabs(p) or re.search(r'[\s%\\]', p) for p in [remote, bun]):
             raise RuntimeError('Invalid room launcher path')
         directory = pathlib.Path('/etc/systemd/system/pi-rooms.service.d')
@@ -210,31 +88,34 @@ add rule inet {MIGRATION_TABLE} output fib daddr type local tcp dport {port} tcp
         previous_pid = None
         if 'pi-remote-supervise' not in old_start:
             previous_pid = self.command('systemctl', 'show', UNITS['rooms'], '-p', 'MainPID', '--value')
-            # The direct-Bun unit exits 75 on handoff. Only during that first
-            # transition, let systemd replace its main PID without killing hosts.
             migration.write_text('[Service]\nKillMode=process\n')
             migration.chmod(0o644)
         self.command('systemctl', 'daemon-reload')
         return migration, previous_pid
-    def install_memory_drain(self):
-        directory = pathlib.Path('/etc/systemd/system/pi-kenan-memory.service.d')
+
+    def install_drain(self, role):
+        if role not in ('root', 'memory'):
+            raise RuntimeError('Only Root and memory have executor drain declarations')
+        directory = pathlib.Path('/etc/systemd/system/' + UNITS[role] + '.d')
         directory.mkdir(mode=0o755, exist_ok=True)
         dropin = directory/'release.conf'
-        dropin.write_text('[Service]\nTimeoutStopSec=infinity\n')
+        dropin.write_text('[Service]\nTimeoutStopSec=infinity\n' + ('KillMode=mixed\n' if role == 'root' else ''))
         dropin.chmod(0o644)
         self.command('systemctl', 'daemon-reload')
+
     def finish_room_migration(self, migration):
         if migration.exists():
             migration.unlink()
             self.command('systemctl', 'daemon-reload')
 
+
 def check(host):
     for role, unit in UNITS.items():
         if host.command('systemctl', 'show', unit, '-p', 'LoadState', '--value') != 'loaded':
             raise RuntimeError(f'Enabled One Kenan is missing {unit}')
-    health = host.health('root')
-    if health.get('releaseProtocol') != 1:
-        raise Deferred('Root Kenan lacks the safe release protocol; perform a controlled idle migration before automatic activation')
+    if host.health('root').get('releaseProtocol') != 2:
+        raise Deferred('The running Root executor does not expose the accepting dispatch-only handoff protocol; it remains running')
+
 
 def prove(host):
     result = {}
@@ -244,9 +125,9 @@ def prove(host):
         health = host.health(role)
         if health.get('ok') is not True or health.get('releaseCommit') != host.expected:
             raise RuntimeError(f'{unit} running release does not match {host.expected}')
-        # Only lifecycle metadata is evidence, never session IDs/content or stores.
         result[role] = {'unit': unit, 'releaseCommit': health['releaseCommit']}
     return {'enabled': True, 'consumers': result}
+
 
 def activate_rooms(host):
     migration, previous_pid = host.install_room_launcher()
@@ -262,61 +143,31 @@ def activate_rooms(host):
         raise RuntimeError('pi-rooms.service running release does not match the selected release')
     return {'enabled': True, 'consumers': {'rooms': {'unit': UNITS['rooms'], 'releaseCommit': health['releaseCommit']}}}
 
-def activate(host):
-    check(host)
-    status, _ = host.http('root', '/v1/admin/release', 'POST')
-    if status != 200:
-        raise Deferred('Root Kenan has active work or could not quiesce; release deferred without restarting consumers')
-    try:
-        # Root admission is gated, and no asks/consent continuations remain. Memory
-        # closes accepted HTTP requests before closing SQLite; custody is untouched.
-        for role in ['memory', 'root']:
-            if host.health(role).get('releaseCommit') != host.expected:
-                if role == 'memory': host.install_memory_drain()
-                previous_pid = host.command('systemctl', 'show', UNITS[role], '-p', 'MainPID', '--value')
-                host.command('systemctl', 'restart', '--no-block', UNITS[role])
-                host.ready(role, previous_pid)
-        activate_rooms(host)
-        return prove(host)
-    finally:
-        # A failed/pending activation must not leave the surviving root gated.
-        status, _ = host.http('root', '/v1/admin/release', 'DELETE')
-        if status != 200:
-            raise RuntimeError('Root admission gate could not be released')
 
-def migrate(host, args):
-    pid = host.validate_migration(args)
-    frozen = False
-    host.fence()
+def activate(host):
+    stale = [role for role in ('memory', 'root') if host.health(role).get('releaseCommit') != host.expected]
+    if not stale:
+        activate_rooms(host)
+        return prove(host)
+    check(host)
+    status, body = host.http('root', '/v1/admin/release', 'POST')
+    if status == 409:
+        raise Deferred('Root has active work; request intake is unchanged and executor replacement waits for natural idle')
     try:
-        # Zero root sessions includes disconnected model requests. Any historic
-        # failed admission or pending consent defers; neither is deleted here.
-        evidence = host.idle(pid)
-        if any(evidence.values()):
-            raise Deferred('Pre-protocol root is not proven idle: ' + json.dumps(evidence, sort_keys=True))
-        frozen = True
-        host.freeze()
-        evidence = host.idle(pid)
-        if any(evidence.values()):
-            raise Deferred('Pre-protocol root changed before freeze: ' + json.dumps(evidence, sort_keys=True))
-        host.install_memory_drain()
-        previous = host.command('systemctl', 'show', UNITS['memory'], '-p', 'MainPID', '--value')
-        host.command('systemctl', 'restart', '--no-block', UNITS['memory'])
-        host.ready('memory', previous)
-        # Still fenced, no durable consent exists, and no accepted connection is
-        # left. Thaw solely so the idle generation can honor its normal SIGTERM.
-        host.thaw()
-        frozen = False
-        host.command('systemctl', 'restart', '--no-block', UNITS['root'])
-        host.ready('root', pid)
-        check(host)
+        if status != 200 or body != {'ok': True, 'dispatchPaused': True}:
+            raise Deferred('Root dispatch pause was not confirmed; no consumers restarted')
+        for role in stale:
+            host.install_drain(role)
+            previous_pid = host.command('systemctl', 'show', UNITS[role], '-p', 'MainPID', '--value')
+            host.command('systemctl', 'restart', '--no-block', UNITS[role])
+            host.ready(role, previous_pid)
         activate_rooms(host)
         return prove(host)
     finally:
-        try:
-            if frozen: host.thaw()
-        finally:
-            host.unfence()
+        status, body = host.http('root', '/v1/admin/release', 'DELETE')
+        if status != 200 or body != {'ok': True, 'dispatchPaused': False}:
+            raise Deferred('Root replacement is still settling; request receipts remain durable and dispatch resume must be reconciled')
+
 
 def public_config(path):
     path = pathlib.Path(path)
@@ -325,35 +176,35 @@ def public_config(path):
         raise RuntimeError('One Kenan configuration must be root-owned and not writable by other identities')
     return json.loads(path.read_text())
 
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['check', 'activate', 'migrate', 'rooms', 'proof'])
+    parser.add_argument('action', choices=['check', 'activate', 'rooms', 'proof'])
     parser.add_argument('--host', required=True)
     parser.add_argument('--expected', required=True)
     parser.add_argument('--config', default='/etc/pi-stack/one-kenan.json')
-    parser.add_argument('--preprotocol-commit', help='Administrator-attested startup source; migrate only')
-    parser.add_argument('--preprotocol-pid', type=int, help='Previously inspected root MainPID; migrate only')
     args = parser.parse_args()
-    if public_config(args.host).get('oneKenan') is not True:
+    enabled = public_config(args.host).get('oneKenan')
+    if enabled is False:
         print(json.dumps({'enabled': False}))
         return
+    if enabled is not True:
+        raise RuntimeError('Root product authority is not explicitly declared')
     if os.geteuid() != 0:
         raise RuntimeError('One Kenan activation/proof requires the host administrator')
     if os.stat('/proc/self/ns/mnt').st_ino != os.stat('/proc/1/ns/mnt').st_ino:
         raise RuntimeError('Run activation in PID 1 mount namespace with sudo nsenter -t 1 -m --')
     if not re.fullmatch('[0-9a-f]{40}', args.expected):
         raise RuntimeError('Expected release must be a full commit ID')
-    # Serialize all privileged activation paths, including room publication.
     with open('/run/pi-one-kenan-activation.lock', 'a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         host = Host(public_config(args.config), args.expected)
         if args.action == 'check':
             check(host)
-        elif args.action == 'migrate':
-            print(json.dumps(migrate(host, args)))
         else:
             action = {'activate': activate, 'rooms': activate_rooms, 'proof': prove}[args.action]
             print(json.dumps(action(host)))
+
 
 if __name__ == '__main__':
     try:
