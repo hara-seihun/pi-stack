@@ -179,6 +179,7 @@ export class ThreadService implements ThreadApi {
   private routing = false;
   private custodyRouting = false;
   private custodyQueued = false;
+  private questionResolutionRunning = false;
   private transactionDepth = 0;
   private readonly projections = new Map<string, { live: Json; activity: ExecutionActivity }>();
   private readonly nativeContexts = new MetadataCache<NativeContextMetadata>(32, 64 * 1024 * 1024);
@@ -240,13 +241,16 @@ export class ThreadService implements ThreadApi {
         question_id TEXT PRIMARY KEY REFERENCES thread_question(id), manager_id TEXT NOT NULL,
         deadline_at INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('held','forwarded','released')), forwarded_id TEXT REFERENCES thread_question(id));
       CREATE INDEX IF NOT EXISTS thread_question_route_due ON thread_question_route(deadline_at) WHERE state='held';
+      CREATE TABLE IF NOT EXISTS thread_question_unresolved (
+        question_id TEXT PRIMARY KEY REFERENCES thread_question(id), deadline_at INTEGER NOT NULL, error TEXT);
       CREATE TABLE IF NOT EXISTS thread_question_origin (question_id TEXT PRIMARY KEY REFERENCES thread_question(id), thread_id TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS thread_question_custody_outbox (request_id TEXT PRIMARY KEY, data TEXT NOT NULL, error TEXT);
       CREATE TABLE IF NOT EXISTS thread_question_link (
         original_id TEXT PRIMARY KEY REFERENCES thread_question(id), forwarded_id TEXT NOT NULL REFERENCES thread_question(id));
       INSERT OR IGNORE INTO thread_question_event(question_id) SELECT id FROM thread_question WHERE accepted_at IS NULL
         AND NOT EXISTS(SELECT 1 FROM thread_question_route r WHERE r.question_id=thread_question.id AND r.state='held')
-        AND NOT EXISTS(SELECT 1 FROM thread_question_origin o WHERE o.question_id=thread_question.id) ORDER BY created_at,rowid;
+        AND NOT EXISTS(SELECT 1 FROM thread_question_origin o WHERE o.question_id=thread_question.id)
+        AND NOT EXISTS(SELECT 1 FROM thread_question_unresolved u WHERE u.question_id=thread_question.id) ORDER BY created_at,rowid;
       CREATE INDEX IF NOT EXISTS thread_question_pending ON thread_question(thread_id,created_at) WHERE accepted_at IS NULL;
       DROP INDEX IF EXISTS thread_execution_active;
       UPDATE thread SET state='idle',held=1 WHERE state='stopped';
@@ -947,6 +951,7 @@ export class ThreadService implements ThreadApi {
   reconcile(): void {
     if (!this.started || this.closed || this.suspended) return;
     void this.routeNotifications();
+    void this.resolveQuestionManagers();
     void this.routeQuestionCustody();
     this.releaseExpiredQuestions();
     this.deliverScheduledWakes();
@@ -1420,7 +1425,55 @@ export class ThreadService implements ThreadApi {
       return bad("invalid_request", "Unknown question custody action");
     } catch (cause) { return bad("unavailable", errorText(cause)); }
   }
+  private async resolveQuestionManagers(): Promise<void> {
+    if (this.questionResolutionRunning || !this.directory || this.closed || this.suspended) return;
+    if (!this.sql("SELECT 1 FROM thread_question_unresolved LIMIT 1").get()) return;
+    this.questionResolutionRunning = true;
+    try {
+      const found = await this.directory.managerThread();
+      if (this.closed || this.suspended) return;
+      this.releaseExpiredQuestions();
+      if (!found.ok) {
+        this.sql("UPDATE thread_question_unresolved SET error=?").run(found.error.message);
+        return;
+      }
+      const rows = this.sql(`SELECT q.*,u.deadline_at FROM thread_question_unresolved u JOIN thread_question q ON q.id=u.question_id
+        WHERE q.accepted_at IS NULL ORDER BY q.created_at,q.rowid`).all() as Json[];
+      if (!rows.length) return;
+      const manager = found.value;
+      this.transaction(() => {
+        const groups = new Map<string, Json[]>();
+        for (const row of rows) {
+          this.sql("DELETE FROM thread_question_unresolved WHERE question_id=?").run(row.id);
+          if (!manager || manager.id === row.thread_id) this.sql("INSERT OR IGNORE INTO thread_question_event(question_id) VALUES(?)").run(row.id);
+          else {
+            this.sql("INSERT INTO thread_question_route(question_id,manager_id,deadline_at,state) VALUES(?,?,?,'held')").run(row.id, manager.id, row.deadline_at);
+            const key = JSON.stringify([row.thread_id, row.deadline_at]);
+            const group = groups.get(key) ?? []; group.push(row); groups.set(key, group);
+          }
+        }
+        if (manager) for (const questions of groups.values()) {
+          this.queueQuestionCustody({ action: "receive", threadId: manager.id, requestId: `custody-resolve:${questions[0]!.id}`, originThreadId: questions[0]!.thread_id,
+            questions: questions.map(q => this.question(q)), deadlineAt: questions[0]!.deadline_at });
+        }
+      });
+      for (const threadId of new Set(rows.map(row => row.thread_id))) this.changed(threadId);
+      void this.routeQuestionCustody();
+    } catch (cause) {
+      if (!this.closed && !this.suspended) this.sql("UPDATE thread_question_unresolved SET error=?").run(errorText(cause));
+    } finally { this.questionResolutionRunning = false; }
+  }
   private releaseExpiredQuestions(): void {
+    const unresolved = this.sql(`SELECT u.question_id,q.thread_id FROM thread_question_unresolved u JOIN thread_question q ON q.id=u.question_id WHERE u.deadline_at<=?`).all(Date.now()) as Json[];
+    if (unresolved.length) {
+      this.transaction(() => {
+        for (const row of unresolved) {
+          this.sql("DELETE FROM thread_question_unresolved WHERE question_id=?").run(row.question_id);
+          this.sql("INSERT OR IGNORE INTO thread_question_event(question_id) SELECT id FROM thread_question WHERE id=? AND accepted_at IS NULL").run(row.question_id);
+        }
+      });
+      for (const id of new Set(unresolved.map(row => row.thread_id))) this.changed(id);
+    }
     const rows = this.sql(`SELECT r.question_id,q.thread_id FROM thread_question_route r JOIN thread_question q ON q.id=r.question_id
       WHERE r.state='held' AND r.deadline_at<=? AND q.accepted_at IS NULL`).all(Date.now()) as Json[];
     if (!rows.length) return;
@@ -1510,15 +1563,9 @@ export class ThreadService implements ThreadApi {
       const thread = this.get(input.threadId); if (!thread) return bad("not_found", "Thread not found");
       if (thread.metadata?.archived) return bad("unavailable", "Restore this archived thread before asking questions");
       const questionIds = input.questions.map(() => randomUUID());
-      let manager = this.manager();
-      if (!manager && this.options.workersOnly && this.directory) {
-        const found = await this.directory.managerThread(); if (!found.ok) return found;
-        manager = found.value ?? undefined;
-        const accepted = this.request(input.requestId, input, "ask"); if (!accepted.ok) return accepted;
-        if (accepted.value) return good({ accepted: true, questionIds: JSON.parse(accepted.value) });
-      }
+      const manager = this.manager();
+      const unresolved = !manager && this.options.workersOnly === true;
       const held = manager && manager.id !== thread.id ? manager : undefined;
-      const externalManager = held && !this.get(held.id);
       this.transaction(() => {
         const now = Date.now();
         input.questions.forEach((question, index) => {
@@ -1526,13 +1573,11 @@ export class ThreadService implements ThreadApi {
           const suggestions = (question.suggestions ?? []).map((text, index) => ({ id: `${id}:${index}`, text }));
           this.sql("INSERT INTO thread_question(id,thread_id,question,suggestions,recommended_id,created_at) VALUES(?,?,?,?,?,?)")
             .run(id, input.threadId, question.question, JSON.stringify(suggestions), question.recommendedSuggestionIndex === undefined ? null : suggestions[question.recommendedSuggestionIndex]!.id, now);
-          if (held) this.sql("INSERT INTO thread_question_route(question_id,manager_id,deadline_at,state) VALUES(?,?,?,'held')").run(id, held.id, now + 2 * 60 * 60_000);
+          if (unresolved) this.sql("INSERT INTO thread_question_unresolved(question_id,deadline_at,error) VALUES(?,?,?)").run(id, now + 2 * 60 * 60_000, this.directory ? null : "Person directory is unavailable");
+          else if (held) this.sql("INSERT INTO thread_question_route(question_id,manager_id,deadline_at,state) VALUES(?,?,?,'held')").run(id, held.id, now + 2 * 60 * 60_000);
           else this.sql("INSERT INTO thread_question_event(question_id) VALUES(?)").run(id);
         });
-        if (externalManager && held) {
-          const questions = questionIds.map(id => this.question(this.sql("SELECT * FROM thread_question WHERE id=?").get(id) as Json));
-          this.queueQuestionCustody({ action: "receive", threadId: held.id, requestId: `custody-receive:${input.requestId}`, originThreadId: thread.id, questions, deadlineAt: now + 2 * 60 * 60_000 });
-        } else if (held) {
+        if (held) {
           const receipt = `manager-questions:${input.requestId}`;
           this.insertMessage(receipt, { requestId: receipt, threadId: held.id, senderId: thread.id, source: "notification", delivery: "steer",
             text: `New held questions from ${thread.title}. Use manager_questions_list to answer under the person's current policy or forward one rewritten question. Unhandled questions become visible after two hours.` }, held.settings, false, thread.agentName);
@@ -1541,7 +1586,7 @@ export class ThreadService implements ThreadApi {
         this.recordRequest(input.requestId, input, "ask", JSON.stringify(questionIds));
       });
       this.changed(input.threadId);
-      if (externalManager) void this.routeQuestionCustody();
+      if (unresolved) void this.resolveQuestionManagers();
       else if (held) { this.changed(held.id); this.wake(held.id); }
       return good({ accepted: true, questionIds });
     } catch (error) { return bad("unavailable", errorText(error)); }
@@ -1562,7 +1607,8 @@ export class ThreadService implements ThreadApi {
       this.releaseExpiredQuestions();
       const rows = this.sql(`SELECT q.* FROM thread_question q JOIN thread t ON t.id=q.thread_id
         WHERE q.accepted_at IS NULL AND NOT EXISTS(SELECT 1 FROM thread_question_route r WHERE r.question_id=q.id AND r.state='held')
-        AND NOT EXISTS(SELECT 1 FROM thread_question_origin o WHERE o.question_id=q.id) ORDER BY q.thread_id,q.created_at,q.rowid`).all() as Json[];
+        AND NOT EXISTS(SELECT 1 FROM thread_question_origin o WHERE o.question_id=q.id)
+        AND NOT EXISTS(SELECT 1 FROM thread_question_unresolved u WHERE u.question_id=q.id) ORDER BY q.thread_id,q.created_at,q.rowid`).all() as Json[];
       const ids = [...new Set([...input.locationThreadIds, ...rows.map(row => row.thread_id as string)])];
       const owners = this.sql(`SELECT id,title,metadata FROM thread WHERE id IN (SELECT value FROM json_each(?))`)
         .all(JSON.stringify(ids)) as Json[];
@@ -1588,7 +1634,7 @@ export class ThreadService implements ThreadApi {
   async questions(threadId: string): Promise<Result<ThreadQuestion[]>> {
     if (!this.get(threadId)) return bad("not_found", "Thread not found");
     this.releaseExpiredQuestions();
-    return good((this.sql("SELECT * FROM thread_question WHERE thread_id=? AND accepted_at IS NULL AND NOT EXISTS(SELECT 1 FROM thread_question_route r WHERE r.question_id=thread_question.id AND r.state='held') AND NOT EXISTS(SELECT 1 FROM thread_question_origin o WHERE o.question_id=thread_question.id) ORDER BY created_at,rowid").all(threadId) as Json[]).map(row => this.question(row)));
+    return good((this.sql("SELECT * FROM thread_question WHERE thread_id=? AND accepted_at IS NULL AND NOT EXISTS(SELECT 1 FROM thread_question_route r WHERE r.question_id=thread_question.id AND r.state='held') AND NOT EXISTS(SELECT 1 FROM thread_question_origin o WHERE o.question_id=thread_question.id) AND NOT EXISTS(SELECT 1 FROM thread_question_unresolved u WHERE u.question_id=thread_question.id) ORDER BY created_at,rowid").all(threadId) as Json[]).map(row => this.question(row)));
   }
   async questionState(threadId: string, questionId: string): Promise<Result<QuestionState>> {
     if (typeof threadId !== "string" || typeof questionId !== "string") return bad("invalid_request", "Thread and question IDs are required");
@@ -1667,6 +1713,8 @@ export class ThreadService implements ThreadApi {
       const choices = this.question(row).suggestions;
       if (input.selectedSuggestionIds.some(id => !choices.some(choice => choice.id === id)) || !input.dismissed && !input.selectedSuggestionIds.length && !input.text.trim())
         return bad("invalid_request", "Select at least one known suggestion or provide nonblank text");
+      this.releaseExpiredQuestions();
+      if (this.sql("SELECT 1 FROM thread_question_unresolved WHERE question_id=?").get(row.id)) return bad("conflict", "Question manager routing is unresolved until its two-hour deadline");
       const route = this.sql("SELECT * FROM thread_question_route WHERE question_id=?").get(row.id) as Json | undefined;
       if (!custody && route && !this.get(route.manager_id)) {
         if (!this.directory) return bad("unavailable", "The person's question custody directory is unavailable");

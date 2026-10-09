@@ -146,6 +146,50 @@ it.each(["manager", "classic"])("routes own-person local fleet questions through
   expect(f.pending("worker")[0]?.senderId).toBe(first === "manager" ? "manager" : null);
 });
 
+it.each(["manager", "none", "deadline"])("accepts fleet questions durably before unavailable manager resolution and recovers across restart (%s)", async resolution => {
+  let now = 10_000_000; vi.spyOn(Date, "now").mockImplementation(() => now);
+  const person = await setup(), fleet = fixture(undefined, { workersOnly: true });
+  const directory = new ThreadDirectory({ id: "person", api: person.service }, [{ id: "fleet", api: fleet.service }]);
+  fleet.service.setDirectory(directory); person.service.setDirectory(directory);
+  let finish!: (value: Result<import("../src/threads/contracts.js").Thread | null>) => void;
+  const unavailable = vi.spyOn(directory, "managerThread").mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  unwrap(await fleet.service.spawn({ requestId: "worker", id: "worker", cwd: fleet.root }));
+  const id = await ask(fleet.service, "worker");
+  expect(unwrap(await fleet.service.ask({ threadId: "worker", requestId: "ask:worker", questions: [{ question: "Proceed worker?", suggestions: ["Yes", "No"] }] })).questionIds).toEqual([id]);
+  expect(unwrap(await fleet.service.questions("worker"))).toEqual([]);
+  expect(unwrap(fleet.service.pendingQuestions({ locationThreadIds: [] })).questions).toEqual([]);
+  expect(unwrap(fleet.service.questionEvents()).items).toEqual([]);
+  expect(await fleet.service.answer({ threadId: "worker", questionId: id, selectedSuggestionIds: [], text: "Too early" })).toMatchObject({ ok: false, error: { code: "conflict" } });
+  finish({ ok: false, error: { code: "unavailable", message: "Person supervisor unavailable" } }); await boundary();
+  await fleet.service.close(); unavailable.mockRestore();
+  now += 60_000;
+  const recovered = fixture(fleet.root, { workersOnly: true }).service;
+  const restored = new ThreadDirectory({ id: "person", api: person.service }, [{ id: "fleet", api: recovered }]); recovered.setDirectory(restored); person.service.setDirectory(restored);
+  if (resolution === "none") vi.spyOn(restored, "managerThread").mockResolvedValue({ ok: true, value: null });
+  if (resolution === "deadline") vi.spyOn(restored, "managerThread").mockResolvedValue({ ok: false, error: { code: "unavailable", message: "Still unavailable" } });
+  unwrap(await recovered.start()); await boundary();
+  if (resolution === "manager") {
+    await until(() => person.service.pending("manager").some(work => work.id.startsWith("manager-custody:")));
+    expect(await inbox(person.service)).toMatchObject([{ id, deadlineAt: 10_000_000 + 2 * 60 * 60_000 }]);
+    expect(unwrap(await recovered.questions("worker"))).toEqual([]);
+    unwrap(await person.service.managerQuestions({ action: "answer", requestId: "recovered-answer", threadId: "manager", questionId: id, selectedSuggestionIds: [], text: "Recovered" }));
+    await until(() => recovered.pending("worker").some(work => work.replyTo === id));
+  } else {
+    if (resolution === "deadline") {
+      expect(unwrap(await recovered.questions("worker"))).toEqual([]);
+      now = 10_000_000 + 2 * 60 * 60_000 - 1;
+      expect(unwrap(recovered.questionEvents()).items).toEqual([]);
+      now += 1; recovered.reconcile();
+    }
+    expect(unwrap(await recovered.questions("worker"))).toMatchObject([{ id }]);
+    const visible = unwrap(recovered.questionEvents()); expect(visible.items).toMatchObject([{ questionId: id }]);
+    expect(unwrap(recovered.questionEvents(visible.cursor)).items).toEqual([]);
+    expect(await inbox(person.service)).toEqual([]);
+    unwrap(await recovered.answer({ threadId: "worker", questionId: id, selectedSuggestionIds: [], text: "Now visible" }));
+    expect(recovered.pending("worker")).toHaveLength(1);
+  }
+});
+
 it("recovers fleet receive and manager fanout outboxes across unavailable transport and restart", async () => {
   const person = await setup(), fleet = fixture(undefined, { workersOnly: true });
   let directory = new ThreadDirectory({ id: "person", api: person.service }, [{ id: "fleet", api: fleet.service }]);
