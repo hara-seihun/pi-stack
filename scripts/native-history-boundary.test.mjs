@@ -45,13 +45,17 @@ test('durable admission fence preserves admitted roots/children/receipts but ref
 test('transient wrappers pin old modules and source identity without rewriting the immutable selected release', t => {
   const root = directory(t), remote = join(root, 'old-remote'), fleet = join(root, 'old-fleet');
   mkdirSync(join(remote, 'server'), { recursive: true }); mkdirSync(join(fleet, 'dist'), { recursive: true });
-  writeFileSync(join(remote, '.pi-stack-commit'), old); writeFileSync(join(remote, 'server/main.ts'), 'original remote');
+  const oldMain = 'await import("./server");';
+  writeFileSync(join(remote, '.pi-stack-commit'), old); writeFileSync(join(remote, 'server/main.ts'), oldMain);
+  writeFileSync(join(remote, 'server/server.ts'), 'const PACKAGE_ROOT = realpathSync(join(import.meta.dir, ".."));\nif (configuredRoot !== PACKAGE_ROOT) { throw new Error("package identity"); }');
+  writeFileSync(join(remote, 'server/context-mirror.ts'), 'old decoder');
+  writeFileSync(join(remote, 'package.json'), '{}');
   writeFileSync(join(fleet, '.pi-stack-commit'), old); writeFileSync(join(fleet, 'dist/cli.js'), 'original fleet');
   const stagedRemote = join(root, 'remote'), stagedFleet = join(root, 'fleet');
   stageRemote(remote, stagedRemote, '/immutable/legacy.json'); stageFleet(fleet, stagedFleet, '/immutable/legacy.json');
   // A restarted coordinator completes the same staged generation, not another release.
   stageRemote(remote, stagedRemote, '/immutable/legacy.json'); stageFleet(fleet, stagedFleet, '/immutable/legacy.json');
-  assert.equal(readFileSync(join(remote, 'server/main.ts'), 'utf8'), 'original remote');
+  assert.equal(readFileSync(join(remote, 'server/main.ts'), 'utf8'), oldMain);
   assert.equal(readFileSync(join(fleet, 'dist/cli.js'), 'utf8'), 'original fleet');
   assert.equal(readFileSync(join(stagedRemote, '.pi-stack-commit'), 'utf8'), old);
   assert.match(readFileSync(join(stagedRemote, 'server/main.ts'), 'utf8'), /legacyRemote/);
