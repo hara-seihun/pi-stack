@@ -8,6 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { request } from 'node:http';
+import { createServer } from 'node:net';
 import { once } from 'node:events';
 import { installObservation, MAINTENANCE_INTAKE, removeFence, serviceBusy, bridgeSocket, legacyFleetLedger, attachLegacyRuntime, reconcileLegacyRuntime, installLegacyMaintenance } from '../deploy/native-history-bridge.mjs';
 import { allOwnersReady, stageRemote, stageFleet, selectPointer, fleetInventory, fleetCompletionBarrier, maintenanceStatus, restorationPort } from '../deploy/native-history-coordinator.mjs';
@@ -230,6 +231,39 @@ test('old owner drains existing work/output, closes before private migration, an
   assert.equal(unacknowledged.ready, false); assert.equal(unacknowledged.owners[0].unacknowledgedSpools, 1);
   truncateSync(spool, 0); // The fixture's OLD decoder has now ACKed the retained output.
   const ready = await control(socket, 'GET', '/status'); assert.equal(ready.ready, true);
+  mkdirSync(join(root, 'thread-runners'));
+  const runnerControl = join(root, 'thread-runners', 'retained.sock');
+  let runnerState = 'unresponsive';
+  const census = createServer(connection => connection.on('data', () => {
+    if (runnerState === 'unresponsive') return;
+    if (runnerState === 'invalid') connection.end(JSON.stringify({ ok: true, threadIds: ['accepted'], activeSessions: -1 }) + '\n');
+    else connection.end(JSON.stringify({ ok: true, threadIds: ['accepted'], activeSessions: runnerState === 'active' ? 1 : 0 }) + '\n');
+  }));
+  await new Promise(resolve => census.listen(runnerControl, resolve));
+  t.after(() => census.close());
+  const pending = await control(socket, 'GET', '/status');
+  assert.equal(pending.error, undefined, 'An observation timeout is not failed native retirement');
+  assert.equal(pending.ready, false);
+  assert.deepEqual(pending.pendingObservations, [{ control: runnerControl, code: 'runner-control-timeout' }]);
+  assert.equal(JSON.parse(readFileSync(join(root, 'native-history-maintenance.json'), 'utf8')).error, undefined);
+  const cannotClose = await control(socket, 'POST', '/close');
+  assert.equal(cannotClose.phase, 'draining'); assert.equal(cannotClose.ready, false);
+  assert.equal(child.exitCode, null);
+  runnerState = 'invalid';
+  const invalid = await control(socket, 'GET', '/status');
+  assert.match(invalid.error, /ownership census is incomplete/);
+  runnerState = 'unresponsive';
+  const stillUnknown = await control(socket, 'GET', '/status');
+  assert.equal(stillUnknown.ready, false);
+  assert.match(stillUnknown.error, /ownership census is incomplete/, 'Partial observations cannot clear a genuine custody error');
+  assert.equal(JSON.parse(readFileSync(join(root, 'native-history-maintenance.json'), 'utf8')).errorOperation, 'status');
+  runnerState = 'active';
+  const active = await control(socket, 'GET', '/status');
+  assert.equal(active.error, undefined); assert.equal(active.ready, false);
+  runnerState = 'idle';
+  const observedIdle = await control(socket, 'GET', '/status');
+  assert.equal(observedIdle.error, undefined); assert.equal(observedIdle.ready, true);
+  await new Promise(resolve => census.close(resolve));
   writeFileSync(threadPath+'.race', 'race');
   const waiting = once(child.stdout, 'data');
   const concurrentStatus = control(socket, 'GET', '/status').catch(error => ({ error: String(error) }));
@@ -255,7 +289,7 @@ test('old owner drains existing work/output, closes before private migration, an
   retainedQueue.close();
   const snapshotFiles = new DatabaseSync(join(root, 'supervisor.sqlite3'));
   assert.equal(snapshotFiles.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name='session_contexts'").get().n, 0); snapshotFiles.close();
-}, { timeout: 5000 });
+}, { timeout: 15000 });
 for (const [retainedHandle, startupFailure] of [[false, false], [true, false], [true, true]]) test(`fleet lifetime preserves restoration without masking startup failure (retained=${retainedHandle}, failure=${startupFailure})`, async t => {
   const root = directory(t), threadPath = join(root, 'threads.sqlite3');
   database(threadPath).db.close();

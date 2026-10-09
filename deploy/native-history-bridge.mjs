@@ -23,11 +23,27 @@ export function atomicJson(path, value) {
 export function runnerRequest(path, request, timeout = 3000) {
   return new Promise((resolve, reject) => {
     const socket = createConnection(path); let body = '';
-    const timer = setTimeout(() => socket.destroy(new Error('Legacy runner control timeout')), timeout);
+    const timer = setTimeout(() => socket.destroy(Object.assign(new Error(`Legacy runner control timeout: ${path} (${request.type})`), { code: 'LEGACY_CONTROL_TIMEOUT', control: path, operation: request.type })), timeout);
     socket.on('connect', () => socket.write(JSON.stringify(request) + '\n'));
     socket.on('data', chunk => { body += chunk; if (body.length > 1024 * 1024) socket.destroy(new Error('Oversized legacy runner status')); else if (body.includes('\n')) { try { const value = JSON.parse(body.split('\n')[0]); clearTimeout(timer); socket.destroy(); resolve(value); } catch (error) { socket.destroy(error); } } });
     socket.on('error', error => { clearTimeout(timer); reject(error); });
+    socket.on('close', () => { clearTimeout(timer); reject(new Error(`Legacy runner control closed without a complete response: ${path} (${request.type})`)); });
   });
+}
+
+export async function observeLegacyRunner(path) {
+  let native;
+  try { native = await runnerRequest(path, { type: 'status' }); }
+  catch (error) {
+    if (error.syscall === 'connect' && (error.code === 'ENOENT' || error.code === 'ECONNREFUSED')) return { ok: true, value: { kind: 'absent' } };
+    if (error.code === 'LEGACY_CONTROL_TIMEOUT' && error.operation === 'status') return { ok: true, value: { kind: 'pending', control: path, code: 'runner-control-timeout' } };
+    return { ok: false, error: { code: 'runner-control-failed', message: String(error) } };
+  }
+  if (native?.ok !== true || !Array.isArray(native.threadIds) || native.threadIds.some(id => typeof id !== 'string')
+    || !Number.isSafeInteger(native.activeSessions) || native.activeSessions < 0) {
+    return { ok: false, error: { code: 'invalid-runner-census', message: `Legacy native ownership census is incomplete: ${path}` } };
+  }
+  return { ok: true, value: { kind: 'observed', native } };
 }
 
 export async function probeBridgeSocket(path) {
@@ -215,7 +231,7 @@ export async function installLegacyMaintenance(options) {
   const ownerOperation = (action, kind) => {
     const operation = ownerQueue.then(async () => {
       const value = await action();
-      if (kind === 'status' && Array.isArray(value?.owners) && receipt.errorOperation === kind) {
+      if (kind === 'status' && Array.isArray(value?.owners) && !value.pendingObservations?.length && receipt.errorOperation === kind) {
         delete receipt.error; delete receipt.errorOperation; save(receipt.phase);
         const { error, errorOperation, ...proof } = value;
         return proof;
@@ -332,18 +348,26 @@ export async function installLegacyMaintenance(options) {
     }
     if (active.some(service => service.closed || detaching.has(service))) return awaitingReplacement();
     const known = new Set(active.flatMap(service => service.sql('SELECT id FROM thread').all().map(row => row.id)));
-    const directory = join(socketDir, 'thread-runners');
+    const directory = join(socketDir, 'thread-runners'), pendingObservations = [];
     if (existsSync(directory)) for (const name of readdirSync(directory).filter(name => name.endsWith('.sock'))) {
-      const control = join(directory, name);
-      let native;
-      try { native = await runnerRequest(control, { type: 'status' }); }
-      catch (error) { if (error.code === 'ENOENT' || error.code === 'ECONNREFUSED') continue; throw error; }
-      if (native.ok !== true || !Array.isArray(native.threadIds)) throw new Error('Legacy native ownership census is incomplete');
-      if (native.threadIds.some(id => !known.has(id))) throw new Error('Legacy native owner is not mapped to its preserved thread ledger; custody requires repair');
-      if (native.activeSessions !== 0) ready = false;
-      controls.add(control);
+      const control = join(directory, name), observation = await observeLegacyRunner(control);
+      if (!observation.ok) throw new Error(observation.error.message);
+      switch (observation.value.kind) {
+        case 'absent': continue;
+        case 'pending': {
+          const { kind, ...pending } = observation.value;
+          pendingObservations.push(pending); ready = false; continue;
+        }
+        case 'observed': {
+          const { native } = observation.value;
+          if (native.threadIds.some(id => !known.has(id))) throw new Error('Legacy native owner is not mapped to its preserved thread ledger; custody requires repair');
+          if (native.activeSessions !== 0) ready = false;
+          controls.add(control); break;
+        }
+        default: throw new Error('Unknown legacy runner observation');
+      }
     }
-    return { ...receipt, ready, owners };
+    return { ...receipt, ready, owners, ...(pendingObservations.length ? { pendingObservations } : {}) };
   }
   let closing;
   async function closeOwners() {

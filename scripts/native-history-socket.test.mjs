@@ -1,13 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, request } from 'node:http';
+import { createServer as createControlServer } from 'node:net';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { once } from 'node:events';
 import { mkdtempSync, lstatSync, existsSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { prepareBridgeSocket, probeBridgeSocket } from '../deploy/native-history-bridge.mjs';
+import { prepareBridgeSocket, probeBridgeSocket, runnerRequest, observeLegacyRunner } from '../deploy/native-history-bridge.mjs';
 function directory(t) { const root = mkdtempSync(join(tmpdir(), 'history-socket-')); t.after(() => rmSync(root, { recursive: true, force: true })); return root; }
 
 test('Node eval library import does not run the socket probe CLI even when argv names the module', () => {
@@ -37,6 +38,24 @@ test('a second controller cannot unlink or orphan the live maintenance owner', a
     req.on('error', reject); req.end();
   });
   assert.equal(response, 'same-owner');
+});
+
+test('retirement timeout stays a command failure; empty and malformed census replies are preservation errors', async t => {
+  const root = directory(t), path = join(root, 'runner.sock');
+  let mode = 'unresponsive';
+  const server = createControlServer(socket => socket.on('data', () => {
+    if (mode === 'empty') socket.end();
+    if (mode === 'malformed') socket.end('not-json\n');
+  }));
+  await new Promise(resolve => server.listen(path, resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  await assert.rejects(runnerRequest(path, { type: 'drain' }, 20), error => error.code === 'LEGACY_CONTROL_TIMEOUT' && error.operation === 'drain' && error.control === path);
+  for (mode of ['empty', 'malformed']) {
+    const result = await observeLegacyRunner(path);
+    assert.equal(result.ok, false);
+    assert.equal(result.error.code, 'runner-control-failed');
+  }
+  assert.deepEqual(await observeLegacyRunner(join(root, 'absent.sock')), { ok: true, value: { kind: 'absent' } });
 });
 
 test('positive refusal of a dead socket permits removal, while unrelated files remain untouched', async t => {
