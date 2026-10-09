@@ -832,6 +832,40 @@ test("allocated-block growth excludes symlink targets, shared inodes and separat
   } finally { f.close(); }
 });
 
+test("fenced capacity repricing preserves live unestimated work and journals sampled growth plus remaining allowance", () => {
+  const f = fixture();
+  try {
+    const created = JSON.parse(run(["create", "--root", f.workspaces, "--name", "reprice", "--repo", f.source,
+      "--min-free-gib", "0", "--json"], f.env));
+    writeFileSync(path.join(created.path, "file.txt"), "dirty live work\n");
+    writeFileSync(path.join(created.path, "generated.bin"), Buffer.alloc(80 * 1024 ** 2));
+    const db = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    const before = db.prepare("SELECT * FROM workspace WHERE id=?").get(created.id);
+    const args = ["reprice-capacity", "--id", created.id, "--intent", "budgeted", "--headroom-gib", "1", "--growth-mib", "8", "--json"];
+    db.prepare("DELETE FROM workspace_capacity_measurement WHERE workspace_id=?").run(created.id);
+    assert.throws(() => run(args, f.env), /requires a fresh allocated-block sample/);
+    run(["measure-capacity", "--id", created.id, "--json"], f.env);
+    db.prepare("UPDATE workspace SET state='creating' WHERE id=?").run(created.id);
+    assert.throws(() => run(args, f.env), /cannot reprice capacity from state creating/);
+    db.prepare("UPDATE workspace SET state='active' WHERE id=?").run(created.id);
+    const repriced = JSON.parse(run(args, f.env));
+    assert.equal(repriced.capacity.intent, "budgeted");
+    assert.equal(repriced.capacity.repricing.remainingGrowthBytes, 8 * 1024 ** 2);
+    assert.equal(repriced.capacity.growthBytes, repriced.capacity.repricing.sampledGrowthBytes + 8 * 1024 ** 2);
+    assert.equal(repriced.capacity.sourceImportBytes, 0);
+    assert.deepEqual(db.prepare("SELECT * FROM workspace WHERE id=?").get(created.id), before);
+    assert.equal(readFileSync(path.join(created.path, "file.txt"), "utf8"), "dirty live work\n");
+    assert.equal(statSync(path.join(created.path, "generated.bin")).size, 80 * 1024 ** 2);
+    const journal = db.prepare("SELECT * FROM workspace_capacity_repricing WHERE workspace_id=?").all(created.id);
+    assert.equal(journal.length, 1);
+    assert.equal(JSON.parse(journal[0].old_plan_json).intent, "unestimated");
+    assert.deepEqual(JSON.parse(journal[0].new_plan_json), repriced.capacity);
+    assert.throws(() => run(args, f.env), /only accepts unestimated plans/);
+    assert.equal(db.prepare("SELECT count(*) AS n FROM workspace_capacity_repricing").get().n, 1);
+    db.close();
+  } finally { f.close(); }
+});
+
 test("capacity caches survive retained source inspection and invalidate only before actual generated-file removal", () => {
   const f = fixture();
   try {

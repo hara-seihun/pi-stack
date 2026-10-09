@@ -96,6 +96,20 @@ Missing, stale, replaced-root, unreadable or failed measurements retain the full
 
 This ledger is native workspace state, `workspace_capacity` in the same registry. Its additive schema leaves existing source custody, leases and cleanup guards unchanged. No dependency installation, runtime activation or cache deletion occurs during admission.
 
+## Repricing completed unestimated work
+
+A completed unestimated clone can opt into an explicit priced allowance without changing its source, files, lease, owner, state or original creation request:
+
+```sh
+agent-workspace measure-capacity --path /absolute/checkout --budget-ms 40000 --json
+agent-workspace reprice-capacity --path /absolute/checkout \
+  --intent budgeted --headroom-gib 8 --growth-mib 512 --json
+```
+
+Use source-only when the continuing work is only source edits; choose budgeted and enough growth for continuing installs/builds. Here `growth-mib` declares **additional remaining writes**, not a replacement total that forgets consumed growth. The tool requires a fresh successful root-identity-bound sample and immutable Git source custody. It forecasts the original source from the existing object store (no history import), uses that conservative source upper bound as baseline, and sets the growth budget to measured growth plus the requested remaining allowance. Admission applies the same 64 MiB/1% measurement margin. Repricing all completed unestimated rows removes their shared 30 GiB guard in favor of the maximum explicitly requested floor; other rows retain their own floors and remaining growth.
+
+Only active/referenced/blocked/repair-required unestimated rows may transition. Pending, reclaiming, released, unpriced, already-priced or unmeasurable rows fail without mutation. The checkout/group and filesystem fences cover pricing; a compare-and-swap and `workspace_capacity_repricing` journal atomically preserve the previous plan, new plan and exact sample. Dirty, live and unpublished work remain protected. This is a budget declaration, not evidence that work is published or deletable. Refresh after large manual deletion before repricing; never manufacture admission by editing the ledger.
+
 ## Finding out what became of a checkout
 
 Records outlive the directory. When a checkout is gone, the registry still holds why, so this is answerable rather than a matter of guesswork:
