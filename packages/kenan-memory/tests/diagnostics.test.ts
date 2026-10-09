@@ -36,9 +36,14 @@ test("root timeout and cancellation distinguish unknown outcomes without replay 
   expect(calls).toBe(1);
   expect(cancelled.result.details.memoryResult.message).toContain("cancelled before submission");
 });
-test("root client diagnoses HTTP, malformed replies and transport errors without echoing root internals", async () => {
-  const http = await ask((async () => new Response("private-error", { status: 503 })) as typeof fetch);
-  expect(http.events[0]).toMatchObject({ outcome: "failed", reason: "http-error", status: 503 });
+test("root client diagnoses terminal HTTP and malformed replies without echoing root internals", async () => {
+  let calls = 0;
+  const http = await ask((async () => { calls++; return new Response("private-error", { status: 403 }); }) as typeof fetch);
+  expect(calls).toBe(1);
+  expect(http.events).toHaveLength(1);
+  expect(http.events[0]).toMatchObject({ stage: "request", outcome: "failed", reason: "http-error", status: 403 });
+  expect(http.result.isError).toBe(true);
+  expect(http.result.details.rootRequest).toBeUndefined();
   expect(http.result.content[0].text).not.toContain("private-error");
   const invalid = await ask((async () => Response.json({ trace: "private-error" })) as typeof fetch);
   expect(invalid.events[0].reason).toBe("invalid-response");
@@ -46,8 +51,6 @@ test("root client diagnoses HTTP, malformed replies and transport errors without
   expect(unknown.events[0].reason).toBe("invalid-response");
   expect(unknown.result.isError).toBe(true);
   expect(unknown.result.content[0].text).not.toContain("private-reply");
-  const refused = await ask((async () => { throw Object.assign(new Error("private-error"), { code: "ECONNREFUSED" }); }) as typeof fetch);
-  expect(refused.events[0].reason).toBe("connection-refused");
   const ready = await ask((async () => Response.json({ reply: "private-reply" })) as typeof fetch);
   expect(ready.events[0]).toMatchObject({ outcome: "ok", status: 200 });
   expect(ready.result.content[0].text).toBe("private-reply");
@@ -82,12 +85,54 @@ test("global-capacity receipts stay pending with an explicit reason, not a faile
   expect(result.result.content[0].text).not.toContain("private-session");
 });
 
-test("lost acknowledgement returns the recoverable public id, never automatically retries or trusts unrelated receipts", async () => {
-  let id = "", calls = 0;
-  const failed = await ask((async (_url, init) => { calls++; id = (init!.headers as Record<string, string>)["x-kenan-request-id"]; throw new Error("private-error"); }) as typeof fetch);
+test("retryable HTTP and transport failures exhaust the deadline without synthetic acceptance", async () => {
+  for (const transport of [
+    (async () => new Response("private-error", { status: 503 })) as typeof fetch,
+    (async () => { throw Object.assign(new Error("private-error"), { code: "ECONNREFUSED" }); }) as typeof fetch,
+    (async () => { throw new Error("private-error"); }) as typeof fetch,
+  ]) {
+    let id = "", calls = 0;
+    const failed = await ask((async (url, init) => {
+      calls++; id = (init!.headers as Record<string, string>)["x-kenan-request-id"];
+      return transport(url, init);
+    }) as typeof fetch, 10);
+    expect(calls).toBe(1);
+    expect(failed.events).toHaveLength(1);
+    expect(failed.events[0]).toMatchObject({ stage: "request", outcome: "failed", reason: "timeout" });
+    expect(failed.events[0].status).toBeUndefined();
+    expect(failed.result.isError).toBe(true);
+    expect(failed.result.details.rootRequest).toBeUndefined();
+    expect(failed.result.details.memoryResult.requestId).toBe(id);
+    expect(failed.result.content[0].text).toContain("timed out; its outcome is unknown");
+    expect(failed.result.content[0].text).toContain("do not resubmit");
+  }
+});
+
+test("replacement reconnects preserve the original ask and report only a verified receipt", async () => {
+  const calls: { url: string; method: string | undefined; body: unknown; id: string | undefined }[] = [];
+  const recovered = await ask((async (url, init) => {
+    const id = (init!.headers as Record<string, string>)["x-kenan-request-id"];
+    calls.push({ url: String(url), method: init!.method, body: init!.body, id });
+    if (calls.length === 1) return new Response("private-error", { status: 503 });
+    if (calls.length === 2) throw Object.assign(new Error("private-error"), { code: "ECONNREFUSED" });
+    return Response.json({ requestId: id, status: "pending", trace: "private-error", rootSessionId: "private-session" }, { status: 202 });
+  }) as typeof fetch, 1_000);
+  expect(calls).toHaveLength(3);
+  expect(calls[0]).toMatchObject({ method: "POST", body: '{"request":"private-request"}' });
+  expect(calls[1]).toEqual(calls[0]);
+  expect(calls[2]).toEqual(calls[0]);
+  expect(recovered.events).toHaveLength(1);
+  expect(recovered.events[0]).toMatchObject({ stage: "request", outcome: "ok", status: 202 });
+  expect(recovered.result.isError).toBe(false);
+  expect(recovered.result.details.rootRequest).toMatchObject({ requestId: calls[0].id, status: "pending" });
+  expect(recovered.result.content[0].text).not.toMatch(/private-session|private-error/);
+});
+
+test("unrelated receipts are rejected without trusting or replaying them", async () => {
+  let calls = 0;
+  const wrong = await ask((async () => { calls++; return Response.json({ requestId: "unrelated", status: "pending" }, { status: 202 }); }) as typeof fetch);
   expect(calls).toBe(1);
-  expect(failed.result.details.memoryResult.requestId).toBe(id);
-  expect(failed.result.content[0].text).toContain("do not resubmit");
-  const wrong = await ask((async () => Response.json({ requestId: "unrelated", status: "pending" }, { status: 202 })) as typeof fetch);
-  expect(wrong.events[0].reason).toBe("invalid-response"); expect(wrong.result.isError).toBe(true);
+  expect(wrong.events[0].reason).toBe("invalid-response");
+  expect(wrong.result.isError).toBe(true);
+  expect(wrong.result.details.rootRequest).toBeUndefined();
 });

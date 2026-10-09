@@ -44,6 +44,27 @@ test('passed stages survive unrelated source repair; inputs, tools and commands 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test('prompt availability receipts track the observer and its proof harness', () => {
+  const root = fixture();
+  try {
+    const inputs = ['deploy/prompt-availability', 'scripts/prompt-availability.test.py'];
+    for (const input of inputs) {
+      mkdirSync(join(root, input, '..'), { recursive: true });
+      writeFileSync(join(root, input), 'original');
+    }
+    const availability = checkJobs.find(([name]) => name === 'prompt availability');
+    const key = checkKey(root, availability, versions);
+    assert.match(key, /^[0-9a-f]{64}$/);
+    writeFileSync(join(root, 'unrelated'), 'change');
+    assert.equal(checkKey(root, availability, versions), key);
+    for (const input of inputs) {
+      writeFileSync(join(root, input), 'changed');
+      assert.notEqual(checkKey(root, availability, versions), key, input);
+      writeFileSync(join(root, input), 'original');
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('failed or mutated stages cannot manufacture pass receipts; corrupt receipts refuse', async () => {
   const root = fixture();
   try {

@@ -8,7 +8,7 @@ import { RootRequestStore, requestHash, type RootRequest } from "./requests.js";
 import type { ConsentBridge } from "./consent-contract.js";
 import { infrastructureReason, reportInfrastructure, type InfrastructureReporter } from "kenan-memory/diagnostics";
 
-export interface RootReleaseState { quiescing: boolean; consentActive: boolean }
+export interface RootReleaseState { dispatchPaused: boolean; consentActive: boolean }
 export interface RootServiceOptions {
   enabled(): boolean;
   memoryUrl: string;
@@ -24,10 +24,10 @@ export interface RootServiceOptions {
   requestStore?: RootRequestStore;
   bridge?: Pick<ConsentBridge, "reply">;
 }
-export function rootService(options: RootServiceOptions): ((request: Request) => Promise<Response>) & { drain(): Promise<{ errors: number }> } {
+export function rootService(options: RootServiceOptions): ((request: Request) => Promise<Response>) & { drain(): Promise<{ errors: number }>; settled(): Promise<void> } {
   const transport = options.transport ?? fetch;
   const report = options.report ?? reportInfrastructure;
-  const releaseState = options.releaseState ?? { quiescing: false, consentActive: false };
+  const releaseState = options.releaseState ?? { dispatchPaused: false, consentActive: false };
   const requests = options.requestStore ?? new RootRequestStore(":memory:");
   const accepting = new Map<string, Promise<void>>();
   const finalizing = new Map<string, Promise<void>>();
@@ -93,7 +93,7 @@ export function rootService(options: RootServiceOptions): ((request: Request) =>
     return operation;
   };
   const drain = async () => {
-    if (!options.enabled() || releaseState.quiescing) return { errors: 0 };
+    if (!options.enabled() || releaseState.dispatchPaused) return { errors: 0 };
     const results = await Promise.all(requests.pending(options.maxConcurrent ?? 4).map(async record => {
       try { if (record.state === "queued") await resume(record); else { await finalize(record); await deliver(record.id); } }
       catch (error) { report({ component: "root-service", stage: "request", outcome: "failed", reason: infrastructureReason(error), durationMs: 0 }); }
@@ -132,7 +132,7 @@ export function rootService(options: RootServiceOptions): ((request: Request) =>
     return operation;
   };
   const resume = (record: Extract<RootRequest, { state: "queued" }>): Promise<void> => {
-    if (record.retryAt > Date.now() || running.has(record.id) || resuming.has(record.id) || active >= (options.maxConcurrent ?? 4)) return Promise.resolve();
+    if (releaseState.dispatchPaused || record.retryAt > Date.now() || running.has(record.id) || resuming.has(record.id) || active >= (options.maxConcurrent ?? 4)) return Promise.resolve();
     requests.save({ ...record, attemptedAt: Date.now(), retryAt: Date.now() + 5_000 });
     active++;
     const operation = (async () => {
@@ -177,12 +177,12 @@ export function rootService(options: RootServiceOptions): ((request: Request) =>
       if (!admission.ok) return admission.response;
       if (admission.route.kind === "release") {
         if (request.method === "DELETE") {
-          releaseState.quiescing = false;
-          return Response.json({ ok: true, quiescing: false });
+          releaseState.dispatchPaused = false;
+          return Response.json({ ok: true, dispatchPaused: false });
         }
         if (active || releaseState.consentActive) return Response.json({ ok: false, error: "busy" }, { status: 409 });
-        releaseState.quiescing = true;
-        return Response.json({ ok: true, quiescing: true });
+        releaseState.dispatchPaused = true;
+        return Response.json({ ok: true, dispatchPaused: true });
       }
       // No private-store inspection happens before the separate admin capability is checked.
       if (admission.route.kind === "list") {
@@ -199,7 +199,7 @@ export function rootService(options: RootServiceOptions): ((request: Request) =>
       const files = readdirSync(directory).filter(name => name.endsWith(".jsonl") && !lstatSync(join(directory, name)).isSymbolicLink());
       return Response.json({ sessionId: admission.route.sessionId, transcripts: files.map(name => ({ name, jsonl: readFileSync(join(directory, name), "utf8") })) }, { headers: { "cache-control": "no-store" } });
     }
-    if (path === "/v1/health" && request.method === "GET") return Response.json({ ok: true, service: "kenan-root", releaseCommit: options.releaseCommit ?? null, releaseProtocol: 1 });
+    if (path === "/v1/health" && request.method === "GET") return Response.json({ ok: true, service: "kenan-root", releaseCommit: options.releaseCommit ?? null, releaseProtocol: 2, activeExecutions: active, consentActive: releaseState.consentActive });
     const lookup = /^\/v1\/ask\/([^/]+)$/.exec(path);
     if (!(path === "/v1/ask" && request.method === "POST") && !(lookup && request.method === "GET")) return new Response("Not found", { status: 404 });
     const callerToken = request.headers.get(MEMORY_TOKEN_HEADER);
@@ -211,7 +211,7 @@ export function rootService(options: RootServiceOptions): ((request: Request) =>
       if (!record) return new Response("Not found", { status: 404 });
       const authorized = await authorize(callerToken, record);
       if (!authorized.ok) return new Response("Not found", { status: authorized.error === "unauthenticated" ? 404 : 503 });
-      if (record.state === "finalizing" && !releaseState.quiescing) await finalize(record);
+      if (record.state === "finalizing" && !releaseState.dispatchPaused) await finalize(record);
       record = requests.get(record.id)!;
       return status(record);
     }
@@ -232,7 +232,6 @@ export function rootService(options: RootServiceOptions): ((request: Request) =>
       if (prior.requestHash !== requestHash((body as any).request)) return Response.json({ error: "Request ID already used" }, { status: 409 });
       return status(prior);
     }
-    if (releaseState.quiescing) return Response.json({ error: "Root Kenan is preparing a release; try again" }, { status: 503 });
     active++;
     let release!: () => void;
     accepting.set(id, new Promise<void>(resolve => release = resolve));
@@ -243,6 +242,10 @@ export function rootService(options: RootServiceOptions): ((request: Request) =>
       if (!root.ok) return Response.json({ error: root.message }, { status: root.error === "unauthenticated" ? 403 : 503 });
       const record = requests.accept(id, (body as any).request, root.value, !!suppliedId, "queued");
       if (record.state !== "queued") throw new Error("Root acceptance did not create a runnable queued request");
+      if (releaseState.dispatchPaused) {
+        requests.save({ ...record, reason: "executor-handoff" });
+        return status(requests.get(id)!);
+      }
       if (active > (options.maxConcurrent ?? 4)) return status(record);
       executing = true;
       const operation = execute(record, root.value, (body as any).request);
@@ -259,5 +262,10 @@ export function rootService(options: RootServiceOptions): ((request: Request) =>
       accepting.delete(id); release();
     }
   };
-  return Object.assign(handle, { drain });
+  const settled = async () => {
+    while (accepting.size || running.size || resuming.size || finalizing.size || delivering.size) {
+      await Promise.all([...accepting.values(), ...running.values(), ...resuming.values(), ...finalizing.values(), ...delivering.values()]);
+    }
+  };
+  return Object.assign(handle, { drain, settled });
 }

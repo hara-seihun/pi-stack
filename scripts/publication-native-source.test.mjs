@@ -22,15 +22,17 @@ test('retained native repair fences already-checked source before host effects, 
   writeFileSync(join(repo, 'deploy/native-history-bridge.mjs'), 'export const protocol = "old";');
   git('add', '.'); git('commit', '-qm', 'checked old source'); const candidate = git('rev-parse', 'HEAD');
   git('commit', '--allow-empty', '-qm', 'owner metadata only'); const equivalent = git('rev-parse', 'HEAD');
-  writeFileSync(join(repo, 'deploy/native-history-bridge.mjs'), 'export const protocol = "repaired";');
+  writeFileSync(join(repo, 'deploy/native-history-bridge.mjs'), "export const MAINTENANCE_INTAKE = 'always-open-v1';\n");
   git('add', '.'); git('commit', '-qm', 'repair native handoff'); const repaired = git('rev-parse', 'HEAD');
   git('update-ref', 'refs/pi-stack-publication/owner-source', repaired);
   const config = publicationConfig(root, repo);
   const result = spawnSync(process.execPath, ['--input-type=module', '-e', `
     import assert from 'node:assert/strict';
-    import {nativeMaintenanceSourceProof,nativeHistoryBoundaryTarget} from ${JSON.stringify(publication)};
+    import {nativeMaintenanceSourceProof,nativeMaintenanceIntakeProof,nativeHistoryBoundaryTarget} from ${JSON.stringify(publication)};
     const candidate=${JSON.stringify(candidate)}, equivalent=${JSON.stringify(equivalent)}, repaired=${JSON.stringify(repaired)};
     assert.equal(nativeMaintenanceSourceProof(${JSON.stringify(repo)},candidate,equivalent).ok,true);
+    assert.equal(nativeMaintenanceIntakeProof(${JSON.stringify(repo)},candidate).error.code,'closed-intake-maintenance-forbidden');
+    assert.equal(nativeMaintenanceIntakeProof(${JSON.stringify(repo)},repaired).value.intake,'always-open-v1');
     assert.equal(nativeMaintenanceSourceProof(${JSON.stringify(repo)},candidate,repaired).error.code,'obsolete-native-maintenance-source');
     const request={requestId:'PUB-aaaaaaaaaaaaaaaaaaaaaaaa',integrationSha:candidate,integratedAt:'already-published-to-main',checks:{status:'passed'}};
     const target={id:'gmktec',sshHost:null,hostConfig:'/fixture/host.json',releaseRepository:${JSON.stringify(repo)}};
@@ -38,7 +40,9 @@ test('retained native repair fences already-checked source before host effects, 
     assert.throws(()=>nativeHistoryBoundaryTarget(request,target,'probe'),/retained owner repair/);
     assert.equal(request.nativeHistory,undefined);
     assert.equal(nativeHistoryBoundaryTarget(request,target,'restore').ok,true);
+    const restoredRequest={...request,integrationSha:repaired};
+    assert.equal(nativeHistoryBoundaryTarget(restoredRequest,target,'probe').ok,true);
   `], { encoding: 'utf8', timeout: 5000, env: { ...process.env, PI_STACK_PUBLICATION_STATE: root, PI_STACK_PUBLICATION_CONFIG: config } });
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(existsSync(trace), true); assert.equal(readFileSync(trace, 'utf8'), '--restore\n');
+  assert.equal(existsSync(trace), true); assert.equal(readFileSync(trace, 'utf8'), '--restore\n--probe\n');
 });

@@ -74,6 +74,7 @@ for (const failure of ["throw", "returned"]) test(`${failure} failure on the fir
 // filesystem receipts and reservation scripts execute unchanged in subprocesses.
 const hostCommand = String.raw`
 import { spawnSync } from "node:child_process";
+import assert from "node:assert/strict";
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync, cpSync } from "node:fs";
 import { basename, join } from "node:path";
 const root = process.env.FIXTURE_ROOT;
@@ -108,9 +109,10 @@ if (name === "ssh") {
     event(args[0]);
     exec("/bin/bash", ["-s", "--", ...args], { input: script });
   } else if (script.includes('native-history-boundary-fixture')) {
-    const mode = args[3] || "advance";
+    const mode = args[3];
+    assert.ok(["--probe", "--restore"].includes(mode), "publication must never advance the native boundary before wrapper preparation");
     event("native-history-" + mode, { revision: args[2], checkout: args[1] });
-    if (mode !== "--restore" && world().hosts[host].mode === "native-history") {
+    if (mode === "--probe" && world().hosts[host].mode === "native-history") {
       process.stderr.write("native history boundary waiting: fixture old generation is busy\n");
       process.exit(75);
     }
@@ -171,13 +173,34 @@ if (name === "ssh") {
 } else if (name === "release") {
   const state = world();
   const mode = state.hosts[host].mode;
-  event("deploy", { revision: args[0] });
+  const request = JSON.parse(readFileSync(join(root, "requests", "PUB-0123456789abcdef01234567.json"), "utf8"));
+  const custody = request.nativeHistory.hosts[host];
+  assert.deepEqual(custody, { state: "restore-required", integrationSha: args[0] }, "wrapper starts only after durable native custody");
+  assert.equal(state.hosts[host].android, args[0], "matched app/web is available before wrapper preparation");
+  event("deploy", { revision: args[0], custody });
   if (mode === "failed") { process.stderr.write("fixture activation failed\n"); process.exit(42); }
   if (mode === "native-source") {
     process.stderr.write("native source prerequisite fixture requires " + "f".repeat(40) + " before Pi Stack " + args[0] + "; selected " + "e".repeat(40) + "\n");
     process.exit(75);
   }
   if (mode === "host-lock") { process.stderr.write("another Pi stack deployment owns /fixture/deploy.lock\n"); process.exit(75); }
+  event("prepare", { revision: args[0], serving: state.hosts[host].selected });
+  event("host-native-history-advance", { revision: args[0], custody });
+  if (mode === "native-history") {
+    process.stderr.write("native history boundary waiting: fixture old generation is busy\n");
+    process.exit(75);
+  }
+  if (mode === "executor-replacement") {
+    state.hosts[host].selected = args[0];
+    state.hosts[host].rootReplacementPending = true;
+    save(state);
+    process.stderr.write("executor replacement waiting: fixture Root executor handoff pending\n");
+    process.exit(75);
+  }
+  if (state.hosts[host].rootReplacementPending) {
+    event("root-executor-replaced", { revision: args[0] });
+    state.hosts[host].rootReplacementPending = false;
+  }
   state.hosts[host].selected = args[0];
   save(state);
 } else throw new Error("Unknown fixture command " + name);
@@ -201,6 +224,7 @@ function fixture(t, waitingHost, mode) {
   mkdirSync(join(repository, "deploy"));
   writeFileSync(join(repository, "deploy/android-update"), "fixture artifact capability\n");
   writeFileSync(join(repository, "deploy/native-history-boundary"), "# native-history-boundary-fixture\n");
+  writeFileSync(join(repository, "deploy/native-history-bridge.mjs"), "export const MAINTENANCE_INTAKE = 'always-open-v1';\n");
   git("add", ".");
   git("commit", "-qm", "selected baseline");
   const baseline = git("rev-parse", "HEAD");
@@ -263,6 +287,41 @@ function fixture(t, waitingHost, mode) {
   const update = change => { const value = world(); change(value); writeFileSync(worldPath, JSON.stringify(value)); };
   return { root, run, events, world, update, revision, newer, baseline, git, requestPath, env };
 }
+
+test("native source validation is effect-free and rejects obsolete or closed-intake boundary source", t => {
+  const f = fixture(t, "gmktec", "native-history");
+  const validate = revision => {
+    const script = `import {nativeHistoryBoundaryTarget} from ${JSON.stringify(pathToFileURL(publication).href)};
+      try { console.log(JSON.stringify(nativeHistoryBoundaryTarget({integrationSha:${JSON.stringify(revision)}}, {id:'gmktec'}, 'validate'))); }
+      catch (error) { console.log(JSON.stringify(error.probeFailure)); }`;
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], { env: f.env, encoding: "utf8", timeout: 3000 });
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout);
+  };
+  const request = readFileSync(f.requestPath, "utf8");
+  const world = f.world();
+  assert.deepEqual(validate(f.revision), { ok: true, status: 0, needed: true });
+  const repository = join(f.root, "repository");
+  writeFileSync(join(repository, "deploy/native-history-boundary"), "# repaired-native-history-boundary-fixture\n");
+  f.git("add", ".");
+  f.git("commit", "-qm", "retained owner boundary repair");
+  const repaired = f.git("rev-parse", "HEAD");
+  f.git("update-ref", "refs/pi-stack-publication/owner-source", repaired);
+  const obsolete = validate(f.revision);
+  assert.equal(obsolete.kind, "native-source");
+  assert.equal(obsolete.mode, "validate");
+  assert.equal(obsolete.sourceProof.code, "obsolete-native-maintenance-source");
+  assert.deepEqual(obsolete.sourceProof.changed, ["deploy/native-history-boundary"]);
+  writeFileSync(join(repository, "deploy/native-history-bridge.mjs"), "export const MAINTENANCE_INTAKE = 'closed';\n");
+  f.git("add", ".");
+  f.git("commit", "-qm", "closed intake candidate");
+  const closed = f.git("rev-parse", "HEAD");
+  f.git("update-ref", "refs/pi-stack-publication/owner-source", closed);
+  assert.equal(validate(closed).intakeProof.code, "closed-intake-maintenance-forbidden");
+  assert.deepEqual(f.events(), [], "validation cannot reserve, prepare, advance or restore host state");
+  assert.deepEqual(f.world(), world);
+  assert.equal(readFileSync(f.requestPath, "utf8"), request, "validation cannot acquire native custody itself");
+});
 
 test("another checked request cannot acquire native fences until each original host custody positively clears", async t => {
   const f = fixture(t, "gmktec", "ready");
@@ -329,7 +388,7 @@ test('one repair-held native boundary prevents automatic rollback of its still-o
   ]);
 });
 
-describe("publication owner host delivery", { concurrency: 4 }, () => {
+describe("publication owner host delivery", { concurrency: 8 }, () => {
 for (const waitingHost of hostIds) for (const mode of ["live-meeting", "native-source", "native-history", "host-lock"]) {
   test(`owner releases both reservations while ${waitingHost} waits for ${mode}; old completion cannot downgrade a newer peer`, async t => {
     const f = fixture(t, waitingHost, mode);
@@ -344,14 +403,23 @@ for (const waitingHost of hostIds) for (const mode of ["live-meeting", "native-s
     assert.equal(first.hosts[readyHost].android.web.revision, f.revision);
     if (mode === "native-history") {
       assert.equal(first.nativeHistory.hosts[waitingHost].state, "restore-required");
-      assert.equal(f.world().hosts[waitingHost].android, f.baseline);
-      assert.ok(!f.events().some(event => event.host === waitingHost && ["install-app-web", "deploy", "native-history---restore"].includes(event.action)));
+      assert.equal(f.world().hosts[waitingHost].android, f.revision);
+      assert.equal(f.world().hosts[waitingHost].selected, f.baseline, "old source serves throughout immutable preparation and busy boundary");
+      const custody = { state: "restore-required", integrationSha: f.revision };
+      assert.deepEqual(first.nativeHistory.hosts[waitingHost], custody);
+      const hostEvents = f.events().filter(event => event.host === waitingHost);
+      assert.deepEqual(hostEvents.filter(event => ["install-app-web", "deploy", "prepare", "host-native-history-advance"].includes(event.action)).map(event => event.action),
+        ["install-app-web", "deploy", "prepare", "host-native-history-advance"]);
+      assert.deepEqual(hostEvents.find(event => event.action === "deploy").custody, custody);
+      assert.deepEqual(hostEvents.find(event => event.action === "host-native-history-advance").custody, custody);
+      assert.equal(hostEvents.find(event => event.action === "prepare").serving, f.baseline);
+      assert.ok(!hostEvents.some(event => event.action === "native-history---restore"));
       assert.equal(hostWaitKind(first.hosts[waitingHost].waiting), "waiting-for-native-history");
       assert.equal(progressBudgetExhausted({ ...first, attempt: 1000, blockedSince: "2020-01-01T00:00:00Z" }), false);
       const beforeProbe = f.events().length;
       const probed = await f.run("refreshHostWaits");
       assert.equal(probed.hosts[waitingHost].ready, false);
-      assert.equal(probed.nativeHistory.hosts[waitingHost].state, "restore-required");
+      assert.deepEqual(probed.nativeHistory.hosts[waitingHost], first.nativeHistory.hosts[waitingHost], "busy probe retains the wrapper's exact custody");
       assert.deepEqual(f.events().slice(beforeProbe).map(event => [event.host, event.action]), [[waitingHost, "native-history---probe"]]);
       assert.equal(probed.hosts[waitingHost].waiting.probeFailingSince, undefined, "truthful busy is not probe failure");
     }
@@ -383,6 +451,48 @@ for (const waitingHost of hostIds) for (const mode of ["live-meeting", "native-s
     assert.equal(JSON.parse(readFileSync(completed.finalProof.path, "utf8"))[readyHost].integrationSha, f.revision);
   });
 }
+
+test("selected candidate with a pending Root replacement resumes its wrapper rather than passing census proof", async t => {
+  const f = fixture(t, "gmktec", "executor-replacement");
+  const waiting = await f.run();
+  assert.equal(waiting.status, "queued", JSON.stringify(waiting.failure));
+  assert.equal(waiting.hosts.gmktec.status, "waiting");
+  assert.equal(waiting.hosts.gmktec.waiting.kind, "host-lock");
+  assert.equal(waiting.hosts.converge.status, "passed");
+  assert.equal(f.world().hosts.gmktec.selected, f.revision);
+  assert.equal(f.world().hosts.gmktec.rootReplacementPending, true);
+  assert.equal(waiting.executorHandoffs.gmktec.integrationSha, f.revision);
+  assert.deepEqual(waiting.nativeHistory.hosts.gmktec, { state: "restore-required", integrationSha: f.revision });
+  assert.equal(f.events().some(event => event.host === "gmktec" && event.action === "proof"), false);
+  const peer = structuredClone(waiting.hosts.converge);
+  const peerProof = readFileSync(peer.proof, "utf8");
+  const boundary = f.events().length;
+  const probed = await f.run("refreshHostWaits");
+  assert.equal(probed.hosts.gmktec.ready, true);
+  assert.deepEqual(probed.executorHandoffs, waiting.executorHandoffs);
+  assert.deepEqual(probed.nativeHistory, waiting.nativeHistory);
+  assert.equal(f.world().hosts.gmktec.rootReplacementPending, true);
+  assert.equal(f.events().length, boundary, "host-lock readiness does not claim an executor was replaced");
+  f.update(value => {
+    value.hosts.gmktec.mode = "ready";
+    value.hosts.converge.selected = f.newer;
+    value.hosts.converge.android = f.newer;
+  });
+  const completed = await f.run();
+  assert.equal(completed.status, "published", JSON.stringify(completed.failure));
+  assert.equal(completed.attempt, waiting.attempt);
+  assert.equal(completed.executorHandoffs.gmktec, undefined);
+  assert.equal(completed.nativeHistory.hosts.gmktec.state, "released");
+  assert.equal(f.world().hosts.gmktec.rootReplacementPending, false);
+  const resumed = f.events().slice(boundary);
+  assert.ok(resumed.every(event => event.host === "gmktec"), "successful peer never re-enters delivery");
+  assert.deepEqual(resumed.filter(event => ["deploy", "prepare", "host-native-history-advance", "root-executor-replaced", "proof"].includes(event.action)).map(event => event.action),
+    ["deploy", "prepare", "host-native-history-advance", "root-executor-replaced", "proof"]);
+  assert.deepEqual(completed.hosts.converge, peer);
+  assert.equal(readFileSync(peer.proof, "utf8"), peerProof);
+  assert.equal(f.world().hosts.converge.selected, f.newer);
+  for (const host of hostIds) assert.equal(existsSync(join(f.root, `${host}.lock.publication`)), false);
+});
 
 for (const mode of ["history-probe-error", "history-unmarked-busy"]) test(`${mode} fails once with causal repair, preserving maintenance and successful peer custody`, async t => {
   const f = fixture(t, "gmktec", "native-history");

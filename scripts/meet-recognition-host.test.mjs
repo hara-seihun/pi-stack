@@ -13,19 +13,33 @@ function fixture(t) {
   mkdirSync(join(dir, 'bin'));
   const put = (name, content) => writeFileSync(join(repo, 'deploy', name), `#!/usr/bin/env bash\nset -euo pipefail\n${content}\n`, { mode: 0o755 });
   copyFileSync(new URL('../deploy/host', import.meta.url), join(repo, 'deploy/host'));
+  copyFileSync(new URL('../deploy/prepared-components.mjs', import.meta.url), join(repo, 'deploy/prepared-components.mjs'));
   put('lib', `pi_stack_enter_deployment() { :; }
 pi_stack_check_person_configs() { :; }
 pi_stack_fleet_user() { echo fixture; }
 pi_stack_users() { echo fixture; }
 pi_stack_daemon_units() { :; }
-pi_stack_prepare_builds() {
-  for i in {1..100}; do [[ ! -f "$RECOGNITION_SELECTED" ]] || return 0; sleep 0.01; done
-  echo 'Recognition was not selected during publication' >&2; return 1
+pi_stack_component_releases_root() { printf '%s\\n' "$PI_STACK_RELEASES_ROOT"; }
+pi_stack_select_release() {
+  [[ $(cat "$1/.pi-stack-commit") == "$3" ]] || return 66
+  ln -s "$1" "$2.next"
+  mv -Tf "$2.next" "$2"
 }
 pi_stack_as_root() { "$@"; }
 pi_stack_run_as() { shift; "$@"; }`);
+  put('prepare', `commit=$(git -C "$(dirname "$0")/.." rev-parse HEAD)
+for name in runtime orchestrator remote tools; do
+  release="$PI_STACK_RELEASES_ROOT/$name/$commit"
+  mkdir -p "$release"
+  printf '%s\\n' "$commit" > "$release/.pi-stack-commit"
+done
+mkdir -p "$PI_STACK_RELEASES_ROOT/runtime/$commit/node_modules/.bin"
+cp "$PI_STACK_RUNTIME_DEST/node_modules/.bin/pi-model-selection-doctor" "$PI_STACK_RELEASES_ROOT/runtime/$commit/node_modules/.bin/"
+node "$(dirname "$0")/prepared-components.mjs" "$PI_STACK_RELEASES_ROOT" "$commit" record
+: > "$PREPARED"`);
   for (const name of ['phone', 'native-prerequisites', 'native-history-boundary', 'one-kenan-access-release', 'runtime-doctors', 'smoke']) put(name, name === 'smoke' ? 'exit "${SMOKE_EXIT:-0}"' : ':');
   put('native-history-boundary', `[[ $1 == /* && $2 == /* && $3 =~ ^[a-f0-9]{40}$ ]] || exit 64
+[[ -f "$PREPARED" ]] || exit 92
 if [[ \${HISTORY_BOUNDARY_BUSY:-0} == 1 ]]; then
   echo 'native history boundary waiting: fixture admitted errands' >&2
   exit 75
@@ -53,15 +67,20 @@ for i in {1..100}; do
 done
 exit 91`);
   const component = `name=$(basename "$0")
+commit=$(git -C "$(dirname "$0")/.." rev-parse HEAD)
 if [[ $name == runtime ]]; then
-  for i in {1..100}; do [[ ! -f "$RECOGNITION_SELECTED" ]] || break; sleep 0.01; done
+  [[ $1 == --activate-prepared ]] || exit 64
   case \${RUNTIME_FAILURE:-} in exit) exit 23;; TERM) kill -TERM "$PPID"; exit 23;; esac
+  source "$(dirname "$0")/lib"
+  pi_stack_select_release "$PI_STACK_RELEASES_ROOT/runtime/$commit" "$PI_STACK_RUNTIME_DEST" "$commit"
+  exit 0
 fi
 [[ $name != settings ]] || { : > "$ACCOUNTS_DONE"; exit 0; }
+[[ \${1:-} != --links-only ]] || exit 0
 key=PI_STACK_\${name^^}_DEST
 destination=\${!key}
 mkdir -p "$destination"
-git -C "$(dirname "$0")/.." rev-parse HEAD > "$destination/.pi-stack-commit"`;
+printf '%s\\n' "$commit" > "$destination/.pi-stack-commit"`;
   for (const name of ['runtime', 'orchestrator', 'remote', 'tools', 'skills', 'settings']) put(name, component);
   mkdirSync(join(repo, 'packages/runtime'), { recursive: true });
   writeFileSync(join(repo, 'packages/runtime/browser-doctor.mjs'), 'process.exit(0);');
@@ -81,12 +100,14 @@ esac
 exit 0
 `, { mode: 0o755 });
   writeFileSync(join(dir, 'bin/curl'), '#!/bin/sh\necho \'{"people":[]}\'\n', { mode: 0o755 });
-  const env = { ...process.env, PATH: `${dir}/bin:${process.env.PATH}`, TRACE: join(dir, 'trace'), WARM_STARTED: join(dir, 'warming'), VOICE_ACTIVATED: join(dir, 'voice-activated'), RECOGNITION_SELECTED: join(dir, 'recognition-selected'), ACCOUNTS_DONE: join(dir, 'accounts'), OLD_RECOGNITION: join(dir, 'old'), NEW_RECOGNITION: join(dir, 'new'), PI_STACK_MEET_RECOGNITION_DEST: join(dir, 'meet-recognition'), PI_STACK_SERVICES: '1', PI_STACK_DEPLOY_NO_SUDO: '1', PI_STACK_ALLOW_LIVE_MEETING_RESTART: '1' };
+  const env = { ...process.env, PATH: `${dir}/bin:${process.env.PATH}`, PI_STACK_RELEASES_ROOT: join(dir, 'releases'), PREPARED: join(dir, 'prepared'), TRACE: join(dir, 'trace'), WARM_STARTED: join(dir, 'warming'), VOICE_ACTIVATED: join(dir, 'voice-activated'), RECOGNITION_SELECTED: join(dir, 'recognition-selected'), ACCOUNTS_DONE: join(dir, 'accounts'), OLD_RECOGNITION: join(dir, 'old'), NEW_RECOGNITION: join(dir, 'new'), PI_STACK_MEET_RECOGNITION_DEST: join(dir, 'meet-recognition'), PI_STACK_SERVICES: '1', PI_STACK_DEPLOY_NO_SUDO: '1', PI_STACK_ALLOW_LIVE_MEETING_RESTART: '1' };
   for (const name of ['RUNTIME', 'ORCHESTRATOR', 'REMOTE', 'TOOLS', 'SKILLS']) env[`PI_STACK_${name}_DEST`] = join(dir, name.toLowerCase());
   mkdirSync(env.OLD_RECOGNITION); mkdirSync(env.NEW_RECOGNITION);
   symlinkSync(env.OLD_RECOGNITION, env.PI_STACK_MEET_RECOGNITION_DEST);
-  const doctor = join(env.PI_STACK_RUNTIME_DEST, 'node_modules/.bin');
+  const oldRuntime = join(dir, 'old-runtime');
+  const doctor = join(oldRuntime, 'node_modules/.bin');
   mkdirSync(doctor, { recursive: true });
+  symlinkSync(oldRuntime, env.PI_STACK_RUNTIME_DEST);
   writeFileSync(join(doctor, 'pi-model-selection-doctor'), 'process.exit(0);');
   writeFileSync(join(dir, 'host.json'), '{"version":1}');
   for (const args of [['init', '-q'], ['add', '.'], ['-c', 'user.name=test', '-c', 'user.email=test@example.test', 'commit', '-qm', 'fixture']]) assert.equal(spawnSync('git', ['-C', repo, ...args]).status, 0);
@@ -94,24 +115,27 @@ exit 0
   return { env, run: extra => spawnSync('bash', [join(repo, 'deploy/host'), join(dir, 'host.json')], { env: { ...env, ...extra }, encoding: 'utf8', timeout: 4000 }) };
 }
 
-test('native history wait precedes every host source selection and service mutation', t => {
+test('preparation precedes native history wait without changing serving sources or services', t => {
   const f = fixture(t);
   const result = f.run({ HISTORY_BOUNDARY_BUSY: '1' });
   assert.equal(result.status, 75, result.stderr);
   assert.match(result.stderr, /native history boundary waiting:/);
   assert.equal(realpathSync(f.env.PI_STACK_MEET_RECOGNITION_DEST), f.env.OLD_RECOGNITION);
-  for (const path of [f.env.RECOGNITION_SELECTED, f.env.WARM_STARTED, f.env.VOICE_ACTIVATED, f.env.TRACE, f.env.PI_STACK_RECOGNITION_TRANSITION_FILE]) {
+  assert.equal(existsSync(f.env.PREPARED), true);
+  for (const path of [f.env.RECOGNITION_SELECTED, f.env.WARM_STARTED, f.env.VOICE_ACTIVATED]) {
     assert.equal(existsSync(path), false, path);
   }
+  assert.doesNotMatch(readFileSync(f.env.TRACE, 'utf8'), /^(restart|start|stop|enable|disable) /m);
+  assert.equal(JSON.parse(readFileSync(f.env.PI_STACK_RECOGNITION_TRANSITION_FILE, 'utf8')).phase, 'rolled_back');
 });
 
 for (const failure of [{}, { RECOGNITION_EXIT: '1' }, { SMOKE_EXIT: '1' }, { RUNTIME_FAILURE: 'exit' }, { RUNTIME_FAILURE: 'TERM' }]) test(`Recognition selection and concurrent activation restore on ${JSON.stringify(failure)}`, t => {
   const f = fixture(t);
   const result = f.run(failure);
   const failed = Object.keys(failure).length > 0;
-  assert.equal(result.status, failure.RUNTIME_FAILURE === 'TERM' ? 143 : failed ? 1 : 0, result.stderr);
+  assert.equal(result.status, failure.RUNTIME_FAILURE === 'TERM' ? 143 : failure.RUNTIME_FAILURE === 'exit' ? 23 : failed ? 1 : 0, result.stderr);
   assert.equal(realpathSync(f.env.PI_STACK_MEET_RECOGNITION_DEST), failed ? f.env.OLD_RECOGNITION : f.env.NEW_RECOGNITION);
-  assert.equal(existsSync(f.env.RECOGNITION_SELECTED), true);
+  assert.equal(existsSync(f.env.RECOGNITION_SELECTED), !failure.RUNTIME_FAILURE);
   assert.equal(existsSync(f.env.WARM_STARTED), !failure.RUNTIME_FAILURE);
   assert.equal(existsSync(f.env.VOICE_ACTIVATED), !failure.RUNTIME_FAILURE);
   const trace = readFileSync(f.env.TRACE, 'utf8');

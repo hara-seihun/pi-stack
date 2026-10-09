@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -17,7 +17,7 @@ function fixture() {
   mkdirSync(join(repo, "deploy"), { recursive: true });
   mkdirSync(bin);
   copyDeploymentOwner(root, repo);
-  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, PI_STACK_HOST_LOCK_HELD: "0", PI_STACK_HOST_LOCK_PATH: join(directory, "host.lock"), PI_STACK_DEPLOY_LOCK_HELD: "0", PI_STACK_DEPLOY_DEADLINE_ACTIVE: "0", PI_STACK_ALLOW_DIRTY: "0", PI_STACK_DEPLOY_NO_SUDO: "1", TRACE: join(directory, "trace"), TMPDIR: join(directory, "tmp"), PI_STACK_RUNTIME_DEST: join(directory, "srv/runtime"), PI_STACK_DEPENDENCIES_ROOT: join(directory, "srv/dependencies") };
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, PI_STACK_HOST_LOCK_HELD: "0", PI_STACK_HOST_LOCK_PATH: join(directory, "host.lock"), PI_STACK_DEPLOY_LOCK_HELD: "0", PI_STACK_DEPLOY_DEADLINE_ACTIVE: "0", PI_STACK_ALLOW_DIRTY: "0", PI_STACK_DEPLOY_NO_SUDO: "1", TRACE: join(directory, "trace"), TMPDIR: join(directory, "tmp"), PI_STACK_RUNTIME_DEST: join(directory, "srv/runtime"), PI_STACK_ORCHESTRATOR_DEST: join(directory, "srv/orchestrator"), PI_STACK_REMOTE_DEST: join(directory, "srv/remote"), PI_STACK_TOOLS_DEST: join(directory, "srv/tools"), PI_STACK_RELEASES_ROOT: join(directory, "srv/.pi-stack-releases"), PI_STACK_DEPENDENCIES_ROOT: join(directory, "srv/dependencies") };
   mkdirSync(env.TMPDIR);
   function executable(path, source) { writeFileSync(path, `#!/usr/bin/env bash\nset -euo pipefail\n${source}\n`, { mode: 0o755 }); }
   function commit() {
@@ -34,34 +34,84 @@ function fixture() {
 
 function preparationFixture() {
   const f = fixture();
+  copyFileSync(join(root, "deploy/prepared-components.mjs"), join(f.repo, "deploy/prepared-components.mjs"));
   f.executable(join(f.bin, "systemctl"), 'echo "preparation must delegate host discovery to its components" >&2; exit 64');
+  f.executable(join(f.repo, "deploy/retain"), ':');
   writeFileSync(join(f.repo, "deploy/lib"), `${readFileSync(join(root, "deploy/lib"), "utf8")}\npi_stack_prepare_builds() { test "\${PI_STACK_DEPLOY_DEADLINE_ACTIVE:-}" = 1 || return 64; printf 'builds\\n' >> "$TRACE"; return "\${BUILD_EXIT:-0}"; }\n`);
-  for (const name of ["runtime", "meet-recognition", "host"]) {
+  for (const name of ["runtime", "meet-recognition", "host", "orchestrator", "remote", "tools"]) {
+    const isComponent = ["orchestrator", "remote", "tools"].includes(name);
     f.executable(join(f.repo, "deploy", name), `root=$(cd "$(dirname "$0")/.." && pwd)
 source "$root/deploy/lib"
 pi_stack_enter_deployment "$0" "$root" "$@"
 printf '%s\\n' "${name}" >> "$TRACE"
-sleep "\${WORK_SECONDS:-0}"
-exit "\${${name.toUpperCase().replaceAll("-", "_")}_EXIT:-0}"`);
+sleep "\${${name.toUpperCase().replaceAll("-", "_")}_SECONDS:-\${WORK_SECONDS:-0}}"
+finished=\${${name.toUpperCase().replaceAll("-", "_")}_FINISHED:-}
+[[ -z $finished ]] || touch "$finished"
+status=\${${name.toUpperCase().replaceAll("-", "_")}_EXIT:-0}
+(( status == 0 )) || exit "$status"
+${name === "runtime" ? '[[ $# == 1 && $1 == --prepare ]] || exit 64' : ""}
+${isComponent ? `[[ $PI_STACK_PREPARE_ONLY == 1 && $PI_STACK_SKIP_TOOL_LINKS == 1 ]] || exit 64
+commit=$(git -C "$root" rev-parse HEAD)
+[[ $PI_STACK_RUNTIME_DEST == "$PI_STACK_RELEASES_ROOT/runtime/$commit" ]] || exit 64
+[[ \${PI_STACK_${name.toUpperCase()}_DEST} == "$(dirname "$PI_STACK_RELEASES_ROOT")/.pi-stack-prepared/$commit/${name}" ]] || exit 64
+[[ $(cat "$PI_STACK_RUNTIME_DEST/.pi-stack-commit") == "$commit" ]] || exit 66
+${name === "orchestrator" ? "" : '[[ $(cat "$PI_STACK_ORCHESTRATOR_DEST/.pi-stack-commit") == "$commit" ]] || exit 66'}` : ""}
+${name === "runtime" || isComponent ? `commit=$(git -C "$root" rev-parse HEAD)
+release="$PI_STACK_RELEASES_ROOT/${name}/$commit"
+mkdir -p "$release"
+printf '%s\\n' "$commit" > "$release/.pi-stack-commit"
+printf 'fixture ${name} artifact\\n' > "$release/payload"
+${isComponent ? `ln -s "$release" "\${PI_STACK_${name.toUpperCase()}_DEST}"` : ""}` : ""}`);
   }
-  f.executable(join(f.repo, "deploy/native-history-boundary"), `[[ $1 == /* && $2 == /* && $3 =~ ^[a-f0-9]{40}$ ]] || exit 64
-if [[ \${HISTORY_BOUNDARY_BUSY:-0} == 1 ]]; then
-  echo 'native history boundary waiting: fixture admitted errands' >&2
-  exit 75
-fi`);
-  // Any nested activation deadline fails immediately, without a 50-second test.
+  f.executable(join(f.repo, "deploy/native-history-boundary"), `printf 'native-history-boundary\\n' >> "$TRACE"
+[[ \${HISTORY_BOUNDARY_BUSY:-0} != 1 ]] || exit 75`);
   f.executable(join(f.bin, "timeout"), 'printf "deadline %s\\n" "$*" >> "$TRACE"; exit 124');
   f.commit();
+  f.commitId = () => spawnSync("git", ["-C", f.repo, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+  f.calls = () => readFileSync(f.env.TRACE, "utf8").trim().split("\n").sort();
+  f.receipt = () => join(f.env.PI_STACK_RELEASES_ROOT, ".prepared", `${f.commitId()}.json`);
+  const selected = [];
+  for (const name of ["runtime", "orchestrator", "remote", "tools"]) {
+    const live = f.env[`PI_STACK_${name.toUpperCase()}_DEST`];
+    const old = join(f.env.PI_STACK_RELEASES_ROOT, name, "a".repeat(40));
+    mkdirSync(old, { recursive: true });
+    writeFileSync(join(old, ".pi-stack-commit"), `${"a".repeat(40)}\n`);
+    symlinkSync(old, live);
+    const link = join(f.directory, "home/.local/bin", name);
+    mkdirSync(dirname(link), { recursive: true });
+    symlinkSync(join(live, ".pi-stack-commit"), link);
+    selected.push([live, old], [link, join(old, ".pi-stack-commit")]);
+  }
+  const intake = join(f.directory, "intake.json");
+  writeFileSync(intake, '{"accepting":true,"nativeHistory":"busy"}\n');
+  f.assertServing = () => {
+    for (const [path, target] of selected) assert.equal(realpathSync(path), target, `${path} must retain its selected owner`);
+    assert.equal(readFileSync(intake, "utf8"), '{"accepting":true,"nativeHistory":"busy"}\n');
+  };
   return f;
 }
 
-test("preparation cannot build or select artifacts while native history maintenance is busy", () => {
+test("preparation proves exact artifacts while native history is busy without changing selected owners or intake", () => {
   const f = preparationFixture();
   try {
     const result = f.run("prepare", { PI_STACK_SERVICES: "1", HISTORY_BOUNDARY_BUSY: "1", PI_STACK_HOST_FILE: join(f.directory, "host.json") });
-    assert.equal(result.status, 75, result.stderr);
-    assert.match(result.stderr, /native history boundary waiting:/);
-    assert.equal(existsSync(f.env.TRACE), false);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(f.calls(), ["builds", "meet-recognition", "orchestrator", "remote", "runtime", "tools"]);
+    f.assertServing();
+    const receipt = JSON.parse(readFileSync(f.receipt(), "utf8"));
+    assert.equal(receipt.commit, f.commitId());
+    assert.equal(receipt.protocol, "prepared-components-v1");
+    assert.deepEqual(receipt.artifacts.map(({ component }) => component), ["runtime", "orchestrator", "remote", "tools"]);
+    for (const { component, path, sha256 } of receipt.artifacts) {
+      assert.equal(path, join(f.env.PI_STACK_RELEASES_ROOT, component, f.commitId()));
+      assert.match(sha256, /^[a-f0-9]{64}$/);
+      assert.equal(readFileSync(join(path, ".pi-stack-commit"), "utf8").trim(), f.commitId());
+    }
+    const repeat = f.run("prepare", { HISTORY_BOUNDARY_BUSY: "1", BUILD_EXIT: "99" });
+    assert.equal(repeat.status, 0, repeat.stderr);
+    assert.match(repeat.stdout, /already prepared/);
+    assert.deepEqual(f.calls(), ["builds", "meet-recognition", "meet-recognition", "orchestrator", "remote", "runtime", "tools"], "a verified receipt reuses stack artifacts while recognition checks its independent inputs");
+    f.assertServing();
   } finally { f.close(); }
 });
 
@@ -71,7 +121,7 @@ test("preparation uses the caller deadline for every child; standalone component
     const prepared = f.run("prepare");
     assert.equal(prepared.status, 0, prepared.stderr);
     assert.equal(prepared.stderr, "");
-    assert.deepEqual(readFileSync(f.env.TRACE, "utf8").trim().split("\n").sort(), ["builds", "meet-recognition", "runtime"]);
+    assert.deepEqual(f.calls(), ["builds", "meet-recognition", "orchestrator", "remote", "runtime", "tools"]);
     for (const name of ["host", "runtime", "meet-recognition"]) {
       const deployed = f.run(name);
       assert.equal(deployed.status, 124, deployed.stderr);
@@ -102,7 +152,7 @@ printf '%s\\n' '${loadState}'`);
     } else {
       assert.equal(result.status, 0, result.stderr);
       assert.equal(result.stderr, "");
-      assert.deepEqual(calls, ["builds", "discovery", "runtime"]);
+      assert.deepEqual(calls, ["builds", "discovery", "orchestrator", "remote", "runtime", "tools"]);
       assert.match(result.stdout, /nothing to prepare/);
       assert.equal(existsSync(join(f.directory, ".pi-meet-recognition")), false);
     }
@@ -197,17 +247,58 @@ printf '206'`);
 test("failed builds skip their dependent runtime while independent recognition is still awaited", () => {
   const f = preparationFixture();
   try {
-    const result = f.run("prepare", { RUNTIME_EXIT: "23", MEET_RECOGNITION_EXIT: "11", BUILD_EXIT: "9" });
+    const finished = join(f.directory, "recognition-finished");
+    const result = f.run("prepare", { RUNTIME_EXIT: "23", MEET_RECOGNITION_EXIT: "11", BUILD_EXIT: "9", MEET_RECOGNITION_SECONDS: "0.12", MEET_RECOGNITION_FINISHED: finished });
     assert.equal(result.status, 1, result.stderr);
     assert.match(result.stderr, /builds exited 9/);
     assert.doesNotMatch(result.stderr, /runtime exited/);
     assert.doesNotMatch(readFileSync(f.env.TRACE, "utf8"), /runtime/);
     assert.match(result.stderr, /meet-recognition exited 11/);
+    assert.equal(existsSync(finished), true, "build failure must join recognition before returning");
+    assert.equal(existsSync(f.receipt()), false);
+    f.assertServing();
     assert.doesNotMatch(result.stdout, /prepared Pi stack/);
     const runtimeFailure = f.run("prepare", { RUNTIME_EXIT: "23", MEET_RECOGNITION_EXIT: "11" });
     assert.equal(runtimeFailure.status, 1, runtimeFailure.stderr);
     assert.match(runtimeFailure.stderr, /runtime exited 23/);
     assert.match(runtimeFailure.stderr, /meet-recognition exited 11/);
+    assert.equal(existsSync(f.receipt()), false);
+    f.assertServing();
+  } finally { f.close(); }
+});
+
+for (const failed of ["remote", "tools"]) test(`failed ${failed} preparation joins its sibling before returning`, () => {
+  const f = preparationFixture();
+  try {
+    const sibling = failed === "remote" ? "tools" : "remote";
+    const finished = join(f.directory, `${sibling}-finished`);
+    const result = f.run("prepare", {
+      [`${failed.toUpperCase()}_EXIT`]: "23",
+      [`${sibling.toUpperCase()}_SECONDS`]: "0.12",
+      [`${sibling.toUpperCase()}_FINISHED`]: finished,
+    });
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(existsSync(finished), true, "all independent stages must settle before failure returns");
+    assert.equal(existsSync(f.receipt()), false, "failed components cannot acquire a prepared receipt");
+    assert.doesNotMatch(result.stdout, /prepared Pi stack/);
+    f.assertServing();
+  } finally { f.close(); }
+});
+
+test("preparation refuses a changed artifact rather than rebuilding beneath a durable proof", () => {
+  const f = preparationFixture();
+  try {
+    assert.equal(f.run("prepare").status, 0);
+    const receipt = readFileSync(f.receipt(), "utf8");
+    const calls = f.calls();
+    writeFileSync(join(f.env.PI_STACK_RELEASES_ROOT, "remote", f.commitId(), "payload"), "changed artifact\n");
+    const result = f.run("prepare");
+    assert.equal(result.status, 66, result.stderr);
+    assert.match(result.stdout, /prepared-artifact-changed/);
+    assert.doesNotMatch(result.stdout, /already prepared/);
+    assert.deepEqual(f.calls(), calls, "invalid proof must not rebuild or run components");
+    assert.equal(readFileSync(f.receipt(), "utf8"), receipt);
+    f.assertServing();
   } finally { f.close(); }
 });
 
@@ -215,7 +306,8 @@ test("runtime consumes completed checkout declarations, never concurrent npm/bui
   const f = preparationFixture();
   try {
     writeFileSync(join(f.repo, "deploy/lib"), `${readFileSync(join(root, "deploy/lib"), "utf8")}\npi_stack_prepare_builds() { sleep 0.15; touch "$DECLARATIONS_READY"; printf 'builds\\n' >> "$TRACE"; }\n`);
-    f.executable(join(f.repo, "deploy/runtime"), 'test -f "$DECLARATIONS_READY"; printf "runtime\\n" >> "$TRACE"');
+    const runtime = join(f.repo, "deploy/runtime");
+    writeFileSync(runtime, readFileSync(runtime, "utf8").replace('printf \'%s\\n\' "runtime"', 'test -f "$DECLARATIONS_READY"; printf \'%s\\n\' "runtime"'));
     f.commit();
     const result = f.run("prepare", { DECLARATIONS_READY: join(f.directory, "declarations-ready") });
     assert.equal(result.status, 0, result.stderr);
@@ -252,6 +344,8 @@ exec /bin/sleep "$@"`);
     assert.equal(terminated, true, `both preparation children must start before cancellation: ${stderr}`);
     assert.deepEqual(result, { code: 124, signal: null }, stderr);
     assert.doesNotMatch(stdout, /prepared Pi stack/);
+    assert.equal(existsSync(f.receipt()), false);
+    f.assertServing();
     assert.deepEqual(readFileSync(f.env.TRACE, "utf8").trim().split("\n").sort(), ["builds", "meet-recognition", "runtime"]);
   } finally {
     if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
@@ -266,6 +360,8 @@ test("preparation still refuses dirty source", () => {
     const result = f.run("prepare");
     assert.equal(result.status, 65, result.stderr);
     assert.equal(existsSync(f.env.TRACE), false);
+    assert.equal(existsSync(f.receipt()), false);
+    f.assertServing();
   } finally { f.close(); }
 });
 
