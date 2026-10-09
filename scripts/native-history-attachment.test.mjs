@@ -69,6 +69,6 @@ test('restored receipt survives restart without reentering old maintenance or im
   const path = join(root, 'native-history-maintenance.json');
   const bytes = JSON.stringify(receipt);
   writeFileSync(path, bytes);
-  assert.equal(await installLegacyMaintenance({ ...receipt, oldApi: '/unavailable-decoder' }), true);
+  assert.equal(await installLegacyMaintenance({ ...receipt, mode: 'remote', oldApi: '/unavailable-decoder' }), true);
   assert.equal(readFileSync(path, 'utf8'), bytes);
 });

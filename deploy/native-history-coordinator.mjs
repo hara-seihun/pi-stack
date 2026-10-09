@@ -105,7 +105,7 @@ function fleetAdmission(item, root, identity, action = 'prepare') {
     `const {legacyFleetLedger}=await import(process.argv[1]); console.log(JSON.stringify(await legacyFleetLedger(process.argv[2],JSON.parse(process.argv[3]),process.argv[4])));`,
     join(root, 'deploy/native-history-bridge.mjs'), item.ledgerPath, JSON.stringify(identity), action]);
   const value = JSON.parse(result);
-  if (action === 'restore' && value.ready !== true) throw new Error('Fleet admission fence restoration remains pending');
+  if ((action === 'restore' || action === 'restore-owned') && value.ready !== true) throw new Error('Fleet admission fence restoration remains pending');
   return value;
 }
 export function fleetInventory(host, persons, platform) {
@@ -226,9 +226,12 @@ export async function boundary({ hostFile, root, candidate, mode = 'advance', st
     if (realpathSync(remotePointer) === state.remoteStage) selectPointer(remotePointer, state.legacyRemote);
     if (realpathSync(orchestratorPointer) === state.fleetStage) selectPointer(orchestratorPointer, state.legacyOrchestrator);
     for (const item of state.owners) {
-      if (item.mode === 'fleet' && !state.adopted.includes(item.unit)) {
-        fleetAdmission(item, root, { candidate, legacySource: state.legacySource }, 'restore'); continue;
+      if (!state.adopted.includes(item.unit)) {
+        if (item.mode === 'fleet') fleetAdmission(item, root, { candidate, legacySource: state.legacySource }, 'restore-owned');
+        continue;
       }
+      const before = ownerStatus(item);
+      if (before.available && (before.value.candidate !== candidate || before.value.legacySource !== state.legacySource)) throw new Error('Another publication owns this maintenance controller; restoration cannot alter its fences');
       const status = ownerStatus(item, 'POST', '/restore');
       if (!status.available && state.adopted.includes(item.unit)) ownerRestorationProof(item, root, hostFile, { candidate, legacySource: state.legacySource });
       else if (status.available && (status.value.error || status.value.phase !== 'restored')) throw new Error(`Cannot restore admission for ${item.unit}: ${status.value?.error ?? 'owner did not acknowledge restoration'}`);
