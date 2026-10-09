@@ -72,13 +72,14 @@ function ownerStatus(item, method = 'GET', path = '/status') {
   if (result.status !== 0) return { available: false, error: result.stderr?.trim() ?? result.error?.message ?? 'Maintenance controller not yet available' };
   const value = JSON.parse(result.stdout);
   if (value.protocol !== BRIDGE_PROTOCOL || value.uid !== item.uid || value.dataDir !== resolve(item.dataDir)) throw new Error(`Maintenance owner identity mismatch: ${item.user}`);
-  return { available: true, value };
+  return { available: true, pid, value };
 }
 function ownerRestorationProof(item, root, hostFile, identity, allowMutation = true) {
   const pid = command('systemctl', ['show', item.unit, '-p', 'MainPID', '--value']);
   const alive = /^[1-9][0-9]*$/.test(pid);
   let namespacePid = pid;
   if (!alive) {
+    if (!allowMutation) throw new Error('Restored controller generation changed during readonly adoption proof');
     if (pid !== '0') throw new Error('Owner returned an invalid namespace PID');
     const custody = JSON.parse(readFileSync(hostFile, 'utf8')).nativeHistoryCustodyUnit;
     if (custody === undefined) return recoverClosedOwner({ item, root, legacyRemote: realpathSync('/srv/pi/pi-remote'), identity });
@@ -278,7 +279,14 @@ export async function boundary({ hostFile, root, candidate, mode = 'advance', st
     if (!admission.ready) return { ...admission, state: 'fleet-completions', reason: 'Accepted old fleet completions are still running' };
     return { ready: true, state: 'awaiting-adoption', reason: 'The publication can adopt the preserved old native owners' };
   }
-  for (const item of state.owners) maintenanceStatus(ownerStatus(item), state, prior => ownerRestorationProof(item, root, hostFile, prior, false));
+  const restoredControllers = new Map();
+  for (const item of state.owners) {
+    const observed = ownerStatus(item);
+    maintenanceStatus(observed, state, prior => {
+      ownerRestorationProof(item, root, hostFile, prior, false);
+      restoredControllers.set(item.unit, { pid: observed.pid, candidate: prior.candidate });
+    });
+  }
   if (mode !== 'probe') {
     // The old daemon aborts tool-free providers on restart. Fence fresh ledger
     // admission first, then let every already accepted completion finish naturally.
@@ -296,7 +304,12 @@ export async function boundary({ hostFile, root, candidate, mode = 'advance', st
       state.adopted.push(item.unit); atomicJson(statePath, state);
     }
   }
-  const statuses = state.owners.map(item => maintenanceStatus(ownerStatus(item), state, prior => ownerRestorationProof(item, root, hostFile, prior, false)));
+  const statuses = state.owners.map(item => {
+    const observed = ownerStatus(item), proven = restoredControllers.get(item.unit);
+    return maintenanceStatus(observed, state, prior => {
+      if (proven?.pid !== observed.pid || proven?.candidate !== prior.candidate) ownerRestorationProof(item, root, hostFile, prior, false);
+    });
+  });
   for (const item of statuses) if (item.available) {
     if (item.value.error) throw new Error(`Private native history maintenance failed: ${item.value.error}`);
     if (item.value.phase === 'restored') throw new Error('An owner restored its admission; restore the whole publication boundary before another candidate');

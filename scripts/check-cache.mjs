@@ -14,6 +14,7 @@ export function checkPolicy(name) {
   if (['orchestrator memory build', 'orchestrator types', 'orchestrator shared RPC', 'Kenan build', 'Remote build'].includes(name)) return { kind: 'run' };
   if (name.startsWith('agent workspace ')) return { kind: 'memo', inputs: ['tools/agent-workspace'] };
   if (name.startsWith('orchestrator ')) return { kind: 'memo', inputs: [...packages, 'config', 'apps/remote/shared'] };
+  if (['config', 'transport', 'roots', 'core', 'gate', 'bundle', 'source', 'progress', 'proof'].some(suite => name === `publication ${suite}`)) return { kind: 'memo', inputs: deployment };
   const policies = {
     'job lifecycle': deployment,
     'explicit state dispatch': deployment,

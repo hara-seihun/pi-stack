@@ -169,7 +169,13 @@ for (const mapping of [null, "", "+refs/heads/main:refs/remotes/origin/main"]) {
 test("bounded creation expiry retains a partial checkout and retries with a larger budget", () => {
   const f = fixture();
   try {
-    const bin = path.join(f.root, "bin");
+    const args = ["create", "--root", f.workspaces, "--name", "bounded", "--repo", f.remote,
+      "--min-free-gib", "0", "--json"];
+    assert.throws(() => run(args, interruptCreation(f, "clone")));
+    const [reserved] = JSON.parse(run(["status", "--json"], f.env)).records;
+    assert.equal(reserved.state, "creating");
+    assert.equal(existsSync(path.join(reserved.path, "file.txt")), false);
+    const bin = path.join(f.root, "bounded-bin");
     mkdirSync(bin);
     const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
     const wrapper = path.join(bin, "git");
@@ -187,13 +193,13 @@ if (result.status === 0 && args.includes('checkout')) {
 `);
     chmodSync(wrapper, 0o755);
     const env = { ...f.env, PATH: `${bin}:${process.env.PATH}` };
-    const args = ["create", "--root", f.workspaces, "--name", "bounded", "--repo", f.remote,
-      "--min-free-gib", "0", "--json"];
     const started = Date.now();
     assert.throws(() => run([...args, "--creation-timeout-seconds", "5"], env), /creation.*(budget|timed out)/);
     assert.ok(Date.now() - started < 10_000);
     const [pending] = JSON.parse(run(["status", "--json"], f.env)).records;
     assert.equal(pending.state, "creating");
+    assert.equal(pending.id, reserved.id);
+    assert.equal(pending.sourceCommit, reserved.sourceCommit);
     assert.equal(existsSync(pending.path), true);
     assert.equal(git(pending.path, "config", "--get", "remote.origin.fetch"),
       "+refs/heads/*:refs/remotes/origin/*");
