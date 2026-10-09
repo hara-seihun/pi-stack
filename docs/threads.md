@@ -169,6 +169,8 @@ are not alternative journals. Cancellation/recovery cannot replay landed input.
 
 The owner stamps sender identity. Native agent messages retain a distinct
 `<agent_message>` envelope so the model cannot mistake them for human input.
+Explicit messages and notifications retain the recipient, durable message ID,
+source and any assignment `replyTo` in that envelope, including after recovery.
 The client renders the sender's Nebulani name and readable body, without wrapper
 XML or routing JSON. In its own thread every assistant remains **Kenan**.
 Completion messages contain final text, outcome and errors, never the sender's
