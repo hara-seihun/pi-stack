@@ -22,6 +22,7 @@ import { spawnSync } from "node:child_process";
 import { policy, canResumeRebootedIntegration, stallReason, runnable, observeQueueProgress, queueStallReason, progressBudgetExhausted, repairId, repairUnit, repairPrompt } from "./publication-control.mjs";
 import { loadPublicationConfig } from "./publication-config.mjs";
 import { hostWaitKind, rollForwardHosts } from "./publication-hosts.mjs";
+import { sourceOnlyQueued, freezeSourceBundle, sourceBundleMembers, resolveSourceBundle } from "./publication-bundle.mjs";
 import { publicationJournalEnabled, beginPublication, finishPublication } from "./action-journal.mjs";
 
 const config = loadPublicationConfig();
@@ -232,7 +233,7 @@ function installFrom(sourceRoot, activate = true) {
   const commandSource = join(sourceRoot, "deploy/publication");
   const unitNames = ["pi-stack-publication.service", "pi-stack-publication.timer", "pi-stack-publication.path",
     "pi-stack-publication-watchdog.service", "pi-stack-publication-watchdog.timer", "pi-stack-publication-repair@.service", "pi-stack-publication-notices.service"];
-  const modules = ["publication-control.mjs", "publication-config.mjs", "publication-hosts.mjs", "action-journal.mjs", "release-checkout", "meeting-census", "native-prerequisites"];
+  const modules = ["publication-control.mjs", "publication-config.mjs", "publication-hosts.mjs", "publication-bundle.mjs", "action-journal.mjs", "release-checkout", "meeting-census", "native-prerequisites"];
   for (const path of [commandSource, ...modules.map(name => join(sourceRoot, "deploy", name)), ...unitNames.map(name => join(sourceRoot, "deploy/systemd", name))]) {
     if (!existsSync(path)) throw new Error(`publication installation source is missing: ${path}`);
   }
@@ -459,6 +460,12 @@ function isCancelled(request) {
 
 function checkCancellation(request) {
   if (isCancelled(request)) throw new Error("Publication cancelled; any completed host release remains selected");
+  const owner = request.sourceBundleOwner ? readRequest(request.sourceBundleOwner.requestId) : request;
+  if (!owner.sourceBundle) return;
+  const members = sourceBundleMembers(owner);
+  if (!members.ok) throw new Error(`${members.error.kind}: ${members.error.detail}`);
+  const cancelled = members.sources.find(source => isCancelled(readRequest(source.requestId)));
+  if (cancelled) throw new Error(`Source bundle member ${cancelled.requestId} cancelled; any completed host release remains selected`);
 }
 
 function appendLog(path, text) {
@@ -786,40 +793,41 @@ function prepareCheckout(request, logPath) {
   return runLogged(request, "fetch-main", "git", ["-C", checkout, "fetch", "--quiet", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"], 60, logPath);
 }
 
-function createIntegration(request, logPath) {
-  let result = runLogged(
-    request,
-    "fetch-submitted-source",
-    "git",
-    ["-C", checkout, "fetch", "--quiet", "--no-tags", "origin", `+${request.sourceRef}:refs/pi-stack-publication/${request.requestId}/source`],
-    60,
-    logPath,
-  );
+export function integrateSourceBundle(request, logPath) {
+  const members = sourceBundleMembers(request);
+  if (!members.ok) return { ok: false, status: 1, stderr: `${members.error.kind}: ${members.error.detail}` };
+  for (const source of members.sources) checkCancellation(readRequest(source.requestId));
+  let result = runLogged(request, "fetch-submitted-sources", "git",
+    ["-C", checkout, "fetch", "--quiet", "--no-tags", "origin", ...members.sources.map(source => `+${source.sourceRef}:refs/pi-stack-publication/${source.requestId}/source`)], 60, logPath);
   if (!result.ok) return result;
-  const fetchedSource = runCapture("git", ["-C", checkout, "rev-parse", `refs/pi-stack-publication/${request.requestId}/source^{commit}`]);
-  if (fetchedSource !== request.sourceSha) return { ok: false, status: 1, stderr: `source ref moved from ${request.sourceSha} to ${fetchedSource}` };
+  for (const source of members.sources) {
+    const fetchedSource = runCapture("git", ["-C", checkout, "rev-parse", `refs/pi-stack-publication/${source.requestId}/source^{commit}`]);
+    if (fetchedSource !== source.sourceSha) return { ok: false, status: 1, stderr: `source ref moved from ${source.sourceSha} to ${fetchedSource}` };
+  }
   const baseSha = runCapture("git", ["-C", checkout, "rev-parse", "refs/remotes/origin/main^{commit}"]);
   result = runLogged(request, "create-integration", "git", ["-C", checkout, "checkout", "--quiet", "-B", "pi-stack-publication", baseSha], 30, logPath);
   if (!result.ok) return result;
-  const sourceInBase = commandResult("git", ["-C", checkout, "merge-base", "--is-ancestor", request.sourceSha, baseSha]).ok;
-  if (!sourceInBase) {
-    result = runLogged(
-      request,
-      "merge-source",
-      "git",
-      [
-        "-C", checkout,
-        "-c", `user.name=${config.mergeAuthor.name}`,
-        "-c", `user.email=${config.mergeAuthor.email}`,
-        "merge", "--no-ff", "--no-edit",
-        "-m", `Integrate Pi Stack publication ${request.requestId}\n\nPi-Stack-Source: ${request.sourceSha}`,
-        request.sourceSha,
-      ],
-      60,
-      logPath,
-    );
+  for (const source of members.sources) {
+    const contained = commandResult("git", ["--no-replace-objects", "-C", checkout, "merge-base", "--is-ancestor", source.sourceSha, "HEAD"]);
+    if (contained.status === 0) continue;
+    if (contained.status !== 1) return contained;
+    result = runLogged(request, "merge-source", "git", [
+      "-C", checkout, "-c", `user.name=${config.mergeAuthor.name}`, "-c", `user.email=${config.mergeAuthor.email}`,
+      "merge", "--no-ff", "--no-edit", "-m", `Integrate Pi Stack publication ${source.requestId}\n\nPi-Stack-Source: ${source.sourceSha}`, source.sourceSha,
+    ], 60, logPath);
     if (!result.ok) return result;
   }
+  for (const source of members.sources) {
+    const proof = commandResult("git", ["--no-replace-objects", "-C", checkout, "merge-base", "--is-ancestor", source.sourceSha, "HEAD"]);
+    if (!proof.ok) return { ...proof, stderr: `combined integration omits ${source.requestId}: ${source.sourceSha}` };
+  }
+  return { ok: true, status: 0, stdout: "", stderr: "", baseSha };
+}
+
+function createIntegration(request, logPath) {
+  let result = integrateSourceBundle(request, logPath);
+  if (!result.ok) return result;
+  const { baseSha } = result;
   if (request.ownerRepairSourceSha && !commandResult("git", ["-C", checkout, "merge-base", "--is-ancestor", request.ownerRepairSourceSha, "HEAD"]).ok) {
     const retained = checked("git", ["-C", checkout, "rev-parse", `${ownerSourceRef}^{commit}`]);
     if (retained !== request.ownerRepairSourceSha) throw new Error("Owner repair source changed; fresh bound evidence required");
@@ -874,7 +882,8 @@ function prepareAndroidArtifact(request, logPath) {
     rmSync(join(request.android.directory, request.android.release.fileName), { force: true });
     rmSync(join(request.android.directory, `${request.android.web?.revision ?? request.android.release.revision}.web.zip`), { force: true });
   }
-  const directory = join(proofRoot, request.requestId, "android-artifact", request.integrationSha);
+  const directory = request.bundleEvidence?.integrationSha === request.integrationSha && request.android
+    ? request.android.directory : join(proofRoot, request.requestId, "android-artifact", request.integrationSha);
   if ((request.android?.web?.revision ?? request.android?.release?.revision) === request.integrationSha && existsSync(join(directory, request.android.release.fileName))
     && existsSync(join(directory, `${request.integrationSha}.web.zip`))) {
     if (sha256(join(directory, request.android.release.fileName)) !== request.android.release.sha256) throw new Error("Prepared Android artifact is corrupt");
@@ -2085,10 +2094,6 @@ export function processRequest(request) {
     finishPublication(request);
     if (request.actionJournal) writeRequest(request);
     appendLog(logPath, `[${new Date().toISOString()}] published integration=${request.integrationSha}\n`);
-    if (request.android) {
-      rmSync(join(request.android.directory, request.android.release.fileName), { force: true });
-      rmSync(join(request.android.directory, `${request.android.web?.revision ?? request.android.release.revision}.web.zip`), { force: true });
-    }
     deliverNotice(request);
   } catch (error) {
     const failedProgress = request.progress;
@@ -2504,6 +2509,56 @@ export function refreshHostWaits(request) {
   return ready;
 }
 
+function bindBundleFollowers(owner) {
+  const members = sourceBundleMembers(owner);
+  if (!members.ok) throw new Error(`${members.error.kind}: ${members.error.detail}`);
+  for (const source of members.sources.slice(1)) {
+    const follower = readRequest(source.requestId);
+    if (follower.sourceSha !== source.sourceSha || follower.sourceRef !== source.sourceRef) throw new Error(`Frozen bundle source changed: ${source.requestId}`);
+    if (follower.sourceBundleOwner?.requestId === owner.requestId && follower.sourceBundleOwner.bundleId === owner.sourceBundle.id) continue;
+    if (isCancelled(follower)) continue;
+    if (!sourceOnlyQueued(follower)) throw new Error(`Frozen bundle member acquired separate work: ${source.requestId}`);
+    follower.sourceBundleOwner = { requestId: owner.requestId, bundleId: owner.sourceBundle.id };
+    follower.step = "awaiting-source-bundle";
+    writeRequest(follower);
+  }
+}
+
+export function freezeQueuedSources(request) {
+  if (!sourceOnlyQueued(request) || meetingOverride(request.requestId)) return;
+  const frozen = freezeSourceBundle(request, allRequests(), candidate => runnable(candidate) && !isCancelled(candidate) && !meetingOverride(candidate.requestId));
+  if (!frozen.ok) throw new Error(`${frozen.error.kind}: ${frozen.error.detail}`);
+  request.sourceBundle = frozen.bundle;
+  writeRequest(request);
+  bindBundleFollowers(request);
+}
+
+export function reconcileSourceBundles() {
+  for (const owner of allRequests().filter(candidate => candidate.sourceBundle)) bindBundleFollowers(owner);
+  for (const request of allRequests().filter(candidate => candidate.status === "queued" && candidate.sourceBundleOwner && !candidate.bundleEvidence && !isCancelled(candidate))) {
+    const owner = readRequest(request.sourceBundleOwner.requestId);
+    const resolved = resolveSourceBundle(request, owner);
+    const log = owner.failure?.log ?? owner.checks?.log ?? join(logRoot, owner.requestId, `attempt-${owner.attempt}.log`);
+    if (!resolved.ok) {
+      updateFailure(request, `${resolved.error.kind}: ${resolved.error.detail}`, log, true, "source-bundle-invalid");
+      continue;
+    }
+    if (resolved.state === "pending") continue;
+    if (resolved.state === "failed") {
+      updateFailure(request, `Source bundle ${owner.requestId} failed: ${resolved.failure?.message}`, log, true, "source-bundle-failed");
+      continue;
+    }
+    const proof = commandResult("git", ["--no-replace-objects", "-C", checkout, "merge-base", "--is-ancestor", request.sourceSha, resolved.evidence.integrationSha]);
+    if (!proof.ok) {
+      updateFailure(request, `Checked bundle ${owner.requestId} omits requested source ${request.sourceSha}`, log, true, "source-bundle-ancestry-failed");
+      continue;
+    }
+    Object.assign(request, resolved.evidence);
+    request.step = "source-bundle-ready";
+    writeRequest(request);
+  }
+}
+
 export function drain() {
   ensureState();
   // Re-read after each request. A submission while this service is active needs no timer turn.
@@ -2543,7 +2598,8 @@ export function drain() {
     // Recovery remains scoped by host reservations; an unavailable host cannot stop its peers.
     const cancelled = allRequests().find(candidate => !["failed", "published"].includes(candidate.status) && existsSync(cancellationPath(candidate.requestId)));
     if (cancelled) { processRequest(cancelled); continue; }
-    const request = allRequests().find(candidate => runnable(candidate) || candidate.status === "running");
+    reconcileSourceBundles();
+    const request = allRequests().find(candidate => (runnable(candidate) && (!candidate.sourceBundleOwner || candidate.bundleEvidence)) || candidate.status === "running");
     if (!request) return;
     if (request.status === "running") {
       if (canResumeRebootedIntegration(request, workerBootId)) processRequest(request);
@@ -2556,6 +2612,7 @@ export function drain() {
         request.waiting?.reason ?? "Publication progress budget exhausted");
       continue;
     }
+    freezeQueuedSources(request);
     processRequest(request);
   }
 }
