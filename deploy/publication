@@ -1164,8 +1164,11 @@ export function nativeMaintenanceSourceProof(repository, candidate, retained) {
       .split('\n').filter(Boolean).map(line => [line.slice(41), line.slice(0, 40)]));
     const selected = tree(candidate), current = tree(retained);
     const changed = files.filter(path => selected.get(path) !== current.get(path));
-    return changed.length === 0 ? { ok: true, value: { candidate, retained } }
-      : { ok: false, error: { code: 'obsolete-native-maintenance-source', candidate, retained, changed } };
+    if (changed.length === 0) return { ok: true, value: { candidate, retained } };
+    const ancestry = commandResult('git', ['-C', repository, 'merge-base', '--is-ancestor', retained, candidate]);
+    if (ancestry.ok) return { ok: true, value: { candidate, retained } };
+    if (ancestry.status !== 1) return { ok: false, error: { code: 'native-maintenance-source-unavailable', message: ancestry.stderr.trim() || `Ancestry proof exited ${ancestry.status}` } };
+    return { ok: false, error: { code: 'obsolete-native-maintenance-source', candidate, retained, changed } };
   } catch (error) { return { ok: false, error: { code: 'native-maintenance-source-unavailable', message: String(error) } }; }
 }
 
