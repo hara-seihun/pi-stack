@@ -70,6 +70,7 @@ export interface Session {
   origin: "person" | "fleet";
   /** Scheduled watch checks belong in Workers without changing their owning supervisor. */
   watchList?: boolean;
+  manager?: boolean;
   /** Explicitly promoted background threads also belong in Chats. */
   foreground?: boolean;
   attentionSummary?: string;
@@ -214,7 +215,14 @@ export interface AgentModelCount {
 
 /** Facts every client needs once: where new threads can start and the
  * person's home. Sent with `hello` and again only when they change. */
+export type ManagerView = { hintSeen: boolean } & (
+  | { view: "classic"; managerThreadId: string | null }
+  | { view: "mono"; managerThreadId: string }
+);
+
 export interface Bootstrap {
+  managerOwnerEnvironmentId: string;
+  manager: ManagerView | null;
   rooms?: true;
   environmentId: string;
   home: string;
@@ -378,6 +386,7 @@ interface TranscriptItemBase {
   kind: TranscriptItemKind;
   /** Bytes of the complete body, so the client can decide what to prefetch. */
   size: number;
+  monoVisibility?: "hidden" | "visible";
   /** Milliseconds since the epoch of the originating message, when known. */
   timestamp?: number;
   /** Speed of the model response this item came from. Present on the last item

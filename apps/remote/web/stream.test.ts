@@ -3,7 +3,7 @@ import { ReconcilePublisher, revisionOf } from "../shared/reconcile";
 import type { StreamEvent, StreamSnapshot, StreamSubscription } from "../server/protocol";
 import { createStreamClient, DEAD_STREAM_MS, EventStreamParser, RECONCILE_TIMEOUT_MS, RECONNECT_GRACE_MS, streamEventFromFrame, type StreamClient, type StreamClientOptions, type StreamStatus } from "./src/stream";
 
-const hello = { type: "hello", epoch: "epoch", streamId: "disposable", bootstrap: { home: "/", threadStarts: [], environmentId: "local", speech: null } };
+const hello = { type: "hello", epoch: "epoch", streamId: "disposable", bootstrap: { managerOwnerEnvironmentId: "local", manager: { view: "classic", managerThreadId: null, hintSeen: false }, home: "/", threadStarts: [], environmentId: "local", speech: null } };
 const encode = (event: unknown) => new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`);
 const finite = (events: unknown[]) => Response.json({ events });
 const transcript = (sessionId: string): StreamSnapshot => ({ type: "transcript", sessionId, generation: "g", total: 0, items: [] });

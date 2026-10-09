@@ -36,6 +36,20 @@ function header(html: string) {
   return html.match(/<header class="conversation-header">.*?<\/header>/s)?.[0] ?? "";
 }
 
+test("mono keeps the shared composer and message view, suppresses live wake work, and acknowledges its first-use hint", () => {
+  const mono = { hintSeen: false, saving: false, onClassic() {}, onHintSeen() {} };
+  const html = render({ mono, liveThinking: "Silent manager wake thinking", thinkingActive: true });
+  expect(html).toContain('title="Long-press to return to classic view"');
+  expect(html).toContain('class="conversation-title-text">Kenan</span>');
+  expect(html).toContain('placeholder="Message Kenan"');
+  expect(html).toContain('id="prompt"');
+  expect(html).toContain('aria-label="Dismiss mono view hint"');
+  expect(html).not.toContain('aria-label="Back"');
+  expect(html).not.toContain("Silent manager wake thinking");
+  expect(html).not.toContain("Context —");
+  expect(render({ mono: { ...mono, hintSeen: true } })).not.toContain('class="mono-hint"');
+});
+
 test("cached idle transcript stays visible while the header updates, then idle returns when ready", () => {
   const updating = render({ syncing: true });
   expect(header(updating)).toContain('class="conversation-syncing" role="status" aria-label="Updating"');

@@ -1670,7 +1670,11 @@ describe("unified Orchestrator peers", () => {
       expect(text).toMatch(/<\/agent_message>$/);
     }
     expect(JSON.parse(progress.split("\n")[2]!)).toMatchObject({ recipientThreadId: root.id, source: "explicit", messageId: "progress" });
-    expect(JSON.parse(completion.split("\n")[2]!)).toEqual({ senderThreadId: child.id, senderName: child.agentName });
+    expect(JSON.parse(completion.split("\n")[2]!)).toEqual({
+      senderThreadId: child.id, senderName: child.agentName, recipientThreadId: root.id,
+      messageId: `thread-result:${fleet.service.latestSettlement(child.id)!.executionId}:${root.id}`,
+      source: "notification", replyTo: "child",
+    });
     expect(JSON.parse(completion.split("\n")[4]!)).toEqual({ type: "thread_idle", title: child.title, outcome: "complete", finalText: "Worker result" });
     await waitFor(() => fleet.service.get(child.id)?.metadata?.archived === true);
     expect(fleet.service.get(child.id)).toMatchObject({ state: "idle", held: false, metadata: { ephemeral: true, archived: true, archivedAt: expect.any(String) } });
@@ -2643,7 +2647,10 @@ describe("ThreadService", () => {
     expectReadableCompletion(text);
     expect(text).toContain(meetingContext);
     expect(text.match(/<agent_message>/g)).toHaveLength(1);
-    expect(JSON.parse(text.split("\n")[2]!)).toEqual({ senderThreadId: "child" });
+    expect(JSON.parse(text.split("\n")[2]!)).toEqual({
+      senderThreadId: "child", recipientThreadId: parent.id, messageId: "persisted-completion",
+      source: "notification", replyTo: "child-work",
+    });
     const body = JSON.parse(text.split("\n")[4]!);
     expect(body).toEqual({ type: "thread_idle", outcome: "failed", finalText: "Readable child result", error });
     await settle(second.sessions[0]!, second.service, parent.id);

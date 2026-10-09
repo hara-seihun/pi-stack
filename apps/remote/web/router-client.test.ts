@@ -30,6 +30,7 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
   let healthFailure = true;
   let healthProbeGate: ((path: string) => Promise<void>) | null = null;
   let mutation: ((request: Request) => Promise<Response>) | null = null;
+  let managerReply: ((request: Request) => Promise<Response>) | null = null;
   const synced: Array<{ user: string; session: string }> = [];
   const publicIngress = process.env.PI_ROUTER_TEST_CASE === "android-public";
   let accessVersion = 1;
@@ -85,6 +86,7 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
       { id: "local", name: "Home", baseUrl: "", icon: "house" },
       ...(user === "sybil" ? [{ id: "cloud", name: "Cloud", baseUrl: "/v1/remotes/cloud", icon: "cloud" }] : []),
     ] });
+    if (managerReply && path.endsWith("/v1/manager")) return managerReply(original);
     if (mutation && request.method === "POST" && /\/v1\/sessions(?:$|\/[^/]+\/prompt$)/.test(path)) return mutation(original);
     return json({ ok: true, user });
   };
@@ -163,6 +165,50 @@ if (!process.env.PI_ROUTER_TEST_CASE) {
     const cloudEndpoint = await window.KenanRemote!.getState();
     await expect(native.pinnedFetch(cloudEndpoint, "guest", "/v1/sessions/pinned/prompt", { method: "POST", body: "{}" })).rejects.toThrow("Request owner changed");
     expect(calls).toHaveLength(pinnedCalls);
+    {
+      const { requestManager } = await import("./src/manager-client");
+      const { inFlight } = await import("./src/in-flight");
+      const preference = { view: "mono", managerThreadId: "manager", hintSeen: true };
+      for (const owner of ["local", "cloud"]) {
+        let began!: () => void;
+        let release!: (response: Response) => void;
+        const sending = new Promise<void>(resolve => { began = resolve; });
+        managerReply = async () => { began(); return new Promise<Response>(resolve => { release = resolve; }); };
+        const saving = requestManager(owner, { view: "mono", hintSeen: true });
+        await sending;
+        expect(calls.at(-1)!.path).toBe(owner === "local" ? "/v1/manager" : "/v1/remotes/cloud/v1/manager");
+        expect(calls.at(-1)!.headers.get("x-pi-remote-session")).toBe("token-1");
+        expect(calls.at(-1)!.body).toEqual({ view: "mono", hintSeen: true });
+        expect(inFlight.count()).toBe(1);
+        expect(inFlight.list()[0]).toMatchObject({ method: "POST", path: "/v1/manager" });
+        release(json(preference));
+        expect(await saving).toEqual({ ok: true, value: preference });
+        expect(inFlight.count()).toBe(0);
+        expect((await window.KenanRemote!.getState()).id).toBe("cloud");
+      }
+      managerReply = async () => {
+        expect(inFlight.count()).toBe(0);
+        return json(preference);
+      };
+      expect(await requestManager("local")).toEqual({ ok: true, value: preference });
+      managerReply = async () => { throw new TypeError("Manager owner unreachable"); };
+      expect((await requestManager("local", { view: "mono" })).ok).toBe(false);
+      expect(inFlight.count()).toBe(0);
+      let began!: () => void;
+      const sending = new Promise<void>(resolve => { began = resolve; });
+      managerReply = async () => { began(); return new Promise<Response>(() => {}); };
+      const controller = new AbortController();
+      const cancelled = requestManager("local", { view: "mono" }, controller.signal);
+      await sending;
+      expect(inFlight.count()).toBe(1);
+      controller.abort();
+      expect(await cancelled).toMatchObject({ ok: false, error: { kind: "identity_changed" } });
+      expect(inFlight.count()).toBe(0);
+      const sent = calls.length;
+      await expect(native.managerFetch("https://outside.example/v1/manager", { method: "POST" })).rejects.toThrow("not authorized");
+      expect(calls).toHaveLength(sent);
+      managerReply = null;
+    }
     await native.pinnedFetch(cloudEndpoint, "sybil", "/v1/sessions/pinned/prompt", { method: "POST", body: JSON.stringify({ requestId: "retained" }) });
     expect(calls.at(-1)!.path).toBe("/v1/remotes/cloud/v1/sessions/pinned/prompt");
     expect(calls.at(-1)!.body).toEqual({ requestId: "retained" });

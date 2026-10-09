@@ -23,6 +23,8 @@ it("completion transport includes the name while human projection retains the fi
   const native = formatThreadMessage(notice, notice.text + "\nMeeting context");
   expect(native).toContain('"senderName":"Kelana"');
   expect(native).toContain('"type":"thread_idle"');
+  expect(JSON.parse(native.split("\n")[2]!)).toEqual({ senderThreadId: senderId, senderName: "Kelana",
+    recipientThreadId: message.threadId, messageId: message.id, source: "notification" });
   expect(agentMessagePresentation(native)).toEqual({ sender: { threadId: senderId, name: "Kelana" }, text: "Result.\nMeeting context" });
   const empty = { ...notice, text: '{"type":"thread_idle","outcome":"cancelled","finalText":null}' };
   expect(agentMessagePresentation(formatThreadMessage(empty, empty.text))?.text).toBe("Work cancelled.");
@@ -43,8 +45,16 @@ it.each([
 });
 
 it("recognizes historical completion envelopes without inventing a name", () => {
-  const historical = { ...message, source: "notification" as const, senderName: undefined, text: '{"type":"thread_idle","outcome":"complete","finalText":"Done."}' };
-  expect(agentMessagePresentation(formatThreadMessage(historical, historical.text))).toEqual({ sender: { threadId: senderId }, text: "Done." });
+  const historical = `<agent_message>\nThis is an agent-to-agent message, not a user message.\n${JSON.stringify({ senderThreadId: senderId })}\n\n{"type":"thread_idle","outcome":"complete","finalText":"Done."}\n</agent_message>`;
+  expect(agentMessagePresentation(historical)).toEqual({ sender: { threadId: senderId }, text: "Done." });
+});
+
+it("retains scheduled wake identity in native notifications without rewriting their words", () => {
+  const wake = { ...message, id: "thread-wake:generation:1000", source: "notification" as const,
+    text: "Scheduled wake check for this existing thread: keep watch." };
+  const native = formatThreadMessage(wake, wake.text);
+  expect(JSON.parse(native.split("\n")[2]!)).toMatchObject({ messageId: wake.id, source: "notification" });
+  expect(agentMessagePresentation(native)).toEqual({ sender: { threadId: senderId, name: "Kelana" }, text: wake.text });
 });
 
 it("labels senders by first name, including threads named before single names", () => {

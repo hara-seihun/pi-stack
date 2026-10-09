@@ -35,7 +35,7 @@ export async function archiveInactiveThreads(api: ThreadApi, afterMs: number, no
   let archived = 0;
   for (const thread of threads.values()) {
     if (stopped()) break;
-    if (thread.metadata?.archived || unread(thread) || isLive(thread)) continue;
+    if (thread.metadata?.manager === true || thread.metadata?.archived || unread(thread) || isLive(thread)) continue;
     if (blocked.has(thread.id) || !expired(thread) || thread.state !== "idle" || thread.pendingMessages > 0) continue;
     const result = await api.control({ threadId: thread.id, action: "archiveInactive", inactiveBefore: cutoff });
     if (!result.ok) {

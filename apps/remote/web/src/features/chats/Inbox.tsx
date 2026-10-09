@@ -61,7 +61,7 @@ export const InboxRowView = memo(function InboxRowView({ row, selected, compactS
       </span>
     </button>
     {colour.menu}
-    <button type="button" className="inbox-close" aria-label={closeTitle} title={closeTitle} onClick={() => onClose(chat)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg></button>
+    {!session?.manager && <button type="button" className="inbox-close" aria-label={closeTitle} title={closeTitle} onClick={() => onClose(chat)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg></button>}
   </div>;
 });
 

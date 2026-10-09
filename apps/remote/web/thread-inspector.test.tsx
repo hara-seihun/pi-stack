@@ -13,8 +13,17 @@ const thread: Session = {
 const noop = () => {};
 const render = (session: Session, pending = false) => renderToStaticMarkup(<InspectorSheet
   session={session} sessions={[]} open pending={pending} autoCollapse onAutoCollapseChange={noop}
-  onClose={noop} onOpenThread={noop} onOpenThreadId={noop} onArchive={noop} onRestore={noop}
+  onClose={noop} onOpenThread={noop} onOpenThreadId={noop} onArchive={noop} onRestore={noop} onBackground={noop}
 />);
+
+test("the permanent manager hides archive and background actions in the shared inspector", () => {
+  const html = render({ ...thread, manager: true, foreground: true });
+  expect(html).not.toContain("Close agent");
+  expect(html).not.toContain("Move to background");
+  expect(html).not.toContain("<dt>Close</dt>");
+  expect(html).toContain("Activity");
+  expect(render({ ...thread, foreground: true })).toContain("Move to background");
+});
 
 test("waiting references never disable Close or create a second dependency status", () => {
   for (const session of [thread, { ...thread, waitingOnAgents: { kind: "agents" as const, threadIds: ["producer"], after: {}, reason: "Result", since: 1 } }]) {

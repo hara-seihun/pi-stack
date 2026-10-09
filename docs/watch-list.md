@@ -32,6 +32,8 @@ Spending money, commitments on the person's behalf, irreversible actions and oth
 
 The scheduler is not a separate agent runtime. Recovery reconnects through the normal thread service. A pending wake contains an immutable spawn request and stable identity; restart or a lost acknowledgement retries that same request instead of creating another check. Unaccepted delivery failures retain that wake and its error, retry no faster than the person's interval, and do not prevent another destination from being delivered. An existing accepted identity can immediately reconcile a lost acknowledgement. Permanent delivery/placement configuration errors stay visible without automatic retry; an explicit check-now retries delivery after the configuration is repaired. Advancing nextDueAt is scheduling custody, not evidence that an item was checked. Native runner open acknowledges SDK readiness, not just its listening socket, and returns the original startup failure. Pooled account unavailability waits with durable backpressure: queued work retains its identity, and accepted work retains its execution and ordinary provider-retry custody. Unknown startup/transport errors retain the existing bounded retry budget. Current watch items and mutation receipts are committed atomically. A stale check prompt confers no additional authority.
 
+The optional [manager heartbeat](../apps/remote/docs/mono.md) uses `thread_wake`, not this scheduler. Its creation, model, destination and context choice are configured independently; replacing watch checks is outside that feature's scope.
+
 ## Configuration and custody
 
 The person registry's `environment` configures the supervisor:

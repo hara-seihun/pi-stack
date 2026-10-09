@@ -9,7 +9,7 @@ import { isStreamSnapshot, streamResource, streamWants } from "../../shared/stre
 import { piFetch } from "./client";
 import { abortable } from "./abortable";
 import { assertNever, requireState } from "../../shared/explicit-state";
-import { stateObject, stateString, stateArray, validateStreamSnapshot } from "../../shared/state-validation";
+import { stateObject, stateString, stateArray, validateBootstrap, validateStreamSnapshot } from "../../shared/state-validation";
 
 export type StreamState = "connecting" | "open" | "offline";
 export interface StreamStatus { state: StreamState; error: string; diagnostic?: string }
@@ -82,7 +82,7 @@ export function streamEventFromFrame(frame: StreamFrame): StreamWireEvent | null
     if (!Object.hasOwn(value, "type") && frame.event) value.type = frame.event;
     const type = requireState(value.type, { hello: true, reconcile: true, "selection-ready": true, notifications: true, events: true, error: true } satisfies Record<StreamWireEvent["type"], true>, "Stream event type");
     switch (type) {
-      case "hello": stateString(value.epoch, "Supervisor epoch"); stateString(value.streamId, "Stream id"); stateObject(value.bootstrap, "Bootstrap"); break;
+      case "hello": stateString(value.epoch, "Supervisor epoch"); stateString(value.streamId, "Stream id"); validateBootstrap(value.bootstrap); break;
       case "reconcile":
         stateString(value.resource, "Reconcile resource"); stateString(value.revision, "Reconcile revision");
         requireState(value.kind, { full: true, patch: true }, "Reconcile kind");

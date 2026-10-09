@@ -89,13 +89,13 @@ export function InspectorSheet({ session, sessions, open, pending, onClose, onOp
   return <Sheet open={open} title={session.name || "Thread"} onClose={onClose} labelledBy="inspector-title" variant="sidebar">
     <div className="inspector-tabs" role="tablist">{tabs.map(item => <button key={item.id} type="button" role="tab" aria-selected={tab === item.id} onClick={() => setTab(item.id)}>{item.label}</button>)}</div>
     {tab === "thread" && <div className="inspector-panel">
-      <div className="inspector-controls">
+      {!session.manager && <div className="inspector-controls">
         {session.archivedAt ? <button type="button" disabled={pending} onClick={onRestore}>Restore</button> : <button type="button" disabled={pending} onClick={onArchive}>Close agent</button>}
         {!session.archivedAt && session.foreground && onBackground && <button type="button" disabled={pending} onClick={onBackground}>Move to background</button>}
-      </div>
+      </div>}
       <dl className="inspector-facts">
         <Row label="Activity"><StatusPill status={status} /></Row>
-        {!session.archivedAt && <Row label="Close">{pending ? "Unavailable while an action is finishing" : "Available"}</Row>}
+        {!session.manager && !session.archivedAt && <Row label="Close">{pending ? "Unavailable while an action is finishing" : "Available"}</Row>}
         {session.state === "running" && <>
           {status.title && <Row label="Phase evidence">{status.title}</Row>}
           <Row label="Phase started">{session.activitySince ? formatTime(new Date(session.activitySince).toISOString()) : "Not reported"}</Row>

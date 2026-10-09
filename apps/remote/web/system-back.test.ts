@@ -91,6 +91,20 @@ test("back closes what is on top first: a dialog, then a menu or editor, then a 
   expect(events).toEqual(["replace:#/chats"]);
 });
 
+test("mono is the app root: system Back closes its panels but never toggles to classic", () => {
+  const actions = { rootChat: "ai:manager", closePanel: () => events.push("closePanel"), closeDetail: () => events.push("closeDetail") };
+  page = { hash: "#/chats/ai/manager" };
+  expect(systemBack(actions, fakeDocument())).toBe(false);
+  expect(events).toEqual([]);
+  page = { hash: "#/chats/ai/manager/inspector" };
+  expect(systemBack(actions, fakeDocument())).toBe(true);
+  expect(events).toEqual(["closePanel"]);
+  events = [];
+  page = { hash: "#/chats/ai/linked" };
+  expect(systemBack(actions, fakeDocument())).toBe(true);
+  expect(events).toEqual(["closeDetail"]);
+});
+
 test("back at the Chats home, or behind a dialog that refuses to cancel, leaves the app to the shell", () => {
   page = { hash: "#/chats" };
   expect(press()).toBe(false);

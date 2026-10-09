@@ -1,7 +1,7 @@
 import { archivedAcrossOwners } from "./archived.js";
 import type { ArchivedThreadsQuery, ArchivedThreadsResult } from "./contracts.js";
 import { validateInspectOptions, validateThreadAwait } from "./contracts.js";
-import type { AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, QuestionEvents, QuestionState, ThreadQuestion, AwaitThreads, ThreadAwaitResult, Result, ThreadApi, ThreadControl, ThreadHistory, ThreadInspection, InspectOptions, ThreadSettlements, PiCommand, ThreadList, ThreadMessage, ThreadPage, ThreadRead, SendThread, SpawnThread, Thread } from "./contracts.js";
+import type { ManagerQuestionCustodyRequest, ManagerQuestionCustodyReceipt, ManagerQuestionsRequest, ManagerQuestionsResponse, AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, QuestionEvents, QuestionState, ThreadQuestion, AwaitThreads, ThreadAwaitResult, Result, ThreadApi, ThreadControl, ThreadHistory, ThreadInspection, InspectOptions, ThreadSettlements, PiCommand, ThreadList, ThreadMessage, ThreadPage, ThreadRead, SendThread, SpawnThread, Thread } from "./contracts.js";
 
 export interface ThreadOwner { id: string; api: ThreadApi }
 const error = (code: "not_found" | "invalid_request" | "conflict", message: string): Result<never> => ({ ok: false, error: { code, message } });
@@ -52,6 +52,18 @@ export class ThreadDirectory implements ThreadApi {
   async questions(threadId: string): Promise<Result<ThreadQuestion[]>> {
     const owner = await this.owner(threadId);
     return owner.ok ? owner.value.api.questions(threadId) : owner;
+  }
+  async managerThread(): Promise<Result<Thread | null>> {
+    const person = this.owners.find(owner => owner.id === "person");
+    return (person ?? this.owners[0]!).api.managerThread();
+  }
+  async managerQuestionCustody(input: ManagerQuestionCustodyRequest): Promise<Result<ManagerQuestionCustodyReceipt>> {
+    const owner = await this.owner(input.threadId);
+    return owner.ok ? owner.value.api.managerQuestionCustody(input) : owner;
+  }
+  async managerQuestions(input: ManagerQuestionsRequest): Promise<Result<ManagerQuestionsResponse>> {
+    const owner = await this.owner(input.threadId);
+    return owner.ok ? owner.value.api.managerQuestions(input) : owner;
   }
   async pendingQuestions(input: import("./contracts.js").PendingQuestionsQuery): Promise<Result<import("./contracts.js").PendingQuestions>> {
     const results = await Promise.all(this.owners.map(owner => owner.api.pendingQuestions(input)));

@@ -1,7 +1,8 @@
-import type { ReactNode } from "react";
+import type { ButtonHTMLAttributes, ReactNode } from "react";
 import type { Layout } from "./layout";
 import { TABS, type Tab } from "./routes";
 import "./shell.css";
+import { useLongPress } from "./long-press";
 import { assertNever } from "../../../shared/explicit-state";
 
 const LABELS: Record<Tab, string> = { chats: "Chats", attention: "Attention", agents: "Agents", files: "Files", machine: "Machine", settings: "Settings" };
@@ -22,30 +23,36 @@ export interface TabBadge { count: number; attention?: boolean }
 
 export interface UpdateTab { visible: boolean; busy: boolean; status: string; onClick(): void }
 
-export function TabNav({ layout, active, badges, onSelect, onPrepare, update }: { layout: Layout; active: Tab; badges: Partial<Record<Tab, TabBadge>>; onSelect(tab: Tab): void; onPrepare?(tab: Tab): void; update?: UpdateTab }) {
+function ChatsTab({ onMono, onPointerDown, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { onMono?(): void }) {
+  const monoPress = useLongPress(onMono);
+  return <button {...props} {...monoPress} onPointerDown={event => { onPointerDown?.(event); monoPress.onPointerDown(event); }} />;
+}
+
+export function TabNav({ layout, active, badges, onSelect, onPrepare, onMono, update }: { layout: Layout; active: Tab; badges: Partial<Record<Tab, TabBadge>>; onSelect(tab: Tab): void; onPrepare?(tab: Tab): void; onMono?(): void; update?: UpdateTab }) {
   return <nav className={layout === "phone" ? "tabbar" : "rail"} aria-label="Sections">
     {TABS.map(tab => {
       const badge = badges[tab];
       const offeredUpdate = tab === "settings" && update?.visible;
       const showBadge = active !== tab && badge && badge.count > 0;
       const label = LABELS[tab];
-      return <button key={tab} type="button" className={`tab${offeredUpdate ? " tab-update" : ""}`} aria-current={active === tab ? "page" : undefined} aria-label={showBadge ? `${label}, ${badge.count}` : label} title={offeredUpdate ? `${label}: ${update.status}` : label} onPointerDown={() => onPrepare?.(tab)} onFocus={() => onPrepare?.(tab)} onClick={() => onSelect(tab)}>
+      const Button = tab === "chats" ? ChatsTab : "button";
+      return <Button {...(tab === "chats" ? { onMono } : {})} key={tab} type="button" className={`tab${offeredUpdate ? " tab-update" : ""}`} aria-current={active === tab ? "page" : undefined} aria-label={showBadge ? `${label}, ${badge.count}` : label} title={tab === "chats" && onMono ? "Chats · Long-press for mono view" : offeredUpdate ? `${label}: ${update.status}` : label} onPointerDown={() => onPrepare?.(tab)} onFocus={() => onPrepare?.(tab)} onClick={() => onSelect(tab)}>
         <span className="tab-icon"><TabIcon tab={tab} />{showBadge && <span className={`tab-badge${badge.attention ? " attention" : ""}`}>{badge.count > 99 ? "99+" : badge.count}</span>}</span>
         <span className={offeredUpdate ? "tab-update-label" : "tab-label"}>{offeredUpdate ? "Update" : label}</span>
-      </button>;
+      </Button>;
     })}
   </nav>;
 }
 
 /** Arranges nav, list and detail for the current layout. On the phone only
  * one of list/detail is visible: the detail when `showDetail` is true. */
-export function Shell({ layout, nav, list, detail, showDetail, showTabs = !showDetail, overlays }: { layout: Layout; nav: ReactNode; list: ReactNode | null; detail: ReactNode; showDetail: boolean; /** Phone only: keep the tab bar under a top-level detail such as Machine. */ showTabs?: boolean; overlays?: ReactNode }) {
-  const single = list === null;
-  return <div id="app" className={`shell layout-${layout}${showDetail ? " detail" : " list"}${single ? " single" : ""}`}>
-    {layout !== "phone" && nav}
-    {!single && <div className="pane pane-list" hidden={layout === "phone" && showDetail}>{list}</div>}
-    <div className="pane pane-detail" hidden={layout === "phone" && !showDetail}>{detail}</div>
-    {layout === "phone" && showTabs && nav}
+export function Shell({ layout, nav, list, detail, showDetail, showTabs = !showDetail, mono = false, overlays }: { layout: Layout; nav: ReactNode; list: ReactNode | null; detail: ReactNode; showDetail: boolean; mono?: boolean; /** Phone only: keep the tab bar under a top-level detail such as Machine. */ showTabs?: boolean; overlays?: ReactNode }) {
+  const single = mono || list === null;
+  return <div id="app" className={`shell layout-${layout}${showDetail ? " detail" : " list"}${single ? " single" : ""}${mono ? " mono" : ""}`}>
+    {!mono && layout !== "phone" && nav}
+    {!mono && !single && <div className="pane pane-list" hidden={layout === "phone" && showDetail}>{list}</div>}
+    <div className="pane pane-detail" hidden={!mono && layout === "phone" && !showDetail}>{detail}</div>
+    {!mono && layout === "phone" && showTabs && nav}
     {overlays}
   </div>;
 }

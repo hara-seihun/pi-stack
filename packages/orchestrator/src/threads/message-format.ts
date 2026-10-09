@@ -30,12 +30,13 @@ export function agentMessagePresentation(text: string): AgentMessagePresentation
     || !isThreadId(metadata.senderThreadId)) return null;
   if (metadata.senderName !== undefined && (typeof metadata.senderName !== "string" || !metadata.senderName.trim())) return null;
   const keys = Object.keys(metadata);
-  const notification = keys.every(key => key === "senderThreadId" || key === "senderName");
-  if (!notification && (metadata.source !== "explicit"
+  const historicalNotification = keys.every(key => key === "senderThreadId" || key === "senderName");
+  if (!historicalNotification && (metadata.source !== "explicit" && metadata.source !== "notification"
     || !isThreadId(metadata.recipientThreadId)
     || typeof metadata.messageId !== "string" || !metadata.messageId
     || keys.some(key => !["senderThreadId", "senderName", "recipientThreadId", "messageId", "source", "replyTo"].includes(key))
     || metadata.replyTo !== undefined && (typeof metadata.replyTo !== "string" || !metadata.replyTo))) return null;
+  const notification = historicalNotification || metadata.source === "notification";
   const body = text.slice(metadataEnd + 2, bodyEnd);
   const tail = text.slice(bodyEnd + "\n</agent_message>".length);
   return {
@@ -88,7 +89,7 @@ export function formatThreadMessage(message: ThreadMessage, text: string): strin
   if (!message.senderId && message.source !== "notification") return text;
   text = readableNotificationText(message, text);
   const sender = { senderThreadId: message.senderId, ...(message.senderName ? { senderName: message.senderName } : {}) };
-  const metadata = message.source === "notification" ? sender : {
+  const metadata = {
     ...sender,
     recipientThreadId: message.threadId,
     messageId: message.id,

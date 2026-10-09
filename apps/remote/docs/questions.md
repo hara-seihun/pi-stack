@@ -47,6 +47,10 @@ For example:
 }
 ```
 
+## Manager routing
+
+When the person's [manager](mono.md) exists, questions from their other threads are held durably for it. Held questions do not replace the original composer or appear in Attention. `manager_questions_list` lists holds; `manager_questions_answer` supplies an explicitly manager-attributed answer through the existing correlated delivery; `manager_questions_forward` presents one rewritten question in the manager chat covering one or several originals. The forwarded originals also become answerable from their classic conversations. The first accepted answer fans out and settles the group idempotently. After two hours an unhandled hold surfaces directly to the person, including after restart. The manager's own questions go straight to them.
+
 ## Answering
 
 Pending questions replace the normal message composer in an AI conversation. The next question appears directly below the transcript, with a quiet remaining count, formatted answer choices, a free-text answer and **Dismiss question**. Personal and room composers share the same question presentation: Markdown paragraphs, emphasis, lists, links, tables and code render in both the question and suggested answers. Choices appear before the free-text field; the recommendation is a separate quiet label. Attention cards and question history use the same rich text, with a separate original-conversation link so Markdown links remain usable. Answer or dismiss each question in creation order before ordinary messaging returns. The unsent message, attachments and reply draft are preserved. Answering one does not consume the other questions in its batch. **Cancel work** remains available in the header while the agent is running.

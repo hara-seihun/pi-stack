@@ -15,6 +15,51 @@ const failure = (code, path, message, extra = {}) => ({ ok: false, error: { code
 const stamp = stat => `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
 const sameFile = (a, b) => a.dev === b.dev && a.ino === b.ino;
 const nonempty = value => typeof value === "string" && value.length > 0 && value.length <= 4096;
+const managerWakeInput = Symbol("managerWakeInput");
+const humanFacingText = Symbol("humanFacingText");
+const AGENT_MESSAGE_PREFIX = "<agent_message>\nThis is an agent-to-agent message, not a user message.\n";
+
+function isManagerWakeInput(content) {
+  const text = typeof content === "string" ? content : (content ?? [])
+    .filter(block => block.type === "text" && typeof block.text === "string").map(block => block.text).join("\n");
+  if (!text.startsWith(AGENT_MESSAGE_PREFIX)) return false;
+  const metadataEnd = text.indexOf("\n\n", AGENT_MESSAGE_PREFIX.length);
+  const bodyEnd = text.lastIndexOf("\n</agent_message>");
+  if (metadataEnd < 0 || bodyEnd < metadataEnd + 2) return false;
+  let metadata;
+  try { metadata = JSON.parse(text.slice(AGENT_MESSAGE_PREFIX.length, metadataEnd)); }
+  catch { return false; }
+  return metadata !== null && typeof metadata === "object" && !Array.isArray(metadata)
+    && (metadata.source === "explicit" || metadata.source === "notification")
+    && nonempty(metadata.senderThreadId) && nonempty(metadata.recipientThreadId)
+    && typeof metadata.messageId === "string"
+    && ["thread-wake:", "manager-questions:", "manager-custody:"].some(prefix => metadata.messageId.startsWith(prefix));
+}
+
+function annotateManagerWakeTurns(records) {
+  let wakeStart = -1;
+  let hasText = false;
+  const annotated = [...records];
+  const finish = end => {
+    if (wakeStart < 0) return;
+    for (let index = wakeStart; index < end; index++) {
+      const record = records[index];
+      annotated[index] = Object.freeze({ ...record, monoVisibility: index === wakeStart || !hasText ? "hidden" : "visible" });
+    }
+  };
+  for (let index = 0; index < records.length; index++) {
+    const record = records[index];
+    if (record.role === "user") {
+      finish(index);
+      wakeStart = record[managerWakeInput] ? index : -1;
+      hasText = false;
+    } else if (wakeStart >= 0 && record[humanFacingText]) {
+      hasText = true;
+    }
+  }
+  finish(records.length);
+  return annotated;
+}
 
 function withSource(path, use) {
   let fd, result;
@@ -95,7 +140,10 @@ function recordMetadata(entry, raw, path, line, offset) {
     blocks: Object.freeze(blocks), toolCallIds: Object.freeze(blocks.filter(block => block.type === "toolCall").map(block => block.toolCallId)),
     toolResultId: message.role === "toolResult" ? message.toolCallId ?? null : null, displayedItemCount,
     ...(typeof message.rootConsent === "boolean" ? { rootConsent: message.rootConsent } : {}),
-    ...(typeof message.questionId === "string" ? { questionId: message.questionId } : {}) }));
+    ...(typeof message.questionId === "string" ? { questionId: message.questionId } : {}),
+    ...(message.role === "user" ? { [managerWakeInput]: isManagerWakeInput(message.content) } : {}),
+    ...(message.role === "assistant" ? { [humanFacingText]: typeof message.content === "string" ? Boolean(message.content.trim())
+      : (message.content ?? []).some(block => block.type === "text" && typeof block.text === "string" && Boolean(block.text.trim())) } : {}) }));
 }
 
 function metadataBytes(record) {
@@ -165,7 +213,7 @@ function hashRange(fd, path, hash, start, end) {
   return ok(hash);
 }
 
-function branchRecords(cache, path, leafId) {
+function branchRecords(cache, path, leafId, managerWakeVisibility) {
   const byId = cache.byId;
   let leaf = leafId === undefined ? cache.records.at(-1) : byId.get(leafId);
   if (leafId !== undefined && !leaf) return failure("invalid-branch", path, `Session entry not found: ${leafId}`, { entryId: leafId });
@@ -177,7 +225,8 @@ function branchRecords(cache, path, leafId) {
     leaf = byId.get(leaf.parentId);
   }
   chain.reverse();
-  const messages = chain.filter(record => record.type === "message" || record.type === "custom_message");
+  const entries = managerWakeVisibility ? annotateManagerWakeTurns(chain) : chain;
+  const messages = entries.filter(record => record.type === "message" || record.type === "custom_message");
   const results = new Map(messages.filter(record => record.role === "toolResult").map(record => [record.toolResultId, record]));
   const paired = new Set();
   const displayed = messages.map(record => {
@@ -188,7 +237,7 @@ function branchRecords(cache, path, leafId) {
   });
   const messageById = new Map(displayed.map(record => [record.id, record]));
   return ok({ leafId: chain.at(-1)?.id ?? null, messages: Object.freeze(displayed),
-    entries: Object.freeze(chain.map(record => messageById.get(record.id) ?? record)) });
+    entries: Object.freeze(entries.map(record => messageById.get(record.id) ?? record)) });
 }
 
 function readIndexedRecord(source, descriptors, descriptor) {
@@ -220,11 +269,12 @@ function trimIndexCache() {
 
 function snapshotBytes(branch) {
   return 1024 + branch.entries.length * 96 + branch.messages.length * 16
-    + branch.messages.filter(record => record.pairedToolResult).length * 256;
+    + branch.messages.filter(record => record.pairedToolResult).length * 256
+    + branch.entries.filter(record => record.monoVisibility !== undefined).length * 512;
 }
 
 /** Native JSONL remains authoritative. The cache retains offsets and metadata, never message bodies. */
-export function indexedThreadHistory(path, leafId) {
+export function indexedThreadHistory(path, leafId, options) {
   path = resolve(path);
   return withSource(path, fd => {
     const stat = fstatSync(fd, { bigint: true });
@@ -264,13 +314,15 @@ export function indexedThreadHistory(path, leafId) {
     } else {
       indexes.delete(path); indexes.set(path, cache);
     }
-    const known = cache.snapshots.get(leafId);
+    const managerWakeVisibility = options?.managerWakeVisibility === true;
+    const snapshotKey = JSON.stringify([leafId ?? null, managerWakeVisibility]);
+    const known = cache.snapshots.get(snapshotKey);
     if (known) {
       if (stamp(statSync(path, { bigint: true })) !== revision) return failure("stale-source", path, "Session changed during indexing");
-      cache.snapshots.delete(leafId); cache.snapshots.set(leafId, known);
+      cache.snapshots.delete(snapshotKey); cache.snapshots.set(snapshotKey, known);
       return ok(known.value);
     }
-    const branch = branchRecords(cache, path, leafId);
+    const branch = branchRecords(cache, path, leafId, managerWakeVisibility);
     if (!branch.ok) return branch;
     if (stamp(statSync(path, { bigint: true })) !== revision) return failure("stale-source", path, "Session changed during indexing");
     const bytes = snapshotBytes(branch.value);
@@ -286,7 +338,7 @@ export function indexedThreadHistory(path, leafId) {
     const descriptors = new Set(branch.value.entries);
     const value = Object.freeze({ source, entries: branch.value.entries, messages: branch.value.messages,
       read: descriptor => readIndexedRecord(source, descriptors, descriptor) });
-    cache.snapshots.set(leafId, { value, bytes });
+    cache.snapshots.set(snapshotKey, { value, bytes });
     cache.metadataBytes += bytes; indexedMetadataBytes += bytes;
     trimIndexCache();
     return ok(value);

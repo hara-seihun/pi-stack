@@ -13,7 +13,7 @@ import type { UiCase } from "./contract";
 import { configureFixtureTransport, type FixtureRoute } from "./transport";
 
 const long = "Synthetic delivery failed — 日本語 العربية 🌿. ".repeat(12);
-export const appFixtureBootstrap: Bootstrap = { environmentId: "synthetic", home: "/synthetic", threadStarts: [{ id: "personal", label: "Personal", icon: "personal", models: [{ id: "openai/gpt-6.1-sol", label: "Sol", icon: "openai" }] }], speech: null };
+export const appFixtureBootstrap: Bootstrap = { managerOwnerEnvironmentId: "synthetic", manager: { view: "classic", managerThreadId: null, hintSeen: false }, environmentId: "synthetic", home: "/synthetic", threadStarts: [{ id: "personal", label: "Personal", icon: "personal", models: [{ id: "openai/gpt-6.1-sol", label: "Sol", icon: "openai" }] }], speech: null };
 export const appFixtureSettings: SettingsSnapshot = { administrator: false, entries: SETTINGS.filter(definition => definition.scope === "person").map(definition => ({ definition, editable: definition.kind !== "owner", value: definition.id === "person.autoCollapse" ? { state: "set", value: true } : { state: "unset" } })) };
 const bootstrap = appFixtureBootstrap;
 export const appFixtureSettingsRoutes: readonly FixtureRoute[] = [

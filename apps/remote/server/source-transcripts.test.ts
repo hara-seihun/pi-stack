@@ -63,6 +63,21 @@ test("cold pages preserve global item offsets and tool pairing outside the selec
   expect(header.items.map(item => [item.seq, item.kind])).toEqual([[0, "system"], [1, "tool"]]);
 });
 
+test("owner quiet-turn visibility survives narrow pages without deleting the native record", async () => {
+  const record: SourceRecord = { seq: 0, count: 2, entryId: "quiet", monoVisibility: "hidden", message: { role: "assistant", content: [
+    { type: "thinking", thinking: "Check current evidence" }, { type: "toolCall", id: "quiet-call", name: "bash", arguments: { command: "pwd" } },
+  ] }, results: [] };
+  const source = fixture([record]);
+  const transcripts = new SourceTranscripts(database(), source.read, project, imageUrl);
+  const narrow = value(await transcripts.page("manager", undefined, 1));
+  expect(narrow.total).toBe(2);
+  expect(narrow.items).toHaveLength(1);
+  expect(narrow.items[0]!.monoVisibility).toBe("hidden");
+  expect(value(await transcripts.body("manager", narrow.items[0]!.id))).toContain("pwd");
+  record.monoVisibility = "visible";
+  expect(value(await transcripts.page("manager", undefined, 1)).items[0]!.monoVisibility).toBe("visible");
+});
+
 test("large heads are bounded while exact bodies are reread lazily; only locators survive database restart", async () => {
   const dir = mkdtempSync(join(tmpdir(), "source-transcripts-")); dirs.push(dir);
   const path = join(dir, "transcripts.sqlite");
