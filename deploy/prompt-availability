@@ -22,7 +22,9 @@ def inspect_owner(data_dir, candidate, now_ms, restore_after_ms):
     receipt = json.loads(receipt_path.read_text())
     if (receipt.get('version') != 1 or receipt.get('protocol') != 'native-history-maintenance-v1'
             or receipt.get('uid') != os.getuid() or receipt.get('dataDir') != str(data)
-            or receipt.get('candidate') != candidate):
+            or receipt.get('candidate') != candidate
+            or not isinstance(receipt.get('legacySource'), str)
+            or not re.fullmatch('[0-9a-f]{40}', receipt['legacySource'])):
         raise ValueError('Maintenance owner/source identity mismatch')
     phase = receipt.get('phase')
     if phase in ('restored', 'closing', 'owners-closed', 'migration-pending', 'migrated'):
@@ -60,9 +62,9 @@ def run():
         raise ValueError('usage: prompt-availability HOST_FILE | --inspect-owner DATA_DIR CANDIDATE NOW_MS RESTORE_AFTER_MS')
     host_file = sys.argv[1]
     host = json.loads(Path(host_file).read_text())
-    owner = host.get('nativeHistoryAvailabilityOwner')
-    if owner is None:
+    if 'nativeHistoryAvailabilityOwner' not in host:
         return
+    owner = host['nativeHistoryAvailabilityOwner']
     if (not isinstance(owner, dict) or not isinstance(owner.get('user'), str)
             or not re.fullmatch('[a-z_][a-z0-9_-]{0,31}', owner['user'])
             or not isinstance(owner.get('unit'), str) or not re.fullmatch('[a-zA-Z0-9_.@-]+\\.service', owner['unit'])
