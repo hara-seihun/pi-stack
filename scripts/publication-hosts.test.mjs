@@ -261,8 +261,22 @@ function fixture(t, waitingHost, mode) {
   const events = () => readFileSync(join(root, "events.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
   const world = () => JSON.parse(readFileSync(worldPath, "utf8"));
   const update = change => { const value = world(); change(value); writeFileSync(worldPath, JSON.stringify(value)); };
-  return { root, run, events, world, update, revision, newer, baseline, git, requestPath };
+  return { root, run, events, world, update, revision, newer, baseline, git, requestPath, env };
 }
+
+test('one repair-held native boundary prevents automatic rollback of its still-owned peer', t => {
+  const f = fixture(t, 'gmktec', 'native-history');
+  const script = `import {recoveryNeeded,outstandingHostCustody} from ${JSON.stringify(pathToFileURL(publication).href)};
+    const request={status:'failed',nativeHistory:{hosts:{gmktec:{state:'repair-required'},converge:{state:'restore-required'}}}};
+    console.log(JSON.stringify({automatic:recoveryNeeded(request),custody:outstandingHostCustody(request)}));
+    request.nativeHistory.hosts.gmktec.state='restored';
+    console.log(JSON.stringify({automatic:recoveryNeeded(request),custody:outstandingHostCustody(request)}));`;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], { env: f.env, encoding: 'utf8', timeout: 3000 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.stdout.trim().split('\n').map(line => JSON.parse(line)), [
+    {automatic:false,custody:true}, {automatic:true,custody:true},
+  ]);
+});
 
 describe("publication owner host delivery", { concurrency: 4 }, () => {
 for (const waitingHost of hostIds) for (const mode of ["live-meeting", "native-source", "native-history", "host-lock"]) {

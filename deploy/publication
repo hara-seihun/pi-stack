@@ -1161,6 +1161,7 @@ function statLogSize(path) {
 }
 
 function restoreNativeHistory(request, target, explicit = false) {
+  if (!explicit && nativeHistoryRepairHeld(request)) return;
   const host = request.nativeHistory?.hosts?.[target.id];
   if (!custodyNeedsRestore(host) && !(explicit && host?.state === "repair-required")) return;
   nativeHistoryBoundaryTarget({ ...request, integrationSha: host.integrationSha }, target, "restore");
@@ -1173,7 +1174,7 @@ export function recoverNativeHistoryCustody(request, hostId) {
   if (request.status !== "failed") throw new Error("Only a failed request can explicitly recover native history custody");
   const target = targets.find(target => target.id === hostId);
   if (!target) throw new Error(`Unknown native history recovery host: ${hostId}`);
-  if (request.nativeHistory?.hosts?.[target.id]?.state !== "repair-required") {
+  if (!custodyNeedsRestore(request.nativeHistory?.hosts?.[target.id]) && request.nativeHistory?.hosts?.[target.id]?.state !== "repair-required") {
     throw new Error(`No repair-held native history custody remains on ${hostId}`);
   }
   const recovery = { at: new Date().toISOString(), hosts: [], status: "running" };
@@ -1682,12 +1683,16 @@ export function outstandingHostCustody(request) {
     || Object.values(request.nativeHistory?.hosts ?? {}).some(host => custodyNeedsRestore(host) || host.state === "repair-required");
 }
 
-function recoveryNeeded(request) {
+export function nativeHistoryRepairHeld(request) {
+  return Object.values(request.nativeHistory?.hosts ?? {}).some(host => host.state === "repair-required");
+}
+
+export function recoveryNeeded(request) {
   return Object.values(request.bootstrap?.hosts ?? {}).some(custodyNeedsRestore)
     || Object.values(request.reservations ?? {}).some(custodyNeedsRestore)
     || ["failed", "published"].includes(request.status) && (
       Object.values(request.maintenance?.hosts ?? {}).some(host => !["restored", "released"].includes(host.state))
-      || Object.values(request.nativeHistory?.hosts ?? {}).some(custodyNeedsRestore));
+      || !nativeHistoryRepairHeld(request) && Object.values(request.nativeHistory?.hosts ?? {}).some(custodyNeedsRestore));
 }
 
 function restoreCustody(request, hostKey, remoteHost) {
