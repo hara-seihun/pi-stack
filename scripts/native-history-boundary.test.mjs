@@ -154,11 +154,11 @@ test('old owner drains existing work/output, closes before private migration, an
   supervisor.prepare("INSERT INTO message_facts VALUES('accepted',?,'retained thinking',NULL)").run(key); supervisor.close();
   const fakeApi = join(root, 'api.mjs'), bridge = resolve('deploy/native-history-bridge.mjs'), transportModule = join(root, 'transport.mjs');
   writeFileSync(transportModule, 'export const runnerSocketDirectory = data => data;');
-  writeFileSync(fakeApi, `import {DatabaseSync} from 'node:sqlite'; export class ThreadService {
+  writeFileSync(fakeApi, `import {DatabaseSync} from 'node:sqlite'; import {existsSync} from 'node:fs'; export class ThreadService {
     constructor(path){this.options={databasePath:path};this.db=new DatabaseSync(path);this.runtimes=new Map();this.operations=new Map();this.opening=new Map();this.halts=new Map();this.dependencyOperations=new Map();this.directory={list:async({id})=>({ok:true,value:{threads:id==='remote-parent'?[{id,createdAt:0}]:id==='remote-child'?[{id,createdAt:Date.now()+100000,parentId:'remote-parent'}]:[]}})};}
     sql(sql){return this.db.prepare(sql)} async start(){return {ok:true}}
     async attach(id){const runtime={waiters:new Map(),busy:true};this.runtimes.set(id,runtime);return runtime}
-    async rpc(){return {isStreaming:false,isCompacting:false,localTools:0,pendingCommandCount:0}}
+    async rpc(){if(existsSync(this.options.databasePath+'.race')&&!this.raced){this.raced=true;console.log('STATUS_WAITING');await new Promise(resolve=>setTimeout(resolve,100));}return {isStreaming:false,isCompacting:false,localTools:0,pendingCommandCount:0}}
     busy(state){return state.isStreaming||state.isCompacting||state.localTools>0||state.pendingCommandCount>0} adoptReference(){} wake(){}
     async send(){return {ok:true}} async spawn(){return {ok:true}} deliverScheduledWakes(){}
     async close(){this.db.exec("UPDATE thread SET metadata=json_remove(metadata,'$.runnerReference')");this.db.close();this.closed=true;return {ok:true}}
@@ -187,8 +187,15 @@ test('old owner drains existing work/output, closes before private migration, an
   assert.equal(unacknowledged.ready, false); assert.equal(unacknowledged.owners[0].unacknowledgedSpools, 1);
   truncateSync(spool, 0); // The fixture's OLD decoder has now ACKed the retained output.
   const ready = await control(socket, 'GET', '/status'); assert.equal(ready.ready, true);
+  writeFileSync(threadPath+'.race', 'race');
+  const waiting = once(child.stdout, 'data');
+  const concurrentStatus = control(socket, 'GET', '/status').catch(error => ({ error: String(error) }));
+  const [marker] = await waiting; assert.match(marker.toString(), /STATUS_WAITING/);
   const exit = once(child, 'exit');
-  await control(socket, 'POST', '/close').catch(() => {});
+  const retiring = control(socket, 'POST', '/close').catch(() => {});
+  const observed = await concurrentStatus;
+  assert.equal(observed.ready, true, JSON.stringify(observed));
+  await retiring;
   const [code] = await exit; assert.equal(code, 75, errors);
   const preserved = readFileSync(native, 'utf8'); assert.ok(preserved.includes(receipt)); assert.match(preserved, /retained thinking/);
   const readiness = JSON.parse(readFileSync(join(root, 'native-history-readiness.json'), 'utf8'));
@@ -197,6 +204,46 @@ test('old owner drains existing work/output, closes before private migration, an
   const snapshotFiles = new DatabaseSync(join(root, 'supervisor.sqlite3'));
   assert.equal(snapshotFiles.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name='session_contexts'").get().n, 0); snapshotFiles.close();
 }, { timeout: 5000 });
+test('normal fleet shutdown retires bridge control without inventing producer closure or keeping closed databases alive', async t => {
+  const root = directory(t), threadPath = join(root, 'threads.sqlite3');
+  database(threadPath).db.close();
+  const ledgerPath = join(root, 'ledger.sqlite3'), ledger = new DatabaseSync(ledgerPath);
+  ledger.exec('CREATE TABLE control(key TEXT PRIMARY KEY,value TEXT); CREATE TABLE run(id TEXT PRIMARY KEY,state TEXT,worker_unit TEXT);'); ledger.close();
+  writeFileSync(join(root, 'package.json'), '{"type":"module"}');
+  const oldApi = join(root, 'api.js'), transportModule = join(root, 'transport.mjs');
+  writeFileSync(transportModule, 'export const runnerSocketDirectory = data => data;');
+  writeFileSync(oldApi, `import {DatabaseSync} from 'node:sqlite'; export class ThreadService {
+    constructor(path){this.options={databasePath:path};this.db=new DatabaseSync(path);this.closed=false;this.runtimes=new Map();this.operations=new Map();this.opening=new Map();this.halts=new Map();this.dependencyOperations=new Map();}
+    sql(sql){return this.db.prepare(sql)} async start(){return {ok:true}} close(){throw new Error('Shutdown must preserve old producer custody, not close native sessions')}
+    attach(){} send(){} spawn(){} deliverScheduledWakes(){} rpc(){} busy(){} adoptReference(){} wake(){}
+    async detach(){this.closed=true;this.db.close();return {ok:true}}
+  }`);
+  writeFileSync(join(root, 'daemon.js'), `import {once} from 'node:events';import {ThreadService} from './api.js'; export class Daemon {
+    constructor(path){this.threads=new ThreadService(path);this.completionPool={size:0};this.reconciling=false;} loadManifest(){} fillCapacity(){}
+    async start(){const resume=once(process,'SIGUSR1');console.log('CONSTRUCTED');await resume;await this.threads.start();console.log('STARTED');await once(process,'SIGTERM');await this.threads.detach();}
+  }`);
+  const harness = join(root, 'shutdown.mjs');
+  writeFileSync(harness, `import {installLegacyMaintenance} from ${JSON.stringify(pathToFileURL(resolve('deploy/native-history-bridge.mjs')).href)};import {Daemon} from './daemon.js';
+    await installLegacyMaintenance(${JSON.stringify({ candidate, legacySource: old, dataDir: root, oldApi, transportModule, mode: 'fleet', ledgerPath, node: process.execPath })});
+    await new Daemon(${JSON.stringify(threadPath)}).start();`);
+  const child = spawn(process.execPath, [harness], { stdio: ['ignore','pipe','pipe'] });
+  let errors = ''; child.stderr.on('data', chunk => errors += chunk);
+  t.after(() => { if (child.exitCode === null) child.kill('SIGKILL'); });
+  await once(child.stdout, 'data');
+  const awaiting = await control(bridgeSocket(process.getuid(), root), 'GET', '/status');
+  assert.equal(awaiting.ready, false); assert.match(awaiting.reason, /awaiting startup/);
+  const started = once(child.stdout, 'data'); child.kill('SIGUSR1'); await started;
+  const observed = await control(bridgeSocket(process.getuid(), root), 'GET', '/status');
+  assert.equal(observed.ready, true, JSON.stringify(observed));
+  const exited = once(child, 'exit');
+  child.kill('SIGTERM');
+  const deadline = setTimeout(() => child.kill('SIGKILL'), 1500);
+  const [code] = await exited; clearTimeout(deadline);
+  assert.equal(code, 0, errors);
+  const receipt = JSON.parse(readFileSync(join(root, 'native-history-maintenance.json'), 'utf8'));
+  assert.equal(receipt.phase, 'draining'); assert.equal(receipt.controllerStopped, true); assert.equal(receipt.ready, false);
+  assert.equal(receipt.databases, undefined); assert.equal(receipt.error, undefined);
+});
 test('fleet adoption fences fresh completions while old accepted provider work settles, without cancellation', async t => {
   const root = directory(t), path = join(root, 'ledger.sqlite3'), db = new DatabaseSync(path);
   db.exec(`CREATE TABLE control(key TEXT PRIMARY KEY,value TEXT); CREATE TABLE run(id TEXT PRIMARY KEY,state TEXT,worker_unit TEXT);
