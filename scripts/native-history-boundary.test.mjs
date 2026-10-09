@@ -41,8 +41,26 @@ test('history observation never fences new roots, external input, answers or due
   service.sql("INSERT INTO thread_work VALUES('wake','accepted','accepted','queued')").run();
   assert.equal(service.sql("SELECT count(*) AS n FROM sqlite_master WHERE type='trigger'").get().n, 0);
   assert.throws(() => installObservation(service, { candidate: 'c'.repeat(40), legacySource: old }), /Another publication/);
-  removeFence(service);
+  removeFence(service, { candidate, legacySource: old });
   service.sql("INSERT INTO thread_work VALUES('after','accepted',NULL,'queued')").run();
+  service.db.close();
+});
+test('restoration refuses another application cohort and preserves accepted work', t => {
+  const root = directory(t), service = database(join(root, 'threads.sqlite3'));
+  const identity = { candidate, legacySource: old };
+  installObservation(service, identity);
+  service.sql("INSERT INTO thread_work VALUES('accepted-work','accepted',NULL,'queued')").run();
+  service.db.exec("CREATE TRIGGER pi_history_admission BEFORE INSERT ON thread_work BEGIN SELECT RAISE(ABORT,'historic intake closed'); END");
+  assert.throws(() => removeFence(service), /immutable ownership identity/);
+  assert.throws(() => removeFence(service, { candidate: 'c'.repeat(40), legacySource: old }), /Another publication/);
+  assert.equal(service.sql("SELECT count(*) AS n FROM sqlite_master WHERE name='pi_history_admission'").get().n, 1);
+  assert.equal(service.sql("SELECT status FROM thread_work WHERE id='accepted-work'").get().status, 'queued');
+  assert.deepEqual(removeFence(service, identity), { ownership: 'restored' });
+  assert.deepEqual(removeFence(service, identity), { ownership: 'unacquired' });
+  service.sql("INSERT INTO thread_work VALUES('new-work','accepted',NULL,'queued')").run();
+  service.db.exec("CREATE TABLE pi_history_cohort(thread_id TEXT PRIMARY KEY)");
+  assert.throws(() => removeFence(service, identity), /no restoration identity/);
+  assert.equal(service.sql('SELECT count(*) AS n FROM thread_work').get().n, 2);
   service.db.close();
 });
 test('transient wrappers pin old modules and source identity without rewriting the immutable selected release', t => {
@@ -218,7 +236,7 @@ test('old owner drains existing work/output, closes before private migration, an
   const snapshotFiles = new DatabaseSync(join(root, 'supervisor.sqlite3'));
   assert.equal(snapshotFiles.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name='session_contexts'").get().n, 0); snapshotFiles.close();
 }, { timeout: 5000 });
-for (const retainedHandle of [false, true]) test(`normal fleet shutdown does not retain the process; a genuine retained handle keeps restoration available (${retainedHandle})`, async t => {
+for (const [retainedHandle, startupFailure] of [[false, false], [true, false], [true, true]]) test(`fleet lifetime preserves restoration without masking startup failure (retained=${retainedHandle}, failure=${startupFailure})`, async t => {
   const root = directory(t), threadPath = join(root, 'threads.sqlite3');
   database(threadPath).db.close();
   const ledgerPath = join(root, 'ledger.sqlite3'), ledger = new DatabaseSync(ledgerPath);
@@ -234,13 +252,14 @@ for (const retainedHandle of [false, true]) test(`normal fleet shutdown does not
   }`);
   writeFileSync(join(root, 'daemon.js'), `import {once} from 'node:events';import {ThreadService} from './api.js'; export class Daemon {
     constructor(path){this.threads=new ThreadService(path);this.completionPool={size:0};this.reconciling=false;} loadManifest(){} fillCapacity(){} reconcile(){}
-    async start(){const resume=once(process,'SIGUSR1');console.log('CONSTRUCTED');await resume;await this.threads.start();console.log('STARTED');await once(process,'SIGTERM');await this.threads.detach();}
+    async start(){const resume=once(process,'SIGUSR1');console.log('CONSTRUCTED');await resume;${startupFailure ? "throw new Error('Another publication owns the native history observation');" : "await this.threads.start();console.log('STARTED');await once(process,'SIGTERM');await this.threads.detach();"}}
   }`);
   const harness = join(root, 'shutdown.mjs');
   writeFileSync(harness, `import {installLegacyMaintenance} from ${JSON.stringify(pathToFileURL(resolve('deploy/native-history-bridge.mjs')).href)};import {Daemon} from './daemon.js';
     ${retainedHandle ? "const retained=setInterval(()=>{},1000);process.once('SIGUSR2',()=>clearInterval(retained));" : ''}
     await installLegacyMaintenance(${JSON.stringify({ candidate, legacySource: old, dataDir: root, oldApi, transportModule, mode: 'fleet', ledgerPath, node: process.execPath })});
-    await new Daemon(${JSON.stringify(threadPath)}).start();console.log('SHUTDOWN');`);
+    try {await new Daemon(${JSON.stringify(threadPath)}).start();console.log('SHUTDOWN');}
+    catch(error){${startupFailure ? "console.log('STARTUP_FAILED');" : "throw error;"}}`);
   const child = spawn(process.execPath, [harness], { stdio: ['ignore','pipe','pipe'] });
   let errors = ''; child.stderr.on('data', chunk => errors += chunk);
   t.after(() => { if (child.exitCode === null) child.kill('SIGKILL'); });
@@ -249,6 +268,18 @@ for (const retainedHandle of [false, true]) test(`normal fleet shutdown does not
   assert.equal(awaiting.ready, false); assert.match(awaiting.reason, /awaiting startup/);
   const started = once(child.stdout, 'data'); child.kill('SIGUSR1'); await started;
   const observed = await control(bridgeSocket(process.getuid(), root), 'GET', '/status');
+  if (startupFailure) {
+    assert.equal(observed.ready, false);
+    assert.equal(observed.controllerStopped, true);
+    assert.match(observed.error, /Legacy daemon startup failed: Error: Another publication owns/);
+    const restored = await control(bridgeSocket(process.getuid(), root), 'POST', '/restore');
+    assert.equal(restored.phase, 'restored'); assert.equal(restored.error, undefined);
+    const exited = once(child, 'exit'); child.kill('SIGUSR2');
+    const deadline = setTimeout(() => child.kill('SIGKILL'), 1500);
+    const [code] = await exited; clearTimeout(deadline);
+    assert.equal(code, 0, errors);
+    return;
+  }
   assert.equal(observed.ready, true, JSON.stringify(observed));
   const exited = once(child, 'exit'), shutdown = once(child.stdout, 'data');
   child.kill('SIGTERM');

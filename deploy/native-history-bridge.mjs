@@ -87,8 +87,27 @@ export function installObservation(service, identity) {
     throw error;
   }
 }
-export function removeFence(service) {
-  service.db.exec('DROP TRIGGER IF EXISTS pi_history_admission; DROP TRIGGER IF EXISTS pi_history_children; DROP TRIGGER IF EXISTS pi_history_question_cohort; DROP TABLE IF EXISTS pi_history_questions; DROP TABLE IF EXISTS pi_history_cohort; DROP TABLE IF EXISTS pi_history_bridge; DROP TABLE IF EXISTS pi_history_observation;');
+export function removeFence(service, identity) {
+  if (!/^[0-9a-f]{40}$/.test(identity?.candidate) || !/^[0-9a-f]{40}$/.test(identity?.legacySource)) throw new Error('Fence restoration requires immutable ownership identity');
+  service.db.exec('SAVEPOINT history_restore');
+  try {
+    const table = service.sql("SELECT name FROM sqlite_master WHERE type='table' AND name='pi_history_bridge'").get();
+    if (!table) {
+      const custody = service.sql("SELECT name FROM sqlite_master WHERE name IN ('pi_history_admission','pi_history_children','pi_history_question_cohort','pi_history_questions','pi_history_cohort','pi_history_observation')").get();
+      if (custody) throw new Error('History custody has no restoration identity');
+      service.db.exec('RELEASE history_restore');
+      return { ownership: 'unacquired' };
+    }
+    const row = service.sql("SELECT value FROM pi_history_bridge WHERE key='identity'").get();
+    if (!row) throw new Error('History custody has no restoration identity');
+    const recorded = JSON.parse(row.value);
+    if (recorded.candidate !== identity.candidate || recorded.legacySource !== identity.legacySource) throw new Error('Another publication owns the history restoration');
+    service.db.exec('DROP TRIGGER IF EXISTS pi_history_admission; DROP TRIGGER IF EXISTS pi_history_children; DROP TRIGGER IF EXISTS pi_history_question_cohort; DROP TABLE IF EXISTS pi_history_questions; DROP TABLE IF EXISTS pi_history_cohort; DROP TABLE IF EXISTS pi_history_bridge; DROP TABLE IF EXISTS pi_history_observation; RELEASE history_restore;');
+    return { ownership: 'restored' };
+  } catch (error) {
+    service.db.exec('ROLLBACK TO history_restore; RELEASE history_restore');
+    throw error;
+  }
 }
 export async function legacyFleetLedger(path, identity, action = 'prepare') {
   const { DatabaseSync } = await import('node:sqlite');
@@ -225,6 +244,7 @@ export async function installLegacyMaintenance(options) {
       daemons.add(this);
       releaseFleetLedger();
       try { return await start.apply(this, args); }
+      catch (error) { receipt.error = `Legacy daemon startup failed: ${String(error)}`; throw error; }
       finally {
         if (receipt.phase === 'owners-closed') {
           try { releaseFleetLedger(); delete receipt.error; save('migrated'); if (options.autoAdvance === true) originalExit(75); }
@@ -385,7 +405,7 @@ export async function installLegacyMaintenance(options) {
     else if (request.method === 'POST' && request.url === '/close') value = await closeOwners();
     else if (request.method === 'POST' && request.url === '/restore') {
       if (receipt.phase !== 'draining' && receipt.phase !== 'restored') throw new Error('Native owner closure has started; resume preserving migration instead of restoring the old decoder');
-      for (const service of services) if (!service.closed) removeFence(service);
+      for (const service of services) if (!service.closed) removeFence(service, identity);
       if (options.mode === 'fleet') releaseFleetLedger();
       restoreDaemonDispatch();
       prototype.start = originalStart; prototype.attach = originalAttach; prototype.wake = originalWake;
