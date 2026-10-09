@@ -35,6 +35,7 @@ const jobs = [
   ["Claude reset collector", "node", ["--test", "tools/claude-reset/collect.test.mjs"]],
   ["runtime", "npm", ["test", "--workspace=@hara-seihun/pi-runtime"]],
   ["One Kenan deployment", "python3", ["-B", "scripts/one-kenan-deploy.test.py"]],
+  ["prompt availability", "python3", ["-B", "scripts/prompt-availability.test.py"]],
   ["Meet recognition protocol", "python3", ["-B", "-m", "unittest", "discover", "-s", "apps/meet-recognition", "-p", "test_protocol.py"]],
   ["action journal publication", "bun", ["test", "deploy/action-journal.test.ts"]],
   ["mail send boundary", "python3", ["-B", "tools/mail-send/test_send.py"]],
