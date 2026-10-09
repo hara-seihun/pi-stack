@@ -8,7 +8,7 @@ export function checkParallelism(env = process.env) {
 }
 
 export function runJob([name, command, args, options = {}], write = (text) => process.stdout.write(text)) {
-  const { timeoutMs = 120_000, drainTimeoutMs = 250, dependsOn = [], ...spawnOptions } = options;
+  const { timeoutMs = 120_000, drainTimeoutMs = 5_000, dependsOn = [], ...spawnOptions } = options;
   if (dependsOn.length) throw new Error(`runJob cannot admit ${name} without its check graph`);
   return new Promise((resolve) => {
     const startedAt = performance.now();
@@ -16,7 +16,6 @@ export function runJob([name, command, args, options = {}], write = (text) => pr
     let drain;
     let exited;
     let settled = false;
-    let timedOut = false;
     write(`\n===== ${name}: started =====\n`);
     const finish = (code, signal, error) => {
       if (settled) return;
@@ -31,12 +30,12 @@ export function runJob([name, command, args, options = {}], write = (text) => pr
       resolve({ name, outcome: code === 0 ? "passed" : "failed", code, signal, error, elapsedMs });
     };
     const deadline = setTimeout(() => {
-      timedOut = true;
       child.kill("SIGKILL");
+      finish(1, "SIGKILL", `exceeded ${timeoutMs}ms deadline`);
     }, timeoutMs);
     const closed = () => {
       if (exited && child.stdout.destroyed && child.stderr.destroyed) {
-        finish(timedOut ? 1 : exited.code, exited.signal, timedOut ? `exceeded ${timeoutMs}ms deadline` : undefined);
+        finish(exited.code, exited.signal);
       }
     };
     for (const stream of [child.stdout, child.stderr]) {
@@ -48,7 +47,7 @@ export function runJob([name, command, args, options = {}], write = (text) => pr
       exited = { code, signal };
       closed();
       if (!settled) drain = setTimeout(() => {
-        finish(1, signal, timedOut ? `exceeded ${timeoutMs}ms deadline` : "process exited but descendants still hold its output streams");
+        finish(1, signal, `process exited but descendants still hold its output streams after ${drainTimeoutMs}ms`);
       }, drainTimeoutMs);
     });
   });

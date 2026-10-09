@@ -20,6 +20,14 @@ test("job output is visible before the process finishes", async () => {
   assert.equal(result.code, 0);
 });
 
+test("an exited job drains output from a descendant finishing its shutdown", async () => {
+  let output = "";
+  const code = `const {spawn}=require('node:child_process'); const child=spawn(process.execPath,['-e',"setTimeout(() => console.log('DRAINED'), 400)"],{stdio:['ignore','inherit','inherit']}); child.unref();`;
+  const result = await runJob(["shutdown", process.execPath, ["-e", code]], text => { output += text; });
+  assert.equal(result.code, 0, output);
+  assert.match(output, /DRAINED/);
+});
+
 test("an exited job with inherited descendant pipes fails instead of hanging", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-job-pipe-"));
   const pidFile = join(root, "pid");
@@ -101,11 +109,32 @@ test("publication partitions deployment checks without dropping or repeating con
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("publication fixture files run exactly once as separately bounded jobs", async () => {
+  const suites = checkJobs.filter(([name]) => name.startsWith("publication "));
+  const expected = ["config", "transport", "roots", "", "gate", "source", "progress", "proof"]
+    .map(suite => `scripts/publication${suite ? `-${suite}` : ""}.test.mjs`);
+  assert.deepEqual(suites.flatMap(([, , args]) => args.filter(arg => arg.endsWith(".test.mjs"))), expected);
+  assert.ok(suites.every(job => job[3].timeoutMs === 55_000));
+  const root = mkdtempSync(join(tmpdir(), "pi-publication-check-plan-"));
+  try {
+    for (const file of expected) writeFileSync(join(root, file.split("/").at(-1)),
+      `import test from 'node:test'; test('fixture', () => console.log(${JSON.stringify(`CONTRACT:${file}`)}));`);
+    let output = "";
+    const results = await runJobs(suites.map(([name, command, args, options]) => [name, command,
+      args.map(arg => arg.endsWith(".test.mjs") ? join(root, arg.split("/").at(-1)) : arg), options]), {
+      concurrency: 2, write(text) { output += text; },
+    });
+    assert.deepEqual(results.map(result => result.code), suites.map(() => 0), output);
+    assert.deepEqual([...output.matchAll(/CONTRACT:([^\n\r]+)/g)].map(match => match[1]).sort(), expected.sort(), output);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("publication schedules every workspace shard directly under the shared budget", async () => {
-  const shards = checkJobs.filter(([name]) => /^agent workspace \d+\/6$/.test(name));
-  assert.equal(shards.length, 6);
-  assert.deepEqual(shards.map(job => job[3].env.AGENT_WORKSPACE_TEST_SHARD), ["0/6", "1/6", "2/6", "3/6", "4/6", "5/6"]);
-  assert.deepEqual(shards.map(job => job[0]), workspaceChecks.filter(([name]) => /^agent workspace \d+\/6$/.test(name)).map(job => job[0]));
+  const shards = checkJobs.filter(([name]) => /^agent workspace \d+\/24$/.test(name));
+  assert.equal(shards.length, 24);
+  assert.deepEqual(shards.map(job => job[3].env.AGENT_WORKSPACE_TEST_SHARD), Array.from({ length: 24 }, (_, index) => `${index}/24`));
+  assert.ok(shards.every(job => job[3].timeoutMs === 55_000));
+  assert.deepEqual(shards.map(job => job[0]), workspaceChecks.filter(([name]) => /^agent workspace \d+\/24$/.test(name)).map(job => job[0]));
   assert.equal(checkJobs.filter(([name]) => name === "agent workspace component deployment").length, 1);
   assert.equal(checkJobs.some(([, command, args]) => command === "npm" && args.includes("--workspace=@hara-seihun/agent-workspace")), false);
   let active = 0, peak = 0;
@@ -119,17 +148,17 @@ test("publication schedules every workspace shard directly under the shared budg
   });
   assert.equal(peak, 2);
   assert.equal(active, 0);
-  assert.deepEqual(results.map(result => result.code), [0, 0, 0, 0, 0, 0]);
+  assert.deepEqual(results.map(result => result.code), shards.map(() => 0));
 });
 
 test("workspace shards execute a selected contract exactly once across the publication plan", async () => {
-  const shards = checkJobs.filter(([name]) => /^agent workspace \d+\/6$/.test(name));
+  const shards = checkJobs.filter(([name]) => /^agent workspace \d+\/24$/.test(name));
   let output = "";
   const results = await runJobs(shards.map(([name, command, args, options]) => [name, command,
     [args[0], "--test-name-pattern=cache discovery walks each directory once", ...args.slice(1)], options]), {
     concurrency: 2, write(text) { output += text; },
   });
-  assert.deepEqual(results.map(result => result.code), [0, 0, 0, 0, 0, 0], output);
+  assert.deepEqual(results.map(result => result.code), shards.map(() => 0), output);
   assert.equal((output.match(/✔ cache discovery walks each directory once/g) ?? []).length, 1, output);
 });
 
@@ -165,6 +194,21 @@ test("check budgets reject invalid settings and permit an empty queue", async ()
   }
   await assert.rejects(runJobs([], { concurrency: 0 }), /positive integer/);
   assert.deepEqual(await runJobs([], { concurrency: 1 }), []);
+});
+
+test("the job deadline also bounds output drain after process exit", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-job-drain-deadline-"));
+  const pidFile = join(root, "pid");
+  try {
+    const code = `const {spawn}=require('node:child_process'); const child=spawn(process.execPath,['-e','setTimeout(()=>{},5000)'],{stdio:['ignore','inherit','inherit']}); require('node:fs').writeFileSync(${JSON.stringify(pidFile)},String(child.pid)); child.unref();`;
+    const result = await runJob(["drain deadline", process.execPath, ["-e", code], { timeoutMs: 200 }], () => {});
+    assert.equal(result.code, 1);
+    assert.match(result.error, /deadline/);
+    assert.ok(result.elapsedMs < 2_000);
+  } finally {
+    try { process.kill(Number(readFileSync(pidFile, "utf8")), "SIGKILL"); } catch {}
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("a running job has a bounded deadline", async () => {

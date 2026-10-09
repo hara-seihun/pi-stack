@@ -22,7 +22,10 @@ const jobs = [
       `--test-name-pattern=^host deployment activates Pi Remote and reconciles daemons with guest ${guest}$`,
       "scripts/deploy-lock.test.mjs"],
   ]),
-  ["publication", "node", ["--test", "scripts/publication-config.test.mjs", "scripts/publication-transport.test.mjs", "scripts/publication-roots.test.mjs", "scripts/publication.test.mjs", "scripts/publication-gate.test.mjs", "scripts/publication-source.test.mjs", "scripts/publication-progress.test.mjs", "scripts/publication-proof.test.mjs"]],
+  ...["config", "transport", "roots", "core", "gate", "source", "progress", "proof"].map(suite => [
+    `publication ${suite}`, "node", ["--test", suite === "core" ? "scripts/publication.test.mjs" : `scripts/publication-${suite}.test.mjs`],
+    { timeoutMs: 55_000 },
+  ]),
   ["Android publication", "node", ["--test", "scripts/android-update.test.mjs"]],
   ["remote deployment", "node", ["--test", "scripts/deploy-remote.test.mjs", "scripts/deploy-voice.test.mjs", "scripts/deploy-phone.test.mjs", "scripts/meet-recognition-service.test.mjs", "scripts/meet-recognition-host.test.mjs", "scripts/meet-recognition-retain.test.mjs", "scripts/supervisor-health.test.mjs"]],
   ["tools", "node", ["scripts/check-tools.mjs"]],
