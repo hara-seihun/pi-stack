@@ -153,6 +153,7 @@ export class ThreadService implements ThreadApi {
   private readonly operations = new Map<string, Promise<unknown>>();
   private readonly halts = new Map<string, Promise<Result<Thread>>>();
   private readonly opening = new Map<string, Promise<Runtime>>();
+  private readonly attaching = new Map<string, Promise<Runtime | undefined>>();
   private readonly dependencyOperations = new Map<string, Promise<Result<void>>>();
   private readonly dependencyRegistering = new Set<string>();
   private readonly waitRegistering = new Set<string>();
@@ -2160,7 +2161,15 @@ export class ThreadService implements ThreadApi {
       this.wake(id);
     }
   }
-  private async attach(id: string, recoverMissing = false): Promise<Runtime | undefined> {
+  private attach(id: string, recoverMissing = false): Promise<Runtime | undefined> {
+    const attaching = this.attaching.get(id); if (attaching) return attaching;
+    const opening = this.opening.get(id); if (opening) return opening;
+    const existing = this.runtimes.get(id); if (existing) return Promise.resolve(existing);
+    const operation = this.attachOwned(id, recoverMissing).finally(() => this.attaching.delete(id));
+    this.attaching.set(id, operation);
+    return operation;
+  }
+  private async attachOwned(id: string, recoverMissing: boolean): Promise<Runtime | undefined> {
     const thread = this.get(id)!;
     if (thread.metadata?.runnerReference) this.phase(id, "recovering", "Reattaching retained runtime socket");
     if (thread.metadata?.runnerReference && !this.options.attachSession) throw new Error("Native runner attachment is not configured");
@@ -2171,10 +2180,19 @@ export class ThreadService implements ThreadApi {
       const session = recoverMissing
         ? await this.options.recoverSession!(id, output, exit)
         : await this.options.attachSession?.(thread.metadata?.runnerReference as Parameters<AttachPiSession>[0], output, exit);
-      if (session) { runtime.session = session; return runtime; }
+      if (session) {
+        runtime.session = session;
+        const state = await this.rpc(runtime, { type: "get_state" });
+        this.adoptReference(id, state);
+        runtime.busy = this.busy(state); runtime.finalMessage = state.lastAssistantMessage;
+        return runtime;
+      }
       if (!this.closed && !this.suspended) this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.runnerReference') WHERE id=?").run(id);
       this.runtimes.delete(id); return undefined;
-    } catch (error) { this.runtimes.delete(id); throw error; }
+    } catch (error) {
+      if (!runtime.session && this.runtimes.get(id) === runtime) this.runtimes.delete(id);
+      throw error;
+    }
   }
   private environmentKey(thread: Thread, extraEnv: Record<string, string | undefined>): string {
     return digest([import.meta.url, thread.cwd, thread.metadata?.context, thread.metadata?.raw, thread.metadata?.sandbox,
@@ -2183,6 +2201,7 @@ export class ThreadService implements ThreadApi {
   }
   private open(id: string, settings: ThreadSettings, recovering: boolean, extraEnv: Record<string, string | undefined> = {}): Promise<Runtime> {
     const opening = this.opening.get(id); if (opening) return opening;
+    const attaching = this.attaching.get(id); if (attaching) return attaching.then(runtime => runtime ?? this.open(id, settings, recovering, extraEnv));
     const existing = this.runtimes.get(id); if (existing) return Promise.resolve(existing);
     const operation = this.openOwned(id, settings, recovering, extraEnv).finally(() => this.opening.delete(id));
     this.opening.set(id, operation); return operation;
