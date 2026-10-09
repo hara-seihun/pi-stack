@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { Type } from "typebox";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { memoryClient } from "./client.js";
+import { rootRequestResponse } from "./root-transport.js";
 import { registerLifeTools } from "./life-tools.js";
 import { LIFE_TOOL_NAMES, type LifeClient } from "./life-contract.js";
 import { oneKenanEnabled } from "./config.js";
@@ -88,20 +89,24 @@ function registerMemoryTools(options: MemoryToolOptions, pi: ExtensionAPI) {
             const result = { ok: false as const, error: "unavailable" as const, message: `${message}. If recovery is needed, retrieve this request with ask_kenan({requestId:\"${requestId}\"}); do not resubmit the original request`, requestId };
             return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: { memoryResult: result }, isError: true };
           };
-          const deadline = AbortSignal.timeout(options.rootTimeoutMs ?? 20_000);
+          const deadline = AbortSignal.timeout(options.rootTimeoutMs ?? 60_000);
           const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
           try {
             const url = options.env.PI_KENAN_ROOT_URL ?? `http://127.0.0.1:${options.env.PI_KENAN_ROOT_PORT ?? KENAN_ROOT_DEFAULT_PORT}`;
             if (combined.aborted) return uncertain("Kenan's privileged request was cancelled before submission");
             const lookup = input.requestId !== undefined;
-            const response = await (options.rootTransport ?? fetch)(`${url}/v1/ask${lookup ? `/${requestId}` : ""}`, { method: lookup ? "GET" : "POST", headers: { "content-type": "application/json", [MEMORY_TOKEN_HEADER]: options.env.PI_KENAN_MEMORY_TOKEN!, ...(!lookup ? { [KENAN_REQUEST_HEADER]: requestId } : {}) },
-              ...(!lookup ? { body: JSON.stringify({ request: input.request }) } : {}), signal: combined });
+            const response = await rootRequestResponse(`${url}/v1/ask${lookup ? `/${requestId}` : ""}`, { method: lookup ? "GET" : "POST", headers: { "content-type": "application/json", [MEMORY_TOKEN_HEADER]: options.env.PI_KENAN_MEMORY_TOKEN!, ...(!lookup ? { [KENAN_REQUEST_HEADER]: requestId } : {}) },
+              ...(!lookup ? { body: JSON.stringify({ request: input.request }) } : {}) }, combined, options.rootTransport ?? fetch);
             if (!response.ok) {
+              if (response.error === "aborted") {
+                const reason = deadline.aborted ? "timeout" : "cancelled";
+                report({ component: "root-client", stage: "request", outcome: "failed", reason, durationMs: Math.round(performance.now() - started) });
+                return uncertain(deadline.aborted ? "Kenan's privileged request timed out; its outcome is unknown" : "Kenan's privileged request was cancelled; its outcome is unknown");
+              }
               report({ component: "root-client", stage: "request", outcome: "failed", reason: "http-error", status: response.status, durationMs: Math.round(performance.now() - started) });
-              await response.body?.cancel();
               return uncertain(`Kenan's privileged request is unavailable (HTTP ${response.status}); no action outcome is implied`);
             }
-            const result = await response.json() as any;
+            const result = response.body as any;
             if (result?.requestId === requestId && typeof result.status === "string" && Object.hasOwn(rootReceiptStates, result.status) && !("reply" in result)) {
               const receiptState = stateValue(rootReceiptStates, result.status as KenanRequestStatus);
               const queued = result.status === "pending" && result.reason === "global-agent-capacity";
