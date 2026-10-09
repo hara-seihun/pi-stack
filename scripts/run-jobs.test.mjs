@@ -101,13 +101,11 @@ test("publication partitions deployment checks without dropping or repeating con
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("publication schedules every workspace shard directly under the shared budget", async () => {
-  const shards = checkJobs.filter(([name]) => /^agent workspace \d+\/\d+$/.test(name));
-  const declared = workspaceChecks.filter(([name]) => /^agent workspace \d+\/\d+$/.test(name));
-  assert.equal(shards.length, declared.length);
-  assert.deepEqual(shards.map(job => job[3].env.AGENT_WORKSPACE_TEST_SHARD), declared.map(job => job[3].env.AGENT_WORKSPACE_TEST_SHARD));
-  assert.deepEqual(shards.map(job => job[0]), declared.map(job => job[0]));
-  assert.equal(checkJobs.filter(([name]) => name === "agent workspace component deployment").length, 1);
+test("workspace checks have their own shared budget, not an application release veto", async () => {
+  const shards = workspaceChecks.filter(([name]) => /^agent workspace \d+\/\d+$/.test(name));
+  assert.ok(shards.length > 0);
+  assert.equal(checkJobs.some(([name]) => name.startsWith('agent workspace ')), false);
+  assert.equal(workspaceChecks.filter(([name]) => name === "agent workspace component deployment").length, 1);
   assert.equal(checkJobs.some(([, command, args]) => command === "npm" && args.includes("--workspace=@hara-seihun/agent-workspace")), false);
   let active = 0, peak = 0;
   const results = await runJobs(shards.map(([name, , , options]) => [name, process.execPath,
@@ -123,11 +121,11 @@ test("publication schedules every workspace shard directly under the shared budg
   assert.deepEqual(results.map(result => result.code), shards.map(() => 0));
 });
 
-test("workspace shards execute a selected contract exactly once across the publication plan", async () => {
-  const shards = checkJobs.filter(([name]) => /^agent workspace \d+\/\d+$/.test(name));
+test("workspace shards execute a selected contract exactly once across the tool plan", async () => {
+  const shards = workspaceChecks.filter(([name]) => /^agent workspace \d+\/\d+$/.test(name));
   let output = "";
   const results = await runJobs(shards.map(([name, command, args, options]) => [name, command,
-    [args[0], "--test-name-pattern=cache discovery walks each directory once", ...args.slice(1)], options]), {
+    [fileURLToPath(new URL('./test-node.mjs', import.meta.url)), "--test-name-pattern=cache discovery walks each directory once", ...args.slice(1)], options]), {
     concurrency: 2, write(text) { output += text; },
   });
   assert.deepEqual(results.map(result => result.code), shards.map(() => 0), output);

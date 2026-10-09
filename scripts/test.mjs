@@ -1,6 +1,5 @@
 import { pathToFileURL } from "node:url";
 import { runJobs } from "./run-jobs.mjs";
-import { workspaceChecks } from "../tools/agent-workspace/check.mjs";
 import { orchestratorTestChecks } from "../packages/orchestrator/scripts/check.mjs";
 import { checkExecutor } from './check-cache.mjs';
 import { fileURLToPath } from 'node:url';
@@ -25,14 +24,13 @@ const jobs = [
       `--test-name-pattern=^host deployment activates Pi Remote and reconciles daemons with guest ${guest}$`,
       "scripts/deploy-lock.test.mjs"],
   ]),
-  ["publication", "node", ["--test", "scripts/publication-config.test.mjs", "scripts/publication-transport.test.mjs", "scripts/publication-roots.test.mjs", "scripts/publication.test.mjs", "scripts/publication-gate.test.mjs", "scripts/publication-source.test.mjs", "scripts/publication-progress.test.mjs", "scripts/publication-proof.test.mjs"]],
+  ["publication", "node", ["--test", "scripts/publication-config.test.mjs", "scripts/publication-transport.test.mjs", "scripts/publication-roots.test.mjs", "scripts/publication.test.mjs", "scripts/publication-gate.test.mjs", "scripts/publication-bundle.test.mjs", "scripts/publication-source.test.mjs", "scripts/publication-progress.test.mjs", "scripts/publication-proof.test.mjs"]],
   ["Android publication", "node", ["--test", "scripts/android-update.test.mjs", "scripts/android-prepared-native.test.mjs"]],
   ["remote deployment", "node", ["--test", "scripts/deploy-remote.test.mjs", "scripts/deploy-voice.test.mjs", "scripts/deploy-phone.test.mjs", "scripts/meet-recognition-service.test.mjs", "scripts/meet-recognition-host.test.mjs", "scripts/meet-recognition-retain.test.mjs", "scripts/supervisor-health.test.mjs"]],
   ["tools", "node", ["scripts/check-tools.mjs"]],
   ["user usage", "node", ["--test", "tools/user-usage/usage.test.mjs"]],
   ["Claude reset collector", "node", ["--test", "tools/claude-reset/collect.test.mjs"]],
   ["runtime", "npm", ["test", "--workspace=@hara-seihun/pi-runtime"]],
-  ...workspaceChecks,
   ["One Kenan deployment", "python3", ["-B", "scripts/one-kenan-deploy.test.py"]],
   ["Meet recognition protocol", "python3", ["-B", "-m", "unittest", "discover", "-s", "apps/meet-recognition", "-p", "test_protocol.py"]],
   ["action journal publication", "bun", ["test", "deploy/action-journal.test.ts"]],
