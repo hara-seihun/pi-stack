@@ -832,6 +832,30 @@ test("allocated-block growth excludes symlink targets, shared inodes and separat
   } finally { f.close(); }
 });
 
+test("capacity caches survive retained source inspection and invalidate only before actual generated-file removal", () => {
+  const f = fixture();
+  try {
+    const created = JSON.parse(run(["create", "--root", f.workspaces, "--name", "cache-lifecycle", "--repo", f.source,
+      "--intent", "budgeted", "--headroom-gib", "1", "--growth-mib", "128", "--json"], f.env));
+    writeFileSync(path.join(created.path, "file.txt"), "dirty retained source\n");
+    run(["measure-capacity", "--id", created.id, "--json"], f.env);
+    const db = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    const cached = () => db.prepare("SELECT measurement_json FROM workspace_capacity_measurement WHERE workspace_id=?").get(created.id);
+    const before = cached();
+    assert.ok(before);
+    run(["release", "--id", created.id, "--json"], f.env);
+    assert.deepEqual(cached(), before);
+    mkdirSync(path.join(created.path, "node_modules"));
+    writeFileSync(path.join(created.path, "node_modules", "generated"), "generated\n");
+    run(["measure-capacity", "--id", created.id, "--json"], f.env);
+    run(["release", "--id", created.id, "--json"], f.env);
+    assert.equal(cached(), undefined);
+    assert.equal(existsSync(path.join(created.path, "node_modules")), false);
+    assert.equal(readFileSync(path.join(created.path, "file.txt"), "utf8"), "dirty retained source\n");
+    db.close();
+  } finally { f.close(); }
+});
+
 test("budgeted source creation shares existing objects and records immutable whole-tree pricing", () => {
   const f = fixture();
   try {
