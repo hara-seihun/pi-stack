@@ -20,6 +20,7 @@ async function fixture(t, content = [{ type: "thinking", thinking: "", signature
   const suffix = '{"type":"message","id":"branch","parentId":"header","message":{"role":"user","content":[{"type":"text","text":"branch"}],"timestamp":2}}';
   const original = '{"type":"session","id":"header","version":3}\n' + receipt + JSON.stringify(assistant) + "\n" + suffix;
   await writeFile(native, original, { mode: 0o640 });
+  await chmod(native, 0o640); // Exercise mode preservation independently of the invoking account's umask.
   const db = new DatabaseSync(options.supervisorDb);
   db.exec(`CREATE TABLE message_facts(session_id TEXT,finalizes_message TEXT,thinking TEXT,metrics TEXT,PRIMARY KEY(session_id,finalizes_message));
     CREATE TABLE thread_views(id TEXT PRIMARY KEY); INSERT INTO thread_views VALUES('s');`);

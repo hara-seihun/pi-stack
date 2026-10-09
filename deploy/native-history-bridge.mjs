@@ -126,42 +126,48 @@ export function removeFence(service, identity) {
   }
 }
 export async function legacyFleetLedger(path, identity, action = 'prepare') {
+  if (!['prepare', 'probe', 'restore', 'restore-owned'].includes(action)) throw new Error('Unknown fleet maintenance action');
+  if (!/^[0-9a-f]{40}$/.test(identity?.candidate) || !/^[0-9a-f]{40}$/.test(identity?.legacySource)) throw new Error('Fleet maintenance requires immutable ownership identity');
   const { DatabaseSync } = await import('node:sqlite');
   const db = new DatabaseSync(path, { readOnly: action === 'probe' });
-  db.exec('PRAGMA busy_timeout=2000');
-  const pendingCompletions = () => db.prepare(`SELECT count(*) AS n FROM run r WHERE r.state IN ('starting','running')
-    AND (r.worker_unit LIKE 'completion:%' OR EXISTS(SELECT 1 FROM control WHERE key='completion-run:'||r.id))`).get().n;
-  if (action === 'probe') {
-    try { const pending = pendingCompletions(); return { ready: pending === 0, pendingCompletions: pending }; }
-    finally { db.close(); }
-  }
+  const dispatchSql = `CREATE TRIGGER pi_history_completion_dispatch BEFORE UPDATE ON run
+      WHEN OLD.state='queued' AND NEW.state='starting'
+        AND (NEW.worker_unit LIKE 'completion:%' OR EXISTS(SELECT 1 FROM control WHERE key='completion-run:'||NEW.id))
+      BEGIN SELECT RAISE(ABORT,'Controller replacement dispatch paused; queued completion receipt is retained'); END`;
   let entered = false;
   try {
-    db.exec('BEGIN IMMEDIATE'); entered = true;
-    if (action === 'restore' || action === 'restore-owned') {
-      const row = db.prepare("SELECT value FROM control WHERE key='native-history-maintenance'").get();
-      if (row && row.value !== JSON.stringify(identity)) {
-        const recorded = JSON.parse(row.value);
-        if (action !== 'restore-owned' || !/^[0-9a-f]{40}$/.test(recorded.candidate) || !/^[0-9a-f]{40}$/.test(recorded.legacySource)) throw new Error('Another publication owns the fleet admission fence');
+    db.exec('PRAGMA busy_timeout=2000');
+    db.exec(action === 'probe' ? 'BEGIN' : 'BEGIN IMMEDIATE'); entered = true;
+    const row = db.prepare("SELECT value FROM control WHERE key='native-history-maintenance'").get();
+    const dispatch = db.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='pi_history_completion_dispatch'").get();
+    const admission = db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='pi_history_completion_admission'").get();
+    if (!row && (dispatch || admission)) throw new Error('Fleet maintenance fence has no declared identity');
+    if (row) {
+      const recorded = JSON.parse(row.value);
+      if (!/^[0-9a-f]{40}$/.test(recorded?.candidate) || !/^[0-9a-f]{40}$/.test(recorded?.legacySource)) throw new Error('Fleet maintenance fence has invalid ownership identity');
+      if (recorded.candidate !== identity.candidate || recorded.legacySource !== identity.legacySource) {
+        if (action !== 'restore-owned') throw new Error('Another publication owns the fleet maintenance fence');
         db.exec('COMMIT'); return { ready: true, ownership: 'foreign-preserved' };
       }
-      if (!row && db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='pi_history_completion_admission'").get()) throw new Error('Fleet admission fence has no declared identity');
+    }
+    if (action === 'restore' || action === 'restore-owned') {
       db.exec('DROP TRIGGER IF EXISTS pi_history_completion_admission; DROP TRIGGER IF EXISTS pi_history_completion_dispatch');
       db.prepare("DELETE FROM control WHERE key='native-history-maintenance'").run();
       db.exec('COMMIT'); return { ready: true };
     }
-    const row = db.prepare("SELECT value FROM control WHERE key='native-history-maintenance'").get();
-    if (row && row.value !== JSON.stringify(identity)) throw new Error('Another publication owns the fleet admission fence');
-    db.prepare("INSERT OR REPLACE INTO control(key,value) VALUES('native-history-maintenance',?)").run(JSON.stringify(identity));
-    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='pi_history_completion_admission'").get()) throw new Error('An earlier gated fleet must restore before dispatch replacement');
-    db.exec(`CREATE TRIGGER IF NOT EXISTS pi_history_completion_dispatch BEFORE UPDATE ON run
-      WHEN OLD.state='queued' AND NEW.state='starting' AND NEW.worker_unit LIKE 'completion:%'
-      BEGIN SELECT RAISE(ABORT,'Controller replacement dispatch paused; queued completion receipt is retained'); END;`);
-    const pending = pendingCompletions();
-    db.exec('COMMIT'); return { ready: pending === 0, pendingCompletions: pending };
+    if (admission) throw new Error('An earlier gated fleet must restore before dispatch replacement');
+    if (dispatch && dispatch.sql !== dispatchSql) throw new Error('Fleet completion dispatch barrier has an unknown definition');
+    if (action === 'prepare') {
+      if (!row) db.prepare("INSERT INTO control(key,value) VALUES('native-history-maintenance',?)").run(JSON.stringify(identity));
+      if (!dispatch) db.exec(dispatchSql);
+    }
+    const prepared = action === 'prepare' || Boolean(row && dispatch);
+    const pending = db.prepare(`SELECT count(*) AS n FROM run r WHERE r.state IN ('starting','running')
+      AND (r.worker_unit LIKE 'completion:%' OR EXISTS(SELECT 1 FROM control WHERE key='completion-run:'||r.id))`).get().n;
+    db.exec('COMMIT'); return { prepared, ready: prepared && pending === 0, pendingCompletions: pending };
   } catch (error) {
     if (entered) db.exec('ROLLBACK');
-    if (error.errcode === 5 || error.errcode === 6) return { ready: false, reason: 'Owner ledger transaction is still active' };
+    if (error.errcode === 5 || error.errcode === 6) return { prepared: false, ready: false, code: 'ledger-transaction-active', reason: 'Owner ledger transaction is still active' };
     throw error;
   }
   finally { db.close(); }
@@ -225,7 +231,6 @@ export async function installLegacyMaintenance(options) {
   if (receipt.phase === 'closing') save('draining');
   const services = new Set(), controls = new Set(), daemons = new Set(), detaching = new WeakSet(), startedServices = new WeakSet();
   const dispatchPaused = new WeakSet(), daemonDispatchPaused = new WeakSet();
-  let handingOff = false;
   let controlServer, autoTimer;
   let ownerQueue = Promise.resolve();
   const ownerOperation = (action, kind) => {
@@ -258,6 +263,7 @@ export async function installLegacyMaintenance(options) {
     controlServer?.unref(); controlServer?.closeIdleConnections();
   }
   let restoreDaemonDispatch = () => {};
+  const restoreCompletionDispatch = new Map();
   if (options.mode === 'fleet' && receipt.phase === 'draining') {
     if (typeof options.ledgerPath !== 'string' || !options.ledgerPath.startsWith('/')) throw new Error('Fleet maintenance needs its exact owner ledger');
     receipt.ledgerPath = options.ledgerPath;
@@ -273,7 +279,15 @@ export async function installLegacyMaintenance(options) {
         || !this.threads.options.databasePath.startsWith('/')) throw new Error('Legacy daemon uses an uninstrumented or unbound thread service');
       services.add(this.threads);
       daemons.add(this);
-      releaseFleetLedger();
+      daemonDispatchPaused.add(this);
+      // The predecessor's provider cohort is already empty before adoption.
+      // Its ordinary startup loop must not restart queued receipts into the
+      // retiring generation. Intake stays in the original request handlers.
+      const pool = this.completionPool, daemon = this;
+      if (typeof pool?.start !== 'function') throw new Error('Legacy completion owner has no finite dispatch seam');
+      const completionStart = pool.start;
+      pool.start = function(...input) { if (!daemonDispatchPaused.has(daemon)) return completionStart.apply(this, input); };
+      restoreCompletionDispatch.set(this, () => { pool.start = completionStart; daemonDispatchPaused.delete(daemon); });
       try { return await start.apply(this, args); }
       catch (error) { receipt.error = `Legacy daemon startup failed: ${String(error)}`; throw error; }
       finally {
@@ -301,7 +315,10 @@ export async function installLegacyMaintenance(options) {
   prototype.start = async function(...args) {
     services.add(this);
     installObservation(this, identity);
-    if (handingOff) dispatchPaused.add(this);
+    // Freeze execution dispatch, not request admission, before startup can
+    // reconcile queued work. Existing runners are attached with their exact
+    // source decoder and allowed to finish; accepted inputs stay in the ledger.
+    dispatchPaused.add(this);
     const result = await originalStart.apply(this, args);
     if (result?.ok === true) {
       startedServices.add(this);
@@ -376,16 +393,12 @@ export async function installLegacyMaintenance(options) {
       const current = await status(); if (!current.ready) return current;
       const active = activeServices();
       if (active === null || !active.length) return awaitingReplacement();
-      handingOff = true;
       for (const service of active) dispatchPaused.add(service);
       for (const daemon of daemons) daemonDispatchPaused.add(daemon);
       const raced = active.some(service => Object.entries(serviceBusy(service)).some(([key, count]) => key !== 'work' && count !== 0))
         || [...daemons].some(daemon => daemon.completionPool.size || daemon.reconciling);
       if (raced) {
-        handingOff = false;
-        for (const service of active) dispatchPaused.delete(service);
-        for (const daemon of daemons) daemonDispatchPaused.delete(daemon);
-        return { ...receipt, ready: false, reason: 'In-flight dispatch raced the short controller replacement; intake remains open' };
+        return { ...receipt, ready: false, reason: 'A retiring cohort operation is still settling; intake remains open and successor dispatch stays queued' };
       }
       save('closing');
       for (const service of active) { const result = await service.close(); if (!result.ok) throw new Error(`Legacy owner close refused: ${result.error.message}`); }
@@ -447,6 +460,8 @@ export async function installLegacyMaintenance(options) {
       for (const service of services) if (!service.closed) removeFence(service, identity);
       if (options.mode === 'fleet') releaseFleetLedger();
       restoreDaemonDispatch();
+      for (const restore of restoreCompletionDispatch.values()) restore();
+      for (const service of services) dispatchPaused.delete(service);
       prototype.start = originalStart; prototype.attach = originalAttach; prototype.wake = originalWake;
       if (originalDrain) prototype.drain = originalDrain;
       if (originalDetach) prototype.detach = originalDetach;

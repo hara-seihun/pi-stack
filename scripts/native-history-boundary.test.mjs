@@ -305,7 +305,7 @@ for (const [retainedHandle, startupFailure] of [[false, false], [true, false], [
     async detach(){this.closed=true;this.db.close();return {ok:true}}
   }`);
   writeFileSync(join(root, 'daemon.js'), `import {once} from 'node:events';import {ThreadService} from './api.js'; export class Daemon {
-    constructor(path){this.threads=new ThreadService(path);this.completionPool={size:0};this.reconciling=false;} loadManifest(){} fillCapacity(){} reconcile(){}
+    constructor(path){this.threads=new ThreadService(path);this.completionPool={size:0,start(){}};this.reconciling=false;} loadManifest(){} fillCapacity(){} reconcile(){}
     async start(){const resume=once(process,'SIGUSR1');console.log('CONSTRUCTED');await resume;${startupFailure ? "throw new Error('Another publication owns the native history observation');" : "await this.threads.start();console.log('STARTED');await once(process,'SIGTERM');await this.threads.detach();"}}
   }`);
   const harness = join(root, 'shutdown.mjs');
@@ -353,26 +353,31 @@ for (const [retainedHandle, startupFailure] of [[false, false], [true, false], [
   assert.equal(receipt.phase, retainedHandle ? 'restored' : 'draining'); assert.equal(receipt.controllerStopped, true); assert.equal(receipt.ready, false);
   assert.equal(receipt.databases, undefined); assert.equal(receipt.error, undefined);
 });
-test('short fleet replacement pauses dispatch, accepts fresh completion receipts and preserves running work', async t => {
+test('finite fleet replacement prepares during active completion, accepts fresh receipts and retains original result', async t => {
   const root = directory(t), path = join(root, 'ledger.sqlite3'), db = new DatabaseSync(path);
-  db.exec(`CREATE TABLE control(key TEXT PRIMARY KEY,value TEXT); CREATE TABLE run(id TEXT PRIMARY KEY,state TEXT,worker_unit TEXT);
-    INSERT INTO run VALUES('accepted','running','completion:accepted');`);
+  t.after(() => db.close());
+  db.exec(`CREATE TABLE control(key TEXT PRIMARY KEY,value TEXT); CREATE TABLE run(id TEXT PRIMARY KEY,state TEXT,worker_unit TEXT,result TEXT);
+    INSERT INTO run VALUES('accepted','starting','completion:accepted',NULL);`);
   const identity = { candidate, legacySource: old };
-  assert.deepEqual(await legacyFleetLedger(path, identity, 'probe'), { ready: false, pendingCompletions: 1 });
+  assert.deepEqual(await legacyFleetLedger(path, identity, 'probe'), { prepared: false, ready: false, pendingCompletions: 1 });
   assert.equal(db.prepare('SELECT count(*) AS n FROM control').get().n, 0);
-  assert.deepEqual(await legacyFleetLedger(path, identity), { ready: false, pendingCompletions: 1 });
-  assert.equal(db.prepare("SELECT state FROM run WHERE id='accepted'").get().state, 'running');
-  db.exec("INSERT INTO run VALUES('new','queued',NULL)");
+  assert.deepEqual(await legacyFleetLedger(path, identity), { prepared: true, ready: false, pendingCompletions: 1 });
+  assert.equal(db.prepare("SELECT state FROM run WHERE id='accepted'").get().state, 'starting');
+  db.exec("UPDATE run SET state='running' WHERE id='accepted'; INSERT INTO run VALUES('new','queued',NULL,NULL)");
   assert.throws(() => db.exec("UPDATE run SET state='starting',worker_unit='completion:new' WHERE id='new'"), /dispatch paused/);
+  assert.deepEqual(await legacyFleetLedger(path, identity, 'probe'), { prepared: true, ready: false, pendingCompletions: 1 });
   await assert.rejects(legacyFleetLedger(path, { ...identity, candidate: 'c'.repeat(40) }), /Another publication/);
   assert.deepEqual(await legacyFleetLedger(path, { ...identity, candidate: 'c'.repeat(40) }, 'restore-owned'), { ready: true, ownership: 'foreign-preserved' });
   assert.equal(JSON.parse(db.prepare("SELECT value FROM control WHERE key='native-history-maintenance'").get().value).candidate, candidate);
-  db.exec("INSERT INTO run VALUES('foreign-release','queued',NULL)");
+  db.exec("INSERT INTO run VALUES('foreign-release','queued',NULL,NULL)");
   assert.throws(() => db.exec("UPDATE run SET state='starting',worker_unit='completion:foreign-release' WHERE id='foreign-release'"), /dispatch paused/);
-  db.exec("UPDATE run SET state='done'");
-  assert.deepEqual(await legacyFleetLedger(path, identity), { ready: true, pendingCompletions: 0 });
+  db.exec("UPDATE run SET state='done',result='original-provider-result' WHERE id='accepted'; INSERT INTO run VALUES('at-cutover','queued',NULL,NULL)");
+  assert.deepEqual(await legacyFleetLedger(path, identity, 'probe'), { prepared: true, ready: true, pendingCompletions: 0 });
+  assert.deepEqual(await legacyFleetLedger(path, identity), { prepared: true, ready: true, pendingCompletions: 0 });
+  assert.equal(db.prepare("SELECT result FROM run WHERE id='accepted'").get().result, 'original-provider-result');
+  assert.equal(db.prepare("SELECT count(*) AS n FROM run WHERE state='queued'").get().n, 3);
   await legacyFleetLedger(path, identity, 'restore');
-  db.exec("INSERT INTO run VALUES('after','queued',NULL)"); db.close();
+  db.exec("UPDATE run SET state='starting',worker_unit='completion:new' WHERE id='new'; INSERT INTO run VALUES('after','queued',NULL,NULL)");
 });
 test('interrupted fleet closure releases its durable fences and locked bootstrap advances without reopening old work', async t => {
   const root = directory(t), threadPath = join(root, 'threads.sqlite3');
