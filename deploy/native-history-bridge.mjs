@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { createConnection } from 'node:net';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, statSync, unlinkSync, readdirSync, openSync, fsyncSync, closeSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, statSync, lstatSync, unlinkSync, readdirSync, openSync, fsyncSync, closeSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
@@ -28,6 +28,31 @@ export function runnerRequest(path, request, timeout = 3000) {
     socket.on('data', chunk => { body += chunk; if (body.length > 1024 * 1024) socket.destroy(new Error('Oversized legacy runner status')); else if (body.includes('\n')) { try { const value = JSON.parse(body.split('\n')[0]); clearTimeout(timer); socket.destroy(); resolve(value); } catch (error) { socket.destroy(error); } } });
     socket.on('error', error => { clearTimeout(timer); reject(error); });
   });
+}
+
+export async function prepareBridgeSocket(path) {
+  try {
+  let before;
+  try { before = lstatSync(path); }
+  catch (error) { if (error.code === 'ENOENT') return { ok: true, value: 'available' }; throw error; }
+  if (!before.isSocket() || before.uid !== process.getuid()) return { ok: false, error: { code: 'unrelated-file', message: 'Maintenance endpoint has unrelated file custody' } };
+  const state = await new Promise((resolve, reject) => {
+    const socket = createConnection(path);
+    const timer = setTimeout(() => socket.destroy(new Error('Maintenance endpoint custody probe timed out')), 1000);
+    socket.once('connect', () => { clearTimeout(timer); socket.destroy(); resolve('live'); });
+    socket.once('error', error => {
+      clearTimeout(timer);
+      if (error.code === 'ECONNREFUSED' || error.code === 'ENOENT') resolve('stale'); else reject(error);
+    });
+  });
+  if (state === 'live') return { ok: false, error: { code: 'live-owner', message: 'Another live controller owns the maintenance endpoint' } };
+  let current;
+  try { current = lstatSync(path); }
+  catch (error) { if (error.code === 'ENOENT') return { ok: true, value: 'available' }; throw error; }
+  if (current.dev !== before.dev || current.ino !== before.ino) return { ok: false, error: { code: 'changed-owner', message: 'Maintenance endpoint changed during custody proof' } };
+  unlinkSync(path);
+  return { ok: true, value: 'removed-stale' };
+  } catch (error) { return { ok: false, error: { code: 'unavailable', message: String(error) } }; }
 }
 
 export function installFence(service, identity) {
@@ -317,7 +342,8 @@ export async function installLegacyMaintenance(options) {
     originalExit(code);
   };
   const socketPath = bridgeSocket(uid, dataDir);
-  if (existsSync(socketPath)) unlinkSync(socketPath);
+  const endpoint = await prepareBridgeSocket(socketPath);
+  if (!endpoint.ok) throw new Error(`${endpoint.error.code}: ${endpoint.error.message}`);
   const server = createServer((request, response) => { void (async () => {
     let value;
     if (request.method === 'GET' && request.url === '/status') value = await status();
