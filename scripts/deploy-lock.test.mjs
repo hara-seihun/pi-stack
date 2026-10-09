@@ -612,7 +612,7 @@ exit 64
       assert.match(broken.stderr,/returning Pi Remote to/);
       assert.equal(readlinkSync(destinations.PI_STACK_REMOTE_DEST),before);
       assert.equal(readFileSync(env.VOICE_TRACE,"utf8"),"--check\n--activate\n--activate\n");
-      assert.equal(readFileSync(env.PHONE_TRACE,"utf8"),"--check\n--activate\n--activate\n");
+      assert.equal(readFileSync(env.PHONE_TRACE,"utf8"),"--check\n--activate\n--restore\n", "rollback restores the captured Phone configuration instead of installing the candidate again");
       assert.equal(readFileSync(activationTrace,"utf8"),"pi-remote@alice.service\npi-remote@alice.service\n");
       assert.match(readFileSync(systemctlTrace,"utf8"),/reset-failed pi-remote@\*\.service/);
     }
