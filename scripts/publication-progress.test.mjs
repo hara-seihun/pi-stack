@@ -107,6 +107,7 @@ function repairFixture(t, status = "launching") {
   mkdirSync(repairDirectory, { recursive: true });
   const { sourceSha, repairedSha } = initializeRepository(workspace);
   assert.equal(run("git", ["clone", "--quiet", workspace, join(root, "repository")]).status, 0);
+  assert.equal(run("git", ["-C", join(root, "repository"), "update-ref", `refs/pi-stack-publication/${requestId}/source`, sourceSha]).status, 0);
   const publicationLog = join(root, "publication.log");
   writeFileSync(publicationLog, "dependency resolution failed: package fixture is missing\n");
   const requestPath = join(requests, `${requestId}.json`);
@@ -131,6 +132,7 @@ function repairFixture(t, status = "launching") {
     version: 2,
     requestId,
     sourceSha,
+    sourceRef: `refs/heads/pi-stack-publications/${requestId}`,
     integrationSha: "b".repeat(40),
     status: "failed",
     step: "checks",
