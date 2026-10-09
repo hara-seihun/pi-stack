@@ -35,7 +35,7 @@ import { BACKGROUND_ATTENTION_POLICY } from "./attention-policy.js";
 import { createExecutionActivity, executionActivitySnapshot, executionWaitActivity, observeExecutionActivity, restoreExecutionActivity, settleExecutionActivity, type ExecutionActivity, type ExecutionPhase } from "./execution-activity.js";
 import type { AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, QuestionEvents, QuestionState, ThreadQuestion, AttachPiSession, AwaitThreads, Delivery, OpenPiSession, PiCommand, PiEvent, PiSession, Result, SendThread, SpawnThread, Thread, ThreadApi, ThreadAwaitResult, ThreadControl, ThreadError, ThreadHistory, ThreadInspection, InspectOptions, ThreadList, ThreadMessage, ThreadPage, ThreadRead, ThreadSettings, ThreadSettlement, ThreadSettlements, WorkOutcome } from "./contracts.js";
 
-import type { PendingQuestions, PendingQuestionsQuery } from "./contracts.js";
+import type { PendingQuestions, PendingQuestionsQuery, ManagerQuestionsRequest, ManagerQuestionsResponse, HeldThreadQuestion, ManagerQuestionCustodyRequest, ManagerQuestionCustodyReceipt } from "./contracts.js";
 
 type Json = Record<string, any>;
 type NativeContextRecord<D extends RecordDescriptor = MessageRecordDescriptor> = { kind: "native"; descriptor: D } | { kind: "receipt"; entry: Json };
@@ -177,6 +177,8 @@ export class ThreadService implements ThreadApi {
   }
   private workerOwner?: (parent: Thread, input: SpawnThread) => ThreadApi | undefined;
   private routing = false;
+  private custodyRouting = false;
+  private custodyQueued = false;
   private transactionDepth = 0;
   private readonly projections = new Map<string, { live: Json; activity: ExecutionActivity }>();
   private readonly nativeContexts = new MetadataCache<NativeContextMetadata>(32, 64 * 1024 * 1024);
@@ -201,6 +203,7 @@ export class ThreadService implements ThreadApi {
         id TEXT PRIMARY KEY, parent_id TEXT, title TEXT NOT NULL, cwd TEXT NOT NULL, session_file TEXT NOT NULL,
         settings TEXT NOT NULL, admission TEXT NOT NULL, state TEXT NOT NULL, held INTEGER NOT NULL DEFAULT 0,
         revision INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, metadata TEXT NOT NULL DEFAULT '{}');
+      CREATE UNIQUE INDEX IF NOT EXISTS thread_manager ON thread(json_extract(metadata,'$.manager')) WHERE json_extract(metadata,'$.manager')=1;
       CREATE INDEX IF NOT EXISTS thread_parent ON thread(parent_id,updated_at);
       CREATE INDEX IF NOT EXISTS thread_created ON thread(created_at,id);
       CREATE INDEX IF NOT EXISTS thread_live_created ON thread(created_at,id) WHERE json_extract(metadata,'$.archived') IS NOT 1;
@@ -233,7 +236,17 @@ export class ThreadService implements ThreadApi {
         seq INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL UNIQUE,
         thread_id TEXT NOT NULL REFERENCES thread(id), summary TEXT NOT NULL, foreground INTEGER NOT NULL, time INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS thread_question_event (seq INTEGER PRIMARY KEY AUTOINCREMENT, question_id TEXT NOT NULL UNIQUE REFERENCES thread_question(id));
-      INSERT OR IGNORE INTO thread_question_event(question_id) SELECT id FROM thread_question WHERE accepted_at IS NULL ORDER BY created_at,rowid;
+      CREATE TABLE IF NOT EXISTS thread_question_route (
+        question_id TEXT PRIMARY KEY REFERENCES thread_question(id), manager_id TEXT NOT NULL,
+        deadline_at INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('held','forwarded','released')), forwarded_id TEXT REFERENCES thread_question(id));
+      CREATE INDEX IF NOT EXISTS thread_question_route_due ON thread_question_route(deadline_at) WHERE state='held';
+      CREATE TABLE IF NOT EXISTS thread_question_origin (question_id TEXT PRIMARY KEY REFERENCES thread_question(id), thread_id TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS thread_question_custody_outbox (request_id TEXT PRIMARY KEY, data TEXT NOT NULL, error TEXT);
+      CREATE TABLE IF NOT EXISTS thread_question_link (
+        original_id TEXT PRIMARY KEY REFERENCES thread_question(id), forwarded_id TEXT NOT NULL REFERENCES thread_question(id));
+      INSERT OR IGNORE INTO thread_question_event(question_id) SELECT id FROM thread_question WHERE accepted_at IS NULL
+        AND NOT EXISTS(SELECT 1 FROM thread_question_route r WHERE r.question_id=thread_question.id AND r.state='held')
+        AND NOT EXISTS(SELECT 1 FROM thread_question_origin o WHERE o.question_id=thread_question.id) ORDER BY created_at,rowid;
       CREATE INDEX IF NOT EXISTS thread_question_pending ON thread_question(thread_id,created_at) WHERE accepted_at IS NULL;
       DROP INDEX IF EXISTS thread_execution_active;
       UPDATE thread SET state='idle',held=1 WHERE state='stopped';
@@ -670,13 +683,13 @@ export class ThreadService implements ThreadApi {
       const code = codes[index]!, count = counts[index]!;
       if (code < 0) { key([metadata.receipts[-code - 1]!.entryId, "user"]); continue; }
       const descriptor = history.messages[code]!;
-      if (descriptor.role !== "assistant" || !descriptor.blocks.length) { key([descriptor.id, descriptor.role]); continue; }
+      if (descriptor.role !== "assistant" || !descriptor.blocks.length) { key([descriptor.id, descriptor.role, descriptor.monoVisibility ?? null]); continue; }
       let emitted = 0;
       for (const block of descriptor.blocks) {
         if (!block.displayed || emitted >= count) continue;
-        key([descriptor.id, descriptor.role, block.index, block.type, block.toolCallId ?? null]); emitted++;
+        key([descriptor.id, descriptor.role, block.index, block.type, block.toolCallId ?? null, descriptor.monoVisibility ?? null]); emitted++;
       }
-      for (; emitted < count; emitted++) key([descriptor.id, descriptor.role, "projected", emitted]);
+      for (; emitted < count; emitted++) key([descriptor.id, descriptor.role, "projected", emitted, descriptor.monoVisibility ?? null]);
     }
     const keyHash = keys.digest("hex");
     const generation = previous && total >= previous.key_count && prefixHash === previous.key_hash ? previous.generation : randomUUID();
@@ -694,7 +707,7 @@ export class ThreadService implements ThreadApi {
     return window;
   }
   private nativeContextWindow(thread: Thread, request: NonNullable<InspectOptions["contextWindow"]>): Result<ThreadContextWindow> {
-    const indexed = indexedThreadHistory(thread.sessionFile, request.leafId);
+    const indexed = indexedThreadHistory(thread.sessionFile, request.leafId, { managerWakeVisibility: thread.metadata?.manager === true });
     if (!indexed.ok) {
       if (indexed.error.code !== "missing" || thread.metadata?.nativeHistoryRequired === true || request.leafId !== undefined) return historyFailure(indexed.error);
       const source = this.unstartedContextSource(thread);
@@ -752,13 +765,15 @@ export class ThreadService implements ThreadApi {
           bytes += measured.value + 1;
         }
       }
-      const selected = { seq: window.seqs[index]!, count: window.counts[index]!, entryId, message: sourceMessage, results: attached };
+      const monoVisibility = code < 0 ? undefined : history.messages[code]!.monoVisibility;
+      const selected = { seq: window.seqs[index]!, count: window.counts[index]!, entryId, message: sourceMessage, results: attached, ...(monoVisibility ? { monoVisibility } : {}) };
       const measured = measureJsonBytes({ ...selected, results: [] }, CONTEXT_WINDOW_MAX_BYTES - bytes);
       if (!measured.ok) return measured;
       bytes += measured.value + 1;
       records.push(selected);
     }
-    return good({ source: { ...window.source }, total, records,
+    const monoLiveVisibility = history.messages.at(-1)?.monoVisibility;
+    return good({ source: { ...window.source }, total, records, ...(monoLiveVisibility ? { monoLiveVisibility } : {}),
       knownToolCallIds: (request.toolCallIds ?? []).filter(id => calls.has(id)),
       completedToolCallIds: (request.toolCallIds ?? []).filter(id => { const call = calls.get(id); return call !== undefined && results.get(call)?.some(index => history.messages[index]!.toolResultId === id); }) });
   }
@@ -932,6 +947,8 @@ export class ThreadService implements ThreadApi {
   reconcile(): void {
     if (!this.started || this.closed || this.suspended) return;
     void this.routeNotifications();
+    void this.routeQuestionCustody();
+    this.releaseExpiredQuestions();
     this.deliverScheduledWakes();
     if (this.capacityLedger) {
       const pending = this.sql("SELECT DISTINCT thread_id FROM thread_capacity WHERE state='releasing'").all() as { thread_id: string }[];
@@ -1154,6 +1171,7 @@ export class ThreadService implements ThreadApi {
       if (this.operations.has(row.thread_id) || this.halts.has(row.thread_id) || this.opening.has(row.thread_id)) continue;
       const thread = this.get(row.thread_id)!;
       const schedule = JSON.parse(row.data) as import("./contracts.js").ThreadWakeSchedule;
+      if (thread.metadata?.manager === true && thread.lastUserMessageAt !== undefined && now - thread.lastUserMessageAt < 15 * 60_000) continue;
       const receipt = `thread-wake:${row.generation}:${schedule.nextDueAt}`;
       this.transaction(() => {
         this.insertMessage(receipt, { requestId: receipt, threadId: thread.id, senderId: thread.id, source: "notification", delivery: "steer",
@@ -1222,6 +1240,13 @@ export class ThreadService implements ThreadApi {
         if (accepted.value) return good(this.get(accepted.value)!);
       }
       if (input.parentId && !parent) return bad("not_found", "Parent thread is not accessible to this service");
+      if (input.metadata && "manager" in input.metadata && input.metadata.manager !== true) return bad("invalid_request", "Manager metadata must be true when present");
+      if (input.metadata?.manager === true) {
+        if (this.options.workersOnly || input.parentId || input.ephemeral || input.metadata.raw || input.metadata.sandbox || input.metadata.context || input.metadata.execution || input.metadata.archived || input.metadata.mode)
+          return bad("invalid_request", "A manager is a persistent full-context person-owned root thread");
+        const manager = this.manager();
+        if (manager) { this.recordRequest(input.requestId, receipt, "spawn", manager.id); return good(manager); }
+      }
       if (input.ephemeral !== undefined && typeof input.ephemeral !== "boolean") return bad("invalid_request", "ephemeral must be a boolean");
       if (input.ephemeral && !input.message) return bad("invalid_request", "Ephemeral subagents need an initial assignment");
       if (input.metadata && ["agentWait", "peerDependencies", "explicitDependencies", "waitDependencies", "peerResultAfter", "peerDependents", "peerSubscriberAfter", "dependencyUpdate", "peerDependencyVersion", "dependencyError", "agentName", "cancellationRequest", "cancellationSettled"].some(key => key in input.metadata!)) return bad("invalid_request", "Waits, dependencies and agent names are owned by the thread service");
@@ -1300,6 +1325,171 @@ export class ThreadService implements ThreadApi {
     const rows = this.sql("SELECT seq,thread_id AS threadId,summary,foreground,time FROM thread_attention WHERE seq>? ORDER BY seq LIMIT ?").all(after, limit) as Json[];
     return good({ cursor: rows.at(-1)?.seq ?? after, items: rows.map(row => ({ ...row, accepted: true, foreground: row.foreground === 1 })) as import("./contracts.js").ThreadAttentionReceipt[] });
   }
+  private manager(): Thread | undefined {
+    const row = this.sql("SELECT id FROM thread WHERE json_extract(metadata,'$.manager')=1 AND json_extract(metadata,'$.archived') IS NOT 1").get() as { id: string } | undefined;
+    return row ? this.get(row.id) ?? undefined : undefined;
+  }
+  async managerThread(): Promise<Result<Thread | null>> { return good(this.manager() ?? null); }
+  private queueQuestionCustody(input: ManagerQuestionCustodyRequest): void {
+    this.sql("INSERT OR IGNORE INTO thread_question_custody_outbox(request_id,data) VALUES(?,?)").run(input.requestId, JSON.stringify(input));
+    if (this.custodyRouting) this.custodyQueued = true;
+  }
+  private async routeQuestionCustody(): Promise<void> {
+    if (this.custodyRouting || !this.directory || this.closed || this.suspended) return;
+    this.custodyRouting = true;
+    try {
+      const rows = this.sql("SELECT request_id,data FROM thread_question_custody_outbox ORDER BY rowid").all() as Json[];
+      for (const row of rows) {
+        if (this.closed || this.suspended) return;
+        const result = await this.directory.managerQuestionCustody(JSON.parse(row.data));
+        if (this.closed || this.suspended) return;
+        if (!result.ok) { this.sql("UPDATE thread_question_custody_outbox SET error=? WHERE request_id=?").run(result.error.message, row.request_id); continue; }
+        this.sql("DELETE FROM thread_question_custody_outbox WHERE request_id=?").run(row.request_id);
+      }
+    } finally {
+      this.custodyRouting = false;
+      if (this.custodyQueued) { this.custodyQueued = false; void this.routeQuestionCustody(); }
+    }
+  }
+  async managerQuestionCustody(input: ManagerQuestionCustodyRequest): Promise<Result<ManagerQuestionCustodyReceipt>> {
+    if (!input || typeof input.threadId !== "string" || !input.threadId.trim()) return bad("invalid_request", "Custody requires its destination thread");
+    const prior = this.request(input.requestId, input, "question-custody"); if (!prior.ok) return prior;
+    if (prior.value) return good({ accepted: true });
+    try {
+      if (input.action === "receive") {
+        const manager = this.manager();
+        if (!manager || manager.id !== input.threadId) return bad("conflict", "Question custody requires this person's manager");
+        if (typeof input.originThreadId !== "string" || !input.originThreadId.trim() || input.originThreadId === manager.id
+          || !Number.isSafeInteger(input.deadlineAt) || input.deadlineAt < 0 || !Array.isArray(input.questions) || !input.questions.length
+          || new Set(input.questions.map(q => q?.id)).size !== input.questions.length
+          || input.questions.some(q => !q || q.threadId !== input.originThreadId || typeof q.id !== "string" || !q.id.trim() || typeof q.question !== "string" || !q.question.trim()
+            || !Number.isSafeInteger(q.createdAt) || !Array.isArray(q.suggestions) || q.suggestions.some(s => !s || typeof s.id !== "string" || !s.id.trim() || typeof s.text !== "string" || !s.text.trim())
+            || new Set(q.suggestions.map(s => s.id)).size !== q.suggestions.length || q.recommendedSuggestionId !== undefined && !q.suggestions.some(s => s.id === q.recommendedSuggestionId)))
+          return bad("invalid_request", "Custody requires valid original questions and their exact deadline");
+        if (!this.directory) return bad("unavailable", "Question origin directory is unavailable");
+        const origin = await this.directory.list({ id: input.originThreadId, limit: 1 }); if (!origin.ok) return origin;
+        if (!origin.value.threads.length) return bad("not_found", "Question origin is not accessible to this person");
+        const accepted = this.request(input.requestId, input, "question-custody"); if (!accepted.ok) return accepted;
+        if (accepted.value) return good({ accepted: true });
+        this.transaction(() => {
+          for (const q of input.questions) {
+            this.sql("INSERT INTO thread_question(id,thread_id,question,suggestions,recommended_id,created_at) VALUES(?,?,?,?,?,?)").run(q.id, manager.id, q.question, JSON.stringify(q.suggestions), q.recommendedSuggestionId ?? null, q.createdAt);
+            this.sql("INSERT INTO thread_question_origin(question_id,thread_id) VALUES(?,?)").run(q.id, input.originThreadId);
+            this.sql("INSERT INTO thread_question_route(question_id,manager_id,deadline_at,state) VALUES(?,?,?,'held')").run(q.id, manager.id, input.deadlineAt);
+          }
+          const receipt = `manager-custody:${input.requestId}`;
+          this.insertMessage(receipt, { requestId: receipt, threadId: manager.id, senderId: input.originThreadId, source: "notification", delivery: "steer",
+            text: `New held questions from ${origin.value.threads[0]!.title}. Use manager_questions_list to answer or forward one rewritten question. Unhandled questions become visible at the original two-hour deadline.` }, manager.settings, false, origin.value.threads[0]!.agentName);
+          this.sql("UPDATE thread SET state='running' WHERE id=?").run(manager.id);
+          this.recordRequest(input.requestId, input, "question-custody", manager.id);
+        });
+        this.changed(manager.id); this.wake(manager.id); this.releaseExpiredQuestions();
+        return good({ accepted: true });
+      }
+      if (input.action === "answer") {
+        const manager = this.manager();
+        if (!manager || manager.id !== input.threadId || input.answer?.threadId !== input.originThreadId) return bad("conflict", "Classic answers require the originating thread and manager custody");
+        const origin = this.sql("SELECT thread_id FROM thread_question_origin WHERE question_id=?").get(input.answer.questionId) as Json | undefined;
+        if (!origin || origin.thread_id !== input.originThreadId) return bad("not_found", "External question not found in manager custody");
+        const answered = await this.acceptQuestion({ ...input.answer, threadId: manager.id }, undefined, true); if (!answered.ok) return answered;
+        const accepted = this.request(input.requestId, input, "question-custody"); if (!accepted.ok) return accepted;
+        if (!accepted.value) this.recordRequest(input.requestId, input, "question-custody", manager.id);
+        void this.routeQuestionCustody();
+        return good({ accepted: true });
+      }
+      if (input.action === "transition") {
+        const route = this.sql("SELECT r.*,q.accepted_at FROM thread_question_route r JOIN thread_question q ON q.id=r.question_id WHERE q.id=? AND q.thread_id=?").get(input.questionId, input.threadId) as Json | undefined;
+        if (!route || route.manager_id !== input.managerId) return bad("not_found", "Question does not belong to this manager custody");
+        if (!input.transition || !["forwarded", "answered"].includes(input.transition.state)) return bad("invalid_request", "Unknown custody transition");
+        if (input.transition.state === "answered") {
+          const value = input.transition.answer;
+          if (value?.answeredBy && (value.answeredBy.kind !== "manager" || value.answeredBy.threadId !== input.managerId)) return bad("invalid_request", "Answer provenance does not match manager custody");
+          const answered = await this.acceptQuestion({ ...value, threadId: input.threadId, questionId: input.questionId }, value?.answeredBy?.threadId, true); if (!answered.ok) return answered;
+        } else {
+          if (typeof input.transition.forwardedQuestionId !== "string" || !input.transition.forwardedQuestionId.trim()) return bad("invalid_request", "Forwarded custody requires a question identity");
+          this.transaction(() => {
+            this.sql("UPDATE thread_question_route SET state='forwarded' WHERE question_id=? AND state='held'").run(input.questionId);
+            if (route.accepted_at === null) this.sql("INSERT OR IGNORE INTO thread_question_event(question_id) VALUES(?)").run(input.questionId);
+          });
+          this.changed(input.threadId);
+        }
+        const accepted = this.request(input.requestId, input, "question-custody"); if (!accepted.ok) return accepted;
+        if (!accepted.value) this.recordRequest(input.requestId, input, "question-custody", input.threadId);
+        return good({ accepted: true });
+      }
+      return bad("invalid_request", "Unknown question custody action");
+    } catch (cause) { return bad("unavailable", errorText(cause)); }
+  }
+  private releaseExpiredQuestions(): void {
+    const rows = this.sql(`SELECT r.question_id,q.thread_id FROM thread_question_route r JOIN thread_question q ON q.id=r.question_id
+      WHERE r.state='held' AND r.deadline_at<=? AND q.accepted_at IS NULL`).all(Date.now()) as Json[];
+    if (!rows.length) return;
+    this.transaction(() => {
+      for (const row of rows) {
+        this.sql("UPDATE thread_question_route SET state='released' WHERE question_id=? AND state='held'").run(row.question_id);
+        if (!this.sql("SELECT 1 FROM thread_question_origin WHERE question_id=?").get(row.question_id)) this.sql("INSERT OR IGNORE INTO thread_question_event(question_id) VALUES(?)").run(row.question_id);
+      }
+    });
+    for (const id of new Set(rows.map(row => row.thread_id))) this.changed(id);
+  }
+  async managerQuestions(input: ManagerQuestionsRequest): Promise<Result<ManagerQuestionsResponse>> {
+    if (this.closed || this.suspended) return bad("unavailable", "Thread controller is suspended");
+    if (!input || typeof input.threadId !== "string") return bad("invalid_request", "The manager thread ID is required");
+    const manager = this.manager();
+    if (!manager || manager.id !== input.threadId) return bad("conflict", "Only this person's manager can handle held questions");
+    this.releaseExpiredQuestions();
+    if (input.action === "list") {
+      const rows = this.sql(`SELECT q.*,r.manager_id,r.deadline_at,r.state routing,r.forwarded_id,o.thread_id origin_thread_id FROM thread_question_route r JOIN thread_question q ON q.id=r.question_id LEFT JOIN thread_question_origin o ON o.question_id=q.id
+        WHERE r.manager_id=? AND r.state IN ('held','forwarded') AND q.accepted_at IS NULL ORDER BY q.created_at,q.rowid`).all(manager.id) as Json[];
+      const questions: HeldThreadQuestion[] = rows.map(row => ({ ...this.question(row), ...(row.origin_thread_id ? { threadId: row.origin_thread_id } : {}), managerId: row.manager_id, deadlineAt: row.deadline_at,
+        routing: row.routing, ...(row.forwarded_id ? { forwardedQuestionId: row.forwarded_id } : {}) }));
+      return good({ action: "list", questions });
+    }
+    if (input.action !== "answer" && input.action !== "forward") return bad("invalid_request", "Manager question action must be list, answer or forward");
+    try {
+      const prior = this.request(input.requestId, input, "manager-questions"); if (!prior.ok) return prior;
+      if (prior.value) return good(JSON.parse(prior.value));
+      if (input.action === "answer") {
+        const row = this.sql("SELECT q.thread_id FROM thread_question q JOIN thread_question_route r ON r.question_id=q.id WHERE q.id=? AND r.manager_id=?").get(input.questionId, manager.id) as Json | undefined;
+        if (!row) return bad("not_found", "Held question not found for this manager");
+        const answered = await this.acceptQuestion({ threadId: row.thread_id, questionId: input.questionId, selectedSuggestionIds: input.selectedSuggestionIds, text: input.text, dismissed: input.dismissed }, manager.id);
+        if (!answered.ok) return answered;
+        const response: ManagerQuestionsResponse = { action: "answer", receipt: answered.value };
+        const accepted = this.request(input.requestId, input, "manager-questions"); if (!accepted.ok) return accepted;
+        if (!accepted.value) this.recordRequest(input.requestId, input, "manager-questions", JSON.stringify(response));
+        void this.routeQuestionCustody();
+        return good(response);
+      }
+      const question = input.question;
+      if (!Array.isArray(input.questionIds) || input.questionIds.length < 1 || input.questionIds.length > 100 || new Set(input.questionIds).size !== input.questionIds.length
+        || input.questionIds.some(id => typeof id !== "string" || !id.trim()) || !question || typeof question.question !== "string" || !question.question.trim()
+        || question.suggestions !== undefined && (!Array.isArray(question.suggestions) || question.suggestions.some(text => typeof text !== "string" || !text.trim()))
+        || question.recommendedSuggestionIndex !== undefined && (!Number.isSafeInteger(question.recommendedSuggestionIndex) || question.recommendedSuggestionIndex < 0 || question.recommendedSuggestionIndex >= (question.suggestions?.length ?? 0)))
+        return bad("invalid_request", "Forward requires 1..100 unique held question IDs and one authored question with valid suggestions");
+      const rows = this.sql(`SELECT q.*,r.state routing FROM thread_question q JOIN thread_question_route r ON r.question_id=q.id
+        WHERE q.id IN (SELECT value FROM json_each(?)) AND r.manager_id=?`).all(JSON.stringify(input.questionIds), manager.id) as Json[];
+      if (rows.length !== input.questionIds.length) return bad("not_found", "One or more held questions do not belong to this manager");
+      if (rows.some(row => row.accepted_at !== null || row.routing !== "held")) return bad("conflict", "Only unanswered held questions can be forwarded");
+      const questionId = randomUUID(), now = Date.now();
+      const suggestions = (question.suggestions ?? []).map((text, index) => ({ id: `${questionId}:${index}`, text }));
+      const response: ManagerQuestionsResponse = { action: "forward", receipt: { accepted: true, questionId } };
+      this.transaction(() => {
+        this.sql("INSERT INTO thread_question(id,thread_id,question,suggestions,recommended_id,created_at) VALUES(?,?,?,?,?,?)").run(questionId, manager.id, question.question, JSON.stringify(suggestions), question.recommendedSuggestionIndex === undefined ? null : suggestions[question.recommendedSuggestionIndex]!.id, now);
+        this.sql("INSERT INTO thread_question_event(question_id) VALUES(?)").run(questionId);
+        for (const row of rows) {
+          this.sql("INSERT INTO thread_question_link(original_id,forwarded_id) VALUES(?,?)").run(row.id, questionId);
+          this.sql("UPDATE thread_question_route SET state='forwarded',forwarded_id=? WHERE question_id=?").run(questionId, row.id);
+          const origin = this.sql("SELECT thread_id FROM thread_question_origin WHERE question_id=?").get(row.id) as Json | undefined;
+          if (origin) this.queueQuestionCustody({ action: "transition", threadId: origin.thread_id, requestId: `custody-forward:${row.id}:${questionId}`, questionId: row.id, managerId: manager.id, transition: { state: "forwarded", forwardedQuestionId: questionId } });
+          else this.sql("INSERT OR IGNORE INTO thread_question_event(question_id) VALUES(?)").run(row.id);
+        }
+        this.recordRequest(input.requestId, input, "manager-questions", JSON.stringify(response));
+      });
+      for (const id of new Set([manager.id, ...rows.map(row => row.thread_id)])) this.changed(id);
+      void this.routeQuestionCustody();
+      return good(response);
+    } catch (cause) { return bad("unavailable", errorText(cause)); }
+  }
   private question(row: Json): ThreadQuestion {
     return { id: row.id, threadId: row.thread_id, question: row.question,
       suggestions: JSON.parse(row.suggestions), ...(row.recommended_id ? { recommendedSuggestionId: row.recommended_id } : {}), createdAt: row.created_at };
@@ -1320,6 +1510,15 @@ export class ThreadService implements ThreadApi {
       const thread = this.get(input.threadId); if (!thread) return bad("not_found", "Thread not found");
       if (thread.metadata?.archived) return bad("unavailable", "Restore this archived thread before asking questions");
       const questionIds = input.questions.map(() => randomUUID());
+      let manager = this.manager();
+      if (!manager && this.options.workersOnly && this.directory) {
+        const found = await this.directory.managerThread(); if (!found.ok) return found;
+        manager = found.value ?? undefined;
+        const accepted = this.request(input.requestId, input, "ask"); if (!accepted.ok) return accepted;
+        if (accepted.value) return good({ accepted: true, questionIds: JSON.parse(accepted.value) });
+      }
+      const held = manager && manager.id !== thread.id ? manager : undefined;
+      const externalManager = held && !this.get(held.id);
       this.transaction(() => {
         const now = Date.now();
         input.questions.forEach((question, index) => {
@@ -1327,16 +1526,29 @@ export class ThreadService implements ThreadApi {
           const suggestions = (question.suggestions ?? []).map((text, index) => ({ id: `${id}:${index}`, text }));
           this.sql("INSERT INTO thread_question(id,thread_id,question,suggestions,recommended_id,created_at) VALUES(?,?,?,?,?,?)")
             .run(id, input.threadId, question.question, JSON.stringify(suggestions), question.recommendedSuggestionIndex === undefined ? null : suggestions[question.recommendedSuggestionIndex]!.id, now);
-          this.sql("INSERT INTO thread_question_event(question_id) VALUES(?)").run(id);
+          if (held) this.sql("INSERT INTO thread_question_route(question_id,manager_id,deadline_at,state) VALUES(?,?,?,'held')").run(id, held.id, now + 2 * 60 * 60_000);
+          else this.sql("INSERT INTO thread_question_event(question_id) VALUES(?)").run(id);
         });
+        if (externalManager && held) {
+          const questions = questionIds.map(id => this.question(this.sql("SELECT * FROM thread_question WHERE id=?").get(id) as Json));
+          this.queueQuestionCustody({ action: "receive", threadId: held.id, requestId: `custody-receive:${input.requestId}`, originThreadId: thread.id, questions, deadlineAt: now + 2 * 60 * 60_000 });
+        } else if (held) {
+          const receipt = `manager-questions:${input.requestId}`;
+          this.insertMessage(receipt, { requestId: receipt, threadId: held.id, senderId: thread.id, source: "notification", delivery: "steer",
+            text: `New held questions from ${thread.title}. Use manager_questions_list to answer under the person's current policy or forward one rewritten question. Unhandled questions become visible after two hours.` }, held.settings, false, thread.agentName);
+          this.sql("UPDATE thread SET state='running' WHERE id=?").run(held.id);
+        }
         this.recordRequest(input.requestId, input, "ask", JSON.stringify(questionIds));
       });
       this.changed(input.threadId);
+      if (externalManager) void this.routeQuestionCustody();
+      else if (held) { this.changed(held.id); this.wake(held.id); }
       return good({ accepted: true, questionIds });
     } catch (error) { return bad("unavailable", errorText(error)); }
   }
   questionEvents(after = 0, limit = 100): Result<QuestionEvents> {
     if (!Number.isSafeInteger(after) || after < 0 || !Number.isInteger(limit) || limit < 1 || limit > 1000) return bad("invalid_request", "Invalid question cursor or limit");
+    this.releaseExpiredQuestions();
     const rows = this.sql(`SELECT e.seq,q.id AS questionId,q.thread_id AS threadId,q.question,q.created_at AS time,q.accepted_at
       FROM thread_question_event e JOIN thread_question q ON q.id=e.question_id WHERE e.seq>? ORDER BY e.seq LIMIT ?`).all(after, limit) as Json[];
     return good({ cursor: rows.at(-1)?.seq ?? after, items: rows.filter(row => row.accepted_at === null).map(({ accepted_at, ...row }) => row) as QuestionEvents["items"] });
@@ -1347,8 +1559,10 @@ export class ThreadService implements ThreadApi {
       || Object.keys(input).some(key => key !== "locationThreadIds"))
       return bad("invalid_request", "Pending questions requires explicit nonblank location thread IDs");
     try {
+      this.releaseExpiredQuestions();
       const rows = this.sql(`SELECT q.* FROM thread_question q JOIN thread t ON t.id=q.thread_id
-        WHERE q.accepted_at IS NULL ORDER BY q.thread_id,q.created_at,q.rowid`).all() as Json[];
+        WHERE q.accepted_at IS NULL AND NOT EXISTS(SELECT 1 FROM thread_question_route r WHERE r.question_id=q.id AND r.state='held')
+        AND NOT EXISTS(SELECT 1 FROM thread_question_origin o WHERE o.question_id=q.id) ORDER BY q.thread_id,q.created_at,q.rowid`).all() as Json[];
       const ids = [...new Set([...input.locationThreadIds, ...rows.map(row => row.thread_id as string)])];
       const owners = this.sql(`SELECT id,title,metadata FROM thread WHERE id IN (SELECT value FROM json_each(?))`)
         .all(JSON.stringify(ids)) as Json[];
@@ -1373,7 +1587,8 @@ export class ThreadService implements ThreadApi {
   }
   async questions(threadId: string): Promise<Result<ThreadQuestion[]>> {
     if (!this.get(threadId)) return bad("not_found", "Thread not found");
-    return good((this.sql("SELECT * FROM thread_question WHERE thread_id=? AND accepted_at IS NULL ORDER BY created_at,rowid").all(threadId) as Json[]).map(row => this.question(row)));
+    this.releaseExpiredQuestions();
+    return good((this.sql("SELECT * FROM thread_question WHERE thread_id=? AND accepted_at IS NULL AND NOT EXISTS(SELECT 1 FROM thread_question_route r WHERE r.question_id=thread_question.id AND r.state='held') AND NOT EXISTS(SELECT 1 FROM thread_question_origin o WHERE o.question_id=thread_question.id) ORDER BY created_at,rowid").all(threadId) as Json[]).map(row => this.question(row)));
   }
   async questionState(threadId: string, questionId: string): Promise<Result<QuestionState>> {
     if (typeof threadId !== "string" || typeof questionId !== "string") return bad("invalid_request", "Thread and question IDs are required");
@@ -1382,7 +1597,7 @@ export class ThreadService implements ThreadApi {
     const question = this.question(row);
     if (row.accepted_at === null) return good({ question });
     const answer = JSON.parse(row.answer);
-    return good({ question, answer: { text: answer.text, selectedSuggestions: question.suggestions.filter(choice => answer.selectedSuggestionIds.includes(choice.id)).map(choice => choice.text), dismissed: answer.dismissed === true, acceptedAt: row.accepted_at } });
+    return good({ question, answer: { text: answer.text, selectedSuggestions: question.suggestions.filter(choice => answer.selectedSuggestionIds.includes(choice.id)).map(choice => choice.text), dismissed: answer.dismissed === true, acceptedAt: row.accepted_at, ...(answer.answeredBy ? { answeredBy: answer.answeredBy } : {}) } });
   }
   private rootConsentQuestion(thread: Thread, questionId: string): boolean {
     return thread.metadata?.rootConsent === true && !!this.sql(`SELECT 1 FROM thread_request r,json_each(CASE WHEN r.kind='ask' THEN r.target ELSE '[]' END) q
@@ -1398,7 +1613,7 @@ export class ThreadService implements ThreadApi {
   private questionAnswerEntry(row: Json): Json {
     return { type: "message", id: `question-answer:${row.id}`, parentId: null, source: "question-receipt",
       timestamp: new Date(row.accepted_at).toISOString(), message: { role: "user", timestamp: row.accepted_at,
-        questionId: row.id, rootConsent: true, content: [{ type: "text", text: questionAnswerBody(row, JSON.parse(row.answer)) }] } };
+        questionId: row.id, rootConsent: true, ...(JSON.parse(row.answer).answeredBy ? { answeredBy: JSON.parse(row.answer).answeredBy } : {}), content: [{ type: "text", text: questionAnswerBody(row, JSON.parse(row.answer)) }] } };
   }
   questionAnswerSource(threadId: string): Array<{ questionId: string; timestamp: number; entryId: string }> {
     return this.questionAnswerRows(threadId, "q.id,q.accepted_at").map(row => ({ questionId: row.id, timestamp: row.accepted_at, entryId: `question-answer:${row.id}` }));
@@ -1435,6 +1650,9 @@ export class ThreadService implements ThreadApi {
     return mergeTimed(messages.filter(message => !receipts.some(receipt => message.rootConsent === true && message.questionId === receipt.questionId)), receipts);
   }
   async answer(input: AnswerThreadQuestion): Promise<Result<QuestionReceipt>> {
+    return this.acceptQuestion(input);
+  }
+  private async acceptQuestion(input: AnswerThreadQuestion, managerId?: string, custody = false): Promise<Result<QuestionReceipt>> {
     if (this.closed || this.suspended) return bad("unavailable", "Thread controller is suspended");
     if (typeof input.threadId !== "string" || typeof input.questionId !== "string"
       || !Array.isArray(input.selectedSuggestionIds) || input.selectedSuggestionIds.some(id => typeof id !== "string")
@@ -1449,27 +1667,56 @@ export class ThreadService implements ThreadApi {
       const choices = this.question(row).suggestions;
       if (input.selectedSuggestionIds.some(id => !choices.some(choice => choice.id === id)) || !input.dismissed && !input.selectedSuggestionIds.length && !input.text.trim())
         return bad("invalid_request", "Select at least one known suggestion or provide nonblank text");
-      const answer = JSON.stringify({ selectedSuggestionIds: input.selectedSuggestionIds, text: input.text, ...(input.dismissed ? { dismissed: true } : {}) });
-      if (row.accepted_at !== null) return row.answer === answer ? good({ accepted: true, questionId: row.id }) : bad("conflict", "Question has already been answered differently");
+      const route = this.sql("SELECT * FROM thread_question_route WHERE question_id=?").get(row.id) as Json | undefined;
+      if (!custody && route && !this.get(route.manager_id)) {
+        if (!this.directory) return bad("unavailable", "The person's question custody directory is unavailable");
+        const receipt = await this.directory.managerQuestionCustody({ action: "answer", threadId: route.manager_id, requestId: `custody-answer:${input.questionId}:${digest(input)}`, originThreadId: input.threadId, answer: input });
+        return receipt.ok ? good({ accepted: true, questionId: input.questionId }) : receipt;
+      }
+      if (!custody && !managerId && route?.state === "held" && route.deadline_at > Date.now()) return bad("conflict", "This question is held for the manager");
+      const linked = this.sql("SELECT forwarded_id FROM thread_question_link WHERE original_id=? OR forwarded_id=? LIMIT 1").get(row.id, row.id) as { forwarded_id: string } | undefined;
+      const linkedRows = linked ? this.sql(`SELECT * FROM thread_question WHERE id=? OR id IN (SELECT original_id FROM thread_question_link WHERE forwarded_id=?) ORDER BY created_at,rowid`).all(linked.forwarded_id, linked.forwarded_id) as Json[] : [row];
+      const answerValue = { selectedSuggestionIds: input.selectedSuggestionIds, text: input.text, ...(input.dismissed ? { dismissed: true } : {}), ...(managerId ? { answeredBy: { kind: "manager" as const, threadId: managerId } } : {}) };
+      const answer = JSON.stringify(answerValue);
+      const first = linkedRows.find(question => question.accepted_at !== null);
+      if (first) return linked || route || first.answer === answer ? good({ accepted: true, questionId: row.id }) : bad("conflict", "Question has already been answered differently");
       if (this.halts.has(input.threadId)) return bad("conflict", "Wait for cancellation confirmation before answering");
       const thread = this.get(input.threadId)!;
       const rootConsent = this.rootConsentQuestion(thread, row.id);
       if (!rootConsent && thread.held && thread.state === "running") {
         const halted = await this.halt(thread.id); if (!halted.ok) return halted;
         const accepted = this.sql("SELECT answer,accepted_at FROM thread_question WHERE id=?").get(row.id) as Json;
-        if (accepted.accepted_at !== null) return accepted.answer === answer ? good({ accepted: true, questionId: row.id }) : bad("conflict", "Question has already been answered differently");
+        if (accepted.accepted_at !== null) return linked || route || accepted.answer === answer ? good({ accepted: true, questionId: row.id }) : bad("conflict", "Question has already been answered differently");
       }
-      const body = questionAnswerBody(row, input);
+      const selectedText = input.selectedSuggestionIds.map(id => choices.find(choice => choice.id === id)!.text);
+      const otherText = [...selectedText, ...(input.text.trim() ? [input.text] : [])].join("\n");
+      const resumed = new Set<string>();
       this.transaction(() => {
-        const accepted = this.sql("UPDATE thread_question SET answer=?,accepted_at=? WHERE id=? AND accepted_at IS NULL").run(answer, Date.now(), row.id);
-        if (!accepted.changes) throw new Error("Question acceptance raced another answer");
-        if (!rootConsent) {
-          this.insertMessage(`question-answer:${row.id}`, { requestId: `question-answer:${row.id}`, threadId: input.threadId,
-            text: body, delivery: "steer", source: "explicit", replyTo: row.id }, thread.settings, thread.held);
-          this.sql("UPDATE thread SET held=0,state='running',metadata=json_remove(metadata,'$.archiveInterruption','$.archived','$.archivedAt') WHERE id=?").run(input.threadId);
+        const now = Date.now();
+        const raced = linkedRows.some(question => (this.sql("SELECT accepted_at FROM thread_question WHERE id=?").get(question.id) as Json).accepted_at !== null);
+        if (raced) return;
+        for (const question of linkedRows) {
+          const value = question.id === row.id ? answerValue : { ...answerValue, selectedSuggestionIds: [], text: otherText };
+          this.sql("UPDATE thread_question SET answer=?,accepted_at=? WHERE id=? AND accepted_at IS NULL").run(JSON.stringify(value), now, question.id);
+          const origin = this.sql("SELECT thread_id FROM thread_question_origin WHERE question_id=?").get(question.id) as Json | undefined;
+          if (origin) {
+            this.queueQuestionCustody({ action: "transition", threadId: origin.thread_id, requestId: `custody-settle:${question.id}`, questionId: question.id, managerId: this.manager()!.id, transition: { state: "answered", answer: value } });
+            continue;
+          }
+          const recipient = this.get(question.thread_id)!;
+          if (this.rootConsentQuestion(recipient, question.id)) continue;
+          this.sql("UPDATE thread SET held=0,state='running',metadata=json_remove(metadata,'$.archiveInterruption','$.archived','$.archivedAt') WHERE id=?").run(recipient.id);
+          const body = questionAnswerBody(question, value);
+          this.insertMessage(`question-answer:${question.id}`, { requestId: `question-answer:${question.id}`, threadId: recipient.id,
+            ...(managerId ? { senderId: managerId } : {}), text: managerId ? `Manager decision (not human input):\n${body}` : body,
+            delivery: "steer", source: managerId ? "notification" : "explicit", replyTo: question.id }, recipient.settings, recipient.held, managerId ? this.get(managerId)?.agentName : undefined);
+          this.sql("UPDATE thread SET held=0,state='running',metadata=json_remove(metadata,'$.archiveInterruption','$.archived','$.archivedAt') WHERE id=?").run(recipient.id);
+          resumed.add(recipient.id);
         }
       });
-      this.changed(input.threadId); if (!rootConsent) this.wake(input.threadId);
+      for (const question of linkedRows) this.changed(question.thread_id);
+      for (const id of resumed) this.wake(id);
+      void this.routeQuestionCustody();
       return good({ accepted: true, questionId: row.id });
     } catch (error) { return bad("unavailable", errorText(error)); }
   }
@@ -1610,12 +1857,13 @@ export class ThreadService implements ThreadApi {
   update(id: string, patch: { title?: string; metadata?: Record<string, unknown>; archived?: boolean }, options: { titleSource?: "agent" } = {}): Result<Thread> {
     if (this.suspended || this.closed) return bad("unavailable", "Thread controller is suspended");
     const thread = this.get(id); if (!thread) return bad("not_found", "Thread not found");
+    if (thread.metadata?.manager === true && patch.archived === true) return bad("conflict", "The manager cannot be archived");
     if (patch.title !== undefined && (typeof patch.title !== "string" || !patch.title.trim())) return bad("invalid_request", "Thread title must be a nonempty string");
     if (patch.metadata && "titleSource" in patch.metadata && patch.metadata.titleSource !== thread.metadata?.titleSource) return bad("conflict", "Use title control instead of changing metadata.titleSource");
     if (patch.metadata && "autoArchiveViewedAt" in patch.metadata && patch.metadata.autoArchiveViewedAt !== thread.metadata?.autoArchiveViewedAt) return bad("conflict", "Use view control instead of changing metadata.autoArchiveViewedAt");
     if (patch.title !== undefined && options.titleSource === "agent" && thread.metadata?.titleSource === "manual") return bad("conflict", "The person named this thread; their title stays until they rename it again");
     if (patch.metadata && "archived" in patch.metadata && patch.archived === undefined) return bad("invalid_request", "Use the explicit archived control instead of changing metadata.archived");
-    for (const key of ["agentWait", "peerDependencies", "explicitDependencies", "waitDependencies", "peerResultAfter", "peerDependents", "peerSubscriberAfter", "dependencyUpdate", "peerDependencyVersion", "dependencyError", "agentName", "cancellationRequest", "cancellationSettled", "foreground", "attentionSummary", "context", "execution", "raw", "telephoneContext", "sandbox", "sandboxProfile", "sandboxGateway", "nativeHistoryRequired", "runnerReference", "ephemeral"] as const) if (patch.metadata && key in patch.metadata && digest(patch.metadata[key] ?? null) !== digest(thread.metadata?.[key] ?? null)) return bad("conflict", `Thread ${key} is immutable`);
+    for (const key of ["agentWait", "peerDependencies", "explicitDependencies", "waitDependencies", "peerResultAfter", "peerDependents", "peerSubscriberAfter", "dependencyUpdate", "peerDependencyVersion", "dependencyError", "agentName", "cancellationRequest", "cancellationSettled", "foreground", "attentionSummary", "context", "execution", "raw", "telephoneContext", "sandbox", "sandboxProfile", "sandboxGateway", "nativeHistoryRequired", "runnerReference", "ephemeral", "manager"] as const) if (patch.metadata && key in patch.metadata && digest(patch.metadata[key] ?? null) !== digest(thread.metadata?.[key] ?? null)) return bad("conflict", `Thread ${key} is immutable`);
     if (patch.metadata && "taskDescription" in patch.metadata && (typeof patch.metadata.taskDescription !== "string" || !patch.metadata.taskDescription.trim() || patch.metadata.taskDescription.length > 240)) return bad("invalid_request", "Task description must be a nonempty sentence of at most 240 characters");
     if (patch.metadata && "mode" in patch.metadata && !isThreadModeName(patch.metadata.mode)) return bad("invalid_request", "A thread mode must be declared in modes.ts");
     if (!validSandboxBoundary({ ...thread.metadata, ...patch.metadata })) return bad("conflict", "Sandbox execution boundary is immutable");
@@ -1670,7 +1918,7 @@ export class ThreadService implements ThreadApi {
   }
   private hasAutoArchiveWork(thread: Thread): boolean {
     const runtime = this.runtimes.get(thread.id);
-    return !!(thread.metadata?.startupFailure || thread.metadata?.incompleteResult || thread.metadata?.agentWait || thread.dependencies?.length || thread.wakeSchedule || thread.state !== "idle" || thread.pendingMessages > 0
+    return !!(thread.metadata?.manager === true || thread.metadata?.startupFailure || thread.metadata?.incompleteResult || thread.metadata?.agentWait || thread.dependencies?.length || thread.wakeSchedule || thread.state !== "idle" || thread.pendingMessages > 0
       || this.sql("SELECT 1 FROM thread_question WHERE thread_id=? AND accepted_at IS NULL LIMIT 1").get(thread.id)
       || this.execution(thread.id) || (!runtime && thread.metadata?.runnerReference) || runtime?.busy || runtime?.commandRunning
       || this.opening.has(thread.id) || this.operations.has(thread.id) || this.halts.has(thread.id) || this.waitRegistering.has(thread.id));
@@ -1678,6 +1926,10 @@ export class ThreadService implements ThreadApi {
   async control(input: ThreadControl): Promise<Result<Thread>> {
     if (this.closed || this.suspended) return bad("unavailable", "Thread controller is suspended");
     if (!this.get(input.threadId)) return bad("not_found", "Thread not found");
+    const manager = this.get(input.threadId)!.metadata?.manager === true;
+    if (manager && (input.action === "close" || input.action === "stop" && input.reason === "archive" || input.action === "update" && input.archived === true))
+      return bad("conflict", "The manager cannot be closed or archived; cancel its current work instead");
+    if (manager && input.action === "archiveInactive") return good(this.get(input.threadId)!);
     if (input.action === "resultSubscribe") {
       if (typeof input.dependentId !== "string" || !input.dependentId.trim() || input.dependentId === input.threadId || typeof input.active !== "boolean" || input.after !== undefined && (!Number.isSafeInteger(input.after) || input.after < 0)) return bad("invalid_request", "Invalid result subscription");
       const current = this.get(input.threadId)!;
@@ -1737,7 +1989,7 @@ export class ThreadService implements ThreadApi {
     if (input.action === "close" || input.action === "stop" || input.action === "cancel") {
       const id = input.threadId;
       if (input.action !== "cancel" && this.get(id)?.metadata?.archived && !this.execution(id) && !this.pending(id).length && !this.runtimes.get(id)?.busy) return good(this.get(id)!);
-      this.sql("UPDATE thread SET held=1,metadata=json_set(json_remove(metadata,'$.cancellationSettled'),'$.cancellationRequest',?) WHERE id=?").run(input.action === "cancel" ? "cancel" : "close", id);
+      this.sql("UPDATE thread SET held=1,metadata=json_set(json_remove(metadata,'$.cancellationSettled'),'$.cancellationRequest',?) WHERE id=?").run(input.action === "cancel" || manager ? "cancel" : "close", id);
       this.changed(id);
       const halted = await this.halt(id); if (!halted.ok) return halted;
       return good(this.get(id)!);
@@ -1869,7 +2121,7 @@ export class ThreadService implements ThreadApi {
     if (request !== "close" && request !== "cancel") return;
     this.transaction(() => {
       this.sql("UPDATE thread_work SET status='done',outcome='cancelled' WHERE thread_id=? AND status!='done'").run(id);
-      this.sql("DELETE FROM thread_wake WHERE thread_id=?").run(id);
+      if (this.get(id)?.metadata?.manager !== true) this.sql("DELETE FROM thread_wake WHERE thread_id=?").run(id);
       this.replaceDependencies(id, []);
       this.sql("UPDATE thread SET held=0,state='idle',metadata=json_remove(metadata,'$.cancellationRequest','$.cancellationSettled','$.archiveInterruption','$.watchStopped','$.agentWait','$.admissionWait','$.providerWait') WHERE id=?").run(id);
       if (request === "close") this.sql("UPDATE thread SET metadata=json_set(metadata,'$.archived',json('true'),'$.archivedAt',?) WHERE id=?").run(new Date().toISOString(), id);

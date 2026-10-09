@@ -79,9 +79,31 @@ export interface AnswerThreadQuestion {
   dismissed?: boolean;
 }
 export interface QuestionReceipt { accepted: true; questionId: string }
+export type ManagerQuestionsRequest = { threadId: string } & (
+  | { action: "list" }
+  | { action: "answer"; requestId: string; questionId: string; selectedSuggestionIds: string[]; text: string; dismissed?: boolean }
+  | { action: "forward"; requestId: string; questionIds: string[]; question: QuestionInput });
+export type QuestionAnswerValue = Pick<AnswerThreadQuestion, "selectedSuggestionIds" | "text" | "dismissed"> & { answeredBy?: { kind: "manager"; threadId: string } };
+export type ManagerQuestionCustodyRequest = { threadId: string; requestId: string } & (
+  | { action: "receive"; originThreadId: string; questions: ThreadQuestion[]; deadlineAt: number }
+  | { action: "answer"; originThreadId: string; answer: AnswerThreadQuestion }
+  | { action: "transition"; managerId: string; questionId: string; transition:
+      | { state: "forwarded"; forwardedQuestionId: string }
+      | { state: "answered"; answer: QuestionAnswerValue } });
+export interface ManagerQuestionCustodyReceipt { accepted: true }
+export interface HeldThreadQuestion extends ThreadQuestion {
+  managerId: string;
+  deadlineAt: number;
+  routing: "held" | "forwarded";
+  forwardedQuestionId?: string;
+}
+export type ManagerQuestionsResponse =
+  | { action: "list"; questions: HeldThreadQuestion[] }
+  | { action: "answer"; receipt: QuestionReceipt }
+  | { action: "forward"; receipt: QuestionReceipt };
 export interface QuestionState {
   question: ThreadQuestion;
-  answer?: { text: string; selectedSuggestions: string[]; dismissed: boolean; acceptedAt: number };
+  answer?: { text: string; selectedSuggestions: string[]; dismissed: boolean; acceptedAt: number; answeredBy?: { kind: "manager"; threadId: string } };
 }
 export type QuestionThread = Pick<Thread, "id" | "title" | "metadata">;
 export interface PendingQuestionsQuery { locationThreadIds: string[] }
@@ -218,7 +240,8 @@ export type ThreadContextSource = {
 export interface ThreadContextWindow {
   source: ThreadContextSource;
   total: number;
-  records: Array<{ seq: number; count: number; entryId: string; message: Record<string, any>; results: Record<string, any>[] }>;
+  monoLiveVisibility?: "hidden" | "visible";
+  records: Array<{ seq: number; count: number; entryId: string; message: Record<string, any>; results: Record<string, any>[]; monoVisibility?: "hidden" | "visible" }>;
   knownToolCallIds: string[];
   completedToolCallIds: string[];
 }
@@ -383,6 +406,9 @@ export interface ThreadApi {
   agentWait(input: AgentWaitRequest): Promise<Result<AgentWaitResult>>;
   wakeSchedule(input: ThreadWakeRequest): Promise<Result<ThreadWakeSchedule | null>>;
   watch(input: import("./watch-list.js").WatchRequest): Promise<Result<import("./watch-list.js").WatchResponse>>;
+  managerThread(): Promise<Result<Thread | null>>;
+  managerQuestionCustody(input: ManagerQuestionCustodyRequest): Promise<Result<ManagerQuestionCustodyReceipt>>;
+  managerQuestions(input: ManagerQuestionsRequest): Promise<Result<ManagerQuestionsResponse>>;
   ask(input: AskThreadQuestions): Promise<Result<QuestionsReceipt>>;
   questions(threadId: string): Promise<Result<ThreadQuestion[]>>;
   pendingQuestions(input: PendingQuestionsQuery): Result<PendingQuestions> | Promise<Result<PendingQuestions>>;

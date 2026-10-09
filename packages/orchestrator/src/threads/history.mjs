@@ -32,7 +32,8 @@ function isManagerWakeInput(content) {
   return metadata !== null && typeof metadata === "object" && !Array.isArray(metadata)
     && (metadata.source === "explicit" || metadata.source === "notification")
     && nonempty(metadata.senderThreadId) && nonempty(metadata.recipientThreadId)
-    && typeof metadata.messageId === "string" && metadata.messageId.startsWith("thread-wake:");
+    && typeof metadata.messageId === "string"
+    && ["thread-wake:", "manager-questions:", "manager-custody:"].some(prefix => metadata.messageId.startsWith(prefix));
 }
 
 function annotateManagerWakeTurns(records) {
