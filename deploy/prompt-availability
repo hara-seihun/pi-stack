@@ -1,0 +1,101 @@
+#!/usr/bin/python3
+"""Restore prolonged, positively observed owner admission closure."""
+import json
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+def inspect_owner(data_dir, candidate, now_ms, restore_after_ms):
+    if not re.fullmatch('[0-9a-f]{40}', candidate) or not Path(data_dir).is_absolute():
+        raise ValueError('Owner proof requires an absolute directory and exact candidate')
+    if type(restore_after_ms) is not int or restore_after_ms <= 0:
+        raise ValueError('An explicit positive closure budget is required')
+    data = Path(data_dir)
+    receipt_path = data / 'native-history-maintenance.json'
+    if receipt_path.stat().st_uid != os.getuid():
+        raise ValueError('Maintenance receipt is not owned by the inspecting UID')
+    receipt = json.loads(receipt_path.read_text())
+    if (receipt.get('version') != 1 or receipt.get('protocol') != 'native-history-maintenance-v1'
+            or receipt.get('uid') != os.getuid() or receipt.get('dataDir') != str(data)
+            or receipt.get('candidate') != candidate):
+        raise ValueError('Maintenance owner/source identity mismatch')
+    phase = receipt.get('phase')
+    if phase in ('restored', 'closing', 'owners-closed', 'migration-pending', 'migrated'):
+        return {'action': 'none', 'reason': phase}
+    if phase != 'draining':
+        raise ValueError('Unknown maintenance phase')
+    admitted_at = receipt.get('admittedAt')
+    if type(admitted_at) is not int or admitted_at < 0 or admitted_at > now_ms:
+        raise ValueError('Maintenance has no valid admission timestamp')
+    database = data / 'threads.sqlite3'
+    if database.stat().st_uid != os.getuid():
+        raise ValueError('Thread database is not owned by the inspecting UID')
+    with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True, timeout=2) as db:
+        db.execute('BEGIN')
+        triggers = db.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND name IN ('pi_history_admission','pi_history_children','pi_history_question_cohort')").fetchall()
+        if not triggers:
+            return {'action': 'none', 'reason': 'admission-open'}
+        if ('pi_history_admission',) not in triggers:
+            raise ValueError('Partial admission fence cannot prove closed intake')
+        identity = db.execute("SELECT value FROM pi_history_bridge WHERE key='identity'").fetchone()
+        if identity is None or json.loads(identity[0]) != {'candidate': candidate, 'legacySource': receipt.get('legacySource')}:
+            raise ValueError('Admission fence has no matching immutable identity')
+        if db.execute("SELECT 1 FROM pi_history_bridge WHERE key='closing'").fetchone():
+            return {'action': 'none', 'reason': 'closing'}
+    if now_ms - admitted_at < restore_after_ms:
+        return {'action': 'none', 'reason': 'closure-within-budget'}
+    return {'action': 'restore', 'candidate': candidate}
+
+
+def run():
+    if len(sys.argv) == 6 and sys.argv[1] == '--inspect-owner':
+        print(json.dumps(inspect_owner(sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5]))))
+        return
+    if len(sys.argv) != 2 or not Path(sys.argv[1]).is_absolute():
+        raise ValueError('usage: prompt-availability HOST_FILE | --inspect-owner DATA_DIR CANDIDATE NOW_MS RESTORE_AFTER_MS')
+    host_file = sys.argv[1]
+    host = json.loads(Path(host_file).read_text())
+    owner = host.get('nativeHistoryAvailabilityOwner')
+    if owner is None:
+        return
+    if (not isinstance(owner, dict) or not isinstance(owner.get('user'), str)
+            or not re.fullmatch('[a-z_][a-z0-9_-]{0,31}', owner['user'])
+            or not isinstance(owner.get('unit'), str) or not re.fullmatch('[a-zA-Z0-9_.@-]+\\.service', owner['unit'])
+            or not isinstance(owner.get('dataDir'), str) or not Path(owner['dataDir']).is_absolute()
+            or type(owner.get('restoreAfterMs')) is not int or owner['restoreAfterMs'] <= 0):
+        raise ValueError('Invalid explicit availability owner declaration')
+    remote = Path('/srv/pi/pi-remote').resolve()
+    base = Path('/srv/pi/.pi-stack-maintenance/native-history')
+    if base not in remote.parents:
+        return
+    stage = remote.parent
+    pid = subprocess.check_output(['systemctl', 'show', owner['unit'], '-p', 'MainPID', '--value'], text=True).strip()
+    if pid == '0':
+        return
+    if not pid.isdigit() or int(pid) <= 0:
+        raise ValueError('Owner namespace has no valid PID')
+    observed = subprocess.run(['nsenter', '-t', pid, '-m', '--', 'runuser', '-u', owner['user'], '--',
+                               '/usr/bin/python3', str(Path(__file__).resolve()), '--inspect-owner',
+                               owner['dataDir'], stage.name, str(time.time_ns() // 1_000_000), str(owner['restoreAfterMs'])],
+                              check=True, capture_output=True, text=True, timeout=5)
+    decision = json.loads(observed.stdout)
+    if decision['action'] == 'none':
+        return
+    if decision != {'action': 'restore', 'candidate': stage.name}:
+        raise ValueError('Owner supplied an invalid restoration decision')
+    source = stage / 'source'
+    subprocess.run(['/usr/local/bin/node', str(source / 'deploy/native-history-coordinator.mjs'),
+                    host_file, str(source), stage.name, '--restore'], check=True, timeout=45)
+
+
+if __name__ == '__main__':
+    try:
+        run()
+    except (ValueError, OSError, sqlite3.Error, subprocess.SubprocessError) as error:
+        print(json.dumps({'ok': False, 'error': {'code': 'availability-proof-failed', 'message': str(error)}}), file=sys.stderr)
+        raise SystemExit(1)

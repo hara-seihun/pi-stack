@@ -60,6 +60,7 @@ function controlledDateProbe() {
       React.createElement('label', null, 'Controlled datetime', React.createElement('input', { id: 'controlled-datetime', type: 'datetime-local', value: value.datetime, onChange: e => setValue({ ...value, datetime: e.target.value }) })),
       React.createElement('label', null, 'Event time zone', React.createElement('input', { id: 'controlled-timezone', value: value.timezone, onChange: e => setValue({ ...value, timezone: e.target.value }) })),
       React.createElement('output', { id: 'controlled-state' }, JSON.stringify({ date: value.date, datetime: value.datetime })),
+      React.createElement('output', { id: 'controlled-timezone-state' }, value.timezone),
       React.createElement('label', null, 'Rejected datetime', React.createElement('input', { id: 'rejected-datetime', type: 'datetime-local', value: rejected, onChange: e => { const previous = rejected; setRejected(e.target.value); setTimeout(() => setRejected(previous), 0); } })),
       React.createElement('label', null, 'Readonly date', React.createElement('input', { id: 'readonly-date', type: 'date', value: '2026-10-02', readOnly: true })));
   }
@@ -152,7 +153,7 @@ try {
     record: phase => { phases.push(phase); writeFileSync(join(directory, "browser-proof.json"), JSON.stringify(phases, null, 2)); },
   });
   accepted = true;
-  console.log(JSON.stringify({ host: hostname(), sdk, runtime, bin, wrapperVersion, browserVersion, recovered: !!values["session-file"], phases: phases.map(({ phase, elapsedMs }) => ({ phase, elapsedMs })), nativeOpen: true, snapshot: true, visibleText: true, screenshot: true, download: true, crossOriginFrameFill: true, dynamicCrossOriginFrameFill: true, remoteExistingFrameFill: true, controlledDateFill: true, controlledDatetimeFill: true, controlledFindFill: true, controlledSemanticFill: true, authorizedTabRestoration: true, frameEval: true, sensitiveInputRedaction: true, cleanup: "closed" }));
+  console.log(JSON.stringify({ host: hostname(), sdk, runtime, bin, wrapperVersion, browserVersion, recovered: !!values["session-file"], phases: phases.map(({ phase, elapsedMs }) => ({ phase, elapsedMs })), nativeOpen: true, snapshot: true, visibleText: true, screenshot: true, download: true, crossOriginFrameFill: true, dynamicCrossOriginFrameFill: true, remoteExistingFrameFill: true, controlledDateFill: true, controlledDatetimeFill: true, controlledFindFill: true, controlledSemanticFill: true, semanticEmptyFill: true, controlledReactEmptyFill: true, rawEmptyFill: true, semanticUnsetTextRejected: true, semanticZeroFill: true, semanticNonemptyFill: true, authorizedTabRestoration: true, frameEval: true, sensitiveInputRedaction: true, cleanup: "closed" }));
 } finally {
   try {
     if (session) await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });

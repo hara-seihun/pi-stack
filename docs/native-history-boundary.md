@@ -36,6 +36,14 @@ After mounting a person's folder, the launcher inspects native schema and retain
 
 The Orchestrator's first-start owner (`native-history-startup.ts`) likewise checks retained producer protocol and spool sizes before choosing its decoder. Unknown/corrupt source custody preserves queued work and returns an explicit startup error. Native current custody starts directly. Capture maintenance belongs to the owner-local migrator, not a runtime compatibility decoder.
 
+## Prompt availability observation
+
+`deploy/prompt-availability` and its `deploy/systemd/pi-prompt-availability.*` units own the optional host availability observer. The host file explicitly declares `nativeHistoryAvailabilityOwner` with `user`, `unit`, absolute `dataDir`, and positive `restoreAfterMs`; an absent declaration disables observation. Install the executable at `/usr/local/libexec/pi-prompt-availability` and the units into `/etc/systemd/system`.
+
+The observer enters the actual owner mount namespace and UID, reads only maintenance metadata and SQLite fence identity, and returns a bounded decision. A `draining` phase does not imply closed admission. Open observation leaves the publication untouched, including when its receipt is older than the closure budget. Only a positively observed matching admission trigger may request the candidate's coordinated restoration after that budget. Foreign/missing identity and unknown phases are errors; closing/migrated owners cannot be restored. Restoration remains with the exact source coordinator, and never disables the availability observer or replays accepted work.
+
+Focused observer contract: `python3 -B scripts/prompt-availability.test.py`.
+
 ## Interruption and restoration
 
 State lives outside model sessions. Pre-migration failure or cancellation restores only that attempt's transient source selectors and owned dispatch/observation state. Historical gated attempts may use their source-bound restoration helper to remove their exact old admission fences. Restoration never cancels accepted provider work or clears another candidate's identity. Each original owner supplies a positive live or closed generation proof in its own namespace and UID.

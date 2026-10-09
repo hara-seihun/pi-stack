@@ -1,0 +1,6 @@
+[Unit]
+Description=Restore positively observed prolonged native history admission closure
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/pi-prompt-availability /etc/pi-stack/host.json
+TimeoutStartSec=50
