@@ -125,14 +125,25 @@ export async function probeBrowser(tool, { url, title, visibleTextCheck, frameVa
         } });
         const value = await batch(`semantic-fill-readback-${route}`, ownerArgs, [
           ["get", "url"], ["get", "value", "#controlled-timezone"],
+          ["eval", "document.querySelector('#controlled-timezone-state').textContent"],
         ]);
         assert.equal(value.data[1].result.value, text, `${route} semantic fill must preserve empty and nonempty strings`);
+        assert.equal(value.data[2].result.result, text, `${route} semantic fill must update controlled React state, including clearing`);
       }
       const missing = await execute(`semantic-fill-unset-${route}`, { semanticAction: {
         action: "fill", ...target, session: ownerName,
       } }, "failure");
       assert.equal(missing.failureCategory, "validation-error", "unset text must fail before dispatch");
       assert.equal(missing.validationError, "semanticAction.text is required for fill.");
+    }
+
+    for (const text of ["0", "nonempty", ""]) {
+      const value = await batch(`raw-controlled-text-fill-${JSON.stringify(text)}`, ownerArgs, [
+        ["fill", "#controlled-timezone", text], ["get", "value", "#controlled-timezone"],
+        ["eval", "document.querySelector('#controlled-timezone-state').textContent"],
+      ]);
+      assert.equal(value.data[1].result.value, text, "raw fill must retain the DOM value");
+      assert.equal(value.data[2].result.result, text, "raw fill must update controlled React state, including clearing");
     }
 
     for (const command of [
