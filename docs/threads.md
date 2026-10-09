@@ -291,7 +291,10 @@ Retained attachment has one in-flight operation and one native client per thread
 Repeated custody probes reuse that client; concurrent native opens await its
 attachment. A new attachment reads native `get_state` before claiming busy or
 idle, without resubmitting input. If that observation fails, the attached client
-and original custody remain available for explicit recovery.
+and original custody remain available for explicit recovery. Fleet controller
+handoff stops its local lease heartbeat timers before ledger closure, including
+failed shutdown, while preserving durable account/broker execution custody for
+the next controller.
 
 Provider capacity refusals preserve execution/work identity, retire inactive
 native resources, and retry through durable admission without emitting a false
