@@ -42,7 +42,7 @@ test("main movement returns before deployment and the next worker pass reruns ch
   const source = "a".repeat(40), base = "b".repeat(40), integration = "c".repeat(40), moved = "d".repeat(40);
   const requestId = "PUB-0123456789abcdef01234567";
   const receipt = join(root, "requests", `${requestId}.json`);
-  const request = { requestId, sourceSha: source, sourceRef: "refs/heads/submission", baseSha: base,
+  const request = { requestId, sourceSha: source, sourceRef: `refs/heads/pi-stack-publications/${requestId}`, baseSha: base,
     integrationSha: integration, checks: { status: "passed" }, status: "queued", attempt: 0, failures: [] };
   writeFileSync(join(root, "main"), base);
   writeFileSync(join(root, "repository/deploy/lib"), 'pi_stack_prepare_dependencies() { :; }\n');
@@ -91,7 +91,7 @@ exit 99
   writeFileSync(join(root, "bin/npm"), '#!/bin/sh\necho "fresh integration checks reached" >&2\nexit 1\n', { mode: 0o700 });
   const checked = processOne(queued);
   assert.equal(checked.attempt, 2);
-  assert.equal(checked.baseSha, moved);
+  assert.equal(checked.baseSha, moved, JSON.stringify(checked.failure));
   assert.equal(checked.failure.step, "checks");
   assert.match(checked.failure.excerpt, /fresh integration checks reached/);
   assert.equal(checked.mainMovements.length, 1);
@@ -103,7 +103,7 @@ for (const mainState of ["base", "pushed", "moved", "same-boot", "unrecorded-boo
   for (const path of ["requests", "bin", "repository/.git"]) mkdirSync(join(root, path), { recursive: true });
   const requestId = "PUB-0123456789abcdef01234567";
   const receipt = join(root, "requests", `${requestId}.json`);
-  const request = { ...interruptedIntegration(), requestId, sourceSha: "a".repeat(40), sourceRef: "refs/heads/submitted",
+  const request = { ...interruptedIntegration(), requestId, sourceSha: "a".repeat(40), sourceRef: `refs/heads/pi-stack-publications/${requestId}`,
     failures: [], updatedAt: "2026-01-01T00:00:00.000Z", queuedAt: "2026-01-01T00:00:00.000Z",
     progress: { command: "git", args: ["push"], deadlineAt: "2026-01-01T00:00:00.000Z" } };
   if (mainState === "same-boot") request.workerBootId = currentBootId;
