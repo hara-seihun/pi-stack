@@ -41,8 +41,26 @@ test('history observation never fences new roots, external input, answers or due
   service.sql("INSERT INTO thread_work VALUES('wake','accepted','accepted','queued')").run();
   assert.equal(service.sql("SELECT count(*) AS n FROM sqlite_master WHERE type='trigger'").get().n, 0);
   assert.throws(() => installObservation(service, { candidate: 'c'.repeat(40), legacySource: old }), /Another publication/);
-  removeFence(service);
+  removeFence(service, { candidate, legacySource: old });
   service.sql("INSERT INTO thread_work VALUES('after','accepted',NULL,'queued')").run();
+  service.db.close();
+});
+test('restoration refuses another application cohort and preserves accepted work', t => {
+  const root = directory(t), service = database(join(root, 'threads.sqlite3'));
+  const identity = { candidate, legacySource: old };
+  installObservation(service, identity);
+  service.sql("INSERT INTO thread_work VALUES('accepted-work','accepted',NULL,'queued')").run();
+  service.db.exec("CREATE TRIGGER pi_history_admission BEFORE INSERT ON thread_work BEGIN SELECT RAISE(ABORT,'historic intake closed'); END");
+  assert.throws(() => removeFence(service), /immutable ownership identity/);
+  assert.throws(() => removeFence(service, { candidate: 'c'.repeat(40), legacySource: old }), /Another publication/);
+  assert.equal(service.sql("SELECT count(*) AS n FROM sqlite_master WHERE name='pi_history_admission'").get().n, 1);
+  assert.equal(service.sql("SELECT status FROM thread_work WHERE id='accepted-work'").get().status, 'queued');
+  assert.deepEqual(removeFence(service, identity), { ownership: 'restored' });
+  assert.deepEqual(removeFence(service, identity), { ownership: 'unacquired' });
+  service.sql("INSERT INTO thread_work VALUES('new-work','accepted',NULL,'queued')").run();
+  service.db.exec("CREATE TABLE pi_history_cohort(thread_id TEXT PRIMARY KEY)");
+  assert.throws(() => removeFence(service, identity), /no restoration identity/);
+  assert.equal(service.sql('SELECT count(*) AS n FROM thread_work').get().n, 2);
   service.db.close();
 });
 test('transient wrappers pin old modules and source identity without rewriting the immutable selected release', t => {
