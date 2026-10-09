@@ -16,6 +16,8 @@ Only after that proof does `deploy/host` observe readiness and perform the short
 
 ## Owner replacement
 
+Read-only owner censuses run concurrently across declared namespace/UID pairs, retaining inventory order and validating every response. Each census takes one bounded control round trip rather than multiplying the five-second socket deadline by the owner count. The coordinator still observes twice around prior-restoration proofs; restoration and close/migration mutations remain ordered. Namespace inspection and identity failures remain errors; an unavailable or busy controller never establishes readiness.
+
 The coordinator stages entry wrappers referring to the immutable selected Remote and Orchestrator releases. Their resource identities, decoder and API module graph remain those of that release. The existing namespace launcher retains the encrypted mount. Inventory includes every registered active `pi-orchestrator@USER`, deduplicating the administrator. Ledger placement comes from the live owning namespace, then the exact registry declaration, then the inspected old CLI's HOME placement.
 
 The old fleet's shutdown aborts tool-free providers, so the coordinator first observes all active provider requests without changing their dispatch. Once they are naturally idle, a short source-bound dispatch barrier prevents a new queued completion from entering the retiring provider. Completion submission remains accepted into its normal durable ledger. If a provider raced this barrier, every prepared barrier is released and normal dispatch resumes. The replacement daemon releases its own barrier before starting; queued requests continue with their original identities. The barrier never rejects inserts or changes accepted run outcomes.
@@ -63,7 +65,8 @@ Private snapshots and native preimages remain in the person's backup coverage. `
 ## Focused contracts
 
 ```sh
-node --test scripts/native-history-boundary.test.mjs \
+node --test scripts/native-history-owner-status.test.mjs \
+  scripts/native-history-boundary.test.mjs \
   scripts/native-history-attachment.test.mjs \
   scripts/native-history-owner-recovery.test.mjs \
   apps/remote/server/native-history-startup.test.mjs \
