@@ -292,25 +292,52 @@ for (const enableGuest of [false, true]) test(`host deployment activates Pi Remo
     writeFileSync(join(deploy, "native-history-boundary"), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     writeFileSync(join(remoteApp, "data-contract.json"), readFileSync(join(root, "apps/remote/data-contract.json")));
     writeFileSync(join(deploy, "lib"), `${readFileSync(join(root, "deploy", "lib"), "utf8")}\npi_stack_prepare_builds() { return "\${BUILD_EXIT:-0}"; }\n`);
-    const component=`#!/usr/bin/env bash\nset -euo pipefail\nname=$(basename "$0")\ncommit=$(git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD)\ncase "$name" in runtime) destination=$PI_STACK_RUNTIME_DEST;; orchestrator) destination=$PI_STACK_ORCHESTRATOR_DEST;; tools) destination=$PI_STACK_TOOLS_DEST;; skills) destination=$PI_STACK_SKILLS_DEST;; settings) printf '%s\\n' "$1" >> "$SETTINGS_TRACE"; exit 0;;\n remote) destination=$PI_STACK_REMOTE_DEST; release="$(dirname "$destination")/.pi-stack-releases/remote/$commit"; mkdir -p "$release/dist" "$release/server/voice" "$release/server/phone"; touch "$release/server/voice/service.ts" "$release/server/phone/service.ts"; cp "$(cd "$(dirname "$0")/.." && pwd)/apps/remote/data-contract.json" "$release/data-contract.json"; printf '%s\\n' "$commit" > "$release/.pi-stack-commit"; ln -sfn "$release" "$destination.tmp"; mv -Tf "$destination.tmp" "$destination"; exit 0;; esac\nmkdir -p "$destination/dist"\nprintf '%s\\n' "$commit" > "$destination/.pi-stack-commit"\n`;
-    for(const name of ["runtime","orchestrator","remote","tools","skills","settings"]){writeFileSync(join(deploy,name),component);chmodSync(join(deploy,name),0o755);}
-    const runtimeOverlap = `
-if [[ \${REQUIRE_RUNTIME_OVERLAP:-0} == 1 ]]; then
-  if [[ $name == orchestrator ]]; then touch "$ORCHESTRATOR_STAGED"; fi
-  if [[ $name == runtime ]]; then
-    for i in $(seq 1 100); do
-      if [[ -f $ORCHESTRATOR_STAGED ]]; then
-        touch "$RUNTIME_CHECKED"
-        exit "\${RUNTIME_CHECK_EXIT:-0}"
-      fi
-      sleep 0.01
-    done
-    echo 'Prepared runtime proof serialized component staging' >&2
-    exit 91
-  fi
+    const component = `#!/usr/bin/env bash
+set -euo pipefail
+name=$(basename "$0")
+root=$(cd "$(dirname "$0")/.." && pwd)
+source "$root/deploy/lib"
+commit=$(git -C "$root" rev-parse HEAD)
+case $name in
+  runtime) destination=$PI_STACK_RUNTIME_DEST;;
+  orchestrator) destination=$PI_STACK_ORCHESTRATOR_DEST;;
+  remote) destination=$PI_STACK_REMOTE_DEST;;
+  tools) destination=$PI_STACK_TOOLS_DEST;;
+  skills) mkdir -p "$PI_STACK_SKILLS_DEST"; printf '%s\\n' "$commit" > "$PI_STACK_SKILLS_DEST/.pi-stack-commit"; exit 0;;
+  settings) printf '%s\\n' "$1" >> "$SETTINGS_TRACE"; exit 0;;
+  *) exit 64;;
+esac
+release="$PI_STACK_RELEASES_ROOT/$name/$commit"
+case \${1:-} in
+  --links-only) pi_stack_require_release "$destination" "$commit"; exit $?;;
+  --activate-prepared) [[ $name == runtime ]] || exit 64; pi_stack_select_release "$release" "$destination" "$commit"; exit $?;;
+esac
+printf '%s\\n' "$name" >> "$PREPARE_TRACE"
+if [[ $name == runtime ]]; then
+  [[ \${1:-} == --prepare ]] || exit 64
+  (( \${RUNTIME_CHECK_EXIT:-0} == 0 )) || exit "$RUNTIME_CHECK_EXIT"
+else
+  [[ $PI_STACK_PREPARE_ONLY == 1 ]] || exit 64
+  pi_stack_require_release "$PI_STACK_RUNTIME_DEST" "$commit"
+  if [[ $name == orchestrator ]]; then (( \${ORCHESTRATOR_EXIT:-0} == 0 )) || exit "$ORCHESTRATOR_EXIT"; fi
 fi
+mkdir -p "$release/dist"
+printf '%s\\n' "$commit" > "$release/.pi-stack-commit"
+case $name in
+  runtime)
+    mkdir -p "$release/node_modules/.bin"
+    cp "$root/packages/runtime/model-doctor.mjs" "$release/node_modules/.bin/pi-model-selection-doctor";;
+  orchestrator) cp "$root/packages/runtime/agent-capacity.mjs" "$release/dist/agent-capacity.js";;
+  remote)
+    mkdir -p "$release/server/voice" "$release/server/phone"
+    touch "$release/server/voice/service.ts" "$release/server/phone/service.ts"
+    cp "$root/apps/remote/data-contract.json" "$release/data-contract.json";;
+esac
+if [[ $name != runtime ]]; then pi_stack_select_release "$release" "$destination" "$commit"; fi
 `;
-    for (const name of ["runtime", "orchestrator"]) writeFileSync(join(deploy, name), component + runtimeOverlap + '\nif [[ $name == orchestrator ]]; then exit "${ORCHESTRATOR_EXIT:-0}"; fi\n');
+    for (const name of ["runtime", "orchestrator", "remote", "tools", "skills", "settings"]) {
+      writeFileSync(join(deploy, name), component, { mode: 0o755 });
+    }
     writeFileSync(join(deploy, "skills"), component.replace('name=$(basename "$0")', 'name=$(basename "$0")\nprintf "%s\\n" "$*" >> "$SKILLS_TRACE"'));
     writeFileSync(join(deploy,"smoke"),"#!/bin/sh\nif [ \"${REQUIRE_ACTIVATION_OVERLAP:-0}\" = 1 ]; then test -f \"$DAEMON_ACTIVATED\" || exit 92; fi\nexit \"${SMOKE_EXIT:-0}\"\n");chmodSync(join(deploy,"smoke"),0o755);
     for (const service of ["voice", "phone"]) {
@@ -337,21 +364,16 @@ process.exit(Number(process.env.${name}_SMOKE_EXIT ?? 0));
     writeFileSync(join(repository,"packages/runtime/browser-doctor.mjs"), doctorProof("BROWSER", "MODEL"));
     // Activation hands the supervisor the selected release; its health then names that commit.
     writeFileSync(join(remoteApp,"activate"),"#!/bin/sh\nprintf '%s\\n' \"${PI_REMOTE_SERVICE:-}\" >> \"$ACTIVATE_TRACE\"\ncat \"$PI_STACK_REMOTE_DEST/.pi-stack-commit\" > \"$SUPERVISOR_COMMIT\"\n");chmodSync(join(remoteApp,"activate"),0o755);
-    assert.equal(spawnSync("git",["init","-q",repository]).status,0);assert.equal(spawnSync("git",["-C",repository,"add","deploy","apps","packages"]).status,0);assert.equal(spawnSync("git",["-C",repository,"-c","user.name=test","-c","user.email=test@example.test","commit","-qm","fixture"]).status,0);
     const destinations=Object.fromEntries(["RUNTIME","ORCHESTRATOR","REMOTE","TOOLS","SKILLS"].map((name)=>[`PI_STACK_${name}_DEST`,join(directory,name.toLowerCase())]));
     const doctorBin = join(destinations.PI_STACK_RUNTIME_DEST, "node_modules/.bin");
-    function installModelDoctor() {
-      mkdirSync(doctorBin, { recursive: true });
-      writeFileSync(join(doctorBin, "pi-model-selection-doctor"), doctorProof("MODEL", "BROWSER"));
-      const capacityDir = join(destinations.PI_STACK_ORCHESTRATOR_DEST, "dist");
-      mkdirSync(capacityDir, { recursive: true });
-      writeFileSync(join(capacityDir, "agent-capacity.js"), `
+    writeFileSync(join(repository, "packages/runtime/model-doctor.mjs"), doctorProof("MODEL", "BROWSER"));
+    writeFileSync(join(repository, "packages/runtime/agent-capacity.mjs"), `
 export async function configuredAgentCapacityStatus() {
   return { ok: true, value: { authority: 'pi-stack-global-agents-v1', limit: 100,
     initialized: process.env.CAPACITY_UNINITIALIZED !== '1', active: 0, queued: 0 } };
 }
 `);
-    }
+    assert.equal(spawnSync("git",["init","-q",repository]).status,0);assert.equal(spawnSync("git",["-C",repository,"add","deploy","apps","packages"]).status,0);assert.equal(spawnSync("git",["-C",repository,"-c","user.name=test","-c","user.email=test@example.test","commit","-qm","fixture"]).status,0);
     const user=process.env.USER??spawnSync("id",["-un"],{encoding:"utf8"}).stdout.trim();
     const hostFile=join(directory,"host.json");writeFileSync(hostFile,JSON.stringify({version:1,fleetUser:user}));
     const personsDir = join(directory, "persons");
@@ -440,6 +462,9 @@ exit 64
     const env={...process.env,...destinations,PATH:`${bin}:${process.env.PATH}`,ACTIVATE_TRACE:activationTrace,VOICE_TRACE:join(directory,"voice.trace"),SUPERVISOR_COMMIT:supervisorCommit,SYSTEMCTL_TRACE:systemctlTrace,SETTINGS_TRACE:settingsTrace,HEALTH_TRACE:join(directory,"health.trace"),PI_REMOTE_PERSONS_DIR:personsDir,PI_REMOTE_ROUTER_PORT:"8788",PI_STACK_DEPLOY_NO_SUDO:"1",PI_STACK_ALLOW_DIRTY:"1",PI_STACK_SERVICES:"1"};
     env.PHONE_TRACE = join(directory, "phone.trace");
     env.SKILLS_TRACE = join(directory, "skills.trace");
+    env.PREPARE_TRACE = join(directory, "prepare.trace");
+    const preparedReceipt = () => join(directory, ".pi-stack-releases/.prepared", `${spawnSync("git", ["-C", repository, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim()}.json`);
+    const resetPreparation = () => rmSync(preparedReceipt());
     env.DAEMON_ACTIVATED = join(directory, "daemon.activated");
     env.PERSON_READ_TRACE = personReadTrace;
     env.PI_STACK_ALLOW_LIVE_MEETING_RESTART = "0";
@@ -475,9 +500,12 @@ exit 64
     rmSync(env.VOICE_TRACE, { force: true });
     rmSync(env.PHONE_TRACE, { force: true });
     rmSync(personReadTrace);
-    installModelDoctor();
-    const first=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:{...env,REQUIRE_ACTIVATION_OVERLAP:"1",REQUIRE_DOCTOR_OVERLAP:"1",BROWSER_DOCTOR_STARTED:join(directory,"browser.started"),MODEL_DOCTOR_STARTED:join(directory,"model.started"),DOCTOR_ACTIVATION_STARTED:join(directory,"doctor.activation.started")},cwd:directory});assert.equal(first.status,0,first.stderr);
+    const first=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:{...env,REQUIRE_ACTIVATION_OVERLAP:"1",REQUIRE_DOCTOR_OVERLAP:"1",BROWSER_DOCTOR_STARTED:join(directory,"browser.started"),MODEL_DOCTOR_STARTED:join(directory,"model.started"),DOCTOR_ACTIVATION_STARTED:join(directory,"doctor.activation.started")},cwd:directory});assert.equal(first.status,0,`${first.stdout}\n${first.stderr}`);
     assert.equal(existsSync(env.DAEMON_ACTIVATED), true, "smoke joins the independent daemon activation job");
+    const preparedOrder = readFileSync(env.PREPARE_TRACE, "utf8").trim().split("\n");
+    assert.deepEqual(preparedOrder.slice(0, 2), ["runtime", "orchestrator"], "dependents stage against the prepared runtime");
+    assert.deepEqual(preparedOrder.slice(2).sort(), ["remote", "tools"]);
+    assert.equal(existsSync(preparedReceipt()), true, "activation requires a bound prepared-artifact receipt");
     assert.deepEqual(readFileSync(env.SKILLS_TRACE, "utf8").trim().split("\n").sort(),
       [user, "--links-only alice", "--links-only guest-person"].sort(),
       "publish the shared skills once, then only reconcile other accounts' links");
@@ -511,8 +539,10 @@ exit 64
     rmSync(systemctlTrace);
     const doctorSettlement = join(directory, "doctor-settlement");
     mkdirSync(doctorSettlement);
+    resetPreparation();
     const stagingFailure = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...env, ORCHESTRATOR_EXIT: "23", DOCTOR_SETTLEMENT_DIR: doctorSettlement } });
-    assert.equal(stagingFailure.status, 23, stagingFailure.stderr);
+    assert.equal(stagingFailure.status, 23, `${stagingFailure.stdout}\n${stagingFailure.stderr}`);
+    assert.equal(existsSync(preparedReceipt()), false, "failed staging cannot record prepared success");
     for (const doctor of ["BROWSER", "MODEL"]) assert.equal(existsSync(join(doctorSettlement, `${doctor}.settled`)), false, "doctors require successful publication of the runtime");
     assert.doesNotMatch(readFileSync(systemctlTrace, "utf8"), /^restart /m, "staging failure cannot activate services");
     const beforeDeferral = readFileSync(activationTrace, "utf8");
@@ -531,21 +561,21 @@ exit 64
     assert.equal(activationFailure.status, 1, activationFailure.stderr);
     for (const doctor of ["BROWSER", "MODEL"]) assert.ok(existsSync(join(doctorSettlement, `${doctor}.settled`)), "failed activation must join both proof jobs before releasing custody");
     rmSync(systemctlTrace);
-    const overlapEnv = { ...env, REQUIRE_RUNTIME_OVERLAP: "1", ORCHESTRATOR_STAGED: join(directory, "orchestrator.staged"), RUNTIME_CHECKED: join(directory, "runtime.checked") };
-    const unchanged=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:overlapEnv});assert.equal(unchanged.status,0,unchanged.stderr);
-    assert.equal(existsSync(overlapEnv.RUNTIME_CHECKED), true, "prepared runtime proof overlaps component staging and is joined");
+    const preparationBefore = readFileSync(env.PREPARE_TRACE, "utf8");
+    const unchanged=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:{...env,BUILD_EXIT:"99",RUNTIME_CHECK_EXIT:"23",ORCHESTRATOR_EXIT:"23"}});assert.equal(unchanged.status,0,`${unchanged.stdout}\n${unchanged.stderr}`);
+    assert.equal(readFileSync(env.PREPARE_TRACE, "utf8"), preparationBefore, "verified prepared artifacts are reused without rebuilding components");
     assert.equal(readFileSync(activationTrace,"utf8"),"pi-remote@alice.service\n");
     const again = readFileSync(systemctlTrace, "utf8");
     assert.deepEqual(restartedDaemons(again), expectedDaemons, "unchanged releases still reconcile every daemon");
     assert.doesNotMatch(again, /restart pi-remote-router/);
 
     rmSync(systemctlTrace,{force:true});
-    rmSync(overlapEnv.ORCHESTRATOR_STAGED);
-    rmSync(overlapEnv.RUNTIME_CHECKED);
-    const runtimeFailure = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...overlapEnv, RUNTIME_CHECK_EXIT: "23" } });
+    resetPreparation();
+    const runtimeFailure = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...env, RUNTIME_CHECK_EXIT: "23" } });
     assert.equal(runtimeFailure.status, 1, runtimeFailure.stderr);
-    assert.equal(existsSync(overlapEnv.RUNTIME_CHECKED), true, "failed runtime proof was not skipped");
-    assert.doesNotMatch(readFileSync(systemctlTrace, "utf8"), /^restart /m, "failed overlapped runtime proof vetoes service activation");
+    assert.match(runtimeFailure.stderr, /preparation runtime exited 23/);
+    assert.equal(existsSync(preparedReceipt()), false, "failed runtime preparation cannot record prepared success");
+    assert.doesNotMatch(readFileSync(systemctlTrace, "utf8"), /^restart /m, "failed prepared runtime proof vetoes service activation");
     rmSync(systemctlTrace,{force:true});
     const disabled=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:{...env,GUEST_UNIT_STATE:"disabled",ALICE_UNIT_STATE:"disabled"}});
     assert.equal(disabled.status,0,disabled.stderr);
@@ -564,11 +594,13 @@ exit 64
       assert.notEqual(doctorFailure.status, 0);
       assert.match(doctorFailure.stderr, /runtime doctor failed/);
     }
+    rmSync(systemctlTrace, { force: true });
     rmSync(join(doctorBin, "pi-model-selection-doctor"));
     const missingDoctor = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env });
-    assert.notEqual(missingDoctor.status, 0);
-    assert.match(missingDoctor.stderr, /runtime doctor failed/);
-    installModelDoctor();
+    assert.equal(missingDoctor.status, 66, `${missingDoctor.stdout}\n${missingDoctor.stderr}`);
+    assert.match(missingDoctor.stdout, /prepared-artifact-changed/);
+    assert.doesNotMatch(readFileSync(systemctlTrace, "utf8"), /^restart /m, "mutated prepared artifacts are rejected before activation");
+    writeFileSync(join(doctorBin, "pi-model-selection-doctor"), doctorProof("MODEL", "BROWSER"));
     rmSync(systemctlTrace,{force:true});
 
     // A release the clients cannot use goes back to the previous Pi Remote.
