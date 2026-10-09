@@ -194,8 +194,13 @@ export async function attachLegacyRuntime(service, original, id, recoverMissing 
 }
 
 export async function reconcileLegacyRuntime(service, id) {
-  const owned = () => service.execution(id) || service.opening.has(id) || service.operations.has(id) || service.halts.has(id);
-  if (owned()) return;
+  const transitioning = () => service.opening.has(id) || service.operations.has(id) || service.halts.has(id);
+  if (transitioning()) return;
+  if (service.execution(id)) {
+    if (!service.runtimes.has(id) && service.get(id)?.metadata?.runnerReference) await service.attach(id);
+    return;
+  }
+  const owned = () => service.execution(id) || transitioning();
   const runtime = await service.attach(id);
   if (owned()) return;
   if (!runtime) {
