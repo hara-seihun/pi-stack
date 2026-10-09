@@ -1004,7 +1004,18 @@ case "$operation" in
 esac
 `.replaceAll("\\${", "${");
 
+export function nativeHistoryCustodyOwners(request, target) {
+  return allRequests().filter(owner => owner.requestId !== request.requestId).flatMap(owner => {
+    const history = owner.nativeHistory?.hosts?.[target.id];
+    if (!history || ["restored", "released"].includes(history.state)) return [];
+    return [{ requestId: owner.requestId, integrationSha: history.integrationSha, state: history.state, receipt: requestPath(owner.requestId) }];
+  });
+}
+
 export function reserveTarget(request, target, logPath) {
+  ensureState();
+  const owners = nativeHistoryCustodyOwners(request, target);
+  if (owners.length) return { ok: false, status: 75, kind: "native-history-custody", owners };
   request.reservations ??= {};
   request.reservations[target.id] = { state: "restore-required", integrationSha: request.integrationSha };
   writeRequest(request);
@@ -1126,11 +1137,34 @@ function nativeSourceProbe(request, target, ensureSource = false) {
   return result;
 }
 
+export function nativeMaintenanceSourceProof(repository, candidate, retained) {
+  const files = ['deploy/native-history-boundary', 'deploy/native-history-coordinator.mjs', 'deploy/native-history-bridge.mjs',
+    'deploy/native-history-closed-owner.mjs', 'deploy/native-history-package-identity.mjs', 'deploy/native-history-root-boundary',
+    'deploy/one-kenan-activate', 'scripts/migrate-native-history.mjs'];
+  try {
+    const tree = sha => new Map(checked('git', ['-C', repository, 'ls-tree', '-r', '--format=%(objectname) %(path)', sha, '--', ...files])
+      .split('\n').filter(Boolean).map(line => [line.slice(41), line.slice(0, 40)]));
+    const selected = tree(candidate), current = tree(retained);
+    const changed = files.filter(path => selected.get(path) !== current.get(path));
+    return changed.length === 0 ? { ok: true, value: { candidate, retained } }
+      : { ok: false, error: { code: 'obsolete-native-maintenance-source', candidate, retained, changed } };
+  } catch (error) { return { ok: false, error: { code: 'native-maintenance-source-unavailable', message: String(error) } }; }
+}
+
 export function nativeHistoryBoundaryTarget(request, target, mode, logPath) {
   if (!["advance", "probe", "restore"].includes(mode)) throw new Error(`Unknown native history boundary mode: ${mode}`);
   const path = "deploy/native-history-boundary";
   const present = runCapture("git", ["-C", checkout, "ls-tree", "--name-only", request.integrationSha, "--", path]);
   if (!present) return { ok: true, status: 0, needed: false };
+  if (mode !== 'restore') {
+    const retained = checked('git', ['-C', checkout, 'for-each-ref', '--format=%(objectname)', ownerSourceRef]);
+    if (retained) {
+      const proof = nativeMaintenanceSourceProof(checkout, request.integrationSha, retained);
+      if (!proof.ok) throw Object.assign(new Error(`Native maintenance source requires the retained owner repair: ${JSON.stringify(proof.error)}`), {
+        probeFailure: { kind: 'native-source', mode, host: target.id, status: 1, sourceProof: proof.error },
+      });
+    }
+  }
   const source = runCapture("git", ["-C", checkout, "show", `${request.integrationSha}:${path}`]);
   const script = (mode === "advance" ? 'set -euo pipefail\ngit -C "$2" fetch --quiet --no-tags origin "$3"\n' : "") + source;
   const args = [target.hostConfig, target.releaseRepository, request.integrationSha, ...(mode === "advance" ? [] : [`--${mode}`])];
@@ -1862,6 +1896,12 @@ function deliverHost(request, target, logPath, previous) {
   if (previous?.status === "waiting" && ["host-lock", "thread-contract"].includes(previous.waiting.kind) && Date.now() - Date.parse(previous.waiting.at) > policy.blockedLimitMs) throw new Error(`${target.id} ${previous.waiting.kind} wait budget exhausted`);
   const result = reserveTarget(request, target, logPath);
   if (!result.ok) {
+    if (result.kind === "native-history-custody") {
+      const outcome = hostWait(request, target, "native-history-custody", logPath,
+        `${target.id} native history custody belongs to ${result.owners.map(owner => owner.requestId).join(", ")}; only their positive restoration or release permits another host admission.`, previous);
+      outcome.waiting.owners = result.owners;
+      return outcome;
+    }
     if (result.status === 75) {
       request.reservations[target.id].state = "released";
       writeRequest(request);
@@ -2410,6 +2450,13 @@ export function refreshHostWaits(request) {
           const result = nativeSourceProbe(request, target);
           host.waiting.probe = { at: new Date().toISOString(), selected: result.ok ? "ready" : result.stderr.trim() };
           available = result.ok;
+          break;
+        }
+        case "native-history-custody": {
+          const owners = nativeHistoryCustodyOwners(request, target);
+          host.waiting.owners = owners;
+          host.waiting.probe = { at: new Date().toISOString(), owners };
+          available = owners.length === 0;
           break;
         }
         case "native-history": {

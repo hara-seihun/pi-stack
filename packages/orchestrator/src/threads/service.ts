@@ -21,6 +21,7 @@ import { getRandomName } from "../nebulani-names.js";
 import { threadSettingsMetadata } from "./settings-metadata.js";
 import { isTelephoneContext, TELEPHONE_CONTEXT_ARGUMENT } from "./telephone-context.js";
 import { inputReceipts } from "./pi-input-receipts.js";
+import type { InputStatus } from "./pi-input-status.js";
 import { measureJsonBytes } from "./json-size.js";
 import { MetadataCache } from "./metadata-cache.js";
 import { formatThreadMessage, serializeThreadNotification } from "./message-format.js";
@@ -1912,7 +1913,7 @@ export class ThreadService implements ThreadApi {
     if (this.get(id)?.metadata?.archived) return bad("unavailable", "Restore this archived thread before using its native session");
     if (["prompt", "steer", "follow_up", "abort", "abort_bash", "abort_retry", "clear_queue", "set_model", "set_thinking_level", "set_speed", "set_session_name", "cycle_model", "cycle_thinking_level"].includes(command.type)) return bad("invalid_request", "Use thread messaging or control(settings/update) so the durable owner records this change");
     const durable = ["native_operation", "fork", "clone", "compact", "new_session", "switch_session", "navigate_tree", "bash", "cycle_model", "cycle_thinking_level", "export_html"].includes(command.type);
-    const observing = ["get_state", "get_context", "get_messages", "get_session_stats", "get_available_models", "get_available_thinking_levels", "get_commands", "get_fork_messages", "set_session_name", "extension_ui_response"].includes(command.type);
+    const observing = ["get_input_status", "get_state", "get_context", "get_messages", "get_session_stats", "get_available_models", "get_available_thinking_levels", "get_commands", "get_fork_messages", "set_session_name", "extension_ui_response"].includes(command.type);
     if (!observing && !command.id) return bad("invalid_request", "Executing commands require a stable command.id for capacity custody");
     const commandExecution = `command:${id}:${command.id}`;
     if (durable && !command.id) return bad("invalid_request", "Conversation mutations require a stable command.id for receipt replay");
@@ -1949,7 +1950,7 @@ export class ThreadService implements ThreadApi {
         runtime.commandRunning = command.type;
         if (durable) this.state(id, "running");
         let result: any;
-        try { result = await this.rpc(runtime, command); } finally { runtime.commandRunning = undefined; }
+        try { result = command.type === "get_input_status" ? await this.inputStatus(id, runtime, command) : await this.rpc(runtime, command); } finally { runtime.commandRunning = undefined; }
         if (this.suspended) return bad("unavailable", "Command remains with the native owner during handoff");
         const response = good(result);
         if (receipt) this.sql("UPDATE thread_request SET response=? WHERE id=? AND response IS NULL").run(JSON.stringify(response), command.id!);
@@ -2055,6 +2056,32 @@ export class ThreadService implements ThreadApi {
     if (this.suspended || this.closed || typeof state.sessionFile !== "string" || !state.sessionFile) return;
     const changed = this.sql("UPDATE thread SET session_file=?,metadata=json_set(metadata,'$.nativeHistoryRequired',json('true')) WHERE id=? AND (session_file!=? OR json_extract(metadata,'$.nativeHistoryRequired') IS NOT 1)").run(state.sessionFile, id, state.sessionFile).changes;
     if (changed) this.changed(id);
+  }
+  private async inputStatus(id: string, runtime: Runtime, command: PiCommand): Promise<InputStatus> {
+    if (typeof command.commandId !== "string" || typeof command.workId !== "string") throw new NativeRejection("Input status requires commandId and workId", "invalid_request");
+    let status: InputStatus;
+    try { status = await this.rpc(runtime, { ...command, type: "get_input_status" }); }
+    catch (error) {
+      if (!(error instanceof NativeRejection) || error.message !== "Unknown command: get_input_status") throw error;
+      // Retained adapters append admission synchronously before their first await. This ordered native state read
+      // crosses the same runner ingress queue; absence is positive non-admission, not a timeout or file guess.
+      const state = await this.rpc(runtime, { type: "get_state" });
+      if (state.sessionFile !== this.get(id)?.sessionFile || !Array.isArray(state.acceptedWorkIds) || !Array.isArray(state.completedWorkIds)) throw new Error("Native input barrier did not identify its session and receipts");
+      status = { state: state.acceptedWorkIds.includes(command.workId) || state.completedWorkIds.includes(command.workId) ? "accepted" : "never_accepted", commandId: command.commandId, workId: command.workId };
+    }
+    if (!status || status.commandId !== command.commandId || status.workId !== command.workId
+      || !["accepted", "rejected", "in_flight", "never_accepted"].includes(status.state)
+      || status.state === "rejected" && typeof status.error !== "string") throw new Error("Invalid native input status response");
+    return status;
+  }
+  private rejectInput(id: string, executionId: string, workId: string, error: string): void {
+    if (this.suspended || this.closed || this.row(id)?.held || this.halts.has(id) || this.execution(id)?.id !== executionId) return;
+    this.transaction(() => {
+      this.sql("UPDATE thread_work SET status='done',outcome='failed' WHERE id=? AND thread_id=? AND execution_id=? AND status='dispatched' AND inserted_at IS NULL AND landed_at IS NULL").run(workId, id, executionId);
+      this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.acknowledgementWait') WHERE id=? AND json_extract(metadata,'$.acknowledgementWait.workId')=?").run(id, workId);
+      this.sql("UPDATE thread SET metadata=json_set(metadata,'$.inputReconciliation',json(?)) WHERE id=?").run(JSON.stringify({ executionId, workId, state: "rejected", error, at: Date.now() }), id);
+    });
+    this.changed(id);
   }
   private confirmInput(id: string, executionId: string, workId: string): void {
     if (this.suspended || this.closed || this.row(id)?.held || this.halts.has(id) || this.execution(id)?.id !== executionId) return;
@@ -2314,6 +2341,10 @@ export class ThreadService implements ThreadApi {
     }
     if (event.type === "response") {
       const waiter = runtime.waiters.get(String(event.id)), inputReceipt = inputCommandReceipt(event.id);
+      if (event.inputUnconfirmed === true) {
+        if (waiter) { clearTimeout(waiter.timer); runtime.waiters.delete(String(event.id)); waiter.reject(new AcknowledgementTimeout(String(event.error))); }
+        return;
+      }
       if (waiter) { clearTimeout(waiter.timer); runtime.waiters.delete(String(event.id)); event.success === false ? waiter.reject(new NativeRejection(String(event.error ?? "Pi command rejected"), event.errorCode === "oversized" || event.errorCode === "invalid_request" ? event.errorCode : "unavailable")) : waiter.resolve(event.data ?? {}); }
       else if (inputReceipt) {
         const [executionId, workId] = inputReceipt;
@@ -2396,7 +2427,12 @@ export class ThreadService implements ThreadApi {
       if (Date.now() >= acknowledgement.nextCheckAt) {
         this.sql("UPDATE thread SET metadata=json_set(metadata,'$.acknowledgementWait.overdue',json('true'),'$.acknowledgementWait.nextCheckAt',?) WHERE id=?").run(Date.now() + 30_000, id);
         this.changed(id);
-        try { this.adoptReference(id, await this.rpc(runtime, { type: "get_state" })); }
+        try {
+          const status = await this.inputStatus(id, runtime, { type: "get_input_status", commandId: acknowledgement.commandId, workId: acknowledgement.workId });
+          if (status.state === "accepted") this.confirmInput(id, acknowledgement.executionId, acknowledgement.workId);
+          else if (status.state === "rejected" || status.state === "never_accepted") this.rejectInput(id, acknowledgement.executionId, acknowledgement.workId,
+            status.state === "rejected" ? status.error : "Native ingress barrier proves this input was never accepted; no replay performed");
+        }
         catch (error) {
           if (!(error instanceof AcknowledgementTimeout)) throw error;
         }

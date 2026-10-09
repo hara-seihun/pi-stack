@@ -258,11 +258,62 @@ function fixture(t, waitingHost, mode) {
     assert.equal(status, 0, stderr);
     return JSON.parse(readFileSync(requestPath, "utf8"));
   };
-  const events = () => readFileSync(join(root, "events.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+  const events = () => existsSync(join(root, "events.jsonl")) ? readFileSync(join(root, "events.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line)) : [];
   const world = () => JSON.parse(readFileSync(worldPath, "utf8"));
   const update = change => { const value = world(); change(value); writeFileSync(worldPath, JSON.stringify(value)); };
   return { root, run, events, world, update, revision, newer, baseline, git, requestPath, env };
 }
+
+test("another checked request cannot acquire native fences until each original host custody positively clears", async t => {
+  const f = fixture(t, "gmktec", "ready");
+  const ownerId = "PUB-ffffffffffffffffffffffff";
+  const ownerPath = join(f.root, "requests", `${ownerId}.json`);
+  const owner = { requestId: ownerId, sourceSha: f.baseline, integrationSha: f.baseline, status: "failed",
+    nativeHistory: { hosts: {
+      gmktec: { state: "repair-required", integrationSha: f.baseline },
+      converge: { state: "restore-required", integrationSha: f.baseline },
+    } } };
+  const original = JSON.stringify(owner);
+  writeFileSync(ownerPath, original);
+  const waiting = await f.run();
+  assert.equal(waiting.status, "queued", JSON.stringify(waiting.failure));
+  for (const host of hostIds) {
+    assert.equal(waiting.hosts[host].status, "waiting");
+    assert.equal(waiting.hosts[host].waiting.kind, "native-history-custody");
+    assert.equal(hostWaitKind(waiting.hosts[host].waiting), "waiting-for-native-history-custody");
+    assert.deepEqual(waiting.hosts[host].waiting.owners, [{ requestId: ownerId, integrationSha: f.baseline,
+      state: owner.nativeHistory.hosts[host].state, receipt: ownerPath }]);
+  }
+  assert.equal(waiting.reservations, undefined);
+  assert.equal(waiting.nativeHistory, undefined);
+  assert.deepEqual(f.events(), [], "custody gate precedes reservation, census, native advance, artifact installation and activation");
+  assert.equal(readFileSync(ownerPath, "utf8"), original, "competing requests never invent restoration or alter original custody");
+  const probed = await f.run("refreshHostWaits");
+  assert.equal(probed.hosts.gmktec.ready, false);
+  assert.equal(probed.hosts.converge.ready, false);
+  assert.equal(probed.nextAttemptAt === undefined, false);
+  assert.deepEqual(f.events(), [], "waiting probes read publication custody only, never another owner's native boundary");
+  owner.nativeHistory.hosts.converge.state = "restored";
+  writeFileSync(ownerPath, JSON.stringify(owner));
+  const peerReady = await f.run("refreshHostWaits");
+  assert.equal(peerReady.hosts.gmktec.ready, false);
+  assert.equal(peerReady.hosts.converge.ready, true);
+  const peerDelivered = await f.run();
+  assert.equal(peerDelivered.status, "queued", JSON.stringify(peerDelivered.failure));
+  assert.equal(peerDelivered.hosts.gmktec.waiting.owners[0].requestId, ownerId);
+  assert.equal(peerDelivered.hosts.converge.status, "passed");
+  assert.ok(f.events().every(event => event.host === "converge"), "restoration frees only that host, not its repair-held peer");
+  const peerProof = structuredClone(peerDelivered.hosts.converge);
+  owner.nativeHistory.hosts.gmktec.state = "released";
+  writeFileSync(ownerPath, JSON.stringify(owner));
+  const finalReady = await f.run("refreshHostWaits");
+  assert.equal(finalReady.hosts.gmktec.ready, true);
+  const boundary = f.events().length;
+  const complete = await f.run();
+  assert.equal(complete.status, "published", JSON.stringify(complete.failure));
+  assert.deepEqual(complete.hosts.converge, peerProof);
+  assert.ok(f.events().slice(boundary).every(event => event.host === "gmktec"));
+});
 
 test('one repair-held native boundary prevents automatic rollback of its still-owned peer', t => {
   const f = fixture(t, 'gmktec', 'native-history');

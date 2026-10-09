@@ -87,6 +87,25 @@ async function fixture(prepare?: (session: AgentSession) => void, extension?: st
   return { get session() { return session; }, get native() { return native; }, events, command, waitFor, reply, message, providerStream, reopen };
 }
 
+it("recovers a lost accepted input acknowledgement by native identity without repeating its prompt", async () => {
+  const f = await fixture();
+  let calls = 0;
+  f.native.agent.streamFunction = () => { calls++; return f.reply(f.message([{ type: "text", text: "done" }], "stop")); };
+  await f.session.command({ type: "prompt", id: "lost-input", workId: "lost-work", message: "once" });
+  await f.waitFor(event => event.type === "agent_settled");
+  f.events.splice(f.events.findIndex(event => event.type === "response" && event.id === "lost-input"), 1);
+  const before = readFileSync(f.native.sessionFile!, "utf8");
+  expect(await f.command("get_input_status", { commandId: "lost-input", workId: "lost-work" })).toMatchObject({
+    success: true, data: { state: "accepted", commandId: "lost-input", workId: "lost-work" },
+  });
+  expect(await f.command("get_input_status", { commandId: "absent", workId: "absent-work" })).toMatchObject({ data: { state: "never_accepted" } });
+  expect(readFileSync(f.native.sessionFile!, "utf8")).toBe(before);
+  await f.session.command({ type: "prompt", id: "lost-input", workId: "lost-work", message: "once" });
+  expect(calls).toBe(1);
+  await f.reopen();
+  expect(await f.command("get_input_status", { commandId: "lost-input", workId: "lost-work" })).toMatchObject({ data: { state: "accepted" } });
+}, 3000);
+
 it.each([
   { remote: false, raw: false },
   { remote: true, raw: false },
