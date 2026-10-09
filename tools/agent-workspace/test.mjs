@@ -1701,6 +1701,41 @@ test("cache discovery skips removed trees and descends into retained cache names
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+for (const grouped of [false, true]) for (const committed of [false, true])
+  test(`preserve-runtime skips optional caches for ${committed ? "unpushed" : "dirty"} ${grouped ? "groups" : "individuals"}`, () => {
+    const f = fixture();
+    try {
+      const records = Array.from({ length: grouped ? 2 : 1 }, (_, index) => JSON.parse(run([
+        "create", "--root", f.workspaces, "--name", `retained-${index}`, "--repo", f.remote,
+        "--mode", "writer", "--lease-seconds", "0", "--min-free-gib", "0",
+        ...(grouped ? ["--group", "source-retention"] : []), "--json",
+      ], f.env)));
+      const workspace = records[0].path;
+      writeFileSync(path.join(workspace, "file.txt"), "retained source\n");
+      if (committed) {
+        git(workspace, "config", "user.name", "Test");
+        git(workspace, "config", "user.email", "test@example.invalid");
+        git(workspace, "add", "file.txt");
+        git(workspace, "commit", "-m", "unpushed source");
+      }
+      for (const record of records) {
+        writeFileSync(path.join(record.path, ".git", "info", "exclude"), "node_modules/\n");
+        mkdirSync(path.join(record.path, "node_modules"));
+        writeFileSync(path.join(record.path, "node_modules", "kept.js"), "retained cache\n");
+      }
+      const results = JSON.parse(run(["reconcile", "--root", f.workspaces, "--after", "start",
+        "--execute", "--reap-expired", "--preserve-runtime", "--json"], f.env));
+      assert.equal(results.length, records.length);
+      assert.ok(results.every(result => result.action === "none"));
+      assert.match(results.find(result => result.record.path === workspace).inspection.reason,
+        committed ? /commits absent from remote refs/ : /working tree has changes/);
+      assert.equal(readFileSync(path.join(workspace, "file.txt"), "utf8"), "retained source\n");
+      for (const record of records) {
+        assert.equal(readFileSync(path.join(record.path, "node_modules", "kept.js"), "utf8"), "retained cache\n");
+      }
+    } finally { f.close(); }
+  });
+
 test("keeps local commits but strips declared caches", () => {
   const f = fixture();
   try {

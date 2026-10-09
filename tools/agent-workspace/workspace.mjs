@@ -906,7 +906,7 @@ function gitStatusExcludingNested(record, args, nestedWorkspaces = []) {
 function gitDisposition(record, nestedWorkspaces = []) {
   const lines = gitStatusExcludingNested(record, ["status", "--porcelain=v1", "--ignored=matching", "--untracked-files=normal"], nestedWorkspaces).split("\n");
   const changed = lines.filter((line) => line && !line.startsWith("!! "));
-  if (changed.length > 0) return { safe: false, reason: `working tree has changes: ${changed.slice(0, 8).join(" | ")}` };
+  if (changed.length > 0) return { safe: false, sourceRetention: true, reason: `working tree has changes: ${changed.slice(0, 8).join(" | ")}` };
   const nestedRelativePaths = nestedWorkspaces.map((workspace) => path.relative(record.path, workspace));
   const ignored = lines
     .filter((line) => line.startsWith("!! "))
@@ -915,7 +915,6 @@ function gitDisposition(record, nestedWorkspaces = []) {
       const candidate = path.resolve(record.path, line.slice(3).replace(/\/$/u, ""));
       try { return existsSync(candidate) && directoryHasEntries(candidate); } catch { return true; }
     });
-  if (ignored.length > 0) return { safe: false, reason: `checkout has unclassified ignored output: ${ignored.slice(0, 8).join(" | ")}` };
   const head = git(record.path, ["rev-parse", "HEAD"]);
   const refs = record.checkoutType === "clone"
     ? git(record.path, ["for-each-ref", "--format=%(refname)", "refs/heads"])
@@ -929,9 +928,10 @@ function gitDisposition(record, nestedWorkspaces = []) {
     const count = Number(git(record.path, ["rev-list", "--count", ref, "--not", "--remotes", ...durableSource]));
     if (count > 0) local.push(`${ref}:${count}`);
   }
-  if (local.length > 0) return { safe: false, reason: `checkout has commits absent from remote refs: ${local.join(", ")}`, head };
-  if (head === record.durableSourceCommit) return { safe: true, reason: "checkout remains at its durable source commit", head };
-  return { safe: true, reason: "every local branch commit exists on a remote ref or in durable source ancestry", head };
+  if (local.length > 0) return { safe: false, sourceRetention: true, reason: `checkout has commits absent from remote refs: ${local.join(", ")}`, head };
+  if (ignored.length > 0) return { safe: false, sourceRetention: false, reason: `checkout has unclassified ignored output: ${ignored.slice(0, 8).join(" | ")}`, head };
+  if (head === record.durableSourceCommit) return { safe: true, sourceRetention: false, reason: "checkout remains at its durable source commit", head };
+  return { safe: true, sourceRetention: false, reason: "every local branch commit exists on a remote ref or in durable source ancestry", head };
 }
 
 function gcDestination(statePath, record, suffix) {
@@ -1176,6 +1176,7 @@ function inspectRecord(record, options = {}) {
   return {
     classification: disposition.safe ? "reclaimable" : "repair-required",
     reason: disposition.reason,
+    sourceRetention: disposition.sourceRetention,
     processes,
     containers: docker.references,
     systemdUnits: systemd.references,
@@ -1206,6 +1207,11 @@ function reconcileRecord(database, record, options) {
   }
   if (inspection.classification === "referenced" || inspection.classification === "blocked") {
     if (options.execute) updateState(database, record, inspection.classification, inspection.reason);
+    return { record, inspection, action: "none" };
+  }
+  if (options.execute && options.reapExpired && options.preserveRuntime
+    && inspection.classification === "repair-required" && inspection.sourceRetention) {
+    updateState(database, record, "repair-required", inspection.reason);
     return { record, inspection, action: "none" };
   }
   let removedCaches = [];
@@ -1285,13 +1291,15 @@ function groupReconciliation(database, records, options) {
       groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline })));
   }
 
+  const preserveKnownSource = options.reapExpired && options.preserveRuntime
+    && inspections.some((inspection) => inspection.classification === "repair-required" && inspection.sourceRetention);
   const removedCaches = new Map();
-  if (options.execute && !inspections.some((inspection) => ["referenced", "blocked"].includes(inspection.classification))) {
+  if (options.execute && !preserveKnownSource && !inspections.some((inspection) => ["referenced", "blocked"].includes(inspection.classification))) {
     safety = freshThreadSafety(safety);
     inspections = records.map((record) => inspectRecord(record,
       groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline })));
   }
-  if (options.execute && !inspections.some((inspection) => ["referenced", "blocked"].includes(inspection.classification))) {
+  if (options.execute && !preserveKnownSource && !inspections.some((inspection) => ["referenced", "blocked"].includes(inspection.classification))) {
     records.forEach((record, index) => {
       if (inspections[index].classification !== "missing") removedCaches.set(record.id, stripCaches(record, options.statePath));
     });
@@ -1299,7 +1307,7 @@ function groupReconciliation(database, records, options) {
       groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline })));
   }
 
-  if (options.execute && !inspections.some((inspection) => ["referenced", "blocked"].includes(inspection.classification))) {
+  if (options.execute && !preserveKnownSource && !inspections.some((inspection) => ["referenced", "blocked"].includes(inspection.classification))) {
     safety = freshThreadSafety(safety);
     inspections = records.map((record) => inspectRecord(record,
       groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline })));
