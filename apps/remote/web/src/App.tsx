@@ -62,6 +62,8 @@ import { speech } from "./speech";
 import { SpeechBar } from "./SpeechBar";
 import { parseSettingsEntry, parseSettingsSnapshot } from "../../shared/settings-wire";
 import { observeClientTimezone } from "./features/settings/client-timezone";
+import { managerNavigation, monoTranscript, type ManagerPreference } from "./app/mono";
+import { requestManager } from "./manager-client";
 
 // Screen code warms after bootstrap, without mounting views or fetching data.
 // A ready view never enters Suspense's cold retry throttle.
@@ -106,6 +108,7 @@ interface AppState {
   archivedTotal: number;
   dashboard: Dashboard | null;
   bootstrap: Bootstrap | null;
+  manager: ManagerPreference | null;
   transcript: TranscriptWindow | null;
   images: InlineImageSnapshot | null;
   attachments: Attachment[];
@@ -120,7 +123,7 @@ interface AppState {
 
 const initialState: AppState = {
   selectedChatId: null,
-  sessions: [], discovered: [], fleet: [], archivedTotal: 0, dashboard: null, bootstrap: null,
+  sessions: [], discovered: [], fleet: [], archivedTotal: 0, dashboard: null, bootstrap: null, manager: null,
   transcript: null, images: null,
   attachments: [], slashCommands: [], offline: "", ownerErrors: [], syncing: true, threadSyncing: true,
   loadingEarlier: false, earlierError: "",
@@ -240,6 +243,89 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const layout = useLayout();
   const route = useRoute();
   const routeChat = routeChatId(route);
+  const manager = state.manager;
+  const managerOwnerId = state.bootstrap?.managerOwnerEnvironmentId;
+  const mono = state.bootstrap?.environmentId === managerOwnerId && manager?.view === "mono" && routeThreadId(route) === manager.managerThreadId;
+  const [managerSaving, setManagerSaving] = useState(false);
+  const managerMutation = useRef(false);
+  const managerGeneration = useRef(0);
+  useEffect(() => () => { managerGeneration.current++; }, []);
+  const managerObservation = useRef(0);
+  const [managerError, setManagerError] = useState("");
+  const [managerRefresh, setManagerRefresh] = useState(0);
+  const openManager = useCallback(async (next: Route) => {
+    const owner = stateRef.current.bootstrap?.managerOwnerEnvironmentId;
+    if (!owner) { toast.error("Manager owner is unavailable"); return; }
+    const generation = managerGeneration.current;
+    try {
+      if (stateRef.current.bootstrap?.environmentId !== owner) {
+        if (!window.KenanRemote) throw new Error("Environment switching is unavailable");
+        const selected = await window.KenanRemote.select({ id: owner, user: person });
+        if (generation !== managerGeneration.current) return;
+        if (!selected || selected.id !== owner) throw new Error("Manager environment selection was not confirmed");
+        navigate(next, { replace: true });
+        location.reload();
+      } else navigate(next, { replace: true });
+    } catch (cause) { if (generation === managerGeneration.current) toast.error(cause instanceof Error ? cause.message : "Could not open manager environment"); }
+  }, [person, stateRef]);
+  const previousManager = useRef<ManagerPreference | null>(null);
+  useLayoutEffect(() => {
+    if (!manager) return;
+    const next = managerNavigation(previousManager.current, manager, currentRoute());
+    previousManager.current = manager;
+    if (next) { if (manager.view === "mono") void openManager(next); else navigate(next, { replace: true }); }
+  }, [manager, openManager]);
+  useEffect(() => {
+    if (!managerOwnerId || state.bootstrap?.environmentId === managerOwnerId) return;
+    const controller = new AbortController();
+    let pending = false;
+    const refresh = async () => {
+      if (pending || managerMutation.current || document.visibilityState !== "visible") return;
+      pending = true;
+      const observation = ++managerObservation.current;
+      const result = await requestManager(managerOwnerId, undefined, controller.signal);
+      pending = false;
+      if (controller.signal.aborted || observation !== managerObservation.current) return;
+      if (result.ok) { setManagerError(""); patch({ manager: result.value }); }
+      else if (result.error.kind !== "identity_changed") setManagerError(result.error.message);
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 30_000);
+    const wake = () => void refresh();
+    window.addEventListener("focus", wake);
+    window.addEventListener("online", wake);
+    window.addEventListener("pi-app-foreground", wake);
+    document.addEventListener("visibilitychange", wake);
+    return () => {
+      controller.abort(); window.clearInterval(timer);
+      window.removeEventListener("focus", wake);
+      window.removeEventListener("online", wake);
+      window.removeEventListener("pi-app-foreground", wake);
+      document.removeEventListener("visibilitychange", wake);
+    };
+  }, [managerOwnerId, state.bootstrap?.environmentId, managerRefresh, patch]);
+  const updateManager = useCallback(async (view: "classic" | "mono", hintSeen?: boolean) => {
+    if (managerMutation.current) return;
+    const owner = stateRef.current.bootstrap?.managerOwnerEnvironmentId;
+    if (!owner) { toast.error("Manager owner is unavailable"); return; }
+    managerMutation.current = true;
+    managerObservation.current++;
+    const generation = managerGeneration.current;
+    setManagerSaving(true);
+    const result = await requestManager(owner, { view, ...(hintSeen === undefined ? {} : { hintSeen }) });
+    if (generation === managerGeneration.current) {
+      if (result.ok) {
+        previousManager.current = result.value;
+        setManagerError("");
+        patch({ manager: result.value });
+        if (result.value.view === "mono") await openManager({ tab: "chats", chat: `ai:${result.value.managerThreadId}`, panel: null });
+        else navigate({ tab: "chats", chat: null, panel: null }, { replace: true });
+        stream.current?.reconnect();
+      } else if (result.error.kind !== "identity_changed") toast.error(result.error.message);
+    }
+    managerMutation.current = false;
+    setManagerSaving(false);
+  }, [patch, openManager, stateRef]);
   useEffect(() => { resetFeatureCollection(); const stop = observeArtifactActions(); return () => { stop(); resetFeatureCollection(); }; }, []);
   useEffect(() => {
     if (!bootstrapped || document.visibilityState !== "visible") return;
@@ -369,10 +455,11 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     else navigate(withoutPanel(route), { replace: true });
   }, [route]);
   const closeDetail = useCallback(() => {
-    if (history.length > 1) back();
+    if (manager?.view === "mono") void openManager({ tab: "chats", chat: `ai:${manager.managerThreadId}`, panel: null });
+    else if (history.length > 1) back();
     else navigate(routeHome(route), { replace: true });
-  }, [route]);
-  useSystemBack({ closePanel, closeDetail });
+  }, [route, manager, openManager]);
+  useSystemBack({ closePanel, closeDetail, rootChat: mono && manager?.view === "mono" ? `ai:${manager.managerThreadId}` : undefined });
   const selectTab = useCallback((tab: Tab) => {
     prepareTab(tab);
     if (tab === route.tab) navigate(routeHome(route));
@@ -386,7 +473,13 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const selectThread = useCallback(async (id: string, discovered?: Session, signal?: AbortSignal) => {
     const generation = ++selectionGeneration.current;
     const candidate = discovered ?? [...stateRef.current.sessions, ...stateRef.current.discovered].find(item => item.id === id);
-    if (!candidate || candidate.archivedAt || candidate.foreground !== true) {
+    if (stateRef.current.manager?.managerThreadId === id) {
+      if (!candidate) {
+        const found = await api(API.session.method, API.session.path({ sessionId: id }));
+        validateSession(found.session);
+        discovered = found.session;
+      }
+    } else if (!candidate || candidate.archivedAt || candidate.foreground !== true) {
       const opened = await api(API.unarchiveSession.method, API.unarchiveSession.path({ sessionId: id }), {});
       validateSession(opened.session);
       discovered = opened.session;
@@ -625,7 +718,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
             promptStorage.current?.invalidate();
           }
           undoCloses.setScope(`${person}:${event.bootstrap.environmentId}`);
-          patch({ bootstrap: event.bootstrap, syncing: false });
+          patch({ bootstrap: event.bootstrap, manager: event.bootstrap.manager ?? stateRef.current.manager, syncing: false });
           if (promptStorage.current?.state.kind !== "ready") void ensureOutbox();
           initialLoad.current?.();
           initialLoad.current = null;
@@ -761,7 +854,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     const next = {
       session: aiId,
       viewing: visible && !!aiId,
-      thinking: !autoCollapse && visible && !!aiId,
+      thinking: !mono && !autoCollapse && visible && !!aiId,
       dashboard: route.tab === "machine",
       workers: route.tab === "agents",
       transcriptFrom: null,
@@ -771,7 +864,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     // A list nobody refreshes would show settled fleet threads as they were.
     if (!next.workers && held.workers) patch({ fleet: [] });
     client.update(next);
-  }, [aiId, autoCollapse, route.tab, visible]);
+  }, [aiId, autoCollapse, mono, route.tab, visible]);
 
   const retryQuestions = useCallback(() => {
     const id = selectedAiId(stateRef.current);
@@ -829,10 +922,10 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   }, [cache, patch, stateRef]);
 
   const thinkingOpen = useCallback((open: boolean) => {
-    if (!autoCollapse) return;
+    if (mono || !autoCollapse) return;
     stream.current?.update({ thinking: open });
     if (!open) liveText.clearThinking();
-  }, [autoCollapse, liveText]);
+  }, [autoCollapse, liveText, mono]);
 
   // Start the renderer before opening a thread; the stream supplies its window.
   const prefetchThread = useCallback((_id: string) => {
@@ -1085,9 +1178,9 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const visibleAttachments = state.attachments.filter((file) => file.sessionId === aiId);
   const contextEntries = useMemo(() => {
     if (state.transcript === null) return [];
-    const heads = state.transcript.items;
-    return heads.length ? entriesFromHeads(heads) : [WAITING_ENTRY];
-  }, [state.transcript]);
+    const heads = mono ? monoTranscript(state.transcript.items) : state.transcript.items;
+    return heads.length ? entriesFromHeads(heads) : mono ? [] : [WAITING_ENTRY];
+  }, [state.transcript, mono]);
   const bodies = useMemo(() => aiId ? new ItemBodies(aiId, undefined, cache) : null, [aiId, cache]);
   // The newest head of a window, and of every update, carries its body when it
   // is small. Taking it here is what lets the step a person opens first render
@@ -1154,9 +1247,9 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const conversation = roomId
     ? <RoomConversation key={roomId} id={roomId} people={roomDirectory.people} onBack={closeDetail} showBack={layout === "phone"} showIdentity={showConversationIdentity} onRefresh={roomDirectory.refresh} />
     : selected
-    ? <ItemBodiesContext.Provider value={bodies}><LiveConversation outbox={<PromptOutboxStatus entries={outboxEntries.filter(entry => entry.sessionId === selected.id)} busyRequestId={outboxBusy} storage={{ state: storageState, retry: () => void ensureOutbox() }} onRetry={id => void submitSavedPrompt(id)} onDiscard={id => void discardSavedPrompt(id)} />} live={liveText} session={selected} ancestors={ancestors} entries={contextEntries} images={images} offline={state.offline} syncing={state.threadSyncing} pending={pending} home={home} prompt={prompt}
+    ? <ItemBodiesContext.Provider value={bodies}><LiveConversation outbox={<PromptOutboxStatus entries={outboxEntries.filter(entry => entry.sessionId === selected.id)} busyRequestId={outboxBusy} storage={{ state: storageState, retry: () => void ensureOutbox() }} onRetry={id => void submitSavedPrompt(id)} onDiscard={id => void discardSavedPrompt(id)} />} live={liveText} session={selected} mono={mono && manager ? { hintSeen: manager.hintSeen, onClassic: () => void updateManager("classic"), onHintSeen: () => void updateManager("mono", true), saving: managerSaving } : undefined} ancestors={ancestors} entries={contextEntries} images={images} offline={state.offline} syncing={state.threadSyncing} pending={pending} home={home} prompt={prompt}
         onVisibleRange={onVisibleHeads} newerAvailable={hasNewer(state.transcript)} onShowNewer={() => void showNewer(false)} onJumpLatest={() => void showNewer(true)} earlierAvailable={hasEarlier(state.transcript)} loadingEarlier={state.loadingEarlier} earlierError={state.earlierError} onShowEarlier={showEarlier} onThinkingOpen={thinkingOpen} autoCollapse={autoCollapse}
-        attachments={visibleAttachments.map(file => ({ id: file.localId, name: file.name, uploading: file.uploading }))} slashCommands={state.slashCommands} drawing={drawing} uploadError={uploadError?.sessionId === aiId ? uploadError.message : ""} controlError={controlError?.sessionId === aiId ? controlError.message : ""} questionsResource={pendingQuestions?.sessionId === aiId ? pendingQuestions : undefined} onRetryQuestions={retryQuestions} showBack={layout === "phone"} showIdentity={showConversationIdentity}
+        attachments={visibleAttachments.map(file => ({ id: file.localId, name: file.name, uploading: file.uploading }))} slashCommands={state.slashCommands} drawing={drawing} uploadError={uploadError?.sessionId === aiId ? uploadError.message : ""} controlError={controlError?.sessionId === aiId ? controlError.message : ""} questionsResource={pendingQuestions?.sessionId === aiId ? pendingQuestions : undefined} onRetryQuestions={retryQuestions} showBack={layout === "phone" || manager?.view === "mono"} showIdentity={showConversationIdentity}
         onBack={closeDetail} onOpenInspector={() => openPanel("inspector")} onOpenAncestor={session => openThreadId(session.id)} onOpenQueue={() => openPanel("queue")} questions={pendingQuestions?.sessionId === selected.id ? prioritizeQuestion(pendingQuestions.questions, route.tab === "chats" ? route.questionId : undefined) : []} onQuestionAccepted={id => { setPendingQuestions(current => current?.sessionId === selected.id ? { ...current, questions: current.questions.filter(question => question.id !== id) } : current); }} onEdit={editFrom} reply={reply} onReply={target => { replyRef.current = target; setReply(target); replyDrafts.save(selected.id, target); }} onCancelReply={() => { replyRef.current = null; setReply(null); replyDrafts.save(selected.id, null); }} onPrompt={text => { setPrompt(text); if (aiId) saveDraft(aiId, text); }} onSend={delivery => void send(delivery)} onStop={() => stopThread(selected)} onResume={() => void controlThread(selected.id, "resume")} onReconnect={reconnect}
         onRemoveAttachment={id => { const file = visibleAttachments.find(item => item.localId === id); if (file) void removeAttachment(file); }} onUpload={files => void uploadFiles(files)} onPaste={() => setPasteSessionId(aiId)} onDraw={() => drawing.open()} onDismissControlError={() => setControlError(null)} /></ItemBodiesContext.Provider>
     : routeChat && state.syncing
@@ -1201,8 +1294,9 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
 
   const showTabs = route.tab === "agents" || route.tab === "attention" || route.tab === "machine" || route.tab === "settings" || (route.tab === "files" && !route.path) || !showDetail;
   return <ClientCacheContext.Provider value={cache}><NotificationProvider sessionId={roomId ? `room:${roomId}` : routeThreadId(route)}>
-    <Shell layout={layout} nav={<TabNav layout={layout} active={route.tab} badges={badges} onSelect={selectTab} onPrepare={prepareTab} update={update} />} list={list} detail={detail} showDetail={showDetail} showTabs={showTabs}
+    <Shell layout={layout} mono={mono} nav={<TabNav layout={layout} active={route.tab} badges={badges} onSelect={selectTab} onPrepare={prepareTab} onMono={managerOwnerId && !managerSaving ? () => void updateManager("mono") : undefined} update={update} />} list={mono ? null : list} detail={detail} showDetail={showDetail} showTabs={showTabs}
       overlays={<>
+        {managerError && <aside className="manager-error"><DismissibleError message={managerError} dismissLabel="Dismiss manager connection error" /><button type="button" onClick={() => setManagerRefresh(value => value + 1)}>Retry manager connection</button></aside>}
         <AppUpdateStatus update={update} />
         <SpeechBar />
         <ToastViewport scope={`${person}:${state.bootstrap?.environmentId || ""}`} position={layout === "phone" && !showTabs ? "top-center" : "bottom-center"} />

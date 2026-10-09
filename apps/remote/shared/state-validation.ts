@@ -1,4 +1,4 @@
-import type { Activity, Session, StreamSnapshot, TranscriptItemKind } from "../server/protocol.js";
+import type { Activity, Bootstrap, ManagerView, Session, StreamSnapshot, TranscriptItemKind } from "../server/protocol.js";
 import { assertNever, requireState } from "./explicit-state.js";
 
 export const ACTIVITIES = {
@@ -24,6 +24,27 @@ export function stateString(value: unknown, owner: string): string {
   return value;
 }
 
+export function validateManagerView(value: unknown): asserts value is ManagerView {
+  const manager = stateObject(value, "Manager view");
+  const view = requireState(manager.view, { classic: true, mono: true }, "Manager view");
+  if (typeof manager.hintSeen !== "boolean") throw new Error("Manager hint: expected boolean");
+  if (manager.managerThreadId === null) {
+    if (view === "mono") throw new Error("Mono view: manager thread is required");
+  } else if (!stateString(manager.managerThreadId, "Manager thread id").trim()) {
+    throw new Error("Manager thread id: expected nonempty string");
+  }
+}
+
+export function validateBootstrap(value: unknown): asserts value is Bootstrap {
+  const bootstrap = stateObject(value, "Bootstrap");
+  stateString(bootstrap.environmentId, "Bootstrap environment");
+  const owner = stateString(bootstrap.managerOwnerEnvironmentId, "Manager owner environment");
+  if (!owner.trim()) throw new Error("Manager owner environment: expected nonempty string");
+  if (bootstrap.manager === null) {
+    if (bootstrap.environmentId === owner) throw new Error("Manager owner: preference is missing");
+  } else validateManagerView(bootstrap.manager);
+}
+
 export function validateThreadObservation(value: unknown): void {
   const row = stateObject(value, "Thread observation");
   requireState(row.state, THREAD_STATES, "Thread lifecycle");
@@ -39,6 +60,7 @@ export function validateSession(value: unknown): asserts value is Session {
     if (!description.trim() || description.length > 240) throw new Error("Task description: expected 1..240 characters");
   }
   requireState(row.origin, { person: true, fleet: true } satisfies Record<Session["origin"], true>, "Session origin");
+  if (row.manager !== undefined && typeof row.manager !== "boolean") throw new Error("Session manager: expected boolean");
   if (typeof row.held !== "boolean") throw new Error("Session held: expected boolean");
   stateArray(row.activeTools, "Active tools").forEach(tool => stateString(tool, "Active tool"));
   stateArray(row.queuedMessages, "Queued messages").forEach(value => {
@@ -71,6 +93,7 @@ export function validateSession(value: unknown): asserts value is Session {
 export function validateTranscriptHead(value: unknown): void {
   const head = stateObject(value, "Transcript head");
   requireState(head.kind, TRANSCRIPT_KINDS, "Transcript kind");
+  if (head.monoVisibility !== undefined) requireState(head.monoVisibility, { hidden: true, visible: true }, "Mono transcript visibility");
   if (head.textTruncated !== undefined && (head.textTruncated !== true || !["user", "assistant", "notice"].includes(String(head.kind))))
     throw new Error("Transcript text preview: invalid marker");
 }
@@ -97,7 +120,7 @@ export function validateStreamSnapshot(resource: string, value: unknown): assert
       stateArray(snapshot.questions, "Questions");
       if (snapshot.state === "failed") stateString(snapshot.error, "Questions error");
       return;
-    case "bootstrap": stateObject(snapshot.bootstrap, "Bootstrap"); return;
+    case "bootstrap": validateBootstrap(snapshot.bootstrap); return;
     case "dashboard": {
       const dashboard = stateObject(snapshot.dashboard, "Dashboard");
       stateArray(dashboard.plans, "Plans").forEach(value => {

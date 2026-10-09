@@ -10,6 +10,7 @@ import { assertNever } from "../../../shared/explicit-state";
 export type BackActions = {
   closePanel(): void;
   closeDetail(): void;
+  rootChat?: string;
 };
 
 /** True when the route shows something a back press should leave. */
@@ -44,6 +45,7 @@ export function systemBack(actions: BackActions, root: Document = document): boo
     return true;
   }
   if ("panel" in route && route.panel) { actions.closePanel(); return true; }
+  if (route.tab === "chats" && route.chat === actions.rootChat) return false;
   if (routeHasDetail(route)) { actions.closeDetail(); return true; }
   if (route.tab !== "chats") { navigate({ tab: "chats", chat: null, panel: null }, { replace: true }); return true; }
   return false;
@@ -53,5 +55,5 @@ export function useSystemBack(actions: BackActions) {
   useEffect(() => {
     window.PiRemoteBack = () => systemBack(actions);
     return () => { delete window.PiRemoteBack; };
-  }, [actions.closePanel, actions.closeDetail]);
+  }, [actions.closePanel, actions.closeDetail, actions.rootChat]);
 }
