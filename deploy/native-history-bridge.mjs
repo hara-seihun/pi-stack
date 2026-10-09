@@ -184,8 +184,12 @@ export async function installLegacyMaintenance(options) {
   const uid = process.getuid();
   const dataDir = resolve(options.dataDir), receiptPath = join(dataDir, 'native-history-maintenance.json');
   const identity = { candidate: options.candidate, legacySource: options.legacySource };
-  let receipt = existsSync(receiptPath) ? JSON.parse(readFileSync(receiptPath, 'utf8')) : { version: 1, protocol: BRIDGE_PROTOCOL, uid, dataDir, ...identity, admittedAt: Date.now(), phase: 'draining' };
-  if (receipt.uid !== uid || receipt.dataDir !== dataDir || receipt.candidate !== identity.candidate || receipt.legacySource !== identity.legacySource) throw new Error('Native history maintenance receipt custody mismatch');
+  const prepared = spawnSync(options.node ?? '/usr/local/bin/node', [fileURLToPath(new URL('./native-history-closed-owner.mjs', import.meta.url)),
+    JSON.stringify({ uid, mode: options.mode, dataDir, ...identity, ...(options.mode === 'fleet' ? { ledgerPath: options.ledgerPath } : {}) }), '--prepare-attempt'],
+    { encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024 });
+  const result = prepared.stdout ? JSON.parse(prepared.stdout) : null;
+  if (prepared.status !== 0 || result?.ok !== true) throw new Error(`Native history maintenance receipt custody mismatch: ${result?.error?.code ?? prepared.error?.message ?? prepared.stderr?.trim() ?? 'missing proof'}`);
+  let receipt = result.value;
   const save = phase => { receipt = { ...receipt, phase, updatedAt: new Date().toISOString() }; atomicJson(receiptPath, receipt); };
   if (receipt.phase === 'restored') return true;
   if (receipt.phase === 'closing') save('draining');

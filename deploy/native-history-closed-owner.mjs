@@ -171,6 +171,44 @@ export function readRestoredOwner(input) {
   finally { for (const db of databases) db.close(); }
 }
 
+export function prepareMaintenanceReceipt(input) {
+  const databases = [];
+  try {
+    const uid = process.getuid();
+    if (input.uid !== uid || !['remote', 'rooms', 'fleet'].includes(input.mode)
+      || !/^[0-9a-f]{40}$/.test(input.candidate) || !/^[0-9a-f]{40}$/.test(input.legacySource)
+      || typeof input.dataDir !== 'string' || !input.dataDir.startsWith('/') || resolve(input.dataDir) !== input.dataDir) return failure('identity', 'Maintenance attempt requires exact own source and directory custody');
+    if (input.mode === 'fleet' && (typeof input.ledgerPath !== 'string' || !input.ledgerPath.startsWith('/')
+      || resolve(input.ledgerPath) !== input.ledgerPath || dirname(input.ledgerPath) !== input.dataDir)) return failure('identity', 'Maintenance requires its exact owner fleet ledger');
+    const path = join(input.dataDir, 'native-history-maintenance.json');
+    let prior = null;
+    if (existsSync(path)) {
+      ownedFile(path, uid); prior = JSON.parse(readFileSync(path, 'utf8'));
+      if (prior.version !== 1 || prior.protocol !== BRIDGE_PROTOCOL || prior.uid !== uid || prior.dataDir !== input.dataDir
+        || !['draining', 'restored', 'closing', 'owners-closed', 'migration-pending', 'migrated'].includes(prior.phase)) return failure('identity', 'Previous maintenance receipt has invalid owner custody');
+      if (sameIdentity(prior, input)) return { ok: true, value: prior };
+      if (prior.phase !== 'restored' || !/^[0-9a-f]{40}$/.test(prior.candidate) || prior.legacySource !== input.legacySource) return failure('prior-custody', 'Previous maintenance is not an acknowledged restoration of this old source');
+      if (existsSync(join(input.dataDir, 'native-history-readiness.json'))) return failure('migration-started', 'Native readiness forbids reacquiring an old decoder');
+      const threadPath = join(input.dataDir, 'threads.sqlite3'); ownedFile(threadPath, uid);
+      const threads = new DatabaseSync(threadPath, { readOnly: true }); databases.push(threads); threads.exec('PRAGMA busy_timeout=2000');
+      if (threadFence(threads, prior) !== 'absent') return failure('prior-fence', 'Previous thread admission fence is not absent');
+      if (input.mode === 'fleet') {
+        if (typeof input.ledgerPath !== 'string' || dirname(input.ledgerPath) !== input.dataDir
+          || resolve(input.ledgerPath) !== input.ledgerPath || (prior.ledgerPath !== undefined && prior.ledgerPath !== input.ledgerPath)) return failure('identity', 'New maintenance must retain its exact owner ledger');
+        ownedFile(input.ledgerPath, uid);
+        const ledger = new DatabaseSync(input.ledgerPath, { readOnly: true }); databases.push(ledger); ledger.exec('PRAGMA busy_timeout=2000');
+        fleetFence(ledger, input);
+      }
+    }
+    const value = { version: 1, protocol: BRIDGE_PROTOCOL, uid, dataDir: input.dataDir,
+      candidate: input.candidate, legacySource: input.legacySource, admittedAt: Date.now(), phase: 'draining',
+      ...(input.mode === 'fleet' ? { ledgerPath: input.ledgerPath } : {}), ...(prior ? { priorRestoration: prior } : {}) };
+    atomicJson(path, value);
+    return { ok: true, value };
+  } catch (error) { return failure('attempt-proof-failed', error instanceof Error ? error.message : String(error)); }
+  finally { for (const db of databases) db.close(); }
+}
+
 export function restoreClosedOwner(input, inspectUnit = closedUnitProof) {
   return restoreOwner(input, { kind: 'closed-unit', inspect: () => inspectUnit(input.unit) });
 }
@@ -251,6 +289,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   try {
     const input = JSON.parse(process.argv[2]);
     result = process.argv[3] === '--read-restored' ? readRestoredOwner(input)
+      : process.argv[3] === '--prepare-attempt' ? prepareMaintenanceReceipt(input)
       : process.argv[3] === '--restore-live' ? restoreLiveOwner(input)
       : process.argv[3] === undefined ? restoreClosedOwner(input) : failure('input', 'Unknown owner proof action');
   }

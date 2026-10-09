@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir, userInfo } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
-import { restoreClosedOwner, restoreLiveOwner, readRestoredOwner, liveUnitProof, publishedSourceProof, isNativeExecutable } from '../deploy/native-history-closed-owner.mjs';
+import { restoreClosedOwner, restoreLiveOwner, readRestoredOwner, liveUnitProof, publishedSourceProof, isNativeExecutable, prepareMaintenanceReceipt } from '../deploy/native-history-closed-owner.mjs';
 import { stageLegacyRemoteIdentity, isLegacyCapturePackage } from '../deploy/native-history-package-identity.mjs';
 const candidate = 'a'.repeat(40), legacySource = 'b'.repeat(40);
 const closed = () => ({ ok: true, value: { LoadState: 'loaded', ActiveState: 'failed', MainPID: '0', ControlGroup: '' } });
@@ -39,6 +39,39 @@ test('closed owner removes exact fence, preserves accepted rows/receipt fields a
   const receipt = JSON.parse(readFileSync(join(input.dataDir, 'native-history-maintenance.json'), 'utf8'));
   assert.equal(receipt.phase, 'restored'); assert.equal(receipt.admittedAt, 42); assert.equal(receipt.untouched, 'retain');
   assert.equal(readRestoredOwner(input).ok, true); assert.equal(restoreClosedOwner(input, closed).ok, true);
+});
+test('new candidate acquires only a positively restored old attempt and preserves its receipt evidence', t => {
+  const input = fixture(t); fence(input);
+  const successor = { ...input, candidate: 'd'.repeat(40) };
+  const path = join(input.dataDir, 'native-history-maintenance.json'); const initial = readFileSync(path, 'utf8');
+  assert.equal(prepareMaintenanceReceipt(successor).error.code, 'prior-custody');
+  assert.equal(readFileSync(path, 'utf8'), initial);
+  assert.equal(restoreClosedOwner(input, closed).ok, true);
+  const previous = JSON.parse(readFileSync(path, 'utf8'));
+  const acquired = prepareMaintenanceReceipt(successor);
+  assert.equal(acquired.ok, true, JSON.stringify(acquired)); assert.equal(acquired.value.candidate, successor.candidate);
+  assert.equal(acquired.value.phase, 'draining'); assert.deepEqual(acquired.value.priorRestoration, previous);
+  assert.equal(acquired.value.admittedAt >= previous.admittedAt, true);
+  const bytes = readFileSync(path, 'utf8');
+  assert.equal(prepareMaintenanceReceipt(successor).ok, true); assert.equal(readFileSync(path, 'utf8'), bytes);
+  assert.deepEqual(readThread(input).map(row => row.body), ['preserve-me']);
+});
+test('restored claim with retained thread fences, migration or foreign fleet identity cannot acquire a successor', t => {
+  const input = fixture(t, 'fleet'); fence(input);
+  const path = join(input.dataDir, 'native-history-maintenance.json');
+  const previous = JSON.parse(readFileSync(path, 'utf8')); previous.phase = 'restored'; writeFileSync(path, JSON.stringify(previous));
+  const successor = { ...input, candidate: 'd'.repeat(40) };
+  assert.equal(prepareMaintenanceReceipt(successor).error.code, 'prior-fence');
+  assert.equal(restoreClosedOwner(input, closed).ok, true);
+  writeFileSync(join(input.dataDir, 'native-history-readiness.json'), '{}');
+  assert.equal(prepareMaintenanceReceipt(successor).error.code, 'migration-started');
+  rmSync(join(input.dataDir, 'native-history-readiness.json'));
+  const ledger = new DatabaseSync(input.ledgerPath);
+  ledger.prepare('INSERT INTO control VALUES(?,?)').run('native-history-maintenance', JSON.stringify({ ...successor, candidate: 'e'.repeat(40) }));
+  assert.equal(prepareMaintenanceReceipt(successor).ok, false);
+  ledger.prepare('UPDATE control SET value=?').run(JSON.stringify({ candidate: successor.candidate, legacySource })); ledger.close();
+  assert.equal(prepareMaintenanceReceipt(successor).ok, true, 'Exact new coordinator barrier is permitted without removing it');
+  const after = new DatabaseSync(input.ledgerPath); assert.equal(JSON.parse(after.prepare('SELECT value FROM control').get().value).candidate, successor.candidate); after.close();
 });
 test('absent receipt yields positive absent-fence proof without fabricating a private receipt', t => {
   const input = fixture(t, 'remote', false); const result = restoreClosedOwner(input, closed);
