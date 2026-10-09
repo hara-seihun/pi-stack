@@ -107,6 +107,38 @@ export function serviceBusy(service) {
   return { work, executions, operations, native };
 }
 
+const legacyAttachments = new WeakMap();
+export async function attachLegacyRuntime(service, original, id, recoverMissing = false) {
+  let pending = legacyAttachments.get(service);
+  if (!pending) { pending = new Map(); legacyAttachments.set(service, pending); }
+  if (pending.has(id)) return pending.get(id);
+  const existing = service.runtimes.get(id);
+  if (existing) return existing;
+  const attaching = Promise.resolve().then(() => original.call(service, id, recoverMissing));
+  pending.set(id, attaching);
+  try { return await attaching; } finally { pending.delete(id); }
+}
+
+export async function reconcileLegacyRuntime(service, id) {
+  if (service.opening.has(id) || service.operations.has(id) || service.halts.has(id)) return;
+  const runtime = await service.attach(id);
+  if (!runtime) {
+    if (service.get(id)?.metadata?.runnerReference) throw new Error('Legacy attachment has not proven producer absence');
+    return;
+  }
+  if (runtime.commandRunning || runtime.waiters.size) return;
+  const state = await service.rpc(runtime, { type: 'get_state' });
+  if (typeof state?.isStreaming !== 'boolean' || typeof state.isCompacting !== 'boolean'
+    || !Number.isSafeInteger(state.localTools) || state.localTools < 0
+    || !Number.isSafeInteger(state.pendingCommandCount) || state.pendingCommandCount < 0) {
+    throw new Error('Legacy runtime returned an incomplete execution-state proof');
+  }
+  if (service.runtimes.get(id) !== runtime) throw new Error('Legacy runtime changed during state reconciliation');
+  service.adoptReference(id, state);
+  runtime.busy = service.busy(state);
+  if (!runtime.busy) service.wake(id);
+}
+
 export async function installLegacyMaintenance(options) {
   if (!/^[0-9a-f]{40}$/.test(options.candidate) || !/^[0-9a-f]{40}$/.test(options.legacySource)) throw new Error('Maintenance requires immutable source identities');
   const uid = process.getuid();
@@ -115,6 +147,7 @@ export async function installLegacyMaintenance(options) {
   let receipt = existsSync(receiptPath) ? JSON.parse(readFileSync(receiptPath, 'utf8')) : { version: 1, protocol: BRIDGE_PROTOCOL, uid, dataDir, ...identity, admittedAt: Date.now(), phase: 'draining' };
   if (receipt.uid !== uid || receipt.dataDir !== dataDir || receipt.candidate !== identity.candidate || receipt.legacySource !== identity.legacySource) throw new Error('Native history maintenance receipt custody mismatch');
   const save = phase => { receipt = { ...receipt, phase, updatedAt: new Date().toISOString() }; atomicJson(receiptPath, receipt); };
+  if (receipt.phase === 'restored') return true;
   if (receipt.phase === 'closing') save('draining');
   const services = new Set(), controls = new Set(), daemons = new Set();
   let restoreDaemonAdmission = () => {};
@@ -141,8 +174,9 @@ export async function installLegacyMaintenance(options) {
   const originalExit = process.exit.bind(process);
   const api = await import(pathToFileURL(options.oldApi).href);
   const prototype = api.ThreadService?.prototype;
-  if (!prototype || !['start','close','attach','send','spawn','deliverScheduledWakes'].every(key => typeof prototype[key] === 'function')) throw new Error('Selected legacy ThreadService has no supported maintenance seam');
-  const originalStart = prototype.start, originalSend = prototype.send, originalSpawn = prototype.spawn, originalWakes = prototype.deliverScheduledWakes;
+  if (!prototype || !['start','close','attach','send','spawn','deliverScheduledWakes','rpc','busy','adoptReference','wake'].every(key => typeof prototype[key] === 'function')) throw new Error('Selected legacy ThreadService has no supported maintenance seam');
+  const originalStart = prototype.start, originalSend = prototype.send, originalSpawn = prototype.spawn, originalWakes = prototype.deliverScheduledWakes, originalAttach = prototype.attach;
+  prototype.attach = function(id, recoverMissing = false) { return attachLegacyRuntime(this, originalAttach, id, recoverMissing); };
   const rejecting = () => ({ ok: false, error: { code: 'unavailable', retryable: true, message: 'Native history maintenance admission is closed; retry the same receipt after publication' } });
   const allowed = async (service, id) => {
     installFence(service, identity);
@@ -202,7 +236,7 @@ export async function installLegacyMaintenance(options) {
       for (const row of references) {
         const reference = JSON.parse(row.reference);
         controls.add(reference.control);
-        await service.attach(row.id); // The retained OLD decoder receives and ACKs its own output.
+        await reconcileLegacyRuntime(service, row.id);
       }
       const busy = serviceBusy(service), spools = [];
       for (const row of service.sql("SELECT json_extract(metadata,'$.runnerReference') AS reference FROM thread WHERE json_extract(metadata,'$.runnerReference') IS NOT NULL").all()) {
@@ -293,7 +327,7 @@ export async function installLegacyMaintenance(options) {
       for (const service of services) if (!service.closed) removeFence(service);
       if (options.mode === 'fleet') releaseFleetLedger();
       restoreDaemonAdmission();
-      prototype.start = originalStart; prototype.send = originalSend; prototype.spawn = originalSpawn; prototype.deliverScheduledWakes = originalWakes;
+      prototype.start = originalStart; prototype.send = originalSend; prototype.spawn = originalSpawn; prototype.deliverScheduledWakes = originalWakes; prototype.attach = originalAttach;
       save('restored'); value = receipt;
     }
     else { response.writeHead(404); response.end(); return; }
