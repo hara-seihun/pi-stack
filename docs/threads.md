@@ -132,7 +132,17 @@ Only a still-active `registered` wait terminates the native turn. An already-arr
 result or resuming input remains available for the agent to handle; success without
 an explanation for an absent wait is not a valid registration outcome.
 
-`clear` releases the caller's wait and outgoing result subscriptions. Explicit
+`set` atomically replaces the previous wait and its peer subscriptions, retaining
+independently declared explicit subscriptions even when a peer belonged to both.
+Validation and current-assignment probe failures leave the accepted wait unchanged.
+The wait, subscription reconciliation journal and retry receipt commit together;
+a subscription transport outage after acceptance leaves a registered wait with
+`metadata.dependencyError` and durable reconciliation custody. Controller restart
+retries that journal without replaying the wait request or native work. Completed
+peer results discharge their edges through the existing result receipt, including
+when the producer automatically archives before cross-owner delivery.
+
+`clear` releases the caller's wait and all outgoing result subscriptions. Explicit
 subscriptions can also be managed without suspending current execution.
 
 `thread_await` is a bounded wait of at most 25 seconds on accessible peers. It

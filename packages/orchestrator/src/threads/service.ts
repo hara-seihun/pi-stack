@@ -969,13 +969,22 @@ export class ThreadService implements ThreadApi {
     }
     return good(undefined);
   }
-  private replaceDependencies(id: string, desired: string[], after?: Record<string, number>): void {
+  private dependencyOwners(thread: Thread): { explicit: string[]; wait: string[] } {
+    const peers = thread.dependencies ?? [];
+    const dependency = validateWaitDependency(thread.metadata?.agentWait);
+    const named = dependency.ok ? dependency.value.kind === "agents" ? dependency.value.threadIds : dependency.value.kind === "message" ? [dependency.value.fromThreadId] : [] : [];
+    const wait = (thread.metadata?.waitDependencies as string[] | undefined) ?? peers.filter(id => named.includes(id));
+    const explicit = (thread.metadata?.explicitDependencies as string[] | undefined) ?? peers.filter(id => !wait.includes(id));
+    return { explicit: explicit.filter(id => peers.includes(id)), wait: wait.filter(id => peers.includes(id)) };
+  }
+  private replaceDependencies(id: string, desired: string[], after?: Record<string, number>, ownership?: { explicit: string[]; wait: string[] }): void {
     const current = this.get(id)!;
+    const owners = ownership ?? this.dependencyOwners(current);
     const update = current.metadata?.dependencyUpdate as { previous: string[]; desired: string[]; after?: Record<string, number> } | undefined;
     const previous = [...new Set([...(current.dependencies ?? []), ...(update?.previous ?? []), ...(update?.desired ?? [])])];
     const cursors = Object.fromEntries(desired.map(target => [target, after?.[target] ?? update?.after?.[target] ?? (current.metadata?.peerResultAfter as Record<string, number> | undefined)?.[target] ?? 0]));
-    this.sql("UPDATE thread SET metadata=json_set(metadata,'$.peerDependencies',json(?),'$.peerResultAfter',json(?),'$.dependencyUpdate',json(?)) WHERE id=?")
-      .run(JSON.stringify(desired), JSON.stringify(cursors), JSON.stringify({ previous, desired, after: cursors }), id);
+    this.sql("UPDATE thread SET metadata=json_set(metadata,'$.peerDependencies',json(?),'$.peerResultAfter',json(?),'$.dependencyUpdate',json(?),'$.explicitDependencies',json(?),'$.waitDependencies',json(?)) WHERE id=?")
+      .run(JSON.stringify(desired), JSON.stringify(cursors), JSON.stringify({ previous, desired, after: cursors }), JSON.stringify(owners.explicit.filter(target => desired.includes(target))), JSON.stringify(owners.wait.filter(target => desired.includes(target))), id);
     this.changed(id);
   }
   /** Completed results remain in durable receipts; subscribers do not keep the producer open. */
@@ -1012,7 +1021,7 @@ export class ThreadService implements ThreadApi {
     if (this.closed || this.suspended) return bad("unavailable", "Subscription registration remains with its owner during handoff");
     const current = this.get(id)!;
     if (current.held || current.metadata?.archived || this.halts.has(id)) return bad("conflict", "A closing or archived agent cannot change dependencies");
-    this.replaceDependencies(id, desired, after);
+    this.replaceDependencies(id, desired, after, { explicit: desired, wait: [] });
     return this.recoverDependencies(id);
   }
   private recoverDependencies(id: string): Promise<Result<void>> {
@@ -1061,11 +1070,7 @@ export class ThreadService implements ThreadApi {
         const ids = dependency.kind === "agents" ? dependency.threadIds : dependency.kind === "message" ? [dependency.fromThreadId] : [];
         const valid = await this.validateDependencies(thread.id, ids); if (!valid.ok) return valid;
       }
-      const current = this.get(thread.id)!;
-      if (input.action === "set" && (current.held || current.metadata?.archived)) return bad("unavailable", "Thread was stopped while registering its wait");
       const ids = dependency?.kind === "agents" ? dependency.threadIds : dependency?.kind === "message" ? [dependency.fromThreadId] : [];
-      const updated = await this.updateDependencies(thread.id, input.action === "clear" ? [] : [...new Set([...(current.dependencies ?? []), ...ids])], dependency?.kind === "agents" ? dependency.after : undefined);
-      if (!updated.ok) return updated;
       let settlement: ThreadSettlement | null = null;
       if (dependency?.kind === "agents") {
         const api = dependency.threadIds.every(id => this.get(id)) ? this : this.directory ?? this;
@@ -1075,9 +1080,12 @@ export class ThreadService implements ThreadApi {
       }
       if (this.closed || this.suspended) return bad("unavailable", "Wait registration remains with its owner during handoff");
       const latest = this.get(thread.id)!;
-      if (input.action === "set" && (latest.held || latest.metadata?.archived)) return bad("unavailable", "Thread was stopped while registering its wait");
+      if (latest.held || latest.metadata?.archived || this.halts.has(thread.id)) return bad("unavailable", "Thread was stopped while registering its wait");
+      if (input.action === "set" && new Set([...this.dependencyOwners(latest).explicit, ...ids]).size > 100)
+        return bad("invalid_request", "Wait and explicit subscriptions require up to 100 unique peers");
       let registration!: import("./contracts.js").AgentWaitRegistration;
       this.transaction(() => {
+        const explicit = input.action === "clear" ? [] : this.dependencyOwners(this.get(thread.id)!).explicit;
         // Inputs may land and even settle while cross-owner validation runs.
         const arrived = (this.sql("SELECT * FROM thread_work WHERE ordinal>? AND thread_id=? AND (status!='done' OR landed_at IS NOT NULL)").all(inputCursor, thread.id) as Json[]).map(row => this.message(row));
         const resumes = (message: ThreadMessage) => dependency && resumesDependency(dependency, message)
@@ -1095,10 +1103,16 @@ export class ThreadService implements ThreadApi {
         } else {
           this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.agentWait') WHERE id=?").run(thread.id);
         }
+        const wait = input.action === "clear" ? [] : ids.filter(id => id !== settlement?.threadId);
+        this.replaceDependencies(thread.id, [...new Set([...explicit, ...wait])], dependency?.kind === "agents" ? dependency.after : undefined, { explicit, wait });
         this.recordRequest(input.requestId, input, "agent-wait", thread.id);
         this.sql("UPDATE thread_request SET response=? WHERE id=?").run(JSON.stringify(registration), input.requestId);
       });
       this.changed(thread.id);
+      // The committed receipt and subscription journal transfer registration custody to this owner.
+      const recovered = await this.recoverDependencies(thread.id);
+      if (this.closed || this.suspended) return bad("unavailable", "Accepted wait registration remains with its owner during handoff");
+      if (!recovered.ok) this.sql("UPDATE thread SET metadata=json_set(metadata,'$.dependencyError',?) WHERE id=?").run(recovered.error.message, thread.id);
       return good({ ...this.get(thread.id)!, waitRegistration: registration });
     } finally { this.waitRegistering.delete(thread.id); }
   }
@@ -1210,7 +1224,7 @@ export class ThreadService implements ThreadApi {
       if (input.parentId && !parent) return bad("not_found", "Parent thread is not accessible to this service");
       if (input.ephemeral !== undefined && typeof input.ephemeral !== "boolean") return bad("invalid_request", "ephemeral must be a boolean");
       if (input.ephemeral && !input.message) return bad("invalid_request", "Ephemeral subagents need an initial assignment");
-      if (input.metadata && ["agentWait", "peerDependencies", "peerResultAfter", "peerDependents", "peerSubscriberAfter", "dependencyUpdate", "peerDependencyVersion", "dependencyError", "agentName", "cancellationRequest", "cancellationSettled"].some(key => key in input.metadata!)) return bad("invalid_request", "Waits, dependencies and agent names are owned by the thread service");
+      if (input.metadata && ["agentWait", "peerDependencies", "explicitDependencies", "waitDependencies", "peerResultAfter", "peerDependents", "peerSubscriberAfter", "dependencyUpdate", "peerDependencyVersion", "dependencyError", "agentName", "cancellationRequest", "cancellationSettled"].some(key => key in input.metadata!)) return bad("invalid_request", "Waits, dependencies and agent names are owned by the thread service");
       if (input.metadata && ("foreground" in input.metadata || "attentionSummary" in input.metadata)) return bad("invalid_request", "Use attention instead of setting attention metadata");
       if (input.metadata && "ephemeral" in input.metadata) return bad("invalid_request", "Set ephemeral on the spawn request, not in metadata");
       if (input.metadata && "autoArchiveViewedAt" in input.metadata) return bad("invalid_request", "Use view control instead of setting auto-archive metadata");
@@ -1601,7 +1615,7 @@ export class ThreadService implements ThreadApi {
     if (patch.metadata && "autoArchiveViewedAt" in patch.metadata && patch.metadata.autoArchiveViewedAt !== thread.metadata?.autoArchiveViewedAt) return bad("conflict", "Use view control instead of changing metadata.autoArchiveViewedAt");
     if (patch.title !== undefined && options.titleSource === "agent" && thread.metadata?.titleSource === "manual") return bad("conflict", "The person named this thread; their title stays until they rename it again");
     if (patch.metadata && "archived" in patch.metadata && patch.archived === undefined) return bad("invalid_request", "Use the explicit archived control instead of changing metadata.archived");
-    for (const key of ["agentWait", "peerDependencies", "peerResultAfter", "peerDependents", "peerSubscriberAfter", "dependencyUpdate", "peerDependencyVersion", "dependencyError", "agentName", "cancellationRequest", "cancellationSettled", "foreground", "attentionSummary", "context", "execution", "raw", "telephoneContext", "sandbox", "sandboxProfile", "sandboxGateway", "nativeHistoryRequired", "runnerReference", "ephemeral"] as const) if (patch.metadata && key in patch.metadata && digest(patch.metadata[key] ?? null) !== digest(thread.metadata?.[key] ?? null)) return bad("conflict", `Thread ${key} is immutable`);
+    for (const key of ["agentWait", "peerDependencies", "explicitDependencies", "waitDependencies", "peerResultAfter", "peerDependents", "peerSubscriberAfter", "dependencyUpdate", "peerDependencyVersion", "dependencyError", "agentName", "cancellationRequest", "cancellationSettled", "foreground", "attentionSummary", "context", "execution", "raw", "telephoneContext", "sandbox", "sandboxProfile", "sandboxGateway", "nativeHistoryRequired", "runnerReference", "ephemeral"] as const) if (patch.metadata && key in patch.metadata && digest(patch.metadata[key] ?? null) !== digest(thread.metadata?.[key] ?? null)) return bad("conflict", `Thread ${key} is immutable`);
     if (patch.metadata && "taskDescription" in patch.metadata && (typeof patch.metadata.taskDescription !== "string" || !patch.metadata.taskDescription.trim() || patch.metadata.taskDescription.length > 240)) return bad("invalid_request", "Task description must be a nonempty sentence of at most 240 characters");
     if (patch.metadata && "mode" in patch.metadata && !isThreadModeName(patch.metadata.mode)) return bad("invalid_request", "A thread mode must be declared in modes.ts");
     if (!validSandboxBoundary({ ...thread.metadata, ...patch.metadata })) return bad("conflict", "Sandbox execution boundary is immutable");
@@ -1687,11 +1701,15 @@ export class ThreadService implements ThreadApi {
       return good(this.get(current.id)!);
     }
     if (input.action === "dependencies") {
-      const updated = await this.updateDependencies(input.threadId, input.threadIds); if (!updated.ok) return updated;
-      if (this.closed || this.suspended) return bad("unavailable", "Dependency registration remains with its owner during handoff");
-      this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.agentWait') WHERE id=?").run(input.threadId);
-      this.changed(input.threadId);
-      return good(this.get(input.threadId)!);
+      if (this.waitRegistering.has(input.threadId)) return bad("conflict", "A wait registration is already in progress");
+      this.waitRegistering.add(input.threadId);
+      try {
+        const updated = await this.updateDependencies(input.threadId, input.threadIds); if (!updated.ok) return updated;
+        if (this.closed || this.suspended) return bad("unavailable", "Dependency registration remains with its owner during handoff");
+        this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.agentWait') WHERE id=?").run(input.threadId);
+        this.changed(input.threadId);
+        return good(this.get(input.threadId)!);
+      } finally { this.waitRegistering.delete(input.threadId); }
     }
     if (input.action === "placement") {
       if (typeof input.foreground !== "boolean") return bad("invalid_request", "Placement requires an explicit foreground boolean");

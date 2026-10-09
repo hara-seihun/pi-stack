@@ -55,6 +55,90 @@ async function spawn(f: ReturnType<typeof fixture>, id: string) {
 }
 const schedule = (f: ReturnType<typeof fixture>, threadId: string, requestId = "schedule") => f.service.wakeSchedule({ threadId, action: "set", requestId, reason: "Inspect durable job", cadenceMs: 60000, nextDueAt: 0 });
 
+it.each([false, true])("replaces wait-owned peers atomically while retaining explicit subscriptions across restart (cross-owner=%s)", async crossOwner => {
+  const parent = fixture(), peers = crossOwner ? fixture(undefined, { workersOnly: true }) : parent;
+  let directory = new ThreadDirectory({ id: "person", api: parent.service }, crossOwner ? [{ id: "fleet", api: peers.service }] : []);
+  parent.service.setDirectory(directory); peers.service.setDirectory(directory);
+  await spawn(parent, "parent");
+  for (const id of ["explicit", "old", "next"]) await spawn(peers, id);
+  unwrap(await parent.service.control({ action: "dependencies", threadId: "parent", threadIds: ["explicit"] }));
+  unwrap(await parent.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "first", reason: "First result", threadIds: ["old", "explicit"] }));
+  const replacement = unwrap(await parent.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "next", reason: "Next result", threadIds: ["next"] }));
+  expect(replacement).toMatchObject({ dependencies: ["explicit", "next"], waitingOnAgents: { threadIds: ["next"] } });
+  expect(peers.service.get("old")?.metadata?.peerDependents).toEqual([]);
+  expect(peers.service.get("explicit")?.metadata?.peerDependents).toEqual(["parent"]);
+  expect(await parent.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "missing", reason: "Unavailable peer", threadIds: ["missing"] })).toMatchObject({ ok: false });
+  expect(parent.service.get("parent")?.dependencies).toEqual(["explicit", "next"]);
+  await boundary(); unwrap(await parent.service.close());
+  const recovered = fixture(parent.root);
+  directory = new ThreadDirectory({ id: "person", api: recovered.service }, crossOwner ? [{ id: "fleet", api: peers.service }] : []);
+  recovered.service.setDirectory(directory); if (crossOwner) peers.service.setDirectory(directory);
+  expect(recovered.service.get("parent")).toMatchObject({ dependencies: ["explicit", "next"], waitingOnAgents: replacement.waitingOnAgents });
+  unwrap(await recovered.service.send({ requestId: "human", threadId: "parent", text: "Continue local work" }));
+  expect(recovered.service.get("parent")?.waitingOnAgents).toBeUndefined();
+  expect(recovered.service.get("parent")?.dependencies).toEqual(["explicit", "next"]);
+  expect(unwrap(await recovered.service.agentWait({ action: "set", kind: "job", threadId: "parent", requestId: "job", reason: "External result", jobId: "job" })).dependencies).toEqual(["explicit"]);
+});
+
+it("a failed current-assignment probe does not change the accepted wait or subscriptions", async () => {
+  const f = fixture(); for (const id of ["parent", "old", "next"]) await spawn(f, id);
+  const accepted = unwrap(await f.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "first", reason: "First result", threadIds: ["old"] }));
+  vi.spyOn(f.service, "await").mockResolvedValueOnce({ ok: false, error: { code: "unavailable", message: "Peer owner unavailable" } });
+  expect(await f.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "next", reason: "Next result", threadIds: ["next"] })).toMatchObject({ ok: false, error: { code: "unavailable" } });
+  expect(f.service.get("parent")).toMatchObject({ dependencies: ["old"], waitingOnAgents: accepted.waitingOnAgents });
+  expect(f.service.get("next")?.metadata?.peerDependents ?? []).toEqual([]);
+});
+
+it("accepted wait replacement retains durable subscription custody through owner failure and restart", async () => {
+  const parent = fixture(), peers = fixture(undefined, { workersOnly: true });
+  let directory = new ThreadDirectory({ id: "person", api: parent.service }, [{ id: "fleet", api: peers.service }]);
+  parent.service.setDirectory(directory); peers.service.setDirectory(directory);
+  await spawn(parent, "parent"); for (const id of ["old", "next"]) await spawn(peers, id);
+  unwrap(await parent.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "first", reason: "First result", threadIds: ["old"] }));
+  const control = peers.service.control.bind(peers.service);
+  vi.spyOn(peers.service, "control").mockImplementation(input => input.action === "resultSubscribe" && input.active && input.threadId === "next"
+    ? Promise.resolve({ ok: false, error: { code: "unavailable", message: "Subscription transport unavailable" } }) : control(input));
+  const request = { action: "set" as const, kind: "agents" as const, threadId: "parent", requestId: "next", reason: "Next result", threadIds: ["next"] };
+  const accepted = unwrap(await parent.service.agentWait(request));
+  expect(accepted).toMatchObject({ dependencies: ["next"], waitRegistration: { status: "registered" }, metadata: { dependencyUpdate: { desired: ["next"] }, dependencyError: "Subscription transport unavailable" } });
+  expect(peers.service.get("old")?.metadata?.peerDependents).toEqual([]);
+  await boundary(); unwrap(await parent.service.close()); vi.restoreAllMocks();
+  const recovered = fixture(parent.root);
+  directory = new ThreadDirectory({ id: "person", api: recovered.service }, [{ id: "fleet", api: peers.service }]);
+  recovered.service.setDirectory(directory); peers.service.setDirectory(directory);
+  expect(unwrap(await recovered.service.agentWait(request)).waitRegistration).toEqual(accepted.waitRegistration);
+  unwrap(await recovered.service.start());
+  await until(() => !recovered.service.get("parent")?.metadata?.dependencyUpdate);
+  expect(recovered.service.get("parent")).toMatchObject({ dependencies: ["next"], waitingOnAgents: accepted.waitingOnAgents });
+  expect(recovered.service.get("parent")?.metadata?.dependencyError).toBeUndefined();
+  expect(peers.service.get("next")?.metadata?.peerDependents).toEqual(["parent"]);
+  expect(recovered.sessions).toHaveLength(0);
+});
+
+it.each([false, true])("auto-archive releases completed peer edges without clear and preserves unfinished named work (cross-owner=%s)", async crossOwner => {
+  const parent = fixture(), peers = crossOwner ? fixture(undefined, { workersOnly: true }) : parent;
+  const directory = new ThreadDirectory({ id: "person", api: parent.service }, crossOwner ? [{ id: "fleet", api: peers.service }] : []);
+  parent.service.setDirectory(directory); peers.service.setDirectory(directory);
+  await spawn(parent, "parent"); unwrap(await peers.service.start());
+  unwrap(await peers.service.spawn({ requestId: "complete-work", id: "complete", parentId: "parent", cwd: peers.root, message: "Complete assignment" }));
+  await until(() => peers.sessions.some(s => s.commands.some(c => c.workId === "complete-work")));
+  unwrap(await parent.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "complete-wait", reason: "Result", threadIds: ["complete"] }));
+  peers.sessions.find(s => s.commands.some(c => c.workId === "complete-work"))!.settle();
+  await until(() => peers.service.get("complete")?.metadata?.archived === true && parent.service.get("parent")?.dependencies?.length === 0);
+  expect(peers.service.get("complete")?.metadata?.peerDependents).toEqual([]);
+  unwrap(await peers.service.spawn({ requestId: "next-work", id: "next", parentId: "parent", cwd: peers.root, message: "Unfinished assignment" }));
+  await until(() => peers.sessions.some(s => s.commands.some(c => c.workId === "next-work")));
+  unwrap(await peers.service.agentWait({ action: "set", kind: "job", threadId: "next", requestId: "next-job", reason: "Unfinished external work", jobId: "job" }));
+  peers.sessions.find(s => s.commands.some(c => c.workId === "next-work"))!.settle();
+  await until(() => peers.service.latestSettlement("next")?.assignmentPending === true);
+  const next = unwrap(await parent.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "next-wait", reason: "Next result", threadIds: ["next"] }));
+  expect(next).toMatchObject({ dependencies: ["next"], waitRegistration: { status: "registered" }, waitingOnAgents: { threadIds: ["next"] } });
+  expect(peers.service.get("next")?.metadata?.archived).not.toBe(true);
+  expect(peers.service.get("next")?.metadata?.peerDependents).toEqual(["parent"]);
+  expect(unwrap(await parent.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "archived-result", reason: "Saved result", threadIds: ["complete"] }))).toMatchObject({ dependencies: [], waitRegistration: { status: "already_arrived", settlement: { threadId: "complete" } } });
+  expect(peers.service.get("complete")?.metadata?.archived).toBe(true);
+});
+
 it("wakes an idle existing thread once, persists observability and coalesces overdue checks under admission", async () => {
   let now = 100000;
   vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -246,6 +330,7 @@ it("rejects a competing registration without overwriting accepted intent", async
   const registering = f.service.agentWait({ requestId: "wait", threadId: "self", action: "set", kind: "agents", threadIds: ["child"], reason: "Child result" });
   await until(() => entered);
   expect(await f.service.agentWait({ requestId: "clear", threadId: "self", action: "clear" })).toMatchObject({ ok: false, error: { code: "conflict" } });
+  expect(await f.service.control({ action: "dependencies", threadId: "self", threadIds: [] })).toMatchObject({ ok: false, error: { code: "conflict" } });
   release();
   expect(unwrap(await registering)).toMatchObject({ waitRegistration: { status: "registered" }, metadata: { agentWait: { reason: "Child result" } } });
   expect(unwrap(await f.service.agentWait({ requestId: "clear", threadId: "self", action: "clear" }))).toMatchObject({ waitRegistration: { status: "cleared" }, dependencies: [] });
