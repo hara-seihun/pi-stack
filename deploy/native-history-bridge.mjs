@@ -1,10 +1,10 @@
 import { createServer } from 'node:http';
 import { createConnection } from 'node:net';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, statSync, unlinkSync, readdirSync, openSync, fsyncSync, closeSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, statSync, lstatSync, unlinkSync, readdirSync, openSync, fsyncSync, closeSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 
 export const BRIDGE_PROTOCOL = 'native-history-maintenance-v1';
 export function bridgeSocket(uid, dataDir) {
@@ -28,6 +28,41 @@ export function runnerRequest(path, request, timeout = 3000) {
     socket.on('data', chunk => { body += chunk; if (body.length > 1024 * 1024) socket.destroy(new Error('Oversized legacy runner status')); else if (body.includes('\n')) { try { const value = JSON.parse(body.split('\n')[0]); clearTimeout(timer); socket.destroy(); resolve(value); } catch (error) { socket.destroy(error); } } });
     socket.on('error', error => { clearTimeout(timer); reject(error); });
   });
+}
+
+export async function probeBridgeSocket(path) {
+  try {
+    let before;
+    try { before = lstatSync(path); }
+    catch (error) { if (error.code === 'ENOENT') return { ok: true, value: { kind: 'absent' } }; throw error; }
+    if (!before.isSocket() || before.uid !== process.getuid()) return { ok: false, error: { code: 'unrelated-file', message: 'Maintenance endpoint has unrelated file custody' } };
+    const kind = await new Promise((resolve, reject) => {
+      const socket = createConnection(path);
+      const timer = setTimeout(() => socket.destroy(new Error('Maintenance endpoint custody probe timed out')), 1000);
+      socket.once('connect', () => { clearTimeout(timer); socket.destroy(); resolve('live'); });
+      socket.once('error', error => {
+        clearTimeout(timer);
+        if (error.code === 'ECONNREFUSED' || error.code === 'ENOENT') resolve('stale'); else reject(error);
+      });
+    });
+    return { ok: true, value: { kind, dev: before.dev, ino: before.ino } };
+  } catch (error) { return { ok: false, error: { code: 'unavailable', message: String(error) } }; }
+}
+
+export async function prepareBridgeSocket(path) {
+  const observed = await probeBridgeSocket(path);
+  if (!observed.ok) return observed;
+  if (observed.value.kind === 'absent') return { ok: true, value: 'available' };
+  if (observed.value.kind === 'live') return { ok: false, error: { code: 'live-owner', message: 'Another live controller owns the maintenance endpoint' } };
+  if (observed.value.kind !== 'stale') return { ok: false, error: { code: 'invalid-proof', message: 'Unknown maintenance endpoint proof' } };
+  try {
+    let current;
+    try { current = lstatSync(path); }
+    catch (error) { if (error.code === 'ENOENT') return { ok: true, value: 'available' }; throw error; }
+    if (current.dev !== observed.value.dev || current.ino !== observed.value.ino) return { ok: false, error: { code: 'changed-owner', message: 'Maintenance endpoint changed during custody proof' } };
+    unlinkSync(path);
+    return { ok: true, value: 'removed-stale' };
+  } catch (error) { return { ok: false, error: { code: 'unavailable', message: String(error) } }; }
 }
 
 export function installFence(service, identity) {
@@ -77,9 +112,14 @@ export async function legacyFleetLedger(path, identity, action = 'prepare') {
   let entered = false;
   try {
     db.exec('BEGIN IMMEDIATE'); entered = true;
-    if (action === 'restore') {
+    if (action === 'restore' || action === 'restore-owned') {
       const row = db.prepare("SELECT value FROM control WHERE key='native-history-maintenance'").get();
-      if (row && row.value !== JSON.stringify(identity)) throw new Error('Another publication owns the fleet admission fence');
+      if (row && row.value !== JSON.stringify(identity)) {
+        const recorded = JSON.parse(row.value);
+        if (action !== 'restore-owned' || !/^[0-9a-f]{40}$/.test(recorded.candidate) || !/^[0-9a-f]{40}$/.test(recorded.legacySource)) throw new Error('Another publication owns the fleet admission fence');
+        db.exec('COMMIT'); return { ready: true, ownership: 'foreign-preserved' };
+      }
+      if (!row && db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='pi_history_completion_admission'").get()) throw new Error('Fleet admission fence has no declared identity');
       db.exec('DROP TRIGGER IF EXISTS pi_history_completion_admission');
       db.prepare("DELETE FROM control WHERE key='native-history-maintenance'").run();
       db.exec('COMMIT'); return { ready: true };
@@ -144,8 +184,12 @@ export async function installLegacyMaintenance(options) {
   const uid = process.getuid();
   const dataDir = resolve(options.dataDir), receiptPath = join(dataDir, 'native-history-maintenance.json');
   const identity = { candidate: options.candidate, legacySource: options.legacySource };
-  let receipt = existsSync(receiptPath) ? JSON.parse(readFileSync(receiptPath, 'utf8')) : { version: 1, protocol: BRIDGE_PROTOCOL, uid, dataDir, ...identity, admittedAt: Date.now(), phase: 'draining' };
-  if (receipt.uid !== uid || receipt.dataDir !== dataDir || receipt.candidate !== identity.candidate || receipt.legacySource !== identity.legacySource) throw new Error('Native history maintenance receipt custody mismatch');
+  const prepared = spawnSync(options.node ?? '/usr/local/bin/node', [fileURLToPath(new URL('./native-history-closed-owner.mjs', import.meta.url)),
+    JSON.stringify({ uid, mode: options.mode, dataDir, ...identity, ...(options.mode === 'fleet' ? { ledgerPath: options.ledgerPath } : {}) }), '--prepare-attempt'],
+    { encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024 });
+  const result = prepared.stdout ? JSON.parse(prepared.stdout) : null;
+  if (prepared.status !== 0 || result?.ok !== true) throw new Error(`Native history maintenance receipt custody mismatch: ${result?.error?.code ?? prepared.error?.message ?? prepared.stderr?.trim() ?? 'missing proof'}`);
+  let receipt = result.value;
   const save = phase => { receipt = { ...receipt, phase, updatedAt: new Date().toISOString() }; atomicJson(receiptPath, receipt); };
   if (receipt.phase === 'restored') return true;
   if (receipt.phase === 'closing') save('draining');
@@ -317,7 +361,8 @@ export async function installLegacyMaintenance(options) {
     originalExit(code);
   };
   const socketPath = bridgeSocket(uid, dataDir);
-  if (existsSync(socketPath)) unlinkSync(socketPath);
+  const endpoint = await prepareBridgeSocket(socketPath);
+  if (!endpoint.ok) throw new Error(`${endpoint.error.code}: ${endpoint.error.message}`);
   const server = createServer((request, response) => { void (async () => {
     let value;
     if (request.method === 'GET' && request.url === '/status') value = await status();
@@ -361,4 +406,15 @@ export async function installLegacyMaintenance(options) {
     timer.unref();
   }
   return true;
+}
+
+const evalInvocation = process.execArgv.some(arg => ['-e', '--eval', '-p', '--print'].includes(arg) || arg.startsWith('--eval=') || arg.startsWith('--print='));
+if (!evalInvocation && process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  if (process.argv.length !== 4 || process.argv[2] !== '--probe-socket') {
+    console.error('Expected --probe-socket PATH'); process.exitCode = 64;
+  } else {
+    const result = await probeBridgeSocket(process.argv[3]);
+    console.log(JSON.stringify(result));
+    if (!result.ok) process.exitCode = 75;
+  }
 }

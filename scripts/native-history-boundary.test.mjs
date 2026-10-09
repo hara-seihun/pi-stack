@@ -126,7 +126,7 @@ test('old owner drains existing work/output, closes before private migration, an
   }`);
   const harness = join(root, 'harness.mjs');
   writeFileSync(harness, `import {installLegacyMaintenance} from ${JSON.stringify(pathToFileURL(bridge).href)}; import {ThreadService} from './api.mjs';
-    const run=await installLegacyMaintenance(${JSON.stringify({ candidate, legacySource: old, dataDir: root, oldApi: fakeApi, transportModule, migrator: resolve('scripts/migrate-native-history.mjs'), node: process.execPath })});
+    const run=await installLegacyMaintenance(${JSON.stringify({ candidate, legacySource: old, dataDir: root, mode: 'remote', oldApi: fakeApi, transportModule, migrator: resolve('scripts/migrate-native-history.mjs'), node: process.execPath })});
     if(run){const service=new ThreadService(${JSON.stringify(threadPath)});await service.start();process.on('SIGUSR2',()=>process.exit(75));
       const admitted=await service.spawn({requestId:'admitted-child',parentId:'accepted'});
       const crossOwner=await service.spawn({requestId:'cross-owner-child',parentId:'remote-child'});
@@ -169,6 +169,9 @@ test('fleet adoption fences fresh completions while old accepted provider work s
   assert.equal(db.prepare("SELECT state FROM run WHERE id='accepted'").get().state, 'running');
   assert.throws(() => db.exec("INSERT INTO run VALUES('new','queued',NULL)"), /admission is closed/);
   await assert.rejects(legacyFleetLedger(path, { ...identity, candidate: 'c'.repeat(40) }), /Another publication/);
+  assert.deepEqual(await legacyFleetLedger(path, { ...identity, candidate: 'c'.repeat(40) }, 'restore-owned'), { ready: true, ownership: 'foreign-preserved' });
+  assert.equal(JSON.parse(db.prepare("SELECT value FROM control WHERE key='native-history-maintenance'").get().value).candidate, candidate);
+  assert.throws(() => db.exec("INSERT INTO run VALUES('foreign-release','queued',NULL)"), /admission is closed/);
   db.exec("UPDATE run SET state='done'");
   assert.deepEqual(await legacyFleetLedger(path, identity), { ready: true, pendingCompletions: 0 });
   await legacyFleetLedger(path, identity, 'restore');
@@ -186,7 +189,7 @@ test('interrupted fleet closure releases its durable fences and locked bootstrap
   writeFileSync(oldApi, 'export class ThreadService {start(){} close(){} attach(){} send(){} spawn(){} deliverScheduledWakes(){} rpc(){} busy(){} adoptReference(){} wake(){}}');
   writeFileSync(transportModule, 'export const runnerSocketDirectory = data => data;');
   const harness = join(root, 'resume.mjs');
-  writeFileSync(harness, `import {installLegacyMaintenance} from ${JSON.stringify(pathToFileURL(resolve('deploy/native-history-bridge.mjs')).href)}; await installLegacyMaintenance(${JSON.stringify({ candidate, legacySource: old, dataDir: root, oldApi, transportModule, mode: 'fleet', autoAdvance: true, node: process.execPath })}); throw new Error('Old work must not reopen');`);
+  writeFileSync(harness, `import {installLegacyMaintenance} from ${JSON.stringify(pathToFileURL(resolve('deploy/native-history-bridge.mjs')).href)}; await installLegacyMaintenance(${JSON.stringify({ candidate, legacySource: old, dataDir: root, oldApi, transportModule, mode: 'fleet', ledgerPath, autoAdvance: true, node: process.execPath })}); throw new Error('Old work must not reopen');`);
   const child = spawn(process.execPath, [harness], { stdio: ['ignore','pipe','pipe'] });
   let errors = ''; child.stderr.on('data', chunk => errors += chunk);
   t.after(() => { if (child.exitCode === null) child.kill('SIGKILL'); });

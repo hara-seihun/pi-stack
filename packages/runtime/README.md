@@ -180,6 +180,40 @@ and propagates other filesystem errors. Focused cleanup checks:
 Active turns retain their original runtime until
 settlement; reopen a shell/CLI session to select the new tree.
 
+## Shell descendant ownership
+
+[`patch-bash-cancellation.mjs`](patch-bash-cancellation.mjs) gives every Linux
+SDK and agent-core local shell execution its own
+[`subreaper`](pi-shell-owner.py), launched through
+[`pi-shell-owner.mjs`](pi-shell-owner.mjs). It preserves the command's UID,
+working directory, environment and mount namespace. GNU `timeout`, `setsid`
+and double-forked descendants remain owned even when they leave Bash's process
+group. Stop, command timeout and runner death close that invocation's descendants;
+concurrent peer tools are untouched. Ordinary command completion also closes
+remaining descendants before returning the command's original exit status.
+
+Cleanup stops and kills only the subreaper's direct children through pidfds,
+reaps them, and repeats for newly adopted descendants. Parent validation prevents
+stale PID observations from signalling unrelated work. Cleanup has a two-second
+budget and returns an explicit failure with residual PIDs if they cannot exit;
+missing cleanup receipts are failures, never successful cancellation. The
+supervisor's receipt pipe is not inherited by shell descendants. Linux needs
+`/usr/bin/python3` with pidfd support and readable `/proc`; capability failures
+prevent command launch. Other platforms retain their existing native executor.
+No shared runner cgroup, service or publication lifecycle is changed.
+
+The patch and both helpers participate in the immutable dependency hash.
+[`bash-cancellation.test.mjs`](bash-cancellation.test.mjs) covers parallel GNU
+timeout children, signal-resistant session escapes, double forks, exact PID
+absence, concurrent sibling survival and runner-parent death. Its disposable
+fixtures never change installed runtime code. `deploy/runtime` runs the same
+proof against copied installed source without patching it:
+
+```sh
+PI_TEST_RUNTIME_ENTRY=file:///srv/pi/runtime/node_modules/@earendil-works/pi-coding-agent/dist/index.js \
+  PI_TEST_BASH_CANCELLATION_PATCH=0 node --test packages/runtime/bash-cancellation.test.mjs
+```
+
 ## Session crash durability
 
 Pi 0.87.1 closes JSONL files after writes without syncing them. A hard host reset can therefore persist a new gocryptfs file length without the complete authenticated final block, making every later read that reaches that block fail with `EIO`. [`patch-session-durability.mjs`](patch-session-durability.mjs) repairs both the SDK and bundled CLI copies. Appends are synced before returning, initial and fork writes are completed and synced as one file, and rewrites use a synced temporary file followed by an atomic rename and parent-directory sync. [`session-durability.test.mjs`](session-durability.test.mjs) checks both deployed source forms and their syntax.
