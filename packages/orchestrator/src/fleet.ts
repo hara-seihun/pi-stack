@@ -24,9 +24,17 @@ function admissionClass(thread: Thread): Thread["admission"] {
 export class Fleet {
   private readonly leases = new Map<string, { leaseId: string; accountId: string; timer: ReturnType<typeof setInterval> }>();
   private readonly brokerExecutions = new Map<string, string>();
+  private detached = false;
   constructor(private readonly store: Store, private readonly config: OrchestratorConfig) {}
 
+  detach(): void {
+    this.detached = true;
+    for (const lease of this.leases.values()) clearInterval(lease.timer);
+    this.leases.clear(); this.brokerExecutions.clear();
+  }
+
   async admit(thread: Thread, settings: ThreadSettings, recovering: boolean, executionId: string): Promise<Result<ThreadAdmission>> {
+    if (this.detached) return { ok: false, error: { code: "unavailable", message: "Fleet controller is detached; execution custody remains with its recorded owner" } };
     const slash = settings.model.indexOf("/");
     const speedError = requestedSpeedError({ provider: settings.model.slice(0, slash), id: settings.model.slice(slash + 1) }, settings.speed);
     if (speedError) return { ok: false, error: { code: "invalid_request", message: speedError } };
@@ -61,6 +69,8 @@ export class Fleet {
       this.store.createLease(leaseId, assignment.accountId, "fleet", thread.id);
       if (rootRepair) this.store.setControl("repair-owner", thread.id);
       if (!recovering) commitMeterAdmission(this.store, assignment);
+      const prior = this.leases.get(thread.id);
+      if (prior) clearInterval(prior.timer);
       const timer = setInterval(() => this.store.heartbeatLease(leaseId), 15_000); timer.unref();
       this.leases.set(thread.id, { leaseId, accountId: assignment.accountId, timer });
       return { ok: true, value: {
