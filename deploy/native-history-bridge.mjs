@@ -126,42 +126,48 @@ export function removeFence(service, identity) {
   }
 }
 export async function legacyFleetLedger(path, identity, action = 'prepare') {
+  if (!['prepare', 'probe', 'restore', 'restore-owned'].includes(action)) throw new Error('Unknown fleet maintenance action');
+  if (!/^[0-9a-f]{40}$/.test(identity?.candidate) || !/^[0-9a-f]{40}$/.test(identity?.legacySource)) throw new Error('Fleet maintenance requires immutable ownership identity');
   const { DatabaseSync } = await import('node:sqlite');
   const db = new DatabaseSync(path, { readOnly: action === 'probe' });
-  db.exec('PRAGMA busy_timeout=2000');
-  const pendingCompletions = () => db.prepare(`SELECT count(*) AS n FROM run r WHERE r.state IN ('starting','running')
-    AND (r.worker_unit LIKE 'completion:%' OR EXISTS(SELECT 1 FROM control WHERE key='completion-run:'||r.id))`).get().n;
-  if (action === 'probe') {
-    try { const pending = pendingCompletions(); return { ready: pending === 0, pendingCompletions: pending }; }
-    finally { db.close(); }
-  }
+  const dispatchSql = `CREATE TRIGGER pi_history_completion_dispatch BEFORE UPDATE ON run
+      WHEN OLD.state='queued' AND NEW.state='starting'
+        AND (NEW.worker_unit LIKE 'completion:%' OR EXISTS(SELECT 1 FROM control WHERE key='completion-run:'||NEW.id))
+      BEGIN SELECT RAISE(ABORT,'Controller replacement dispatch paused; queued completion receipt is retained'); END`;
   let entered = false;
   try {
-    db.exec('BEGIN IMMEDIATE'); entered = true;
-    if (action === 'restore' || action === 'restore-owned') {
-      const row = db.prepare("SELECT value FROM control WHERE key='native-history-maintenance'").get();
-      if (row && row.value !== JSON.stringify(identity)) {
-        const recorded = JSON.parse(row.value);
-        if (action !== 'restore-owned' || !/^[0-9a-f]{40}$/.test(recorded.candidate) || !/^[0-9a-f]{40}$/.test(recorded.legacySource)) throw new Error('Another publication owns the fleet admission fence');
+    db.exec('PRAGMA busy_timeout=2000');
+    db.exec(action === 'probe' ? 'BEGIN' : 'BEGIN IMMEDIATE'); entered = true;
+    const row = db.prepare("SELECT value FROM control WHERE key='native-history-maintenance'").get();
+    const dispatch = db.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='pi_history_completion_dispatch'").get();
+    const admission = db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='pi_history_completion_admission'").get();
+    if (!row && (dispatch || admission)) throw new Error('Fleet maintenance fence has no declared identity');
+    if (row) {
+      const recorded = JSON.parse(row.value);
+      if (!/^[0-9a-f]{40}$/.test(recorded?.candidate) || !/^[0-9a-f]{40}$/.test(recorded?.legacySource)) throw new Error('Fleet maintenance fence has invalid ownership identity');
+      if (recorded.candidate !== identity.candidate || recorded.legacySource !== identity.legacySource) {
+        if (action !== 'restore-owned') throw new Error('Another publication owns the fleet maintenance fence');
         db.exec('COMMIT'); return { ready: true, ownership: 'foreign-preserved' };
       }
-      if (!row && db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='pi_history_completion_admission'").get()) throw new Error('Fleet admission fence has no declared identity');
+    }
+    if (action === 'restore' || action === 'restore-owned') {
       db.exec('DROP TRIGGER IF EXISTS pi_history_completion_admission; DROP TRIGGER IF EXISTS pi_history_completion_dispatch');
       db.prepare("DELETE FROM control WHERE key='native-history-maintenance'").run();
       db.exec('COMMIT'); return { ready: true };
     }
-    const row = db.prepare("SELECT value FROM control WHERE key='native-history-maintenance'").get();
-    if (row && row.value !== JSON.stringify(identity)) throw new Error('Another publication owns the fleet admission fence');
-    db.prepare("INSERT OR REPLACE INTO control(key,value) VALUES('native-history-maintenance',?)").run(JSON.stringify(identity));
-    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='pi_history_completion_admission'").get()) throw new Error('An earlier gated fleet must restore before dispatch replacement');
-    db.exec(`CREATE TRIGGER IF NOT EXISTS pi_history_completion_dispatch BEFORE UPDATE ON run
-      WHEN OLD.state='queued' AND NEW.state='starting' AND NEW.worker_unit LIKE 'completion:%'
-      BEGIN SELECT RAISE(ABORT,'Controller replacement dispatch paused; queued completion receipt is retained'); END;`);
-    const pending = pendingCompletions();
-    db.exec('COMMIT'); return { ready: pending === 0, pendingCompletions: pending };
+    if (admission) throw new Error('An earlier gated fleet must restore before dispatch replacement');
+    if (dispatch && dispatch.sql !== dispatchSql) throw new Error('Fleet completion dispatch barrier has an unknown definition');
+    if (action === 'prepare') {
+      if (!row) db.prepare("INSERT INTO control(key,value) VALUES('native-history-maintenance',?)").run(JSON.stringify(identity));
+      if (!dispatch) db.exec(dispatchSql);
+    }
+    const prepared = action === 'prepare' || Boolean(row && dispatch);
+    const pending = db.prepare(`SELECT count(*) AS n FROM run r WHERE r.state IN ('starting','running')
+      AND (r.worker_unit LIKE 'completion:%' OR EXISTS(SELECT 1 FROM control WHERE key='completion-run:'||r.id))`).get().n;
+    db.exec('COMMIT'); return { prepared, ready: prepared && pending === 0, pendingCompletions: pending };
   } catch (error) {
     if (entered) db.exec('ROLLBACK');
-    if (error.errcode === 5 || error.errcode === 6) return { ready: false, reason: 'Owner ledger transaction is still active' };
+    if (error.errcode === 5 || error.errcode === 6) return { prepared: false, ready: false, code: 'ledger-transaction-active', reason: 'Owner ledger transaction is still active' };
     throw error;
   }
   finally { db.close(); }
