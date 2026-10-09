@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir, userInfo } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
-import { restoreClosedOwner, restoreLiveOwner, readRestoredOwner, liveUnitProof, publishedSourceProof, isNativeExecutable, prepareMaintenanceReceipt } from '../deploy/native-history-closed-owner.mjs';
+import { restoreClosedOwner, restoreLiveOwner, restoreObservationOwner, observationUnitProof, readRestoredOwner, liveUnitProof, publishedSourceProof, isNativeExecutable, prepareMaintenanceReceipt } from '../deploy/native-history-closed-owner.mjs';
 import { stageLegacyRemoteIdentity, isLegacyCapturePackage } from '../deploy/native-history-package-identity.mjs';
 const candidate = 'a'.repeat(40), legacySource = 'b'.repeat(40);
 const closed = () => ({ ok: true, value: { LoadState: 'loaded', ActiveState: 'failed', MainPID: '0', ControlGroup: '' } });
@@ -208,6 +208,93 @@ test('live route rejects unavailable source proof and preclosure crossing withou
   assert.equal(restoreLiveOwner(input, () => live(input)).ok, false);
   assert.equal(JSON.parse(readFileSync(join(input.dataDir, 'native-history-maintenance.json'))).phase, 'draining');
 });
+function observe(input, version = 1) {
+  const db = new DatabaseSync(join(input.dataDir, 'threads.sqlite3'));
+  db.exec('CREATE TABLE pi_history_bridge(key TEXT PRIMARY KEY,value TEXT); CREATE TABLE pi_history_observation(version INTEGER PRIMARY KEY);');
+  db.prepare('INSERT INTO pi_history_bridge VALUES(?,?)').run('identity', JSON.stringify({ candidate: input.candidate, legacySource: input.legacySource }));
+  db.prepare('INSERT INTO pi_history_observation VALUES(?)').run(version); db.close();
+  if (input.mode === 'fleet') {
+    const ledger = new DatabaseSync(input.ledgerPath);
+    ledger.prepare('INSERT INTO control VALUES(?,?)').run('native-history-maintenance', JSON.stringify({ candidate: input.candidate, legacySource: input.legacySource }));
+    ledger.exec("CREATE TRIGGER pi_history_completion_dispatch BEFORE UPDATE ON run WHEN OLD.state='queued' AND NEW.state='starting' BEGIN SELECT RAISE(ABORT,'dispatch-paused'); END;"); ledger.close();
+  }
+}
+function observationLive(input, pid = 42) { const proof = live(input, pid); delete proof.value.servingEntry; return proof; }
+test('observation restore removes only observation/dispatch custody with providers and native rows untouched', t => {
+  const input = fixture(t, 'fleet'); observe(input);
+  const ledger = new DatabaseSync(input.ledgerPath);
+  ledger.exec("INSERT INTO run VALUES('active','running','completion:old'); INSERT INTO run VALUES('queued','queued','completion:next');");
+  ledger.prepare('INSERT INTO control VALUES(?,?)').run('completion-run:active', 'preserve'); ledger.close();
+  const before = readThread(input);
+  const result = restoreObservationOwner(input, () => observationLive(input));
+  assert.equal(result.ok, true, JSON.stringify(result)); assert.equal(result.value.restorationProof.owner, 'live-observation');
+  assert.equal(result.value.restorationProof.pendingCompletions, 2);
+  assert.deepEqual(readThread(input), before);
+  const after = new DatabaseSync(input.ledgerPath);
+  assert.deepEqual(after.prepare('SELECT id,state FROM run ORDER BY id').all().map(row => ({ ...row })), [{ id: 'active', state: 'running' }, { id: 'queued', state: 'queued' }]);
+  assert.equal(after.prepare("SELECT value FROM control WHERE key='completion-run:active'").get().value, 'preserve');
+  assert.equal(after.prepare("SELECT count(*) AS n FROM sqlite_master WHERE type='trigger'").get().n, 0); after.close();
+  const receipt = JSON.parse(readFileSync(join(input.dataDir, 'native-history-maintenance.json')));
+  assert.equal(receipt.phase, 'restored'); assert.equal(receipt.untouched, 'retain');
+  assert.equal(readRestoredOwner(input).ok, true);
+  assert.equal(restoreObservationOwner(input, () => observationLive(input)).ok, false, 'Absent observation is not fabricated positive custody');
+});
+test('observation proof requires health outside locks and repeated kernel identity under both locks', t => {
+  const input = fixture(t, 'fleet'); observe(input); let healthChecks = 0, lockedChecks = 0;
+  const health = () => {
+    for (const path of [join(input.dataDir, 'threads.sqlite3'), input.ledgerPath]) {
+      const db = new DatabaseSync(path); try { db.exec('BEGIN IMMEDIATE; ROLLBACK'); } finally { db.close(); }
+    }
+    healthChecks++; return observationLive(input);
+  };
+  const kernel = () => {
+    for (const path of [join(input.dataDir, 'threads.sqlite3'), input.ledgerPath]) {
+      const db = new DatabaseSync(path); try { assert.throws(() => db.exec('BEGIN IMMEDIATE'), /locked/); } finally { db.close(); }
+    }
+    lockedChecks++; return observationLive(input);
+  };
+  assert.equal(restoreObservationOwner(input, health, kernel).ok, true);
+  assert.equal(healthChecks, 2); assert.equal(lockedChecks, 1);
+  assert.equal(observationUnitProof(input).error.code, 'live-proof-input');
+});
+test('observation route refuses unknown, historical gated, foreign and closing owners without mutation', t => {
+  for (const defect of ['missing', 'version', 'identity', 'admission', 'children', 'questions', 'cohort', 'closing', 'ledger-admission', 'ledger-foreign', 'receipt-foreign', 'receipt-absent', 'receipt-closing', 'readiness', 'retirement']) {
+    const input = fixture(t, 'fleet'); if (defect !== 'missing') observe(input, defect === 'version' ? 2 : 1);
+    const db = new DatabaseSync(join(input.dataDir, 'threads.sqlite3'));
+    if (['admission', 'children', 'questions'].includes(defect)) db.exec(`CREATE TRIGGER ${defect === 'questions' ? 'pi_history_question_cohort' : `pi_history_${defect}`} BEFORE INSERT ON thread BEGIN SELECT RAISE(ABORT,'historical'); END;`);
+    if (defect === 'cohort') db.exec('CREATE TABLE pi_history_cohort(id TEXT)');
+    if (defect === 'identity') db.prepare("UPDATE pi_history_bridge SET value=?").run(JSON.stringify({ candidate: 'c'.repeat(40), legacySource }));
+    if (defect === 'closing') db.exec("INSERT INTO pi_history_bridge VALUES('closing','1')"); db.close();
+    const ledger = new DatabaseSync(input.ledgerPath);
+    if (defect === 'ledger-admission') ledger.exec("CREATE TRIGGER pi_history_completion_admission BEFORE INSERT ON run BEGIN SELECT RAISE(ABORT,'historical'); END;");
+    if (defect === 'ledger-foreign') ledger.prepare('UPDATE control SET value=?').run(JSON.stringify({ candidate: 'c'.repeat(40), legacySource })); ledger.close();
+    const path = join(input.dataDir, 'native-history-maintenance.json');
+    if (defect.startsWith('receipt-')) {
+      const receipt = JSON.parse(readFileSync(path));
+      if (defect === 'receipt-absent') rmSync(path);
+      else { if (defect === 'receipt-foreign') receipt.candidate = 'c'.repeat(40); else receipt.phase = 'closing'; writeFileSync(path, JSON.stringify(receipt)); }
+    }
+    if (defect === 'readiness') writeFileSync(join(input.dataDir, 'native-history-readiness.json'), '{}');
+    if (defect === 'retirement') mkdirSync(join(input.dataDir, 'native-history-retirement'));
+    const before = existsSync(path) ? readFileSync(path, 'utf8') : null;
+    const result = restoreObservationOwner(input, () => observationLive(input));
+    assert.equal(result.ok, false, defect);
+    assert.equal(existsSync(path) ? readFileSync(path, 'utf8') : null, before, defect);
+    assert.deepEqual(readThread(input).map(row => row.body), ['preserve-me'], defect);
+  }
+});
+test('observation generation changes rollback or explicitly report committed release without acknowledging receipt', t => {
+  const input = fixture(t); observe(input);
+  const before = readFileSync(join(input.dataDir, 'native-history-maintenance.json'), 'utf8');
+  const early = restoreObservationOwner(input, () => observationLive(input), () => observationLive(input, 43));
+  assert.equal(early.error.code, 'owner-generation-changed');
+  const db = new DatabaseSync(join(input.dataDir, 'threads.sqlite3')); assert.equal(db.prepare('SELECT version FROM pi_history_observation').get().version, 1); db.close();
+  let calls = 0;
+  const late = restoreObservationOwner(input, () => observationLive(input, ++calls === 1 ? 42 : 43), () => observationLive(input));
+  assert.equal(late.error.code, 'owner-generation-changed'); assert.equal(late.error.fenceReleaseCommitted, true);
+  assert.equal(readFileSync(join(input.dataDir, 'native-history-maintenance.json'), 'utf8'), before);
+});
+
 test('staged local entry/server preserve package assertion and one old API module graph without settings edits', t => {
   const root = mkdtempSync(join(tmpdir(), 'history-package-')); t.after(() => rmSync(root, { recursive: true, force: true }));
   const legacy = join(root, 'old'), target = join(root, 'stage');
