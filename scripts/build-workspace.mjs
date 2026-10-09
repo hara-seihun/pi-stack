@@ -58,7 +58,10 @@ const sources = listed.stdout.split("\0").filter(file => file && !outputs.some(o
 const inputFiles = [...new Set([
   ...sources, "package.json", "package-lock.json", "node_modules/.package-lock.json", "scripts/build-workspace.mjs",
 ])].sort();
-const inputs = digestFiles(inputFiles);
+const revision = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' });
+if (revision.status !== 0) throw new Error('Cannot identify build source');
+const sourceIdentity = name === 'remote' ? revision.stdout.trim() : '';
+const inputs = createHash('sha256').update(digestFiles(inputFiles)).update(sourceIdentity).digest('hex');
 const receiptPath = join(root, "node_modules", `.pi-stack-build-${name}.json`);
 const receipt = existsSync(receiptPath) ? JSON.parse(readFileSync(receiptPath, "utf8")) : null;
 if (receipt?.inputs === inputs && receipt.node === process.version && receipt.output === outputDigest()) {
@@ -74,7 +77,7 @@ if (result.status !== 0) {
   process.exit(result.status || 1);
 }
 const output = outputDigest();
-if (!output || digestFiles(inputFiles) !== inputs) {
+if (!output || createHash('sha256').update(digestFiles(inputFiles)).update(sourceIdentity).digest('hex') !== inputs) {
   console.error(`Pi ${name} build produced no files or its inputs changed during the build`);
   process.exit(1);
 }

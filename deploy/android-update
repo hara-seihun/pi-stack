@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { APP_UPDATE_DIRECTORY, isAppRelease, isWebRelease } from "../apps/remote/server/app-update.ts";
 import { webBundleBytes } from "./android-web-bundle.mjs";
+import { checkedPreparedNative } from "./android-native-artifact.mjs";
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const destination = process.env.PI_REMOTE_APP_UPDATES_DIR || APP_UPDATE_DIRECTORY;
@@ -74,17 +75,29 @@ function webBundle(input, identity, kind = "apk") {
 function sourceIdentity() {
   return JSON.parse(command("node", ["apps/kenan/release-info.mjs"]));
 }
-function plan() {
+function plan(requestsDirectory) {
   const identity = sourceIdentity();
   const current = join(destination, "current");
-  if (!existsSync(current)) return { kind: "native", identity };
-  const nativeDirectory = realpathSync(current);
-  const { release } = artifact(nativeDirectory);
-  if (release.shellId !== identity.shellId) return { kind: "native", identity };
-  if (!compatible(release, identity)) throw new Error("Selected native artifact is newer than or conflicts with the candidate web release");
-  command("git", ["merge-base", "--is-ancestor", release.revision, identity.revision]);
-  const changedTests = command("git", ["diff", "--name-only", release.revision, identity.revision, "--", "apps/kenan/android/app/src/test"]);
-  return changedTests ? { kind: "native", identity } : { kind: "web", identity, nativeDirectory, release };
+  if (existsSync(current)) {
+    const nativeDirectory = realpathSync(current);
+    const { release } = artifact(nativeDirectory);
+    if (release.shellId === identity.shellId) {
+      if (!compatible(release, identity)) throw new Error("Selected native artifact is newer than or conflicts with the candidate web release");
+      command("git", ["merge-base", "--is-ancestor", release.revision, identity.revision]);
+      const changedTests = command("git", ["diff", "--name-only", release.revision, identity.revision, "--", "apps/kenan/android/app/src/test"]);
+      if (!changedTests) return { kind: "web", identity, nativeDirectory, release };
+    }
+  }
+  if (requestsDirectory !== undefined) {
+    const requests = readdirSync(requestsDirectory).filter(name => name.endsWith(".json"))
+      .map(name => JSON.parse(readFileSync(join(requestsDirectory, name), "utf8")))
+      .sort((left, right) => (right.android?.release?.versionCode ?? -1) - (left.android?.release?.versionCode ?? -1));
+    for (const request of requests) {
+      const candidate = checkedPreparedNative(request, identity, { readArtifact: artifact, git: (...args) => command("git", args) });
+      if (candidate.ok) return { kind: "web", identity, ...candidate.value };
+    }
+  }
+  return { kind: "native", identity };
 }
 function prepareWeb(output, nativeDirectory) {
   const identity = sourceIdentity();
@@ -229,13 +242,13 @@ async function bundle(output) {
 try {
   const [operation, argument, nativeDirectory, ...extra] = process.argv.slice(2);
   if (extra.length || !["plan", "prepare", "prepare-web", "install", "install-locked", "verify", "bundle"].includes(operation)
-    || (operation === "plan" ? argument !== undefined : !argument)
-    || (operation === "prepare-web" ? !nativeDirectory : nativeDirectory !== undefined)) throw new Error("usage: deploy/android-update plan | prepare OUTPUT_DIRECTORY | prepare-web OUTPUT_DIRECTORY NATIVE_DIRECTORY | install ARTIFACT_DIRECTORY | verify MANIFEST_PATH | bundle OUTPUT_FILE");
+    || (operation !== "plan" && !argument)
+    || (operation === "prepare-web" ? !nativeDirectory : nativeDirectory !== undefined)) throw new Error("usage: deploy/android-update plan [REQUESTS_DIRECTORY] | prepare OUTPUT_DIRECTORY | prepare-web OUTPUT_DIRECTORY NATIVE_DIRECTORY | install ARTIFACT_DIRECTORY | verify MANIFEST_PATH | bundle OUTPUT_FILE");
   // Published releases are public downloads read by unprivileged mirrors; the caller's umask must not narrow them.
   process.umask(0o022);
   let result;
   switch (operation) {
-    case "plan": result = plan(); break;
+    case "plan": result = plan(argument === undefined ? undefined : resolve(argument)); break;
     case "prepare": result = prepare(resolve(argument)); break;
     case "prepare-web": result = prepareWeb(resolve(argument), resolve(nativeDirectory)); break;
     case "bundle": result = await bundle(resolve(argument)); break;

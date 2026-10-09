@@ -194,8 +194,8 @@ case "$*" in
   *'rev-parse refs/pi-stack-publication/'*) echo ${source};;
   *'rev-parse refs/remotes/origin/main'*) echo ${base};;
   *'rev-parse HEAD'*) echo ${integration};;
-  *'merge-base --is-ancestor'*) exit 1;;
-  *'merge --no-ff'*) ${failedStep === "merge-source" ? "echo 'CONFLICT (content): Merge conflict in README.md'; exit 1" : ":"};;
+  *'merge-base --is-ancestor'*) test -f '${join(root, 'merged')}' && exit 0; exit 1;;
+  *'merge --no-ff'*) ${failedStep === "merge-source" ? "echo 'CONFLICT (content): Merge conflict in README.md'; exit 1" : `touch '${join(root, 'merged')}'`};;
 esac
 `, { mode: 0o700 });
   writeFileSync(join(root, "bin/npm"), '#!/bin/sh\necho "(fail) integration fixture rejects wrong core" >&2\necho "Expected: 201" >&2\necho "Received: 409" >&2\nexit 1\n', { mode: 0o700 });
@@ -224,7 +224,7 @@ esac
   assert.equal(failed.checks.status, "failed");
   assert.equal(failed.failure.step, "checks");
   assert.equal(failed.failure.progress.command, "bash");
-  assert.deepEqual(failed.failure.progress.args, ["-c", 'set -euo pipefail\nsource deploy/lib\npi_stack_prepare_dependencies "$PWD"\nnpm run check\nnpm run android:test --workspace=kenan']);
+  assert.deepEqual(failed.failure.progress.args, ["-c", 'set -euo pipefail\nsource deploy/lib\npi_stack_prepare_dependencies "$PWD"\nnpm run check']);
   assert.equal(failed.failure.progress.cwd, join(root, "repository"));
   assert.match(failed.failure.excerpt, /integration fixture rejects wrong core/);
   assert.match(failed.failure.excerpt, /Received: 409/);

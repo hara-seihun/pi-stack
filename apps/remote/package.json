@@ -24,7 +24,7 @@
     "build:phone-media": "vite build --config vite.phone-media.config.ts",
     "pretypecheck": "node prepare-check.mjs",
     "typecheck": "tsc -p tsconfig.web.json && tsc -p tsconfig.json",
-    "test": "npm run build && node check.mjs"
+    "test": "node ../../scripts/build-workspace.mjs remote && node check.mjs"
   },
   "engines": {
     "bun": ">=1.3.13"
