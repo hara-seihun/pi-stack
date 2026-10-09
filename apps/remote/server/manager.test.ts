@@ -38,7 +38,9 @@ describe("person manager view", () => {
     expect(f.spawned[0]!.settings).toEqual({ model: "anthropic/claude-opus-5-5", thinkingLevel: "high", speed: "standard" });
     expect(f.wakes).toHaveLength(1);
     expect(f.wakes[0]).toMatchObject({ action: "set", cadenceMs: MANAGER_HEARTBEAT_MS });
-    const id = manager.snapshot().managerThreadId;
+    const snapshot = manager.snapshot();
+    if (snapshot.view !== "mono") throw new Error("Expected mono after successful initialization");
+    const id = snapshot.managerThreadId;
     manager = f.make();
     await manager.update({ view: "classic" });
     await manager.update({ view: "mono", hintSeen: false });
@@ -55,12 +57,15 @@ describe("person manager view", () => {
     expect((await manager.update({ view: "mono" })).ok).toBe(false);
     expect(manager.snapshot().view).toBe("classic");
     const id = manager.snapshot().managerThreadId;
+    if (id === null) throw new Error("Provisioning must retain its reserved identity");
     manager = f.make();
     f.rejectWake(false);
     expect((await manager.update({ view: "mono" })).ok).toBe(true);
     expect(f.spawned[1]!.id).toBe(id);
     expect(f.spawned[1]!.requestId).toBe(f.spawned[0]!.requestId);
-    expect(f.wakes[1]!.requestId).toBe(f.wakes[0]!.requestId);
+    const firstWake = f.wakes[0]!, secondWake = f.wakes[1]!;
+    if (firstWake.action !== "set" || secondWake.action !== "set") throw new Error("Expected heartbeat initialization");
+    expect(secondWake.requestId).toBe(firstWake.requestId);
     f.db.close();
   });
 
