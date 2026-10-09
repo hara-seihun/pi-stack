@@ -169,6 +169,9 @@ test('fleet adoption fences fresh completions while old accepted provider work s
   assert.equal(db.prepare("SELECT state FROM run WHERE id='accepted'").get().state, 'running');
   assert.throws(() => db.exec("INSERT INTO run VALUES('new','queued',NULL)"), /admission is closed/);
   await assert.rejects(legacyFleetLedger(path, { ...identity, candidate: 'c'.repeat(40) }), /Another publication/);
+  assert.deepEqual(await legacyFleetLedger(path, { ...identity, candidate: 'c'.repeat(40) }, 'restore-owned'), { ready: true, ownership: 'foreign-preserved' });
+  assert.equal(JSON.parse(db.prepare("SELECT value FROM control WHERE key='native-history-maintenance'").get().value).candidate, candidate);
+  assert.throws(() => db.exec("INSERT INTO run VALUES('foreign-release','queued',NULL)"), /admission is closed/);
   db.exec("UPDATE run SET state='done'");
   assert.deepEqual(await legacyFleetLedger(path, identity), { ready: true, pendingCompletions: 0 });
   await legacyFleetLedger(path, identity, 'restore');

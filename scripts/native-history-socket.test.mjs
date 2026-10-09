@@ -6,7 +6,7 @@ import { once } from 'node:events';
 import { mkdtempSync, lstatSync, existsSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { prepareBridgeSocket } from '../deploy/native-history-bridge.mjs';
+import { prepareBridgeSocket, probeBridgeSocket } from '../deploy/native-history-bridge.mjs';
 function directory(t) { const root = mkdtempSync(join(tmpdir(), 'history-socket-')); t.after(() => rmSync(root, { recursive: true, force: true })); return root; }
 
 test('a second controller cannot unlink or orphan the live maintenance owner', async t => {
@@ -15,6 +15,8 @@ test('a second controller cannot unlink or orphan the live maintenance owner', a
   await new Promise(resolve => server.listen(path, resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
   const inode = lstatSync(path).ino;
+  const live = await probeBridgeSocket(path);
+  assert.equal(live.ok, true); assert.equal(live.value.kind, 'live');
   const result = await prepareBridgeSocket(path);
   assert.equal(result.ok, false);
   assert.equal(result.error.code, 'live-owner');
@@ -33,6 +35,10 @@ test('positive refusal of a dead socket permits removal, while unrelated files r
   await once(child.stdout, 'data');
   const exited = once(child, 'exit'); child.kill('SIGKILL'); await exited;
   assert.equal(lstatSync(path).isSocket(), true);
+  const inode = lstatSync(path).ino;
+  const stale = await probeBridgeSocket(path);
+  assert.equal(stale.ok, true); assert.equal(stale.value.kind, 'stale');
+  assert.equal(lstatSync(path).ino, inode, 'readonly proof preserves even a stale endpoint');
   assert.deepEqual(await prepareBridgeSocket(path), { ok: true, value: 'removed-stale' });
   assert.equal(existsSync(path), false);
   writeFileSync(path, 'not a maintenance socket');

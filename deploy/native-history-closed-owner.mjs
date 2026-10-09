@@ -21,7 +21,7 @@ function processStartTicks(pid) {
   if (!/^[0-9]+$/.test(ticks)) throw new Error('Live actor has no stable process generation');
   return ticks;
 }
-function originalEntryProof(input, source, cgroup, namespace) {
+export function originalEntryProof(input, source, cgroup, namespace) {
   const expectedEntry = join(source, input.mode === 'fleet' ? 'dist/cli.js' : input.mode === 'rooms' ? 'server/rooms-main.ts' : 'server/main.ts');
   const matches = [];
   const pids = readFileSync(`/sys/fs/cgroup${cgroup}/cgroup.procs`, 'utf8').trim().split('\n');
@@ -29,6 +29,8 @@ function originalEntryProof(input, source, cgroup, namespace) {
     if (!/^[1-9][0-9]*$/.test(pid)) continue;
     try {
       if (statSync(`/proc/${pid}`).uid !== input.uid) continue;
+      const executable = basename(readlinkSync(`/proc/${pid}/exe`));
+      if (executable !== 'node' && executable !== 'bun') continue;
       const args = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0');
       const entry = args.find(arg => arg.startsWith('/') && arg.endsWith(`/${input.mode === 'fleet' ? 'dist/cli.js' : input.mode === 'rooms' ? 'server/rooms-main.ts' : 'server/main.ts'}`));
       if (!entry || realpathSync(entry) !== expectedEntry) continue;
@@ -81,7 +83,15 @@ export function liveUnitProof(input) {
     const startTicks = processStartTicks(input.ownerPid);
     const namespace = readlinkSync(join(proc, 'ns/mnt'));
     const servingEntry = originalEntryProof(input, source, fields.ControlGroup, namespace);
-    if (existsSync(bridgeSocket(input.uid, input.dataDir))) return failure('bridge-present', 'Live maintenance socket exists; restore through its owning bridge');
+    const endpoint = bridgeSocket(input.uid, input.dataDir);
+    if (existsSync(endpoint)) {
+      const probe = spawnSync(process.execPath, [fileURLToPath(new URL('./native-history-bridge.mjs', import.meta.url)), '--probe-socket', endpoint],
+        { encoding: 'utf8', timeout: 1500, maxBuffer: 16384 });
+      const observed = probe.stdout ? JSON.parse(probe.stdout) : null;
+      if (probe.status !== 0 || observed?.ok !== true) return failure('bridge-unavailable', 'Maintenance endpoint has no positive connection-state proof');
+      if (observed.value.kind === 'live') return failure('bridge-present', 'Live maintenance controller exists; restore through its owning bridge');
+      if (observed.value.kind !== 'absent' && observed.value.kind !== 'stale') return failure('bridge-unavailable', 'Unknown maintenance endpoint connection-state proof');
+    }
     const health = spawnSync('curl', ['-fsS', '--max-time', '2', `http://127.0.0.1:${input.healthPort}/v1/health`], { encoding: 'utf8', timeout: 3000, maxBuffer: 16384 });
     if (health.status !== 0) return failure('health-unavailable', 'Actual own-UID old-owner health is unavailable');
     const value = JSON.parse(health.stdout);
