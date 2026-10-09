@@ -65,6 +65,7 @@ function usage() {
   deploy/publication cancel REQUEST
   deploy/publication repair REQUEST
   deploy/publication repair-result REQUEST
+  deploy/publication recover-native-history REQUEST HOST
   deploy/publication submit SHA --repair-of REQUEST
   deploy/publication report REQUEST [REMOTE_URL SESSION_ID]
   deploy/publication gate-status
@@ -415,6 +416,9 @@ function retry(requestId) {
   if (repair?.explicitStop || repair?.failure?.at !== request.failure?.at || repair?.failure?.attempt !== request.failure?.attempt) throw new Error("Repair evidence is not bound to the latest failed attempt or was explicitly stopped");
   if (request.status !== "failed" || repair?.outcome?.status !== "infrastructure-fixed")
     throw new Error("Retry requires the dedicated repair's infrastructure-fixed evidence and is allowed once");
+  if (Object.values(request.nativeHistory?.hosts ?? {}).some(host => host.state === "repair-required")) {
+    throw new Error("Native history custody remains repair-held; recover-native-history must establish safe restoration before unchanged-source retry");
+  }
   if (request.repairedRetry) request.repairedRetries = [...(request.repairedRetries ?? []), request.repairedRetry];
   request.repairedRetry = { failureAt: request.failure.at, failedAttempt: request.failure.attempt, repairId: repair.id, at: new Date().toISOString(), evidence: repair.outcome.evidence };
   if (repair.outcome.ownerSourceSha) {
@@ -519,6 +523,7 @@ function updateFailure(request, message, logPath, notify = true, reason = messag
     log: logPath,
     command: request.progress ? [request.progress.command, ...request.progress.args].join(" ") : request.checks?.command,
     progress: request.progress,
+    hosts: Object.fromEntries(Object.entries(request.hosts ?? {}).filter(([, host]) => host.status === "failed").map(([id, host]) => [id, structuredClone(host.failure)])),
     excerpt: logTail(logPath),
   };
   if (request.checks?.status === "running") request.checks.status = "failed";
@@ -1113,7 +1118,11 @@ function nativeSourceProbe(request, target, ensureSource = false) {
     ? ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", target.sshHost, "bash", "-s", "--", ...args]
     : ["-s", "--", ...args];
   const result = commandResult(command, commandArgs, { input: script, timeoutSeconds: 45 });
-  if (!result.ok && result.status !== 75) throw new Error(result.stderr.trim() || `native prerequisite probe exited ${result.status}`);
+  if (!result.ok && !(result.status === 75 && /^native source prerequisite [^\r\n]+ requires [0-9a-f]{40} before Pi Stack [0-9a-f]{40}; selected [0-9a-f]{40}$/m.test(result.stderr))) {
+    throw Object.assign(new Error(result.stderr.trim() || `native prerequisite probe exited ${result.status}`), {
+      probeFailure: { kind: "native-source", host: target.id, status: result.status, command: [command, ...commandArgs] },
+    });
+  }
   return result;
 }
 
@@ -1139,7 +1148,9 @@ export function nativeHistoryBoundaryTarget(request, target, mode, logPath) {
     : commandResult(command, commandArgs, { input: script, timeoutSeconds: 45 });
   const detail = mode === "advance" ? logTail(logPath, start) : result.stderr;
   if (!result.ok && !(mode !== "restore" && result.status === 75 && /^native history boundary waiting: [^\r\n]+$/m.test(detail))) {
-    throw new Error(detail.trim() || `native history boundary ${mode} exited ${result.status}`);
+    throw Object.assign(new Error(detail.trim() || `native history boundary ${mode} exited ${result.status}`), {
+      probeFailure: { kind: "native-history", mode, host: target.id, status: result.status, command: [command, ...commandArgs] },
+    });
   }
   return result;
 }
@@ -1149,13 +1160,37 @@ function statLogSize(path) {
   try { return fstatSync(fd).size; } finally { closeSync(fd); }
 }
 
-function restoreNativeHistory(request, target) {
+function restoreNativeHistory(request, target, explicit = false) {
   const host = request.nativeHistory?.hosts?.[target.id];
-  if (!custodyNeedsRestore(host)) return;
+  if (!custodyNeedsRestore(host) && !(explicit && host?.state === "repair-required")) return;
   nativeHistoryBoundaryTarget({ ...request, integrationSha: host.integrationSha }, target, "restore");
   host.state = "restored";
   host.restoredAt = new Date().toISOString();
   writeRequest(request);
+}
+
+export function recoverNativeHistoryCustody(request, hostId) {
+  if (request.status !== "failed") throw new Error("Only a failed request can explicitly recover native history custody");
+  const target = targets.find(target => target.id === hostId);
+  if (!target) throw new Error(`Unknown native history recovery host: ${hostId}`);
+  if (request.nativeHistory?.hosts?.[target.id]?.state !== "repair-required") {
+    throw new Error(`No repair-held native history custody remains on ${hostId}`);
+  }
+  const recovery = { at: new Date().toISOString(), hosts: [], status: "running" };
+  (request.nativeHistoryRecoveries ??= []).push(recovery);
+  writeRequest(request);
+  try {
+    restoreNativeHistory(request, target, true);
+    recovery.hosts.push(target.id);
+    recovery.status = "restored";
+  } catch (error) {
+    recovery.status = "failed";
+    recovery.error = error instanceof Error ? error.message : String(error);
+    throw error;
+  } finally {
+    recovery.finishedAt = new Date().toISOString();
+    writeRequest(request);
+  }
 }
 
 function releaseNativeHistory(request, target) {
@@ -1644,13 +1679,15 @@ export function outstandingHostCustody(request) {
   return Object.values(request.bootstrap?.hosts ?? {}).some(custodyNeedsRestore)
     || Object.values(request.reservations ?? {}).some(custodyNeedsRestore)
     || Object.values(request.maintenance?.hosts ?? {}).some(host => !["restored", "released"].includes(host.state))
-    || Object.values(request.nativeHistory?.hosts ?? {}).some(custodyNeedsRestore);
+    || Object.values(request.nativeHistory?.hosts ?? {}).some(host => custodyNeedsRestore(host) || host.state === "repair-required");
 }
 
 function recoveryNeeded(request) {
   return Object.values(request.bootstrap?.hosts ?? {}).some(custodyNeedsRestore)
     || Object.values(request.reservations ?? {}).some(custodyNeedsRestore)
-    || ["failed", "published"].includes(request.status) && outstandingHostCustody(request);
+    || ["failed", "published"].includes(request.status) && (
+      Object.values(request.maintenance?.hosts ?? {}).some(host => !["restored", "released"].includes(host.state))
+      || Object.values(request.nativeHistory?.hosts ?? {}).some(custodyNeedsRestore));
 }
 
 function restoreCustody(request, hostKey, remoteHost) {
@@ -2027,7 +2064,8 @@ export function processRequest(request) {
     let message = error instanceof Error ? error.message : String(error);
     if (restorationFailures.length) message += `; intake restoration failed: ${restorationFailures.join("; ")}`;
     appendLog(logPath, `[${new Date().toISOString()}] failed step=${request.step}: ${message}\n`);
-    updateFailure(request, message, logPath);
+    const probeFailure = Object.values(request.hosts ?? {}).some(host => host.status === "failed" && host.failure.reason === "readiness-probe-failed");
+    updateFailure(request, message, logPath, true, probeFailure ? "readiness-probe-failed" : message);
   } finally {
     activeRequest = undefined;
     activeLog = undefined;
@@ -2340,6 +2378,7 @@ function completeRepair(requestId) {
 }
 
 export function refreshHostWaits(request) {
+  if (["failed", "published"].includes(request.status)) return false;
   request.hosts ??= {};
   if (["live-meeting", "native-source", "native-history", "host-lock"].includes(request.waiting?.kind)) {
     const id = request.waiting.host;
@@ -2351,7 +2390,7 @@ export function refreshHostWaits(request) {
     const host = request.hosts[target.id];
     if (!host) { ready = true; continue; }
     if (host.status === "passed") continue;
-    if (host.status === "failed") { ready = true; continue; }
+    if (host.status === "failed") continue;
     if (host.status !== "waiting") throw new Error(`Unknown delivery state for ${target.id}: ${host.status}`);
     try {
       let available;
@@ -2379,6 +2418,7 @@ export function refreshHostWaits(request) {
         default: throw new Error(`Unknown wait kind for ${target.id}: ${host.waiting.kind}`);
       }
       delete host.waiting.probeFailingSince;
+      delete host.waiting.probeFailure;
       host.ready = available;
       if (available) ready = true;
       else host.nextAttemptAt = new Date(Date.now() + policy.blockedRetryMs).toISOString();
@@ -2386,19 +2426,33 @@ export function refreshHostWaits(request) {
       host.ready = false;
       const since = host.waiting.probeFailingSince ?? new Date().toISOString();
       host.waiting.probeFailingSince = since;
-      host.waiting.probe = { at: new Date().toISOString(), error: error.message };
-      if (Date.now() - Date.parse(since) > policy.meetingProbeFailureLimitMs) {
-        request.hosts[target.id] = { status: "failed", failure: { at: new Date().toISOString(), message: `${target.id} readiness probe failed: ${error.message}` } };
-        ready = true;
+      host.waiting.probe = { at: new Date().toISOString(), error: error.message, ...(error.probeFailure ? { failure: error.probeFailure } : {}) };
+      if (host.waiting.kind !== "live-meeting" || Date.now() - Date.parse(since) > policy.meetingProbeFailureLimitMs) {
+        request.hosts[target.id] = { status: "failed", failure: { at: new Date().toISOString(), reason: "readiness-probe-failed",
+          message: `${target.id} readiness probe failed: ${error.message}`, waiting: structuredClone(host.waiting) } };
+        const history = request.nativeHistory?.hosts?.[target.id];
+        if (host.waiting.kind === "native-history" && custodyNeedsRestore(history)) {
+          history.state = "repair-required";
+          history.probeFailure = structuredClone(host.waiting.probe);
+        }
+        const log = host.waiting.log ?? request.waiting?.log ?? join(logRoot, request.requestId, `attempt-${request.attempt}.log`);
+        appendLog(log, `[${new Date().toISOString()}] ${request.hosts[target.id].failure.message}\n${JSON.stringify(host.waiting.probe)}\n`);
       }
     }
+  }
+  const failures = targets.filter(target => request.hosts[target.id]?.status === "failed");
+  if (failures.length && !ready) {
+    request.step = "host-readiness-probe";
+    const log = request.waiting?.log ?? join(logRoot, request.requestId, `attempt-${request.attempt}.log`);
+    updateFailure(request, failures.map(target => request.hosts[target.id].failure.message).join("; "), log, true, "readiness-probe-failed");
+    return false;
   }
   if (!ready) request.nextAttemptAt = new Date(Date.now() + policy.blockedRetryMs).toISOString();
   writeRequest(request);
   return ready;
 }
 
-function drain() {
+export function drain() {
   ensureState();
   // Re-read after each request. A submission while this service is active needs no timer turn.
   for (;;) {
@@ -2409,6 +2463,7 @@ function drain() {
       if ((request.recoveryAttempts ?? 0) >= policy.maxAttempts) { restorationBlocked = true; continue; }
       request.recoveryAttempts = (request.recoveryAttempts ?? 0) + 1;
       const previousStatus = request.status;
+      const causalFailure = request.failure;
       const interruptedRecovery = request.recoveryInProgress === true;
       request.status = "running";
       request.recoveryInProgress = true;
@@ -2418,11 +2473,18 @@ function drain() {
       try {
         recoverOutstandingCustody(request, previousStatus);
         delete request.recoveryInProgress;
-        if (interruptedRecovery) updateFailure(request, "Interrupted host recovery completed; repair owns the next publication attempt", activeLog);
-        else { request.status = previousStatus; writeRequest(request); }
+        if (interruptedRecovery && !causalFailure) updateFailure(request, "Interrupted host recovery completed; repair owns the next publication attempt", activeLog);
+        else { request.status = causalFailure ? "failed" : previousStatus; writeRequest(request); }
       } catch (error) {
         delete request.recoveryInProgress;
-        updateFailure(request, `Host custody recovery failed: ${error.message}`, activeLog);
+        if (causalFailure) {
+          request.status = "failed";
+          request.failure = causalFailure;
+          appendLog(activeLog, `[${new Date().toISOString()}] Host custody recovery failed: ${error.message}\n`);
+          writeRequest(request);
+          ensureRepair(request);
+          deliverNotice(request);
+        } else updateFailure(request, `Host custody recovery failed: ${error.message}`, activeLog);
         restorationBlocked = true;
       } finally { activeRequest = undefined; activeLog = undefined; }
     }
@@ -2459,6 +2521,14 @@ function main() {
   if (operation === "watchdog" && args.length === 0) return locked("watchdog", "watchdog", [], true);
   if (operation === "_watchdog" && args.length === 0) return watchdog();
   if (operation === "_drain" && args.length === 0) return drain();
+  if (operation === "recover-native-history" && args.length === 2) return locked("worker", "recover-native-history", args);
+  if (operation === "_recover-native-history" && args.length === 2) {
+    validateRequestId(args[0]);
+    const request = readRequest(args[0]);
+    recoverNativeHistoryCustody(request, args[1]);
+    process.stdout.write(`${JSON.stringify(request)}\n`);
+    return;
+  }
   if (operation === "_fail-stalled" && args.length === 2) return failStalled(...args);
   if (operation === "_fail-unclaimed" && args.length === 2) return failUnclaimed(...args);
   if (operation === "acknowledge-issues" && args.length === 0) return locked("worker", "acknowledge-issues");
