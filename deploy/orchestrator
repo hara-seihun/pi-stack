@@ -28,12 +28,6 @@ reconcile_cli_links() {
   done < <(pi_stack_users)
 }
 
-if [[ ${1:-} == --links-only ]]; then
-  pi_stack_require_release "$dest" "$commit"
-  reconcile_cli_links
-  exit 0
-fi
-
 normalize_model_defaults() {
   local fleet home config
   fleet=$(pi_stack_fleet_user)
@@ -74,6 +68,11 @@ reconcile_model_availability() {
   fi
 }
 [[ ${PI_STACK_PREPARE_ONLY:-0} == 1 ]] || reconcile_model_availability
+if [[ ${1:-} == --links-only ]]; then
+  pi_stack_require_release "$dest" "$commit"
+  reconcile_cli_links
+  exit 0
+fi
 
 # The fleet user's operator config names the lane manifest. A release whose
 # daemon cannot parse the live manifest must not be selected.
