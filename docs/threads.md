@@ -287,6 +287,12 @@ no process-lifetime lock owner. Unknown generations, conflicting ownership or an
 unacknowledged fence retain the original capacity identity. Recovery never
 replays stopped input or changes an already-completed assignment receipt.
 
+Retained attachment has one in-flight operation and one native client per thread.
+Repeated custody probes reuse that client; concurrent native opens await its
+attachment. A new attachment reads native `get_state` before claiming busy or
+idle, without resubmitting input. If that observation fails, the attached client
+and original custody remain available for explicit recovery.
+
 Provider capacity refusals preserve execution/work identity, retire inactive
 native resources, and retry through durable admission without emitting a false
 completion. Transient compaction/transport recovery has recorded retry times and
