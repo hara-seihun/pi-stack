@@ -749,6 +749,38 @@ test("source capacity separates real headroom and known footprint from unknown f
   assert.throws(() => workspaceTesting.capacityRequirement(plan, [-1]), /invalid capacity ledger/);
 });
 
+test("filesystem headroom is shared across completed workspaces while pending construction and declared growth stay additive", () => {
+  const f = fixture();
+  const GiB = 1024 ** 3;
+  try {
+    const records = ["one", "two", "three"].map(name => JSON.parse(run([
+      "create", "--root", name === "three" ? path.join(f.root, "other-pool") : f.workspaces,
+      "--name", name, "--repo", f.remote, "--min-free-gib", "0", "--json",
+    ], f.env)));
+    const db = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    const device = String(statSync(f.workspaces).dev);
+    const plan = { intent: "unestimated", estimate: "unknown", constructionBytes: 30 * GiB, growthBytes: 0, headroomBytes: 0 };
+    for (const record of records) db.prepare("UPDATE workspace_capacity SET plan_json=? WHERE workspace_id=?").run(JSON.stringify(plan), record.id);
+    let reservations = workspaceTesting.capacityReservations(db, device);
+    assert.deepEqual(reservations, { priced: [], headroomBytes: 30 * GiB, unpricedDormant: 0 });
+    assert.equal(workspaceTesting.capacityRequirement(plan, reservations.priced, reservations.headroomBytes), 30 * GiB);
+    db.prepare("UPDATE workspace SET state='creating' WHERE id=?").run(records[0].id);
+    reservations = workspaceTesting.capacityReservations(db, device);
+    assert.deepEqual(reservations, { priced: [30 * GiB], headroomBytes: 30 * GiB, unpricedDormant: 0 });
+    assert.equal(workspaceTesting.capacityRequirement(plan, reservations.priced, reservations.headroomBytes), 60 * GiB);
+    db.prepare("UPDATE workspace SET state='released' WHERE id=?").run(records[0].id);
+    const budgeted = { intent: "budgeted", estimate: "whole-tree-upper-bound", constructionBytes: 5 * GiB, growthBytes: 2 * GiB, headroomBytes: 40 * GiB };
+    db.prepare("UPDATE workspace_capacity SET plan_json=? WHERE workspace_id=?").run(JSON.stringify(budgeted), records[1].id);
+    db.prepare("UPDATE workspace SET state='repair-required', lease_expires_at=0 WHERE id=?").run(records[1].id);
+    reservations = workspaceTesting.capacityReservations(db, device);
+    assert.deepEqual(reservations, { priced: [2 * GiB], headroomBytes: 40 * GiB, unpricedDormant: 0 });
+    assert.equal(workspaceTesting.capacityRequirement(plan, reservations.priced, reservations.headroomBytes), 42 * GiB);
+    db.prepare("UPDATE workspace SET state='released'").run();
+    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [], headroomBytes: 0, unpricedDormant: 0 });
+    db.close();
+  } finally { f.close(); }
+});
+
 test("budgeted source creation shares existing objects and records immutable whole-tree pricing", () => {
   const f = fixture();
   try {
@@ -789,25 +821,25 @@ test("budgeted source creation shares existing objects and records immutable who
     const device = String(statSync(f.workspaces).dev);
     const fullPlan = { intent: "unestimated", estimate: "unknown", constructionBytes: 30 * 1024 ** 3, growthBytes: 0, headroomBytes: 0 };
     db.prepare("UPDATE workspace_capacity SET plan_json=? WHERE workspace_id=?").run(JSON.stringify(fullPlan), created.id);
-    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [30 * 1024 ** 3], unpricedDormant: 0 });
+    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [], headroomBytes: 30 * 1024 ** 3, unpricedDormant: 0 });
     db.prepare("UPDATE workspace_capacity SET plan_json=? WHERE workspace_id=?").run(JSON.stringify(created.capacity), created.id);
-    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [8 * 1024 ** 2], unpricedDormant: 0 });
+    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [8 * 1024 ** 2], headroomBytes: 1024 ** 3, unpricedDormant: 0 });
     db.prepare("UPDATE workspace SET lease_expires_at=0 WHERE id=?").run(created.id);
-    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [8 * 1024 ** 2], unpricedDormant: 0 });
+    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [8 * 1024 ** 2], headroomBytes: 1024 ** 3, unpricedDormant: 0 });
     db.prepare("UPDATE workspace SET state='creating', lease_expires_at=0 WHERE id=?").run(created.id);
-    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [created.capacity.growthBytes + created.capacity.constructionBytes], unpricedDormant: 0 });
+    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [created.capacity.growthBytes + created.capacity.constructionBytes], headroomBytes: 1024 ** 3, unpricedDormant: 0 });
     db.prepare("DELETE FROM workspace_capacity WHERE workspace_id=?").run(created.id);
-    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [], unpricedDormant: 1 });
-    assert.deepEqual(workspaceTesting.capacityReservations(db, device, created.path), { priced: [], unpricedDormant: 0 });
+    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [], headroomBytes: 0, unpricedDormant: 1 });
+    assert.deepEqual(workspaceTesting.capacityReservations(db, device, created.path), { priced: [], headroomBytes: 0, unpricedDormant: 0 });
     // An old dormant reservation is priced again under the filesystem fence before resuming.
     const resumed = JSON.parse(run(args, f.env));
     assert.equal(resumed.id, created.id);
     assert.equal(resumed.capacity.sourceCommit, created.sourceCommit);
-    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [8 * 1024 ** 2], unpricedDormant: 0 });
+    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [8 * 1024 ** 2], headroomBytes: 1024 ** 3, unpricedDormant: 0 });
     db.prepare("UPDATE workspace SET state='creating' WHERE id=?").run(created.id);
     rmSync(created.path, { recursive: true });
     run(["cancel-creation", "--id", created.id], f.env);
-    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [], unpricedDormant: 0 });
+    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [], headroomBytes: 0, unpricedDormant: 0 });
     db.close();
   } finally { f.close(); }
 });
@@ -2361,23 +2393,36 @@ test("unknown ignored output requires repair", () => {
   }
 });
 
-test("expired live references require an explicit reap", async () => {
+for (const grouped of [false, true]) test(`expired live references require an explicit reap; preserve-runtime retains ${grouped ? "groups" : "individuals"}`, async () => {
   const f = fixture();
   let sleeper;
   try {
     const created = JSON.parse(run([
       "create", "--root", f.workspaces, "--name", "referenced", "--repo", f.remote,
       "--mode", "review", "--lease-seconds", "0", "--min-free-gib", "0", "--json",
+      ...(grouped ? ["--group", "live-group"] : []),
     ], f.env));
+    if (grouped) run([
+      "create", "--root", f.workspaces, "--name", "group-peer", "--repo", f.remote,
+      "--group", "live-group", "--lease-seconds", "0", "--min-free-gib", "0", "--json",
+    ], f.env);
     sleeper = spawn("sleep", ["60"], { cwd: created.path, stdio: "ignore" });
     await new Promise((resolve) => setTimeout(resolve, 100));
     const exited = new Promise((resolve) => sleeper.once("exit", resolve));
     const liveSafety = { ...f.env, PI_WORKSPACE_TEST_EXTERNAL_SAFETY: "host" };
     const held = JSON.parse(await runAsync(["release", "--id", created.id, "--json"], liveSafety));
-    assert.equal(held.inspection.classification, "referenced");
+    assert.equal((grouped ? held.find(result => result.record.id === created.id) : held).inspection.classification, "referenced");
     assert.equal(existsSync(created.path), true);
+    const preserved = JSON.parse(await runAsync(["reconcile", "--root", f.workspaces, "--after", "start", "--execute", "--reap-expired", "--preserve-runtime", "--json"], liveSafety));
+    assert.equal(preserved.find(result => result.record.id === created.id).inspection.classification, "referenced");
+    assert.equal(preserved.every(result => result.action === "none"), true);
+    assert.equal(sleeper.exitCode, null);
+    assert.equal(existsSync(created.path), true);
+    const released = JSON.parse(await runAsync(["release", "--id", created.id, "--reap-expired", "--preserve-runtime", "--json"], liveSafety));
+    assert.equal((grouped ? released.find(result => result.record.id === created.id) : released).inspection.classification, "referenced");
+    assert.equal(sleeper.exitCode, null);
     const reaped = JSON.parse(await runAsync(["release", "--id", created.id, "--reap-expired", "--json"], liveSafety));
-    assert.equal(reaped.action, "released");
+    assert.equal((grouped ? reaped[0] : reaped).action, grouped ? "released-group" : "released");
     assert.equal(existsSync(created.path), false);
     await exited;
   } finally {
@@ -2496,6 +2541,7 @@ test("status, list and dry-run reconciliation leave disposal to executing lifecy
       ["list", "--path", "missing"],
       ["reconcile"],
       ["reconcile", "--execute=false"],
+      ["reconcile", "--root", f.workspaces, "--execute", "--reap-expired", "--preserve-runtime"],
     ]) {
       const result = JSON.parse(run([...args, "--json"], env));
       assert.deepEqual(args[0] === "reconcile" ? result : result.records, []);
