@@ -42,6 +42,13 @@ test("automatic retention keeps an unreceived subscription while allowing the pr
   expect(await archiveInactiveThreads(apiFor([row("dependent", { dependencies: ["settled"] }), row("settled")], calls), 1000, 10000)).toBe(1);
 });
 
+test("forever managers never enter the inactive archive path even after heartbeat cancellation", async () => {
+  const calls: unknown[] = [];
+  const manager = row("manager", { metadata: { manager: true, foreground: true, autoArchiveViewedAt: 2 } });
+  expect(await archiveInactiveThreads(apiFor([manager, row("ordinary")], calls), 1000, 10000)).toBe(1);
+  expect(calls).toEqual(["list:first", { threadId: "ordinary", action: "archiveInactive", inactiveBefore: 9000 }]);
+});
+
 test("a racing owner preserves its newly accepted work without aborting the sweep", async () => {
   const calls: unknown[] = [];
   const api = apiFor([row("racing"), row("safe")], calls);

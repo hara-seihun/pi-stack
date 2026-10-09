@@ -14,6 +14,7 @@ export interface SourceRecord {
   results: any[];
   header?: { systemPrompt: string; tools: any[] };
   headerItem?: "tool";
+  monoVisibility?: "hidden" | "visible";
 }
 export interface SourceWindow {
   source: { revision: string; generation: string; context: string };
@@ -59,6 +60,7 @@ export class SourceTranscripts {
     if (selected.length !== record.count) throw new Error(`Source item count mismatch for ${record.entryId}: ${record.count} != ${selected.length}`);
     for (const [index, item] of selected.entries()) {
       item.head.seq = record.seq + index;
+      if (record.monoVisibility !== undefined) item.head.monoVisibility = record.monoVisibility;
       // User and assistant heads used to transport whole message text, defeating lazy bodies.
       if ((item.head.kind === "user" || item.head.kind === "assistant" || item.head.kind === "notice") && item.head.text.length > INLINE_BODY_LIMIT) {
         item.head.text = `${item.head.text.slice(0, PREVIEW_CHARACTERS)}…`;

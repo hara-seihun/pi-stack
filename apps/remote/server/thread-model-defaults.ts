@@ -37,10 +37,12 @@ export function configuredThreadDestinations(destinations: ThreadDestination[], 
       ? { contextDir: destination.contextDir ?? "context" } : {};
     const icon = destination.id === "sandbox" && (!destination.icon || destination.icon === "raw") ? "sandbox" : destination.icon;
     const resolved = { ...destination, ...personalContext, icon, models, defaultModel };
-    if (resolved.watchContextFiles !== undefined) {
-      if (!Array.isArray(resolved.watchContextFiles) || resolved.watchContextFiles.some(name => typeof name !== "string" || !/^[^/\\\0]+\.md$/i.test(name)))
-        throw new Error(`Thread profile ${destination.id}: watchContextFiles must be a list of Markdown file names`);
-      if (!resolved.contextDir || resolved.raw || resolved.sandbox) throw new Error(`Thread profile ${destination.id}: watchContextFiles needs a full-context destination with contextDir`);
+    for (const field of ["watchContextFiles", "managerContextFiles"] as const) {
+      const names = resolved[field];
+      if (names === undefined) continue;
+      if (!Array.isArray(names) || names.some(name => typeof name !== "string" || !/^[^/\\\0]+\.md$/i.test(name)))
+        throw new Error(`Thread profile ${destination.id}: ${field} must be a list of Markdown file names`);
+      if (!resolved.contextDir || resolved.raw || resolved.sandbox) throw new Error(`Thread profile ${destination.id}: ${field} needs a full-context destination with contextDir`);
     }
     return resolved;
   });
@@ -80,6 +82,8 @@ export interface ThreadDestination {
    * as if chosen in the picker. Omitted means every top-level Markdown file there; destinations without `contextDir` load none.
    */
   watchContextFiles?: string[];
+  /** Context choice for the person's forever manager, using this destination's ordinary context-file loader. */
+  managerContextFiles?: string[];
 }
 
 export function defaultThreadDestinations(personalWorkspaceId?: string): ThreadDestination[] {

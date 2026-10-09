@@ -10,6 +10,8 @@ The feed opens directly on its cards, without a heading, refresh toolbar or cale
 
 Personal need cards have **Dismiss**, which settles their original owner and reloads the sources. Commitment dismissal hides only the reminder, not the obligation; source changes can bring it back. Submission failures and partial effects remain visible. See [dismissal semantics](needs-you.md).
 
+Questions held by the person's [manager](mono.md) stay out of Attention until forwarded or their two-hour hold expires. A forwarded rewritten question opens the manager conversation; original classic-thread questions remain answerable, and the first answer settles their shared custody.
+
 A question notification already represented by a linked personal item appears once. Question links select the original question in its source conversation; answers and dismissals stay with that owner. Opening an update opens the original thread, not a copy.
 
 Expand **Calendar** below the feed for **New event**, occurrence/series editing and deletion with **Undo**, display zone, optional month selection, **Upcoming**, **Refresh calendars** and **Sync**. The month selector changes the calendar window, not the personal deadlines or updates.

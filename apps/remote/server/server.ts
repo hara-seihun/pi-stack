@@ -76,6 +76,7 @@ import { dismissError, observeError, observeFailure } from "./error-feedback";
 import { startLedgerSnapshots } from "./ledger-snapshot";
 import { SupervisorRelease } from "./supervisor-release";
 import { autoArchiveDelay, startAutoArchive } from "./auto-archive";
+import { Manager, managerDestination, managerSettings, parseManagerPatch } from "./manager";
 import { createThreadViewRecorder } from "./thread-viewing";
 import { VoiceClient } from "./voice/client";
 import { MeetGateway } from "./meet/gateway";
@@ -348,6 +349,16 @@ const watchList = new WatchList({
   onError: error => { observeError(db, "watch-list", error); if (error) console.error("Watch list check failed:", error); },
 });
 threads.setWatchList(watchList);
+const MANAGER_DESTINATION = unwrap(managerDestination([...THREAD_DESTINATIONS.values()], process.env.PI_REMOTE_MANAGER_DESTINATION));
+const manager = new Manager(db, threads, () => {
+  const admitted = workspaceAdmission.resolve(MANAGER_DESTINATION.workspaceId);
+  if (!admitted.ok) return { ok: false, error: { code: "unavailable", message: admitted.error.message } };
+  const sources = destinationContextSources(MANAGER_DESTINATION);
+  const selected = selectContextFiles(sources, watchContextFiles(MANAGER_DESTINATION.managerContextFiles, sources?.directory));
+  return selected.ok ? { ok: true, value: { cwd: admitted.value.cwd, metadata: {
+    workspaceId: MANAGER_DESTINATION.workspaceId, profileId: MANAGER_DESTINATION.id, contextFiles: selected.value,
+  } } } : { ok: false, error: { code: "invalid_request", message: selected.error } };
+}, unwrap(managerSettings(process.env.PI_REMOTE_MANAGER_MODEL)), () => signalSync());
 const peerThreads = new Map<string, Thread>();
 let peerArchivedTotal = 0;
 const peerChildren = new Map<string, boolean>();
@@ -723,6 +734,7 @@ function threadInstructions(sessionId: string, audience: "thread" | "voice" = "t
   const snapshot = inlineImages.snapshot(sessionId);
   const registry = snapshot.images.map(({ id, state, refs, path, paths, error, conflict }) => ({ id, state, refs, path, paths, error, conflict }));
   return [
+    audience === "thread" && threads.get(sessionId)?.metadata?.manager === true ? readFileSync(join(import.meta.dir, "manager-prompt.md"), "utf8") : "",
     audience === "thread" ? chosenContextFiles(sessionId) : "",
     meetingInstructions(sessionId, audience),
     ROOMS_ENABLED ? roomInstructions(threads.get(sessionId)?.metadata?.room) : "",
@@ -967,6 +979,7 @@ function publicSession(row: any,
     hasChildren,
     origin,
     watchList: row.metadata?.watchList === true,
+    manager: row.metadata?.manager === true,
     foreground: typeof row.metadata?.foreground === "boolean" ? row.metadata.foreground : origin === "person" && !row.parentId && !row.metadata?.watchList,
     agentName: typeof row.metadata?.agentName === "string" ? row.metadata.agentName : liveThread(row.id)?.agentName,
     dependencies: row.metadata?.peerDependencies,
@@ -996,7 +1009,7 @@ function publicSession(row: any,
 // hold, which it remembers on the ClientStream.
 
 function bootstrap(): Bootstrap {
-  return { environmentId: ENVIRONMENT_ID, home: HOME, threadStarts: threadStartProfiles(), speech: speech?.catalog() ?? null, ...(ROOMS_ENABLED ? { rooms: true } : {}) };
+  return { environmentId: ENVIRONMENT_ID, home: HOME, manager: manager.snapshot(), threadStarts: threadStartProfiles(), speech: speech?.catalog() ?? null, ...(ROOMS_ENABLED ? { rooms: true } : {}) };
 }
 
 let stateEncoded = "";
@@ -1930,6 +1943,14 @@ const server = Bun.serve<SocketData>({
       const row = sessionRow.get(agentMeetingRequest.sessionId) as any;
       if (!row?.meeting_id) return error("This is not a Meet thread", 404);
       return meet.handleAgent(req, row.meeting_id);
+    }
+    if (API.manager.match(req.method, url.pathname)) return json(manager.snapshot());
+    if (API.updateManager.match(req.method, url.pathname)) {
+      if (!humanCaller()) return error("Only the person may change their conversation view", 403);
+      const patch = parseManagerPatch(await req.json());
+      if (!patch.ok) return threadError(patch.error);
+      const updated = await manager.update(patch.value);
+      return updated.ok ? json(updated.value) : threadError(updated.error);
     }
     const instructionsRequest = API.sessionInstructions.match(req.method, url.pathname);
     if (instructionsRequest) {

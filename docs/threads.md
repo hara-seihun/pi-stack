@@ -221,6 +221,10 @@ wakes, attention awaiting the person or unanswered questions. Foreground and
 unread human attention remain discoverable. Automatic retention preserves unfinished subscriptions; explicit Close overrides
 retention without losing durable terminal results.
 
+## The person's manager
+
+[Mono view and manager custody](../apps/remote/docs/mono.md) owns the optional forever conversation. The person's supervisor creates one full-context thread lazily on first use, marked `metadata.manager:true`, and preserves it from archival. It uses the ordinary tools and durable own-thread wake. Questions from other own-person threads pass through manager custody before becoming human-visible; unhandled holds expire after two hours. The watch-list scheduler remains independent.
+
 ## Questions and attention
 
 `request_user_input_async` stores independently answerable questions with stable

@@ -35,6 +35,7 @@ export const API = Object.freeze({
   network: route("GET", "/v1/network"),
   featureUsage: route("GET", "/v1/feature-usage"), recordFeatureUsage: route("POST", "/v1/feature-usage"),
   settings: route("GET", "/v1/settings"), updateSetting: route("PUT", "/v1/settings/:id"),
+  manager: route("GET", "/v1/manager"), updateManager: route("POST", "/v1/manager"),
   notifications: route("GET", "/v1/notifications"),
   needsYou: route("GET", "/v1/needs-you"),
   dismissNeed: route("POST", "/v1/needs-you/dismiss"),
