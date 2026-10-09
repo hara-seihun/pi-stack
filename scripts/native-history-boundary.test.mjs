@@ -6,11 +6,11 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { request } from 'node:http';
 import { once } from 'node:events';
 import { installFence, removeFence, serviceBusy, bridgeSocket, legacyFleetLedger, attachLegacyRuntime, reconcileLegacyRuntime, installLegacyMaintenance } from '../deploy/native-history-bridge.mjs';
-import { allOwnersReady, stageRemote, stageFleet, selectPointer, fleetInventory, fleetCompletionBarrier } from '../deploy/native-history-coordinator.mjs';
+import { allOwnersReady, stageRemote, stageFleet, selectPointer, fleetInventory, fleetCompletionBarrier, maintenanceStatus, restorationPort } from '../deploy/native-history-coordinator.mjs';
 const old = 'a'.repeat(40), candidate = 'b'.repeat(40);
 function directory(t) { const path = mkdtempSync(join(tmpdir(), 'history-boundary-')); t.after(() => rmSync(path, { recursive: true, force: true })); return path; }
 function database(path) {
@@ -64,6 +64,45 @@ test('transient wrappers pin old modules and source identity without rewriting t
   assert.equal(allOwnersReady([{ available: true, value: { phase: 'draining', ready: false } }]), false);
   assert.equal(allOwnersReady([{ available: true, value: { phase: 'draining', ready: true } }]), true);
   assert.equal(allOwnersReady([{ available: true, value: { phase: 'migrated' } }]), true);
+});
+test('asynchronous adoption waits only for a positively restored previous controller', () => {
+  const identity = { candidate, legacySource: old }, prior = { available: true, value: { candidate: 'c'.repeat(40), legacySource: old, phase: 'restored' } };
+  let proved;
+  assert.equal(maintenanceStatus(prior, identity, value => { proved = value; }).available, false);
+  assert.deepEqual(proved, { candidate: prior.value.candidate, legacySource: old, adoptingCandidate: candidate });
+  assert.throws(() => maintenanceStatus(prior, identity, () => { throw new Error('fence remains'); }), /fence remains/);
+  assert.throws(() => maintenanceStatus({ ...prior, value: { ...prior.value, phase: 'draining' } }, identity, () => assert.fail()), /different source/);
+  assert.throws(() => maintenanceStatus({ ...prior, value: { ...prior.value, legacySource: 'd'.repeat(40) } }, identity, () => assert.fail()), /different source/);
+  const current = { available: true, value: { ...identity, phase: 'draining' } };
+  assert.equal(maintenanceStatus(current, identity, () => assert.fail()), current);
+});
+test('live restoration uses one explicit loopback controller declaration', () => {
+  const controller = { unit: 'owner.service', healthUrl: 'http://127.0.0.1:2460/v1/health' };
+  assert.equal(restorationPort({ owners: [{ controllers: [controller] }] }, controller.unit), 2460);
+  assert.throws(() => restorationPort({ owners: [] }, controller.unit), /exactly one/);
+  assert.throws(() => restorationPort({ owners: [{ controllers: [controller, controller] }] }, controller.unit), /exactly one/);
+  assert.throws(() => restorationPort({ owners: [{ controllers: [{ ...controller, healthUrl: 'http://elsewhere:2460/v1/health' }] }] }, controller.unit), /Invalid/);
+});
+test('generated Remote and rooms wrappers actually pass their exact owner mode', t => {
+  const root = directory(t), remote = join(root, 'old'), stage = join(root, 'stage');
+  mkdirSync(join(remote, 'server'), { recursive: true });
+  writeFileSync(join(remote, '.pi-stack-commit'), old);
+  writeFileSync(join(remote, 'package.json'), '{}');
+  writeFileSync(join(remote, 'server/main.ts'), 'await import("./server");');
+  writeFileSync(join(remote, 'server/rooms-main.ts'), 'throw new Error("must not reopen");');
+  writeFileSync(join(remote, 'server/server.ts'), 'const PACKAGE_ROOT = realpathSync(join(import.meta.dir, ".."));\nif (configuredRoot !== PACKAGE_ROOT) {}');
+  writeFileSync(join(remote, 'server/context-mirror.ts'), 'old');
+  const bridge = join(root, 'bridge.mjs'), manifest = join(root, 'manifest.json'), config = join(root, 'config.json');
+  writeFileSync(bridge, 'export async function installLegacyMaintenance(input) { if(input.mode!==process.env.EXPECT_MODE)throw new Error("owner mode missing"); console.log(input.mode); return false; }');
+  writeFileSync(config, JSON.stringify({ environment: { PI_REMOTE_DATA: root } }));
+  writeFileSync(manifest, JSON.stringify({ bridgeModule: bridge, legacyRemote: remote }));
+  stageRemote(remote, stage, manifest);
+  for (const mode of ['remote', 'rooms']) {
+    const run = spawnSync(process.execPath, [join(stage, 'server', mode === 'remote' ? 'main.ts' : 'rooms-main.ts')], {
+      encoding: 'utf8', timeout: 3000, env: { ...process.env, PI_REMOTE_CONFIG: config, EXPECT_MODE: mode },
+    });
+    assert.equal(run.status, 0, run.stderr); assert.equal(run.stdout.trim(), mode);
+  }
 });
 test('every registered active fleet joins the owner inventory and a non-admin completion holds the whole boundary', async t => {
   const root = directory(t), adminLedger = join(root, 'admin.sqlite3'), ordinaryLedger = join(root, 'ordinary.sqlite3');
