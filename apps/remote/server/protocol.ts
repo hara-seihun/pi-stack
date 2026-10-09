@@ -221,7 +221,8 @@ export type ManagerView = { hintSeen: boolean } & (
 );
 
 export interface Bootstrap {
-  manager: ManagerView;
+  managerOwnerEnvironmentId: string;
+  manager: ManagerView | null;
   rooms?: true;
   environmentId: string;
   home: string;

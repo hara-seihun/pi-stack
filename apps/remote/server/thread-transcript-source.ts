@@ -54,7 +54,8 @@ export class ThreadTranscriptSource {
         const overlaid = withToolProgress([], [tool]);
         if (Buffer.byteLength(JSON.stringify(overlaid)) > 4 * 1024 * 1024)
           return { ok: false, error: { code: "oversized", message: "A live tool record exceeds the 4 MiB budget" } };
-        window.records.push({ seq, count: 1, entryId: `live:${tool.id}`, message: overlaid[0], results: overlaid.slice(1) });
+        window.records.push({ seq, count: 1, entryId: `live:${tool.id}`, message: overlaid[0], results: overlaid.slice(1),
+          ...(window.monoLiveVisibility !== undefined ? { monoVisibility: window.monoLiveVisibility } : {}) });
       }
     }
     return { ok: true, value: window };

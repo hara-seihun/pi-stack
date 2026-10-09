@@ -20,6 +20,7 @@ export interface SourceWindow {
   source: { revision: string; generation: string; context: string };
   total: number;
   records: SourceRecord[];
+  monoLiveVisibility?: "hidden" | "visible";
 }
 export type ReadSourceWindow = (sessionId: string, before: number | undefined, limit: number) => Promise<SourceResult<SourceWindow>>;
 export type ProjectSourceMessage = (sessionId: string, message: any, image: (image: ContextImage) => string) => any;

@@ -349,8 +349,11 @@ const watchList = new WatchList({
   onError: error => { observeError(db, "watch-list", error); if (error) console.error("Watch list check failed:", error); },
 });
 threads.setWatchList(watchList);
-const MANAGER_DESTINATION = unwrap(managerDestination([...THREAD_DESTINATIONS.values()], process.env.PI_REMOTE_MANAGER_DESTINATION));
-const manager = new Manager(db, threads, () => {
+const MANAGER_ENVIRONMENT_ID = process.env.PI_REMOTE_MANAGER_ENVIRONMENT ?? ENVIRONMENT_ID;
+if (!/^[a-z][a-z0-9-]{0,31}$/.test(MANAGER_ENVIRONMENT_ID)) throw new Error("PI_REMOTE_MANAGER_ENVIRONMENT must be an environment ID");
+const MANAGER_DESTINATION = MANAGER_ENVIRONMENT_ID === ENVIRONMENT_ID
+  ? unwrap(managerDestination([...THREAD_DESTINATIONS.values()], process.env.PI_REMOTE_MANAGER_DESTINATION)) : null;
+const manager = MANAGER_DESTINATION ? new Manager(db, threads, () => {
   const admitted = workspaceAdmission.resolve(MANAGER_DESTINATION.workspaceId);
   if (!admitted.ok) return { ok: false, error: { code: "unavailable", message: admitted.error.message } };
   const sources = destinationContextSources(MANAGER_DESTINATION);
@@ -358,7 +361,7 @@ const manager = new Manager(db, threads, () => {
   return selected.ok ? { ok: true, value: { cwd: admitted.value.cwd, metadata: {
     workspaceId: MANAGER_DESTINATION.workspaceId, profileId: MANAGER_DESTINATION.id, contextFiles: selected.value,
   } } } : { ok: false, error: { code: "invalid_request", message: selected.error } };
-}, unwrap(managerSettings(process.env.PI_REMOTE_MANAGER_MODEL)), () => signalSync());
+}, unwrap(managerSettings(process.env.PI_REMOTE_MANAGER_MODEL)), () => signalSync()) : null;
 const peerThreads = new Map<string, Thread>();
 let peerArchivedTotal = 0;
 const peerChildren = new Map<string, boolean>();
@@ -1009,7 +1012,7 @@ function publicSession(row: any,
 // hold, which it remembers on the ClientStream.
 
 function bootstrap(): Bootstrap {
-  return { environmentId: ENVIRONMENT_ID, home: HOME, manager: manager.snapshot(), threadStarts: threadStartProfiles(), speech: speech?.catalog() ?? null, ...(ROOMS_ENABLED ? { rooms: true } : {}) };
+  return { environmentId: ENVIRONMENT_ID, home: HOME, managerOwnerEnvironmentId: MANAGER_ENVIRONMENT_ID, manager: manager?.snapshot() ?? null, threadStarts: threadStartProfiles(), speech: speech?.catalog() ?? null, ...(ROOMS_ENABLED ? { rooms: true } : {}) };
 }
 
 let stateEncoded = "";
@@ -1944,8 +1947,9 @@ const server = Bun.serve<SocketData>({
       if (!row?.meeting_id) return error("This is not a Meet thread", 404);
       return meet.handleAgent(req, row.meeting_id);
     }
-    if (API.manager.match(req.method, url.pathname)) return json(manager.snapshot());
-    if (API.updateManager.match(req.method, url.pathname)) {
+    if (API.manager.match(req.method, url.pathname) || API.updateManager.match(req.method, url.pathname)) {
+      if (!manager) return json({ code: "manager_owner", error: "This person's manager belongs to another environment", environmentId: MANAGER_ENVIRONMENT_ID }, 409);
+      if (req.method === "GET") return json(manager.snapshot());
       if (!humanCaller()) return error("Only the person may change their conversation view", 403);
       const patch = parseManagerPatch(await req.json());
       if (!patch.ok) return threadError(patch.error);
