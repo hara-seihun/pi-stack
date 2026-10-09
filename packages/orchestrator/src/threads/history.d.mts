@@ -25,6 +25,8 @@ export type RecordDescriptor = Readonly<{
   length: number;
   line: number;
   digest: string;
+  /** Manager wake input stays hidden; the rest of its turn is visible only when it contains assistant text. */
+  monoVisibility?: "hidden" | "visible";
   timestamp?: number | null;
   /** Native custom-data entry discriminator; no custom data is retained. */
   customType?: string;
@@ -62,7 +64,11 @@ export type IndexedThreadHistory = Readonly<{
 export const MAX_HISTORY_RECORD_BYTES: number;
 export const MAX_HISTORY_INDEX_BYTES: number;
 export const MAX_HISTORY_INDEXES: number;
-export function indexedThreadHistory(path: string, leafId?: string): ThreadHistoryResult<IndexedThreadHistory>;
+export type IndexedThreadHistoryOptions = Readonly<{
+  /** Annotate manager wake turns without changing native records or standalone display counts. */
+  managerWakeVisibility?: boolean;
+}>;
+export function indexedThreadHistory(path: string, leafId?: string, options?: IndexedThreadHistoryOptions): ThreadHistoryResult<IndexedThreadHistory>;
 export function parseSession(text: string): SessionEntry[];
 export function activePath(entries: SessionEntry[], leafId?: string): SessionEntry[];
 export function timestampMs(value: unknown): number | undefined;

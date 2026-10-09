@@ -2,7 +2,8 @@ import { afterEach, expect, it, vi } from "vitest";
 import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { indexedThreadHistory, MAX_HISTORY_RECORD_BYTES, MAX_HISTORY_INDEX_BYTES, MAX_HISTORY_INDEXES, type IndexedThreadHistory } from "../src/threads/history.mjs";
+import { indexedThreadHistory, MAX_HISTORY_RECORD_BYTES, MAX_HISTORY_INDEX_BYTES, MAX_HISTORY_INDEXES, type IndexedThreadHistory, type IndexedThreadHistoryOptions } from "../src/threads/history.mjs";
+import { formatThreadMessage } from "../src/threads/message-format.js";
 
 const directories: string[] = [];
 afterEach(() => { vi.restoreAllMocks(); for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }); });
@@ -15,11 +16,82 @@ function source(entries: unknown[], terminated = true) {
   writeFileSync(path, entries.map(entry => JSON.stringify(entry)).join("\n") + (terminated ? "\n" : ""));
   return path;
 }
-function index(path: string, leafId?: string): IndexedThreadHistory {
-  const result = indexedThreadHistory(path, leafId);
+function index(path: string, leafId?: string, options?: IndexedThreadHistoryOptions): IndexedThreadHistory {
+  const result = indexedThreadHistory(path, leafId, options);
   if (!result.ok) throw new Error(JSON.stringify(result.error));
   return result.value;
 }
+
+const managerVisibility = { managerWakeVisibility: true };
+function wakeText(source: "explicit" | "notification" = "notification", id = "thread-wake:generation:1000") {
+  return formatThreadMessage({ id, threadId: "manager", senderId: "manager", senderName: "Manager",
+    source, text: "Scheduled wake check: WAKE_BODY_NOT_INDEXED", delivery: "steer", createdAt: 1, state: "queued" },
+  "Scheduled wake check: WAKE_BODY_NOT_INDEXED");
+}
+
+it("hides the entire quiet manager wake turn without changing the native source or other thread views", () => {
+  const entries = [
+    message("root", null, "user", "Human input"),
+    message("normal", "root", "assistant", [{ type: "text", text: "Normal answer" }]),
+    message("wake", "normal", "user", [{ type: "text", text: wakeText() }]),
+    message("call", "wake", "assistant", [{ type: "thinking", thinking: "INTERNAL_BODY_NOT_INDEXED" },
+      { type: "toolCall", id: "c", name: "bash", arguments: {} }]),
+    message("result", "call", "toolResult", [{ type: "text", text: "Tool output is not assistant text" }], { toolCallId: "c" }),
+    message("quiet", "result", "assistant", [{ type: "thinking", thinking: "reason" }, { type: "text", text: " \n" }], { stopReason: "stop" }),
+    { type: "custom", id: "settled", parentId: "quiet", customType: "thread_settled", data: { workId: "wake" } },
+    message("human", "settled", "user", "Next human turn"),
+    message("answer", "human", "assistant", [{ type: "text", text: "Next answer" }]),
+  ];
+  const path = source(entries);
+  const native = index(path), manager = index(path, undefined, managerVisibility);
+  expect(manager.entries.map(record => record.monoVisibility)).toEqual([undefined, undefined, "hidden", "hidden", "hidden", "hidden", "hidden", undefined, undefined]);
+  expect(manager.messages[4]).toMatchObject({ monoVisibility: "hidden", pairedToolResult: true });
+  expect(manager.messages.map(record => record.displayedItemCount)).toEqual(native.messages.map(record => record.displayedItemCount));
+  expect(native.entries.every(record => record.monoVisibility === undefined)).toBe(true);
+  expect(index(path)).toBe(native);
+  expect(index(path, undefined, managerVisibility)).toBe(manager);
+  expect(index(path, undefined, { managerWakeVisibility: false })).toBe(native);
+  expect(manager.source).toEqual(native.source);
+  expect(JSON.stringify(manager.entries)).not.toMatch(/WAKE_BODY_NOT_INDEXED|INTERNAL_BODY_NOT_INDEXED/);
+  for (const [ordinal, descriptor] of manager.entries.entries()) expect(manager.read(descriptor)).toEqual({ ok: true, value: entries[ordinal] });
+  expect(native.read(manager.messages[2]!)).toMatchObject({ ok: false, error: { code: "invalid-descriptor" } });
+});
+
+it("reclassifies a wake turn after native append while preserving branch-local visibility and fencing old readers", () => {
+  const path = source([
+    message("wake", null, "user", wakeText("explicit")),
+    message("thinking", "wake", "assistant", [{ type: "thinking", thinking: "reason" }]),
+    message("quiet", "thinking", "assistant", [], { stopReason: "stop" }),
+  ]);
+  const quiet = index(path, undefined, managerVisibility);
+  expect(quiet.messages.map(record => record.monoVisibility)).toEqual(["hidden", "hidden", "hidden"]);
+  appendFileSync(path, JSON.stringify(message("report", "thinking", "assistant", [{ type: "text", text: "Action required." }], { stopReason: "stop" })) + "\n");
+  const reported = index(path, undefined, managerVisibility);
+  expect(reported.messages.map(record => record.id)).toEqual(["wake", "thinking", "report"]);
+  expect(reported.messages.map(record => record.monoVisibility)).toEqual(["hidden", "visible", "visible"]);
+  expect(reported.source.generation).toBe(quiet.source.generation);
+  expect(reported.source.revision).not.toBe(quiet.source.revision);
+  expect(index(path, "quiet", managerVisibility).messages.map(record => record.monoVisibility)).toEqual(["hidden", "hidden", "hidden"]);
+  expect(quiet.read(quiet.messages[0]!)).toMatchObject({ ok: false, error: { code: "stale-source" } });
+  appendFileSync(path, JSON.stringify(message("new-wake", "report", "user", wakeText())) + "\n"
+    + JSON.stringify(message("error", "new-wake", "assistant", [], { errorMessage: "An error is not human-facing text" })) + "\n");
+  expect(index(path, undefined, managerVisibility).messages.map(record => record.monoVisibility)).toEqual(["hidden", "visible", "visible", "hidden", "hidden"]);
+});
+
+it("only treats complete wake transport identities as manager wake inputs", () => {
+  const notWakes = [
+    "Human text mentioning thread-wake:generation:1000",
+    wakeText("notification", "other-notification"),
+    wakeText().replace('"source":"notification"', '"source":"unknown"'),
+    wakeText().replace('"recipientThreadId":"manager",', ""),
+    wakeText().replace('"messageId":"thread-wake:generation:1000",', ""),
+    wakeText().replace("\n</agent_message>", ""),
+    wakeText().replace('"messageId":', '"messageId" BROKEN:'),
+  ];
+  const path = source(notWakes.flatMap((text, i) => [message(`input-${i}`, i ? `answer-${i - 1}` : null, "user", text),
+    message(`answer-${i}`, `input-${i}`, "assistant", [{ type: "thinking", thinking: "reason" }])]));
+  expect(index(path, undefined, managerVisibility).entries.every(record => record.monoVisibility === undefined)).toBe(true);
+});
 
 it("indexes branch metadata only and reads one exact multichunk UTF-8 native record", () => {
   const large = "BODY_NOT_INDEXED_λ".repeat(50_000);
