@@ -10,7 +10,7 @@ function service(state) {
   const calls = [];
   return {
     runtime, calls, runtimes: new Map([['thread', runtime]]), opening: new Map(), operations: new Map(), halts: new Map(),
-    attach: async () => runtime, rpc: async () => state,
+    attach: async () => runtime, rpc: async () => state, execution: () => undefined,
     adoptReference: (...args) => calls.push(['adopt', ...args]),
     busy: value => value.isStreaming || value.isCompacting || value.localTools > 0 || value.pendingCommandCount > 0,
     wake: id => calls.push(['wake', id]),
@@ -43,6 +43,33 @@ test('positive native state repairs false busy without clearing actual native wo
   await reconcileLegacyRuntime(running, 'thread');
   assert.equal(running.runtime.busy, true);
   assert.deepEqual(running.calls.map(call => call[0]), ['adopt']);
+});
+
+test('accepted execution stays with its controller without maintenance attachment or state RPC', async () => {
+  const owner = service(idle);
+  owner.execution = () => ({ id: 'accepted-execution' });
+  owner.attach = async () => { throw new Error('Maintenance must not attach accepted execution'); };
+  owner.rpc = async () => { throw new Error('Maintenance must not query accepted execution'); };
+  await reconcileLegacyRuntime(owner, 'thread');
+  assert.equal(owner.runtime.busy, true);
+  assert.deepEqual(owner.calls, []);
+});
+
+test('execution or dispatch beginning during attachment defers idle reconciliation', async () => {
+  for (const race of ['execution', 'dispatch', 'opening', 'halt']) {
+    const owner = service(idle);
+    owner.attach = async () => {
+      if (race === 'execution') owner.execution = () => ({ id: 'raced-execution' });
+      if (race === 'dispatch') owner.operations.set('thread', Promise.resolve());
+      if (race === 'opening') owner.opening.set('thread', Promise.resolve());
+      if (race === 'halt') owner.halts.set('thread', Promise.resolve());
+      return owner.runtime;
+    };
+    owner.rpc = async () => { throw new Error('Maintenance must not overlap raced ownership'); };
+    await reconcileLegacyRuntime(owner, 'thread');
+    assert.equal(owner.runtime.busy, true);
+    assert.deepEqual(owner.calls, []);
+  }
 });
 
 test('incomplete state, replacement race and pending commands never fabricate idle', async () => {
