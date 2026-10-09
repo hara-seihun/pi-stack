@@ -362,7 +362,12 @@ Native message/entry timestamps keep their original provenance. The non-context
 delivery instant and timezone provenance, never message content or a transformed
 context snapshot. Subsequent requests, resume and retained compaction history
 reuse that delivery record, without another prefix or receipt. Newly generated
-compaction/branch messages receive their own delivery records.
+compaction/branch messages receive their own delivery records. The native Codex
+checkpoint's user-shaped substitution marker is provider control data, not prose:
+its exact active-compaction identity and timestamp leave it untouched, without a
+delivery receipt. Ordinary user text resembling a marker is still timestamped.
+The provider's exact-marker validation continues to reject lost or duplicated
+checkpoint substitutions.
 
 The trusted owner launcher declares `PI_PERSON_TIMEZONE_FILE` as
 `/var/lib/pi-timezones/USER/timezone.json`. The owning Remote publishes this

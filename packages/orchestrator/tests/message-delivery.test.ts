@@ -120,6 +120,39 @@ it("common final adapter prefixes converted compaction/custom/bash before native
   expect(text(result[2])).toContain("EXTERNAL callee");
   expect(messages[1]).toMatchObject({ summary: "retained raw summary" });
 });
+it("native checkpoint substitution survives final delivery projection across resume and converted content", async () => {
+  const runtimeDirectory = "../../runtime/extensions/codex-compaction/";
+  const { checkpointContext } = await import(runtimeDirectory + "index.mjs");
+  const { replaceMarker } = await import(runtimeDirectory + "native.mjs");
+  const { buildSessionContext } = await import("@earendil-works/pi-coding-agent");
+  const manager = SessionManager.inMemory();
+  const first = manager.appendMessage({ role: "user", content: "retained input", timestamp: 1 });
+  const encrypted = { type: "compaction", encrypted_content: "fixture-checkpoint" };
+  const id = manager.appendCompaction("native summary", first, 100, {
+    kind: "openai-codex-native-compaction", version: 2,
+    modelKey: "openai-codex-responses:gpt-6.1-sol", replacementHistory: [encrypted],
+  });
+  manager.appendMessage({ role: "user", content: "new queued input", timestamp: 2 });
+  const context = value<{ messages: AgentMessage[] }>(checkpointContext(buildSessionContext(manager.getBranch()).messages,
+    manager.getBranch(), { api: "openai-codex-responses", id: "gpt-6.1-sol" }));
+  const marker = `Pi Codex checkpoint ${id}`;
+  for (const arrayContent of [false, true]) {
+    const messages = convertToLlm(context.messages).map(message => message.role === "user" && message.content === marker && arrayContent
+      ? { ...message, content: [{ type: "text" as const, text: marker }] } : message);
+    const projected = value(createMessageDeliveryProjection(manager, { PI_MODEL_DELIVERY_TIMEZONE: "null" }, () => 1000)(messages));
+    expect(text(projected[0])).toBe(marker);
+    expect(text(projected.at(-1)!)).toMatch(/^\[Model delivery:/);
+    const payload = { input: projected.map(message => ({ role: message.role,
+      content: [{ type: "input_text", text: text(message) }] })) };
+    const rewritten = value<{ input: unknown[] }>(replaceMarker(payload, marker, [encrypted]));
+    expect(rewritten.input[0]).toEqual(encrypted);
+    expect(rewritten.input.at(-1)).toMatchObject({ content: [{ text: expect.stringContaining("new queued input") }] });
+  }
+  const receipts = manager.getBranch().filter(entry => entry.type === "custom" && entry.customType === MESSAGE_DELIVERY_RECEIPT);
+  expect(JSON.stringify(receipts)).not.toContain(`entry:${id}:user`);
+  const lookalike: AgentMessage = { role: "user", content: marker, timestamp: 123 };
+  expect(text(value(createMessageDeliveryProjection(manager, { PI_MODEL_DELIVERY_TIMEZONE: "null" })([lookalike]))[0])).toMatch(/^\[Model delivery:/);
+});
 it("actual SDK sends current live/queued prefixes but never persists transformed history or changes receipts", async () => {
   const root = data("Europe/London");
   writeFileSync(join(root, "auth.json"), JSON.stringify({ anthropic: { type: "api_key", key: "fixture-only" } }));

@@ -99,9 +99,18 @@ export function createMessageDeliveryProjection(manager: DeliveryManager, env: N
       delivery = { at, timezone: timezone.value, prefix: prefix.value };
     }
     const sources = sourceKeys(branch), occurrences = new Map<string, number>();
+    const checkpoint = [...branch].reverse().find(entry => entry.type === "compaction");
+    const nativeCheckpoint = checkpoint?.type === "compaction"
+      && (checkpoint.details as { kind?: unknown } | undefined)?.kind === "openai-codex-native-compaction" ? checkpoint : undefined;
     const pending: MessageDeliveryReceipt[] = [], projected: AgentMessage[] = [];
     for (const message of messages) {
-      if (message.role === "assistant" || (message as StampedMessage)[stamped]) { projected.push(message); continue; }
+      // This user-shaped item is a provider substitution token, not delivered prose.
+      const checkpointMarker = nativeCheckpoint && message.role === "user"
+        && message.timestamp === Date.parse(nativeCheckpoint.timestamp)
+        && (typeof message.content === "string" ? message.content
+          : message.content.length === 1 && message.content[0].type === "text" ? message.content[0].text : undefined)
+          === `Pi Codex checkpoint ${nativeCheckpoint.id}`;
+      if (checkpointMarker || message.role === "assistant" || (message as StampedMessage)[stamped]) { projected.push(message); continue; }
       const provenance = `${message.role}:${message.timestamp}`;
       const occurrence = occurrences.get(provenance) ?? 0;
       occurrences.set(provenance, occurrence + 1);
