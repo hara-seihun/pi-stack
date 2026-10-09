@@ -73,6 +73,35 @@ test('restored claim with retained thread fences, migration or foreign fleet ide
   assert.equal(prepareMaintenanceReceipt(successor).ok, true, 'Exact new coordinator barrier is permitted without removing it');
   const after = new DatabaseSync(input.ledgerPath); assert.equal(JSON.parse(after.prepare('SELECT value FROM control').get().value).candidate, successor.candidate); after.close();
 });
+test('an unacquired successor proves prior restoration without rewriting its receipt or releasing foreign custody', t => {
+  const input = fixture(t, 'fleet');
+  assert.equal(restoreClosedOwner(input, closed).ok, true);
+  const successor = { ...input, candidate: 'd'.repeat(40), allowUnacquired: true };
+  const path = join(input.dataDir, 'native-history-maintenance.json'), before = readFileSync(path, 'utf8');
+  assert.equal(readRestoredOwner({ ...successor, allowUnacquired: false }).ok, false);
+  const observed = readRestoredOwner(successor);
+  assert.equal(observed.ok, true, JSON.stringify(observed));
+  assert.equal(observed.value.candidate, successor.candidate);
+  assert.equal(observed.value.restorationProof.priorCandidate, candidate);
+  const ledger = new DatabaseSync(input.ledgerPath);
+  ledger.prepare('INSERT INTO control VALUES(?,?)').run('native-history-maintenance', JSON.stringify(successor)); ledger.close();
+  assert.equal(readRestoredOwner(successor).ok, false, 'own fleet barrier still needs release');
+  const adoption = readRestoredOwner({ ...input, adoptingCandidate: successor.candidate });
+  assert.equal(adoption.ok, true, JSON.stringify(adoption));
+  assert.equal(adoption.value.restorationProof.fleetFence, 'identity-bound');
+  assert.equal(readRestoredOwner({ ...input, adoptingCandidate: 'f'.repeat(40) }).ok, false, 'foreign fence is not adoption');
+  const retained = new DatabaseSync(input.ledgerPath, { readOnly: true });
+  assert.equal(JSON.parse(retained.prepare('SELECT value FROM control').get().value).candidate, successor.candidate); retained.close();
+  const restored = restoreClosedOwner(successor, closed);
+  assert.equal(restored.ok, true, JSON.stringify(restored));
+  assert.equal(restored.value.restorationProof.acquisition, 'not-acquired');
+  assert.equal(readFileSync(path, 'utf8'), before);
+  assert.equal(readRestoredOwner(successor).ok, true);
+  const foreign = new DatabaseSync(input.ledgerPath);
+  foreign.prepare('INSERT INTO control VALUES(?,?)').run('native-history-maintenance', JSON.stringify({ ...successor, candidate: 'e'.repeat(40) })); foreign.close();
+  assert.equal(restoreClosedOwner(successor, closed).ok, false);
+  assert.equal(readFileSync(path, 'utf8'), before);
+});
 test('absent receipt yields positive absent-fence proof without fabricating a private receipt', t => {
   const input = fixture(t, 'remote', false); const result = restoreClosedOwner(input, closed);
   assert.equal(result.ok, true); assert.equal(result.value.restorationProof.receipt, 'absent');

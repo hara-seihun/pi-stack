@@ -14,7 +14,7 @@ function fixture(t) {
     mkdirSync(dirname(join(repo, path)), { recursive: true });
     writeFileSync(join(repo, path), text);
   };
-  for (const file of ["scripts/build-workspace.mjs", "deploy/lib", "deploy/release-checkout"]) {
+  for (const file of ["scripts/build-workspace.mjs", "apps/kenan/build.mjs", "deploy/lib", "deploy/release-checkout"]) {
     put(file, "");
     copyFileSync(join(root, file), join(repo, file));
   }
@@ -52,6 +52,8 @@ run();
 `);
   spawnSync("chmod", ["+x", join(repo, "bin/npm")]);
   assert.equal(spawnSync("git", ["init", "-q", repo]).status, 0);
+  assert.equal(spawnSync('git', ['-C', repo, 'add', '.']).status, 0);
+  assert.equal(spawnSync('git', ['-C', repo, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'source']).status, 0);
   const env = { ...process.env, PATH: `${repo}/bin:${process.env.PATH}` };
   const run = (name, extra = {}) => spawnSync(process.execPath, [join(repo, "scripts/build-workspace.mjs"), name], { cwd: repo, env: { ...env, ...extra }, encoding: "utf8", timeout: 3000 });
   return { repo, put, env, run, calls: () => readFileSync(join(repo, "calls"), "utf8").trim().split("\n") };
@@ -105,6 +107,22 @@ test("Root publication reuses prepared compilation but rejects changed inputs or
   assert.equal(existsSync(join(f.repo, "node_modules/.pi-stack-build-kenan-root.json")), false);
   build();
   assert.equal(f.calls().length, 8);
+});
+
+test('Kenan copies the checked shared build, while a new revision refreshes its embedded identity', t => {
+  const f = fixture(t);
+  const build = () => {
+    const result = spawnSync(process.execPath, [join(f.repo, 'apps/kenan/build.mjs')], { cwd: f.repo, env: f.env, encoding: 'utf8', timeout: 3000 });
+    assert.equal(result.status, 0, result.stderr);
+  };
+  build(); build();
+  assert.deepEqual(f.calls(), ['remote']);
+  assert.equal(readFileSync(join(f.repo, 'apps/kenan/dist/main.js'), 'utf8'), 'built');
+  f.put('revision-marker', 'new source identity');
+  assert.equal(spawnSync('git', ['-C', f.repo, 'add', 'revision-marker']).status, 0);
+  assert.equal(spawnSync('git', ['-C', f.repo, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'next revision']).status, 0);
+  build();
+  assert.deepEqual(f.calls(), ['remote', 'remote']);
 });
 
 test("build reuse requires unchanged source, dependencies and complete output", t => {

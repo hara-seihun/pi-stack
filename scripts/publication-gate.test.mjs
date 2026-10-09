@@ -42,7 +42,7 @@ test("main movement returns before deployment and the next worker pass reruns ch
   const source = "a".repeat(40), base = "b".repeat(40), integration = "c".repeat(40), moved = "d".repeat(40);
   const requestId = "PUB-0123456789abcdef01234567";
   const receipt = join(root, "requests", `${requestId}.json`);
-  const request = { requestId, sourceSha: source, sourceRef: "refs/heads/submission", baseSha: base,
+  const request = { requestId, sourceSha: source, sourceRef: `refs/heads/pi-stack-publications/${requestId}`, baseSha: base,
     integrationSha: integration, checks: { status: "passed" }, status: "queued", attempt: 0, failures: [] };
   writeFileSync(join(root, "main"), base);
   writeFileSync(join(root, "repository/deploy/lib"), 'pi_stack_prepare_dependencies() { :; }\n');
@@ -91,7 +91,7 @@ exit 99
   writeFileSync(join(root, "bin/npm"), '#!/bin/sh\necho "fresh integration checks reached" >&2\nexit 1\n', { mode: 0o700 });
   const checked = processOne(queued);
   assert.equal(checked.attempt, 2);
-  assert.equal(checked.baseSha, moved);
+  assert.equal(checked.baseSha, moved, JSON.stringify(checked.failure));
   assert.equal(checked.failure.step, "checks");
   assert.match(checked.failure.excerpt, /fresh integration checks reached/);
   assert.equal(checked.mainMovements.length, 1);
@@ -103,7 +103,7 @@ for (const mainState of ["base", "pushed", "moved", "same-boot", "unrecorded-boo
   for (const path of ["requests", "bin", "repository/.git"]) mkdirSync(join(root, path), { recursive: true });
   const requestId = "PUB-0123456789abcdef01234567";
   const receipt = join(root, "requests", `${requestId}.json`);
-  const request = { ...interruptedIntegration(), requestId, sourceSha: "a".repeat(40), sourceRef: "refs/heads/submitted",
+  const request = { ...interruptedIntegration(), requestId, sourceSha: "a".repeat(40), sourceRef: `refs/heads/pi-stack-publications/${requestId}`,
     failures: [], updatedAt: "2026-01-01T00:00:00.000Z", queuedAt: "2026-01-01T00:00:00.000Z",
     progress: { command: "git", args: ["push"], deadlineAt: "2026-01-01T00:00:00.000Z" } };
   if (mainState === "same-boot") request.workerBootId = currentBootId;
@@ -194,8 +194,8 @@ case "$*" in
   *'rev-parse refs/pi-stack-publication/'*) echo ${source};;
   *'rev-parse refs/remotes/origin/main'*) echo ${base};;
   *'rev-parse HEAD'*) echo ${integration};;
-  *'merge-base --is-ancestor'*) exit 1;;
-  *'merge --no-ff'*) ${failedStep === "merge-source" ? "echo 'CONFLICT (content): Merge conflict in README.md'; exit 1" : ":"};;
+  *'merge-base --is-ancestor'*) test -f '${join(root, 'merged')}' && exit 0; exit 1;;
+  *'merge --no-ff'*) ${failedStep === "merge-source" ? "echo 'CONFLICT (content): Merge conflict in README.md'; exit 1" : `touch '${join(root, 'merged')}'`};;
 esac
 `, { mode: 0o700 });
   writeFileSync(join(root, "bin/npm"), '#!/bin/sh\necho "(fail) integration fixture rejects wrong core" >&2\necho "Expected: 201" >&2\necho "Received: 409" >&2\nexit 1\n', { mode: 0o700 });
@@ -224,7 +224,7 @@ esac
   assert.equal(failed.checks.status, "failed");
   assert.equal(failed.failure.step, "checks");
   assert.equal(failed.failure.progress.command, "bash");
-  assert.deepEqual(failed.failure.progress.args, ["-c", 'set -euo pipefail\nsource deploy/lib\npi_stack_prepare_dependencies "$PWD"\nnpm run check\nnpm run android:test --workspace=kenan']);
+  assert.deepEqual(failed.failure.progress.args, ["-c", 'set -euo pipefail\nsource deploy/lib\npi_stack_prepare_dependencies "$PWD"\nnpm run check']);
   assert.equal(failed.failure.progress.cwd, join(root, "repository"));
   assert.match(failed.failure.excerpt, /integration fixture rejects wrong core/);
   assert.match(failed.failure.excerpt, /Received: 409/);

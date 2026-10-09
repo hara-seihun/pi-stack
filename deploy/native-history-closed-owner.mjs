@@ -149,7 +149,8 @@ export function readRestoredOwner(input) {
     ownedFile(receiptPath, uid);
     const receipt = JSON.parse(readFileSync(receiptPath, 'utf8'));
     if (receipt.version !== 1 || receipt.protocol !== BRIDGE_PROTOCOL || receipt.uid !== uid || receipt.dataDir !== input.dataDir
-      || !sameIdentity(receipt, identity) || receipt.phase !== 'restored') return failure('receipt-not-restored', 'Maintenance receipt is not this owner/source restored acknowledgement');
+      || receipt.phase !== 'restored' || (!sameIdentity(receipt, identity) && !(input.allowUnacquired === true
+        && /^[0-9a-f]{40}$/.test(receipt.candidate) && receipt.legacySource === input.legacySource))) return failure('receipt-not-restored', 'Maintenance receipt is not this owner/source restored acknowledgement');
     if (existsSync(join(input.dataDir, 'native-history-readiness.json'))) return failure('migration-started', 'Native readiness exists');
     const path = join(input.dataDir, 'threads.sqlite3'); ownedFile(path, uid);
     const threads = new DatabaseSync(path, { readOnly: true }); databases.push(threads);
@@ -161,12 +162,16 @@ export function readRestoredOwner(input) {
         || dirname(input.ledgerPath) !== input.dataDir || (receipt.ledgerPath !== undefined && receipt.ledgerPath !== input.ledgerPath)) return failure('identity', 'Exact fleet ledger is required');
       ownedFile(input.ledgerPath, uid);
       const ledger = new DatabaseSync(input.ledgerPath, { readOnly: true }); databases.push(ledger);
-      ledger.exec('PRAGMA busy_timeout=2000'); fleet = fleetFence(ledger, identity);
-      if (fleet.fence !== 'absent') return failure('fence-present', 'Restored owner still has a fleet fence');
+      ledger.exec('PRAGMA busy_timeout=2000');
+      if (input.adoptingCandidate !== undefined && !/^[0-9a-f]{40}$/.test(input.adoptingCandidate)) return failure('identity', 'Adoption requires an exact candidate identity');
+      fleet = fleetFence(ledger, input.adoptingCandidate === undefined ? identity : { candidate: input.adoptingCandidate, legacySource: input.legacySource });
+      if (fleet.fence !== 'absent' && input.adoptingCandidate === undefined) return failure('fence-present', 'Restored owner still has a fleet fence');
     }
     return { ok: true, value: { protocol: BRIDGE_PROTOCOL, uid, dataDir: input.dataDir, ...identity, phase: 'restored', ready: true,
-      restorationProof: { owner: 'acknowledged-receipt', receipt: 'identity-bound', threadFence: 'absent',
-        ...(fleet ? { fleetFence: 'absent', pendingCompletions: fleet.pendingCompletions } : {}) } } };
+      restorationProof: { owner: 'acknowledged-receipt', receipt: sameIdentity(receipt, identity) ? 'identity-bound' : 'prior-restored',
+        ...(sameIdentity(receipt, identity) ? {} : { priorCandidate: receipt.candidate, acquisition: 'not-acquired' }), threadFence: 'absent',
+        ...(fleet ? { fleetFence: fleet.fence, pendingCompletions: fleet.pendingCompletions,
+          ...(input.adoptingCandidate === undefined ? {} : { adoptingCandidate: input.adoptingCandidate }) } : {}) } } };
   } catch (error) { return failure('restoration-proof-failed', error instanceof Error ? error.message : String(error)); }
   finally { for (const db of databases) db.close(); }
 }
@@ -232,11 +237,16 @@ function restoreOwner(input, route) {
     const identity = { candidate: input.candidate, legacySource: input.legacySource };
     const receiptPath = join(input.dataDir, 'native-history-maintenance.json');
     if (existsSync(join(input.dataDir, 'native-history-readiness.json'))) return failure('migration-started', 'Native readiness exists; resume the candidate instead of the old decoder');
-    let receipt = null;
+    let receipt = null, priorRestored = false;
     if (existsSync(receiptPath)) {
       ownedFile(receiptPath, uid); receipt = JSON.parse(readFileSync(receiptPath, 'utf8'));
       if (receipt.version !== 1 || receipt.protocol !== BRIDGE_PROTOCOL || receipt.uid !== uid
-        || receipt.dataDir !== input.dataDir || !sameIdentity(receipt, identity)) return failure('identity', 'Maintenance receipt custody mismatch');
+        || receipt.dataDir !== input.dataDir) return failure('identity', 'Maintenance receipt custody mismatch');
+      if (!sameIdentity(receipt, identity)) {
+        if (input.allowUnacquired !== true || receipt.phase !== 'restored' || !/^[0-9a-f]{40}$/.test(receipt.candidate)
+          || receipt.legacySource !== input.legacySource) return failure('identity', 'Maintenance receipt custody mismatch');
+        priorRestored = true;
+      }
       if (!['draining', 'restored'].includes(receipt.phase)) return failure('migration-started', 'Owner closure or migration has started');
       if (receipt.databases !== undefined && (!Array.isArray(receipt.databases)
         || receipt.databases.some(path => path !== join(input.dataDir, 'threads.sqlite3')))) return failure('identity', 'Maintenance receipt names another thread database');
@@ -246,6 +256,7 @@ function restoreOwner(input, route) {
     ownedFile(threadPath, uid);
     const threads = new DatabaseSync(threadPath); databases.push(threads); threads.exec('PRAGMA busy_timeout=2000; BEGIN IMMEDIATE');
     const thread = threadFence(threads, identity);
+    if (priorRestored && thread !== 'absent') return failure('prior-fence', 'Unacquired owner cannot retain a current thread fence');
     let ledger = null, fleet = null;
     if (input.mode === 'fleet') {
       if (typeof input.ledgerPath !== 'string' || !input.ledgerPath.startsWith('/') || resolve(input.ledgerPath) !== input.ledgerPath
@@ -273,9 +284,10 @@ function restoreOwner(input, route) {
       if (!after.ok || JSON.stringify(after.value) !== JSON.stringify(initial.value)) return {
         ok: false, error: { code: 'owner-generation-changed', message: 'Fences were released but live source/PID proof changed; receipt remains untouched', fenceReleaseCommitted: true } };
     }
-    const proof = { owner: route.kind, unit: input.unit, ...(route.kind === 'live-old-unit' ? { live: initial.value } : {}), threadFence: thread, receipt: receipt ? 'identity-bound' : 'absent',
+    const proof = { owner: route.kind, unit: input.unit, ...(route.kind === 'live-old-unit' ? { live: initial.value } : {}), threadFence: thread, receipt: priorRestored ? 'prior-restored' : receipt ? 'identity-bound' : 'absent',
+      ...(priorRestored ? { priorCandidate: receipt.candidate, acquisition: 'not-acquired' } : {}),
       ...(fleet ? { fleetFence: fleet.fence, pendingCompletions: fleet.pendingCompletions } : {}) };
-    if (receipt) atomicJson(receiptPath, { ...receipt, phase: 'restored', updatedAt: new Date().toISOString(), restorationProof: proof });
+    if (receipt && !priorRestored) atomicJson(receiptPath, { ...receipt, phase: 'restored', updatedAt: new Date().toISOString(), restorationProof: proof });
     return { ok: true, value: { protocol: BRIDGE_PROTOCOL, uid, dataDir: input.dataDir, ...identity, phase: 'restored', ready: true, restorationProof: proof } };
   } catch (error) {
     return failure(error.errcode === 5 || error.errcode === 6 ? 'database-busy' : 'restoration-failed', error instanceof Error ? error.message : String(error));

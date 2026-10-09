@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { atomicJson, bridgeSocket, BRIDGE_PROTOCOL } from './native-history-bridge.mjs';
 import { stageLegacyRemoteIdentity } from './native-history-package-identity.mjs';
+import { recoverClosedOwner } from './native-history-owner-recovery.mjs';
 
 export function command(binary, args, options = {}) {
   const result = spawnSync(binary, args, { encoding: 'utf8', timeout: 15000, ...options });
@@ -35,14 +36,14 @@ const m=JSON.parse(readFileSync(${JSON.stringify(manifest)},'utf8'));
 const c=JSON.parse(readFileSync(process.env.PI_REMOTE_CONFIG,'utf8'));
 const dataDir=process.env.PI_REMOTE_DATA??c.environment.PI_REMOTE_DATA;
 const {installLegacyMaintenance}=await import(pathToFileURL(m.bridgeModule).href);
-if(await installLegacyMaintenance({...m,dataDir,oldApi:m.legacyRemote+'/node_modules/pi-orchestrator/src/api.ts'})) await import(pathToFileURL(${JSON.stringify(stagedIdentity.mainPath)}).href);
+if(await installLegacyMaintenance({...m,dataDir,mode:'remote',oldApi:m.legacyRemote+'/node_modules/pi-orchestrator/src/api.ts'})) await import(pathToFileURL(${JSON.stringify(stagedIdentity.mainPath)}).href);
 `, { mode: 0o644 });
   if (existsSync(join(legacy, 'server/rooms-main.ts'))) writeFileSync(join(target, 'server/rooms-main.ts'), `import {readFileSync} from 'node:fs'; import {pathToFileURL} from 'node:url';
 const m=JSON.parse(readFileSync(${JSON.stringify(manifest)},'utf8'));
 const c=JSON.parse(readFileSync(process.env.PI_REMOTE_CONFIG??'/etc/pi-stack/rooms.json','utf8'));
 const dataDir=process.env.PI_REMOTE_DATA??c.environment.PI_REMOTE_DATA;
 const {installLegacyMaintenance}=await import(pathToFileURL(m.bridgeModule).href);
-if(await installLegacyMaintenance({...m,dataDir,oldApi:m.legacyRemote+'/node_modules/pi-orchestrator/src/api.ts'})) await import(pathToFileURL(m.legacyRemote+'/server/rooms-main.ts').href);
+if(await installLegacyMaintenance({...m,dataDir,mode:'rooms',oldApi:m.legacyRemote+'/node_modules/pi-orchestrator/src/api.ts'})) await import(pathToFileURL(m.legacyRemote+'/server/rooms-main.ts').href);
 `, { mode: 0o644 });
 }
 export function stageFleet(legacy, target, manifest) {
@@ -71,26 +72,38 @@ function ownerStatus(item, method = 'GET', path = '/status') {
   if (result.status !== 0) return { available: false, error: result.stderr?.trim() ?? result.error?.message ?? 'Maintenance controller not yet available' };
   const value = JSON.parse(result.stdout);
   if (value.protocol !== BRIDGE_PROTOCOL || value.uid !== item.uid || value.dataDir !== resolve(item.dataDir)) throw new Error(`Maintenance owner identity mismatch: ${item.user}`);
-  return { available: true, value };
+  return { available: true, pid, value };
 }
-function ownerRestorationProof(item, root, hostFile, identity) {
+function ownerRestorationProof(item, root, hostFile, identity, allowMutation = true) {
   const pid = command('systemctl', ['show', item.unit, '-p', 'MainPID', '--value']);
   const alive = /^[1-9][0-9]*$/.test(pid);
   let namespacePid = pid;
   if (!alive) {
+    if (!allowMutation) throw new Error('Restored controller generation changed during readonly adoption proof');
     if (pid !== '0') throw new Error('Owner returned an invalid namespace PID');
     const custody = JSON.parse(readFileSync(hostFile, 'utf8')).nativeHistoryCustodyUnit;
-    if (typeof custody !== 'string' || !/^[a-zA-Z0-9_.@-]+\.service$/.test(custody)) throw new Error('Closed owner requires its declared retained custody namespace');
+    if (custody === undefined) return recoverClosedOwner({ item, root, legacyRemote: realpathSync('/srv/pi/pi-remote'), identity });
+    if (typeof custody !== 'string' || !/^[a-zA-Z0-9_.@-]+\.service$/.test(custody)) throw new Error('Invalid retained custody namespace declaration');
     if (command('systemctl', ['show', custody, '-p', 'ActiveState', '--value']) !== 'active') throw new Error('Retained custody namespace is not active');
     namespacePid = command('systemctl', ['show', custody, '-p', 'MainPID', '--value']);
     if (!/^[1-9][0-9]*$/.test(namespacePid)) throw new Error('Retained custody has no namespace PID');
   }
-  const input = { uid: item.uid, unit: item.unit, mode: item.mode, dataDir: item.dataDir, ...identity,
+  const input = { uid: item.uid, unit: item.unit, mode: item.mode, dataDir: item.dataDir, ...identity, allowUnacquired: true,
     ...(item.mode === 'fleet' ? { ledgerPath: item.ledgerPath } : {}) };
-  const result = spawnSync('nsenter', ['--target', namespacePid, '--mount', '--', 'runuser', '-u', item.user, '--',
-    '/usr/local/bin/node', join(root, 'deploy/native-history-closed-owner.mjs'), JSON.stringify(input), ...(alive ? ['--read-restored'] : [])],
+  const invoke = (request, action) => spawnSync('nsenter', ['--target', namespacePid, '--mount', '--', 'runuser', '-u', item.user, '--',
+    '/usr/local/bin/node', join(root, 'deploy/native-history-closed-owner.mjs'), JSON.stringify(request), ...action],
     { encoding: 'utf8', timeout: 10000 });
-  const proof = result.stdout ? JSON.parse(result.stdout) : null;
+  let result = invoke(input, alive ? ['--read-restored'] : []);
+  let proof = result.stdout ? JSON.parse(result.stdout) : null;
+  if (alive && proof?.ok === false && allowMutation) {
+    const host = JSON.parse(readFileSync(hostFile, 'utf8'));
+    if (typeof host.nativeHistoryRestorationPlan !== 'string' || !host.nativeHistoryRestorationPlan.startsWith('/')) throw new Error('Live owner restoration requires its declared controller plan');
+    const plan = JSON.parse(readFileSync(host.nativeHistoryRestorationPlan, 'utf8'));
+    const healthPort = restorationPort(plan, item.unit);
+    const selectedSource = item.mode === 'fleet' ? '/srv/pi/pi-orchestrator' : '/srv/pi/pi-remote';
+    result = invoke({ ...input, ownerPid: Number(pid), healthPort, selectedSource, publisherUid: Number(command('id', ['-u', host.fleetUser])) }, ['--restore-live']);
+    proof = result.stdout ? JSON.parse(result.stdout) : null;
+  }
   if (result.status !== 0 || proof?.ok !== true) throw new Error(`Owner restoration proof unavailable for ${item.unit}: ${proof?.error?.code ?? result.error?.message ?? result.stderr?.trim() ?? 'missing proof'}`);
   const value = proof.value;
   if (value.protocol !== BRIDGE_PROTOCOL || value.uid !== item.uid || value.dataDir !== item.dataDir || value.candidate !== identity.candidate
@@ -139,6 +152,21 @@ export function fleetCompletionBarrier(owners, inspect) {
     if (receipt.ready !== true) waiting.push({ user: item.user, pendingCompletions: receipt.pendingCompletions, reason: receipt.reason });
   }
   return { ready: waiting.length === 0, waiting };
+}
+export function restorationPort(plan, unit) {
+  const entries = plan.owners.flatMap(owner => owner.controllers).filter(controller => controller.unit === unit);
+  if (entries.length !== 1) throw new Error('Live restoration requires exactly one declared controller endpoint');
+  const url = new URL(entries[0].healthUrl);
+  if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || url.pathname !== '/v1/health' || !/^[1-9][0-9]*$/.test(url.port)
+    || url.username || url.password || url.search || url.hash) throw new Error('Invalid declared restoration health endpoint');
+  return Number(url.port);
+}
+export function maintenanceStatus(status, identity, proveRestored) {
+  if (!status.available || (status.value.candidate === identity.candidate && status.value.legacySource === identity.legacySource)) return status;
+  const prior = status.value;
+  if (prior.phase !== 'restored' || prior.legacySource !== identity.legacySource || !/^[0-9a-f]{40}$/.test(prior.candidate)) throw new Error('Maintenance controller selected a different source');
+  proveRestored({ candidate: prior.candidate, legacySource: prior.legacySource, adoptingCandidate: identity.candidate });
+  return { available: false, error: 'Proven restored controller is awaiting asynchronous adoption' };
 }
 export function allOwnersReady(owners) { return owners.every(item => item.available && (item.value.phase === 'migrated' || item.value.ready === true)); }
 
@@ -231,7 +259,11 @@ export async function boundary({ hostFile, root, candidate, mode = 'advance', st
         continue;
       }
       const before = ownerStatus(item);
-      if (before.available && (before.value.candidate !== candidate || before.value.legacySource !== state.legacySource)) throw new Error('Another publication owns this maintenance controller; restoration cannot alter its fences');
+      if (before.available && (before.value.candidate !== candidate || before.value.legacySource !== state.legacySource)) {
+        if (before.value.phase !== 'restored' || before.value.legacySource !== state.legacySource) throw new Error('Another publication owns this maintenance controller; restoration cannot alter its fences');
+        ownerRestorationProof(item, root, hostFile, { candidate, legacySource: state.legacySource });
+        continue;
+      }
       const status = ownerStatus(item, 'POST', '/restore');
       if (!status.available && state.adopted.includes(item.unit)) ownerRestorationProof(item, root, hostFile, { candidate, legacySource: state.legacySource });
       else if (status.available && (status.value.error || status.value.phase !== 'restored')) throw new Error(`Cannot restore admission for ${item.unit}: ${status.value?.error ?? 'owner did not acknowledge restoration'}`);
@@ -246,6 +278,14 @@ export async function boundary({ hostFile, root, candidate, mode = 'advance', st
     const admission = fleetCompletionBarrier(state.owners.filter(item => item.mode === 'fleet'), item => fleetAdmission(item, root, { candidate, legacySource: state.legacySource }, 'probe'));
     if (!admission.ready) return { ...admission, state: 'fleet-completions', reason: 'Accepted old fleet completions are still running' };
     return { ready: true, state: 'awaiting-adoption', reason: 'The publication can adopt the preserved old native owners' };
+  }
+  const restoredControllers = new Map();
+  for (const item of state.owners) {
+    const observed = ownerStatus(item);
+    maintenanceStatus(observed, state, prior => {
+      ownerRestorationProof(item, root, hostFile, prior, false);
+      restoredControllers.set(item.unit, { pid: observed.pid, candidate: prior.candidate });
+    });
   }
   if (mode !== 'probe') {
     // The old daemon aborts tool-free providers on restart. Fence fresh ledger
@@ -264,9 +304,13 @@ export async function boundary({ hostFile, root, candidate, mode = 'advance', st
       state.adopted.push(item.unit); atomicJson(statePath, state);
     }
   }
-  const statuses = state.owners.map(item => ownerStatus(item));
+  const statuses = state.owners.map(item => {
+    const observed = ownerStatus(item), proven = restoredControllers.get(item.unit);
+    return maintenanceStatus(observed, state, prior => {
+      if (proven?.pid !== observed.pid || proven?.candidate !== prior.candidate) ownerRestorationProof(item, root, hostFile, prior, false);
+    });
+  });
   for (const item of statuses) if (item.available) {
-    if (item.value.candidate !== state.candidate || item.value.legacySource !== state.legacySource) throw new Error('Maintenance controller selected a different source');
     if (item.value.error) throw new Error(`Private native history maintenance failed: ${item.value.error}`);
     if (item.value.phase === 'restored') throw new Error('An owner restored its admission; restore the whole publication boundary before another candidate');
   }

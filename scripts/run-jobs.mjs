@@ -8,7 +8,7 @@ export function checkParallelism(env = process.env) {
 }
 
 export function runJob([name, command, args, options = {}], write = (text) => process.stdout.write(text)) {
-  const { timeoutMs = 120_000, drainTimeoutMs = 250, dependsOn = [], ...spawnOptions } = options;
+  const { timeoutMs = 120_000, drainTimeoutMs = 5_000, dependsOn = [], checkEnvironment, ...spawnOptions } = options;
   if (dependsOn.length) throw new Error(`runJob cannot admit ${name} without its check graph`);
   return new Promise((resolve) => {
     const startedAt = performance.now();
@@ -16,7 +16,6 @@ export function runJob([name, command, args, options = {}], write = (text) => pr
     let drain;
     let exited;
     let settled = false;
-    let timedOut = false;
     write(`\n===== ${name}: started =====\n`);
     const finish = (code, signal, error) => {
       if (settled) return;
@@ -31,12 +30,12 @@ export function runJob([name, command, args, options = {}], write = (text) => pr
       resolve({ name, outcome: code === 0 ? "passed" : "failed", code, signal, error, elapsedMs });
     };
     const deadline = setTimeout(() => {
-      timedOut = true;
       child.kill("SIGKILL");
+      finish(1, "SIGKILL", `exceeded ${timeoutMs}ms deadline`);
     }, timeoutMs);
     const closed = () => {
       if (exited && child.stdout.destroyed && child.stderr.destroyed) {
-        finish(timedOut ? 1 : exited.code, exited.signal, timedOut ? `exceeded ${timeoutMs}ms deadline` : undefined);
+        finish(exited.code, exited.signal);
       }
     };
     for (const stream of [child.stdout, child.stderr]) {
@@ -48,13 +47,13 @@ export function runJob([name, command, args, options = {}], write = (text) => pr
       exited = { code, signal };
       closed();
       if (!settled) drain = setTimeout(() => {
-        finish(1, signal, timedOut ? `exceeded ${timeoutMs}ms deadline` : "process exited but descendants still hold its output streams");
+        finish(1, signal, `process exited but descendants still hold its output streams after ${drainTimeoutMs}ms`);
       }, drainTimeoutMs);
     });
   });
 }
 
-export async function runJobs(jobs, { concurrency = checkParallelism(), write } = {}) {
+export async function runJobs(jobs, { concurrency = checkParallelism(), write, execute = runJob } = {}) {
   if (!Number.isSafeInteger(concurrency) || concurrency < 1) throw new Error("concurrency must be a positive integer");
   const workers = Math.min(concurrency, jobs.length);
   const childBudget = Math.max(1, Math.floor(concurrency / Math.max(1, workers)));
@@ -96,7 +95,7 @@ export async function runJobs(jobs, { concurrency = checkParallelism(), write } 
         pending.delete(index);
       } else if (running.size < workers && dependencies[index].every(dependency => results[dependency]?.outcome === "passed")) {
         const env = { ...process.env, ...options.env, PI_STACK_CHECK_CONCURRENCY: String(childBudget) };
-        running.set(index, runJob([name, command, args, { ...options, env }], write).then(result => ({ index, result })));
+        running.set(index, execute([name, command, args, { ...options, env, checkEnvironment: options.env ?? {} }], write).then(result => ({ index, result })));
         pending.delete(index);
       }
     }
