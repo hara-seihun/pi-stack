@@ -382,9 +382,7 @@ if [[ ${PI_STACK_FORCE_ROLLBACK:-0} != 1 ]]; then
     "$root/deploy/meet-recognition-service" --activate &
     recognition_pid=$!
   fi
-if ! "$root/deploy/voice" --activate || ! "$root/deploy/phone" --activate; then
-  activation_failed=1
-elif [[ $previous_remote != "$expected" ]]; then
+if [[ $previous_remote != "$expected" ]]; then
   activate_remote "$expected" || activation_failed=1
 elif ! remote_matches_release "$expected"; then
   # Publication can finish before a deployment is interrupted. Reconcile a
@@ -392,6 +390,9 @@ elif ! remote_matches_release "$expected"; then
   activate_remote "$expected" || activation_failed=1
 fi
 
+if (( activation_failed == 0 )); then
+  if ! "$root/deploy/voice" --activate || ! "$root/deploy/phone" --activate; then activation_failed=1; fi
+fi
 if (( activation_failed == 0 )) && [[ ${PI_STACK_DEPLOY_NO_SUDO:-0} != 1 ]]; then
   "$root/deploy/timezone-ready" "$router_base" || activation_failed=1
 fi
@@ -441,7 +442,9 @@ if (( smoke_failed )); then
       pi_stack_as_root systemctl reset-failed 'pi-remote@*.service' 2>/dev/null || true
       for service in voice phone; do
         if [[ -f $previous_remote_release/server/$service/service.ts ]]; then
-          "$root/deploy/$service" --activate || echo "$service rollback failed" >&2
+          service_action=--activate
+          [[ $service != phone ]] || service_action=--restore
+          "$root/deploy/$service" "$service_action" || echo "$service rollback failed" >&2
         elif [[ $(systemctl show "pi-stack-$service.service" -p LoadState --value) == loaded ]]; then
           pi_stack_as_root systemctl stop "pi-stack-$service.service"
         fi

@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSyn
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { atomicJson, bridgeSocket, BRIDGE_PROTOCOL } from './native-history-bridge.mjs';
+import { atomicJson, bridgeSocket, BRIDGE_PROTOCOL, MAINTENANCE_INTAKE } from './native-history-bridge.mjs';
 import { stageLegacyRemoteIdentity } from './native-history-package-identity.mjs';
 import { recoverClosedOwner } from './native-history-owner-recovery.mjs';
 
@@ -101,7 +101,8 @@ function ownerRestorationProof(item, root, hostFile, identity, allowMutation = t
     const plan = JSON.parse(readFileSync(host.nativeHistoryRestorationPlan, 'utf8'));
     const healthPort = restorationPort(plan, item.unit);
     const selectedSource = item.mode === 'fleet' ? '/srv/pi/pi-orchestrator' : '/srv/pi/pi-remote';
-    result = invoke({ ...input, ownerPid: Number(pid), healthPort, selectedSource, publisherUid: Number(command('id', ['-u', host.fleetUser])) }, ['--restore-live']);
+    if (MAINTENANCE_INTAKE !== 'always-open-v1') throw new Error('Unknown controller intake observation contract');
+    result = invoke({ ...input, ownerPid: Number(pid), healthPort, selectedSource, publisherUid: Number(command('id', ['-u', host.fleetUser])) }, ['--restore-observation']);
     proof = result.stdout ? JSON.parse(result.stdout) : null;
   }
   if (result.status !== 0 || proof?.ok !== true) throw new Error(`Owner restoration proof unavailable for ${item.unit}: ${proof?.error?.code ?? result.error?.message ?? result.stderr?.trim() ?? 'missing proof'}`);

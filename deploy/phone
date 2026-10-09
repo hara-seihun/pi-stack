@@ -5,6 +5,11 @@ source "$root/deploy/lib"
 pi_stack_enter_deployment "$0" "$root" "$@"
 # Telephone credentials and the personal encrypted state are host-owned.
 [[ $(systemctl show pi-stack-phone.service -p LoadState --value) == loaded ]] || exit 0
+canonical=${PI_STACK_PHONE_CONFIG:-/etc/pi-stack/phone.json}
+host_file=$(pi_stack_host_file)
+revision=$(git -C "$root" rev-parse HEAD)
+configuration() { pi_stack_as_root node "$root/deploy/phone-configuration.mjs" "$1" "$host_file" "$revision" "$canonical"; }
+candidate=$(configuration inspect)
 reset_phone_failure() {
   local phone_state
   phone_state=$(systemctl show pi-stack-phone.service -p ActiveState --value)
@@ -20,14 +25,15 @@ reset_phone_failure() {
 }
 case ${1:---activate} in
   --check)
-    pi_stack_as_root test -s /etc/pi-stack/phone.json
-    pi_stack_as_root bun "$root/apps/remote/server/phone/config-check.ts" /etc/pi-stack/phone.json
+    pi_stack_as_root test -s "$candidate"
+    pi_stack_as_root bun "$root/apps/remote/server/phone/config-check.ts" "$candidate"
+    configuration prepare >/dev/null
     if systemctl is-active --quiet pi-stack-phone.service; then
-      status=$(bun "$root/apps/remote/server/pi-call" status) || { echo 'Phone census unavailable' >&2; exit 75; }
+      status=$(PI_STACK_PHONE_CONFIG="$canonical" bun "$root/apps/remote/server/pi-call" status) || { echo 'Phone census unavailable' >&2; exit 75; }
       [[ $(jq -r '.activeCalls' <<<"$status") == 0 ]] || { echo 'Live telephone calls; defer deployment' >&2; exit 75; }
     fi
     ;;
-  --activate)
+  --activate|--restore)
     bindings=$(systemctl show pi-stack-phone.service -p BindsTo --value)
     supervisors=()
     for unit in $bindings; do
@@ -39,10 +45,15 @@ case ${1:---activate} in
     case $state in
       active)
         reset_phone_failure
-        pi_stack_as_root systemctl restart pi-stack-phone.service
-        systemctl is-active --quiet pi-stack-phone.service
+        if [[ ${1:---activate} == --restore ]]; then configuration restore >/dev/null;
+        else configuration activate >/dev/null; fi
+        if ! pi_stack_as_root systemctl restart pi-stack-phone.service || ! systemctl is-active --quiet pi-stack-phone.service; then
+          configuration restore >/dev/null
+          exit 1
+        fi
         ;;
       inactive)
+        [[ ${1:---activate} != --restore ]] || configuration restore >/dev/null
         reset_phone_failure
         pi_stack_as_root systemctl stop pi-stack-phone.service
         echo "Phone remains stopped with $supervisor"
@@ -58,5 +69,5 @@ case ${1:---activate} in
       *) echo "Unknown phone owner supervisor state: $supervisor ($state)" >&2; exit 66 ;;
     esac
     ;;
-  *) echo 'usage: deploy/phone [--check|--activate]' >&2; exit 64 ;;
+  *) echo 'usage: deploy/phone [--check|--activate|--restore]' >&2; exit 64 ;;
 esac

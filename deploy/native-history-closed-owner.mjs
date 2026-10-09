@@ -63,7 +63,9 @@ export function publishedSourceProof(path, legacySource, publisherUid) {
     return { ok: true, value: { source, publisherUid } };
   } catch (error) { return failure('source-proof-failed', error instanceof Error ? error.message : String(error)); }
 }
-export function liveUnitIdentityProof(input) {
+export function liveUnitIdentityProof(input) { return inspectLiveIdentity(input, 'original-entry'); }
+export function observationUnitIdentityProof(input) { return inspectLiveIdentity(input, 'observation'); }
+function inspectLiveIdentity(input, contract) {
   try {
     if (!Number.isSafeInteger(input.ownerPid) || input.ownerPid <= 0 || !Number.isSafeInteger(input.healthPort)
       || input.healthPort <= 0 || input.healthPort >= 65536 || typeof input.selectedSource !== 'string'
@@ -82,9 +84,9 @@ export function liveUnitIdentityProof(input) {
     if (cgroup !== `0::${fields.ControlGroup}`) return failure('owner-cgroup', 'Live PID is not in the declared owning unit cgroup');
     const startTicks = processStartTicks(input.ownerPid);
     const namespace = readlinkSync(join(proc, 'ns/mnt'));
-    const servingEntry = originalEntryProof(input, source, fields.ControlGroup, namespace);
+    const servingEntry = contract === 'original-entry' ? originalEntryProof(input, source, fields.ControlGroup, namespace) : null;
     const endpoint = bridgeSocket(input.uid, input.dataDir);
-    if (existsSync(endpoint)) {
+    if (contract === 'original-entry' && existsSync(endpoint)) {
       const probe = spawnSync(process.execPath, [fileURLToPath(new URL('./native-history-bridge.mjs', import.meta.url)), '--probe-socket', endpoint],
         { encoding: 'utf8', timeout: 1500, maxBuffer: 16384 });
       const observed = probe.stdout ? JSON.parse(probe.stdout) : null;
@@ -93,11 +95,13 @@ export function liveUnitIdentityProof(input) {
       if (observed.value.kind !== 'absent' && observed.value.kind !== 'stale') return failure('bridge-unavailable', 'Unknown maintenance endpoint connection-state proof');
     }
     return { ok: true, value: { unit: input.unit, pid: input.ownerPid, startTicks, cgroup: fields.ControlGroup,
-      source, publisherUid, healthPort: input.healthPort, namespace, servingEntry } };
+      source, publisherUid, healthPort: input.healthPort, namespace, ...(servingEntry === null ? {} : { servingEntry }) } };
   } catch (error) { return failure('live-proof-failed', error instanceof Error ? error.message : String(error)); }
 }
-export function liveUnitProof(input) {
-  const identity = liveUnitIdentityProof(input);
+export function liveUnitProof(input) { return inspectLiveHealth(input, liveUnitIdentityProof); }
+export function observationUnitProof(input) { return inspectLiveHealth(input, observationUnitIdentityProof); }
+function inspectLiveHealth(input, inspectIdentity) {
+  const identity = inspectIdentity(input);
   if (!identity.ok) return identity;
   try {
     const health = spawnSync('curl', ['-fsS', '--max-time', '2', `http://127.0.0.1:${input.healthPort}/v1/health`], { encoding: 'utf8', timeout: 3000, maxBuffer: 16384 });
@@ -126,6 +130,18 @@ function threadFence(db, identity) {
   if (!row || !sameIdentity(JSON.parse(row.value), identity)) throw new Error('Thread fence belongs to another publication or has no identity');
   if (db.prepare("SELECT 1 FROM pi_history_bridge WHERE key='closing'").get()) throw new Error('Owner closure has started; old decoder restoration is forbidden');
   return 'identity-bound';
+}
+function threadObservation(db, identity, mode) {
+  if (['pi_history_admission', 'pi_history_children', 'pi_history_question_cohort'].some(name => trigger(db, name))
+    || ['pi_history_questions', 'pi_history_cohort'].some(name => table(db, name))) throw new Error('Historical admission/cohort state is not an observation');
+  const observation = table(db, 'pi_history_observation'), bridge = table(db, 'pi_history_bridge');
+  if (!observation && !bridge && mode === 'fleet') return 'absent-awaiting-dispatch-proof';
+  if (!observation || !bridge) throw new Error('Positive observation custody is absent');
+  const versions = db.prepare('SELECT version FROM pi_history_observation').all();
+  if (versions.length !== 1 || versions[0].version !== 1) throw new Error('Observation version is not exactly one');
+  const rows = db.prepare('SELECT key,value FROM pi_history_bridge').all();
+  if (rows.length !== 1 || rows[0].key !== 'identity' || !sameIdentity(JSON.parse(rows[0].value), identity)) throw new Error('Observation has foreign identity or closure state');
+  return 'identity-bound-observation';
 }
 function fleetFence(db, identity) {
   if (!table(db, 'control') || !table(db, 'run')) throw new Error('Fleet completion schema is unavailable');
@@ -220,8 +236,12 @@ export function restoreClosedOwner(input, inspectUnit = closedUnitProof) {
 export function restoreLiveOwner(input, inspectOwner = liveUnitProof, inspectIdentity = inspectOwner === liveUnitProof ? liveUnitIdentityProof : inspectOwner) {
   return restoreOwner(input, { kind: 'live-old-unit', inspect: () => inspectOwner(input), inspectLocked: () => inspectIdentity(input) });
 }
+export function restoreObservationOwner(input, inspectOwner = observationUnitProof, inspectIdentity = inspectOwner === observationUnitProof ? observationUnitIdentityProof : inspectOwner) {
+  return restoreOwner(input, { kind: 'live-observation', inspect: () => inspectOwner(input), inspectLocked: () => inspectIdentity(input) });
+}
 function restoreOwner(input, route) {
   const databases = [];
+  const observation = route.kind === 'live-observation', liveRoute = route.kind === 'live-old-unit' || observation;
   try {
     const uid = process.getuid(), username = userInfo().username;
     if (input.uid !== uid || !['remote', 'rooms', 'fleet'].includes(input.mode)
@@ -236,14 +256,16 @@ function restoreOwner(input, route) {
     if (!initial.ok) return initial;
     const identity = { candidate: input.candidate, legacySource: input.legacySource };
     const receiptPath = join(input.dataDir, 'native-history-maintenance.json');
-    if (existsSync(join(input.dataDir, 'native-history-readiness.json'))) return failure('migration-started', 'Native readiness exists; resume the candidate instead of the old decoder');
+    if (existsSync(join(input.dataDir, 'native-history-readiness.json'))
+      || (observation && existsSync(join(input.dataDir, 'native-history-retirement')))) return failure('migration-started', 'Native readiness or retirement exists; resume the candidate instead of the old decoder');
+    if (observation && !existsSync(receiptPath)) return failure('receipt-unavailable', 'Observation restoration requires its exact maintenance receipt');
     let receipt = null, priorRestored = false;
     if (existsSync(receiptPath)) {
       ownedFile(receiptPath, uid); receipt = JSON.parse(readFileSync(receiptPath, 'utf8'));
       if (receipt.version !== 1 || receipt.protocol !== BRIDGE_PROTOCOL || receipt.uid !== uid
         || receipt.dataDir !== input.dataDir) return failure('identity', 'Maintenance receipt custody mismatch');
       if (!sameIdentity(receipt, identity)) {
-        if (input.allowUnacquired !== true || receipt.phase !== 'restored' || !/^[0-9a-f]{40}$/.test(receipt.candidate)
+        if (observation || input.allowUnacquired !== true || receipt.phase !== 'restored' || !/^[0-9a-f]{40}$/.test(receipt.candidate)
           || receipt.legacySource !== input.legacySource) return failure('identity', 'Maintenance receipt custody mismatch');
         priorRestored = true;
       }
@@ -255,7 +277,7 @@ function restoreOwner(input, route) {
     if (!existsSync(threadPath)) return failure('database-unavailable', 'Owner thread database is absent; no absence proof can be manufactured');
     ownedFile(threadPath, uid);
     const threads = new DatabaseSync(threadPath); databases.push(threads); threads.exec('PRAGMA busy_timeout=2000; BEGIN IMMEDIATE');
-    const thread = threadFence(threads, identity);
+    const thread = observation ? threadObservation(threads, identity, input.mode) : threadFence(threads, identity);
     if (priorRestored && thread !== 'absent') return failure('prior-fence', 'Unacquired owner cannot retain a current thread fence');
     let ledger = null, fleet = null;
     if (input.mode === 'fleet') {
@@ -265,26 +287,32 @@ function restoreOwner(input, route) {
       ownedFile(input.ledgerPath, uid);
       ledger = new DatabaseSync(input.ledgerPath); databases.push(ledger); ledger.exec('PRAGMA busy_timeout=2000; BEGIN IMMEDIATE');
       fleet = fleetFence(ledger, identity);
+      const dispatch = trigger(ledger, 'pi_history_completion_dispatch');
+      if (observation && (trigger(ledger, 'pi_history_completion_admission')
+        || (dispatch && fleet.fence !== 'identity-bound'))) throw new Error('Historical or unidentified fleet barrier is not dispatch-only observation');
+      if (observation && thread === 'absent-awaiting-dispatch-proof' && (!dispatch || fleet.fence !== 'identity-bound')) return failure('observation-unacquired', 'Neither a positive thread observation nor an identity-bound dispatch barrier exists');
       if (route.kind === 'closed-unit' && fleet.pendingCompletions !== 0) return failure('accepted-completions', `Accepted fleet completions remain pending: ${fleet.pendingCompletions}`);
     }
-    const current = route.kind === 'live-old-unit' ? route.inspectLocked() : route.inspect();
+    const current = liveRoute ? route.inspectLocked() : route.inspect();
     if (!current.ok) return current;
-    if (route.kind === 'live-old-unit' && JSON.stringify(kernelIdentity(current.value)) !== JSON.stringify(kernelIdentity(initial.value))) return failure('owner-generation-changed', 'Live owner source/PID/namespace changed before fence release');
+    if (liveRoute && JSON.stringify(kernelIdentity(current.value)) !== JSON.stringify(kernelIdentity(initial.value))) return failure('owner-generation-changed', 'Live owner source/PID/namespace changed before fence release');
+    if (observation && (existsSync(join(input.dataDir, 'native-history-readiness.json')) || existsSync(join(input.dataDir, 'native-history-retirement')))) return failure('migration-started', 'Owner retirement began during observation proof');
+    if (thread === 'identity-bound-observation') threads.exec('DROP TABLE pi_history_observation; DROP TABLE pi_history_bridge;');
     if (thread === 'identity-bound') threads.exec('DROP TRIGGER IF EXISTS pi_history_admission; DROP TRIGGER IF EXISTS pi_history_children; DROP TRIGGER IF EXISTS pi_history_question_cohort; DROP TABLE IF EXISTS pi_history_questions; DROP TABLE IF EXISTS pi_history_cohort; DROP TABLE pi_history_bridge;');
     if (ledger) {
       if (fleet.fence === 'identity-bound') {
-        ledger.exec('DROP TRIGGER IF EXISTS pi_history_completion_admission');
+        ledger.exec(observation ? 'DROP TRIGGER IF EXISTS pi_history_completion_dispatch' : 'DROP TRIGGER IF EXISTS pi_history_completion_admission');
         ledger.prepare("DELETE FROM control WHERE key='native-history-maintenance'").run();
       }
       ledger.exec('COMMIT');
     }
     threads.exec('COMMIT');
-    if (route.kind === 'live-old-unit') {
+    if (liveRoute) {
       const after = route.inspect();
       if (!after.ok || JSON.stringify(after.value) !== JSON.stringify(initial.value)) return {
         ok: false, error: { code: 'owner-generation-changed', message: 'Fences were released but live source/PID proof changed; receipt remains untouched', fenceReleaseCommitted: true } };
     }
-    const proof = { owner: route.kind, unit: input.unit, ...(route.kind === 'live-old-unit' ? { live: initial.value } : {}), threadFence: thread, receipt: priorRestored ? 'prior-restored' : receipt ? 'identity-bound' : 'absent',
+    const proof = { owner: route.kind, unit: input.unit, ...(liveRoute ? { live: initial.value } : {}), threadFence: thread === 'absent-awaiting-dispatch-proof' ? 'absent-dispatch-only' : thread, receipt: priorRestored ? 'prior-restored' : receipt ? 'identity-bound' : 'absent',
       ...(priorRestored ? { priorCandidate: receipt.candidate, acquisition: 'not-acquired' } : {}),
       ...(fleet ? { fleetFence: fleet.fence, pendingCompletions: fleet.pendingCompletions } : {}) };
     if (receipt && !priorRestored) atomicJson(receiptPath, { ...receipt, phase: 'restored', updatedAt: new Date().toISOString(), restorationProof: proof });
@@ -303,6 +331,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     result = process.argv[3] === '--read-restored' ? readRestoredOwner(input)
       : process.argv[3] === '--prepare-attempt' ? prepareMaintenanceReceipt(input)
       : process.argv[3] === '--restore-live' ? restoreLiveOwner(input)
+      : process.argv[3] === '--restore-observation' ? restoreObservationOwner(input)
       : process.argv[3] === undefined ? restoreClosedOwner(input) : failure('input', 'Unknown owner proof action');
   }
   catch { result = failure('input', 'Expected one JSON closed-owner restoration configuration'); }

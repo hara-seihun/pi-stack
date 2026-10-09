@@ -218,7 +218,7 @@ test('old owner drains existing work/output, closes before private migration, an
   const snapshotFiles = new DatabaseSync(join(root, 'supervisor.sqlite3'));
   assert.equal(snapshotFiles.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name='session_contexts'").get().n, 0); snapshotFiles.close();
 }, { timeout: 5000 });
-test('normal fleet shutdown retires bridge control without inventing producer closure or keeping closed databases alive', async t => {
+for (const retainedHandle of [false, true]) test(`normal fleet shutdown does not retain the process; a genuine retained handle keeps restoration available (${retainedHandle})`, async t => {
   const root = directory(t), threadPath = join(root, 'threads.sqlite3');
   database(threadPath).db.close();
   const ledgerPath = join(root, 'ledger.sqlite3'), ledger = new DatabaseSync(ledgerPath);
@@ -238,8 +238,9 @@ test('normal fleet shutdown retires bridge control without inventing producer cl
   }`);
   const harness = join(root, 'shutdown.mjs');
   writeFileSync(harness, `import {installLegacyMaintenance} from ${JSON.stringify(pathToFileURL(resolve('deploy/native-history-bridge.mjs')).href)};import {Daemon} from './daemon.js';
+    ${retainedHandle ? "const retained=setInterval(()=>{},1000);process.once('SIGUSR2',()=>clearInterval(retained));" : ''}
     await installLegacyMaintenance(${JSON.stringify({ candidate, legacySource: old, dataDir: root, oldApi, transportModule, mode: 'fleet', ledgerPath, node: process.execPath })});
-    await new Daemon(${JSON.stringify(threadPath)}).start();`);
+    await new Daemon(${JSON.stringify(threadPath)}).start();console.log('SHUTDOWN');`);
   const child = spawn(process.execPath, [harness], { stdio: ['ignore','pipe','pipe'] });
   let errors = ''; child.stderr.on('data', chunk => errors += chunk);
   t.after(() => { if (child.exitCode === null) child.kill('SIGKILL'); });
@@ -249,13 +250,22 @@ test('normal fleet shutdown retires bridge control without inventing producer cl
   const started = once(child.stdout, 'data'); child.kill('SIGUSR1'); await started;
   const observed = await control(bridgeSocket(process.getuid(), root), 'GET', '/status');
   assert.equal(observed.ready, true, JSON.stringify(observed));
-  const exited = once(child, 'exit');
+  const exited = once(child, 'exit'), shutdown = once(child.stdout, 'data');
   child.kill('SIGTERM');
+  if (retainedHandle) {
+    await shutdown;
+    const stopped = await control(bridgeSocket(process.getuid(), root), 'GET', '/status');
+    assert.equal(stopped.controllerStopped, true); assert.equal(stopped.ready, false);
+    assert.match(stopped.reason, /awaiting startup or replacement/);
+    const restored = await control(bridgeSocket(process.getuid(), root), 'POST', '/restore');
+    assert.equal(restored.phase, 'restored'); assert.equal(restored.error, undefined);
+    child.kill('SIGUSR2');
+  }
   const deadline = setTimeout(() => child.kill('SIGKILL'), 1500);
   const [code] = await exited; clearTimeout(deadline);
   assert.equal(code, 0, errors);
   const receipt = JSON.parse(readFileSync(join(root, 'native-history-maintenance.json'), 'utf8'));
-  assert.equal(receipt.phase, 'draining'); assert.equal(receipt.controllerStopped, true); assert.equal(receipt.ready, false);
+  assert.equal(receipt.phase, retainedHandle ? 'restored' : 'draining'); assert.equal(receipt.controllerStopped, true); assert.equal(receipt.ready, false);
   assert.equal(receipt.databases, undefined); assert.equal(receipt.error, undefined);
 });
 test('short fleet replacement pauses dispatch, accepts fresh completion receipts and preserves running work', async t => {
