@@ -205,7 +205,7 @@ export async function installLegacyMaintenance(options) {
   function stopControl() {
     clearInterval(autoTimer);
     receipt.controllerStopped = true; receipt.ready = false; save(receipt.phase);
-    controlServer?.close(); controlServer?.closeIdleConnections();
+    controlServer?.unref(); controlServer?.closeIdleConnections();
   }
   let restoreDaemonDispatch = () => {};
   if (options.mode === 'fleet' && receipt.phase === 'draining') {
@@ -379,7 +379,7 @@ export async function installLegacyMaintenance(options) {
   const socketPath = bridgeSocket(uid, dataDir);
   const endpoint = await prepareBridgeSocket(socketPath);
   if (!endpoint.ok) throw new Error(`${endpoint.error.code}: ${endpoint.error.message}`);
-  const server = createServer((request, response) => { void ownerOperation(async () => {
+  const server = createServer((request, response) => { response.setHeader('connection', 'close'); void ownerOperation(async () => {
     let value;
     if (request.method === 'GET' && request.url === '/status') value = await status();
     else if (request.method === 'POST' && request.url === '/close') value = await closeOwners();

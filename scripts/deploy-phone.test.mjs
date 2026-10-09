@@ -4,15 +4,18 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { phoneConfiguration } from '../deploy/phone-configuration.mjs';
 
 function activate(state, bindings = "pi-remote@alex.service", restartStatus = 0, discoveryStatus = 0, phoneState = "inactive") {
   const root = mkdtempSync(join(tmpdir(), "pi-phone-activate-"));
   try {
     mkdirSync(join(root, "deploy"));
     mkdirSync(join(root, "bin"));
-    for (const file of ["phone", "lib", "release-checkout"]) copyFileSync(new URL(`../deploy/${file}`, import.meta.url), join(root, "deploy", file));
+    for (const file of ["phone", "phone-configuration.mjs", "lib", "release-checkout"]) copyFileSync(new URL(`../deploy/${file}`, import.meta.url), join(root, "deploy", file));
     assert.equal(spawnSync("git", ["init", "--quiet", root]).status, 0);
     assert.equal(spawnSync("git", ["-C", root, "-c", "user.name=Phone fixture", "-c", "user.email=fixture@example.invalid", "commit", "--quiet", "--allow-empty", "-m", "Phone fixture"]).status, 0);
+    const host = join(root, 'host.json');
+    writeFileSync(host, '{}');
     const trace = join(root, "trace");
     writeFileSync(trace, "");
     writeFileSync(join(root, "bin/systemctl"), `#!/bin/sh
@@ -39,7 +42,7 @@ esac
       env: { ...process.env, PATH: `${root}/bin:${process.env.PATH}`, TEST_STATE: state,
         TEST_BINDINGS: bindings, TEST_RESTART_STATUS: String(restartStatus),
         TEST_DISCOVERY_STATUS: String(discoveryStatus), TEST_PHONE_STATE: phoneState, TEST_TRACE: trace,
-        PI_STACK_DEPLOY_DEADLINE_ACTIVE: "1", PI_STACK_HOST_LOCK_HELD: "1",
+        PI_STACK_DEPLOY_DEADLINE_ACTIVE: "1", PI_STACK_HOST_FILE: host, PI_STACK_HOST_LOCK_HELD: "1",
         PI_STACK_DEPLOY_LOCK_HELD: "1", PI_STACK_GIT_CHECKOUT: root,
         PI_STACK_HOST_LOCK_PATH: join(root, "host.lock") },
     });
@@ -91,4 +94,57 @@ test("failed, transitioning, unknown or undiscoverable owners never masquerade a
   for (const state of ["activating", "deactivating", "reloading", "refreshing"]) assert.equal(activate(state).status, 75);
   for (const bindings of ["", "system.slice", "pi-remote@alex.service pi-remote@sam.service"]) assert.equal(activate("active", bindings).status, 66);
   assert.equal(activate("active", "pi-remote@alex.service", 0, 1).status, 1);
+});
+
+
+test("prepared Phone configuration stays private and changes only at activation, with exact rollback custody", t => {
+  const root = mkdtempSync(join(tmpdir(), 'phone-configuration-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const host = join(root, 'host.json'), canonical = join(root, 'serving.json'), candidate = join(root, 'candidate.json');
+  const revision = 'a'.repeat(40), state = join(root, 'state');
+  writeFileSync(host, JSON.stringify({ phoneConfigurationCandidate: candidate }));
+  writeFileSync(canonical, 'serving', { mode: 0o600 });
+  writeFileSync(candidate, 'prepared', { mode: 0o600 });
+  const run = action => phoneConfiguration(action, host, revision, canonical, state);
+  assert.equal(run('inspect').value.path, candidate);
+  assert.equal(run('activate').ok, false, 'unproved configuration cannot activate');
+  assert.equal(run('prepare').ok, true);
+  assert.equal(readFileSync(canonical, 'utf8'), 'serving');
+  assert.equal(run('activate').ok, true);
+  assert.equal(readFileSync(canonical, 'utf8'), 'prepared');
+  assert.equal(run('activate').ok, true, 'same preparation resumes without duplicating activation');
+  assert.equal(run('restore').ok, true);
+  assert.equal(readFileSync(canonical, 'utf8'), 'serving');
+  assert.equal(run('restore').ok, true);
+  assert.equal(run('activate').ok, false, 'restored attempt cannot rearm');
+});
+
+test("Phone configuration refuses changed candidates and serving generations without replacing either", t => {
+  const root = mkdtempSync(join(tmpdir(), 'phone-configuration-refusal-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const host = join(root, 'host.json'), canonical = join(root, 'serving.json'), candidate = join(root, 'candidate.json');
+  writeFileSync(host, JSON.stringify({ phoneConfigurationCandidate: candidate }));
+  writeFileSync(canonical, 'serving', { mode: 0o600 }); writeFileSync(candidate, 'prepared', { mode: 0o600 });
+  const run = action => phoneConfiguration(action, host, 'b'.repeat(40), canonical, join(root, 'state'));
+  assert.equal(run('prepare').ok, true);
+  writeFileSync(candidate, 'changed'); assert.equal(run('activate').ok, false);
+  assert.equal(readFileSync(canonical, 'utf8'), 'serving');
+  writeFileSync(candidate, 'prepared'); writeFileSync(canonical, 'another-owner-change');
+  assert.equal(run('activate').ok, false);
+  assert.equal(readFileSync(canonical, 'utf8'), 'another-owner-change');
+  writeFileSync(canonical, 'serving'); assert.equal(run('activate').ok, true);
+  writeFileSync(canonical, 'new-generation'); assert.equal(run('restore').ok, false);
+  assert.equal(readFileSync(canonical, 'utf8'), 'new-generation');
+});
+
+test("unset Phone preparation retains canonical configuration; null and relative candidates are explicit errors", t => {
+  const root = mkdtempSync(join(tmpdir(), 'phone-configuration-input-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const host = join(root, 'host.json'), canonical = join(root, 'serving.json');
+  writeFileSync(host, '{}');
+  assert.deepEqual(phoneConfiguration('inspect', host, 'c'.repeat(40), canonical), { ok: true, value: { kind: 'canonical', path: canonical } });
+  for (const value of [null, '', 'relative', canonical]) {
+    writeFileSync(host, JSON.stringify({ phoneConfigurationCandidate: value }));
+    assert.equal(phoneConfiguration('inspect', host, 'c'.repeat(40), canonical).ok, false);
+  }
 });
