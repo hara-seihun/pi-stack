@@ -23,7 +23,11 @@ Authority guidance is not a new bypass around a tool's explicit confirmation, cr
 
 Provenance separates stated, revealed, derived and hypothesis claims, nullable confidence, evidence/counterevidence, observation/validity times and supersession. Unknown deadlines and recommendations are null, not inferred values. Following an agent recommendation is agent-exposed evidence, not independent confirmation of a preference.
 
-A reconciliation records which sources were actually inspected, their checked/reconciled time, freshness boundary and complete/partial/inaccessible/excluded state. Reading the aggregate, scheduling a watch or ending a turn does not advance reconciliation. If supporting evidence is removed or stopped, dependent projections must not present it as current authority.
+A reconciliation records which sources were actually inspected, their checked/reconciled time, freshness boundary and complete/partial/inaccessible/excluded state. `checkedAt` is the last actual source check; `reconciledAt` is the last actual reconciliation completion, or null when none is recorded. These are independent milestones: reconciliation can finish after its source check, and a later check can retain an earlier reconciliation without claiming a new one.
+
+`freshUntil` is a separate recorded source freshness boundary; null means freshness is unknown, not perpetual freshness, and is valid even after successful reconciliation. Complete coverage requires a recorded reconciliation and no error. Timestamps must be valid, but coverage imposes no relative ordering or wall-clock bound on these source claims; an already-expired freshness boundary remains valid and is shown as stale.
+
+Reading the aggregate, scheduling a watch or ending a turn does not advance reconciliation. If supporting evidence is removed or stopped, dependent projections must not present it as current authority.
 
 ## Attention projection
 

@@ -40,7 +40,9 @@ export const LifePolicySchema = Type.Object({
 }, closed);
 export const LifeCoverageSchema = Type.Object({
   source: id, state: enumeration(["complete", "partial", "inaccessible", "excluded"]),
-  checkedAt: time, reconciledAt: Type.Union([time, Type.Null()]), freshUntil: Type.Union([time, Type.Null()]),
+  checkedAt: Type.String({ ...time, description: "Last actual source check; may precede completion of reconciliation or follow a retained earlier reconciliation." }),
+  reconciledAt: Type.Union([time, Type.Null()], { description: "Last actual reconciliation completion, or null when none is recorded. Reading alone does not reconcile." }),
+  freshUntil: Type.Union([time, Type.Null()], { description: "Recorded source freshness boundary, or null when freshness is unknown; null does not assert perpetual freshness." }),
   detail: nullableText, error: nullableText, evidence: Type.Array(LifeEvidenceSchema, { maxItems: 100 }),
 }, closed);
 export const LifeSteeringSchema = Type.Object({

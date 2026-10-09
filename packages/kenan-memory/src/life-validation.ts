@@ -19,7 +19,6 @@ function semantic(value: unknown, field: string | null = null): boolean {
     if (item.kind === "commitment" && ((item.state === "waiting") !== (item.waiting !== null))) return false;
     if (item.kind === "preference" && item.adoptedRule === true && (item.provenance as { factClass: string }).factClass !== "stated") return false;
     if (item.state === "complete" && "reconciledAt" in item && (item.reconciledAt === null || item.error !== null)) return false;
-    if (typeof item.reconciledAt === "string" && typeof item.checkedAt === "string" && Date.parse(item.reconciledAt) > Date.parse(item.checkedAt)) return false;
     if (item.mode === "off" && item.instruction !== null) return false;
     return Object.entries(item).every(([key, entry]) => semantic(entry, key));
   }
