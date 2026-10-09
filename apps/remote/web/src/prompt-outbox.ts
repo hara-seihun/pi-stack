@@ -1,3 +1,5 @@
+import { CONTROLLER_REPLACEMENT_TIMEOUT_MS } from "./controller-replacement";
+
 export type OutboxResult<T> = { ok: true; value: T } | { ok: false; error: PromptOutboxError };
 export type PromptOutboxError = {
   kind: "invalid_scope" | "scope_changed" | "interrupted" | "invalid_prompt" | "storage_unavailable" | "storage_corrupt"
@@ -206,7 +208,7 @@ export class PromptOutbox {
     if (!fence.ok) return fence;
     const controller = new AbortController();
     this.controllers.set(requestId, controller);
-    const timer = setTimeout(() => controller.abort(new Error("Prompt acknowledgement timed out.")), 20_000);
+    const timer = setTimeout(() => controller.abort(new Error("Prompt acknowledgement timed out.")), CONTROLLER_REPLACEMENT_TIMEOUT_MS);
     let outcome: PromptOutboxOutcome;
     try {
       const response = await new Promise<{ status: number; body: unknown }>((resolve, reject) => {

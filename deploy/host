@@ -55,7 +55,6 @@ fi
 if (( services )); then
   candidate=$(git -C "$root" rev-parse HEAD)
   "$root/deploy/native-prerequisites" "$PI_STACK_HOST_FILE" "$root" "$candidate"
-  "$root/deploy/native-history-boundary" "$PI_STACK_HOST_FILE" "$root" "$candidate"
 fi
 recognition=0
 if (( services )) && "$root/deploy/meet-recognition-service" --check 2>/dev/null; then recognition=1; fi
@@ -180,6 +179,15 @@ trap 'exit 130' INT
 trap 'exit 129' HUP
 
 if [[ -z ${PI_STACK_HOST_PHASE:-} ]]; then
+  # Nothing that compiles, downloads or tests belongs after old listeners close.
+  "$root/deploy/prepare"
+  export PI_STACK_RELEASES_ROOT=$(pi_stack_component_releases_root)
+  if (( services )); then
+    if jq -e '.oneKenan == true' "$PI_STACK_HOST_FILE" >/dev/null; then
+      pi_stack_as_root python3 "$root/deploy/one-kenan-activate" check --host "$PI_STACK_HOST_FILE" --expected "$candidate" || exit $?
+    fi
+    "$root/deploy/native-history-boundary" "$PI_STACK_HOST_FILE" "$root" "$candidate"
+  fi
   remote=${PI_STACK_REMOTE_DEST:-/srv/pi/pi-remote}
   export PI_STACK_PREVIOUS_REMOTE=$(cat "$remote/.pi-stack-commit" 2>/dev/null || true)
   export PI_STACK_PREVIOUS_REMOTE_RELEASE=$(readlink -f "$remote" || true)
@@ -233,29 +241,24 @@ tools=${PI_STACK_TOOLS_DEST:-/srv/pi/tools}
 previous_remote=${PI_STACK_PREVIOUS_REMOTE:-}
 previous_remote_release=${PI_STACK_PREVIOUS_REMOTE_RELEASE:-}
 if [[ $PI_STACK_HOST_PHASE == publication ]]; then
-# Builds share checkout dependencies, not output directories. Prepare them
-# together while selecting recognition on hosts that own it.
-# The recognizer model is fetched by deploy/prepare, outside this
-# deadline; here it is only selected, and a missing preparation fails loudly.
-pi_stack_prepare_builds "$root" &
-builds_pid=$!
-"$root/deploy/runtime" &
-runtime_pid=$!
+export PI_STACK_RELEASES_ROOT=$(pi_stack_component_releases_root)
+pi_stack_as_root node "$root/deploy/prepared-components.mjs" "$PI_STACK_RELEASES_ROOT" "$expected" verify
+"$root/deploy/runtime" --activate-prepared
+for component in orchestrator remote tools; do
+  case $component in
+    orchestrator) destination=$orchestrator ;;
+    remote) destination=$remote ;;
+    tools) destination=$tools ;;
+  esac
+  pi_stack_select_release "$PI_STACK_RELEASES_ROOT/$component/$expected" "$destination" "$expected"
+done
+"$root/deploy/orchestrator" --links-only
 if (( recognition )); then
   recognition_started=1
   "$root/deploy/meet-recognition" --select
 else
   echo 'Meet recognition: no host service declaration; skipping local ASR' >&2
 fi
-preparation_failed=0
-wait "$builds_pid" || preparation_failed=1
-# prepare already selected this immutable runtime. Its repeated custody proof
-# can overlap component staging; a cold deployment still needs it selected first.
-if [[ ! -f $runtime/.pi-stack-commit || $(<"$runtime/.pi-stack-commit") != "$expected" ]]; then
-  wait "$runtime_pid" || preparation_failed=1
-fi
-(( preparation_failed == 0 )) || exit 1
-"$root/deploy/orchestrator"
 if (( services )) && [[ ${PI_STACK_DEPLOY_NO_SUDO:-0} != 1 ]]; then
   timezone_users=()
   for user in "${users[@]}"; do timezone_users+=(--user "$user"); done
@@ -268,9 +271,9 @@ fi
 # disjoint state: separate release directories, ~/.local/bin, and ~/.pi/agent.
 # The shared skills release is published once, serially; each account's
 # settings and package install then proceed in parallel.
-"$root/deploy/remote" &
-remote_pid=$!
-"$root/deploy/tools" &
+(
+  for user in "${users[@]}"; do "$root/deploy/tools" --links-only "$user"; done
+) &
 tools_pid=$!
 (
   set -euo pipefail
@@ -290,8 +293,6 @@ tools_pid=$!
 ) &
 accounts_pid=$!
 publish_failed=0
-wait "$runtime_pid" || publish_failed=1
-wait "$remote_pid" || publish_failed=1
 wait "$tools_pid" || publish_failed=1
 wait "$accounts_pid" || publish_failed=1
 (( publish_failed == 0 )) || exit 1
@@ -399,15 +400,22 @@ if (( activation_failed == 0 )); then
   daemon_activation_pid=$!
 fi
 
-# Refresh the additive gates before rolling the shared-room supervisor. Root,
-# memory and encrypted custody remain untouched by the ordinary host release.
+# Refresh additive access and hand enabled consumers to their owning activator.
+# Root replacement pauses dispatch only; durable intake remains accepting.
 if ! "$root/deploy/one-kenan-access-release" "$PI_STACK_HOST_FILE"; then
   activation_failed=1
 elif jq -e '.oneKenan == true' "$PI_STACK_HOST_FILE" >/dev/null; then
   if [[ ${PI_STACK_DEPLOY_NO_SUDO:-0} != 1 ]]; then
-    pi_stack_as_root python3 "$root/deploy/native-history-root-activate" "$PI_STACK_HOST_FILE" "$expected" || activation_failed=1
+    consumer_status=0
+    pi_stack_as_root python3 "$root/deploy/one-kenan-activate" activate --host "$PI_STACK_HOST_FILE" --expected "$expected" || consumer_status=$?
+    if (( consumer_status == 75 )); then
+      if (( recognition )); then wait "$recognition_pid" || exit 1; fi
+      if [[ -n ${daemon_activation_pid:-} ]]; then wait "$daemon_activation_pid" || exit 1; fi
+      echo 'executor replacement waiting: accepting Root remains busy or its graceful handoff is settling' >&2
+      exit 75
+    fi
+    (( consumer_status == 0 )) || activation_failed=1
   fi
-  pi_stack_as_root python3 "$root/deploy/one-kenan-activate" rooms --host "$PI_STACK_HOST_FILE" --expected "$expected" || activation_failed=1
 fi
 if (( recognition )); then
   wait "$recognition_pid" || activation_failed=1

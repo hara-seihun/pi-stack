@@ -146,7 +146,7 @@ export function fleetInventory(host, persons, platform) {
 }
 export function fleetCompletionBarrier(owners, inspect) {
   const waiting = [];
-  // Fence/census EVERY owner even when an earlier owner's provider is still busy.
+  // Observe every owner; an earlier busy provider never hides later custody.
   for (const item of owners) {
     const receipt = inspect(item);
     if (receipt.ready !== true) waiting.push({ user: item.user, pendingCompletions: receipt.pendingCompletions, reason: receipt.reason });
@@ -181,14 +181,11 @@ export async function boundary({ hostFile, root, candidate, mode = 'advance', st
     const script = join(root, 'deploy/native-history-root-boundary');
     if (!existsSync(script)) throw new Error('Root native history maintenance adapter is missing from this source bundle');
     const result = spawnSync('/usr/bin/python3', [script, hostFile, candidate, ...(action ? [action] : [])], { encoding: 'utf8', timeout: 35000 });
-    if (result.status === 75 && result.stderr.includes('native history boundary waiting:')) return { ready: false, state: 'root-busy', reason: result.stderr.trim() };
+    if (result.status === 75 && result.stderr.includes('native history observation waiting:')) return { ready: false, state: 'root-busy', reason: result.stderr.trim() };
     if (result.status !== 0) throw new Error(`Root native history boundary failed: ${result.error?.message ?? result.stderr}`);
     const value = JSON.parse(result.stdout);
     if (value.ready !== true) throw new Error('Root native history adapter returned an invalid readiness proof');
-    if (action === undefined && !((value.state === 'gated-idle' && value.admissionGated === true)
-      || (value.state === 'inactive' && value.escapedNativeProcesses === 0) || value.state === 'not-enabled')) {
-      throw new Error('Root native history migration requires an actual admission gate or absent native producer');
-    }
+    if (action !== '--restore' && value.admissionGated === true) throw new Error('History observation must not gate Root intake');
     return value;
   };
   if (!state) {
@@ -243,13 +240,10 @@ export async function boundary({ hostFile, root, candidate, mode = 'advance', st
         const health = JSON.parse(command('runuser', ['-u', item.user, '--', 'curl', '-fsS', '--max-time', '2', `http://127.0.0.1:${port}/v1/health`]));
         if (health.releaseCommit !== selected) throw new Error('Candidate source is selected but has not acquired serving custody');
       }
-      if (state.rootBoundary === 'restore-required') rootBoundary('--restore');
       state.phase = 'released'; atomicJson(statePath, state); return { ready: true, state: 'candidate-selected' };
     }
     const statuses = state.owners.map(item => ownerStatus(item));
-    if (statuses.some(item => !item.available) && state.rootBoundary === 'restore-required') throw new Error('An unavailable owner may have crossed native closure; restoration requires its producer proof');
     if (statuses.some(item => item.available && ['closing','migrated','owners-closed','migration-pending'].includes(item.value.phase)) || state.phase === 'ready') throw new Error('Native history is already preserved/migrated; prior capture source restoration is not allowed. Resume the candidate.');
-    if (state.rootBoundary === 'restore-required') rootBoundary('--restore');
     state.phase = 'restoring'; atomicJson(statePath, state);
     if (realpathSync(remotePointer) === state.remoteStage) selectPointer(remotePointer, state.legacyRemote);
     if (realpathSync(orchestratorPointer) === state.fleetStage) selectPointer(orchestratorPointer, state.legacyOrchestrator);
@@ -288,10 +282,15 @@ export async function boundary({ hostFile, root, candidate, mode = 'advance', st
     });
   }
   if (mode !== 'probe') {
-    // The old daemon aborts tool-free providers on restart. Fence fresh ledger
-    // admission first, then let every already accepted completion finish naturally.
-    const admission = fleetCompletionBarrier(state.owners.filter(item => item.mode === 'fleet' && !state.adopted.includes(item.unit)), item => fleetAdmission(item, root, { candidate, legacySource: state.legacySource }));
-    if (!admission.ready) return { ...admission, state: 'fleet-completions', reason: 'Accepted old fleet completions must settle before controller adoption' };
+    const fleets = state.owners.filter(item => item.mode === 'fleet' && !state.adopted.includes(item.unit));
+    const identity = { candidate, legacySource: state.legacySource };
+    const natural = fleetCompletionBarrier(fleets, item => fleetAdmission(item, root, identity, 'probe'));
+    if (!natural.ready) return { ...natural, state: 'fleet-completions', reason: 'Old provider work is running; ordinary intake and dispatch remain open' };
+    const dispatch = fleetCompletionBarrier(fleets, item => fleetAdmission(item, root, identity));
+    if (!dispatch.ready) {
+      for (const item of fleets) fleetAdmission(item, root, identity, 'restore');
+      return { ...dispatch, state: 'fleet-completions', reason: 'Provider dispatch raced the short replacement; normal dispatch has resumed' };
+    }
     stageRemote(state.legacyRemote, state.remoteStage, state.manifestPath);
     stageFleet(state.legacyOrchestrator, state.fleetStage, state.manifestPath);
     if (state.phase === 'planned') {
@@ -315,8 +314,7 @@ export async function boundary({ hostFile, root, candidate, mode = 'advance', st
     if (item.value.phase === 'restored') throw new Error('An owner restored its admission; restore the whole publication boundary before another candidate');
   }
   if (!allOwnersReady(statuses)) return { ready: false, state: state.phase, owners: statuses, reason: 'Old accepted work or output remains with its legacy owner' };
-  if (mode !== 'probe') { state.rootBoundary = 'restore-required'; atomicJson(statePath, state); }
-  const privileged = rootBoundary(mode === 'probe' ? '--probe' : undefined);
+  const privileged = rootBoundary('--probe');
   if (!privileged.ready) return privileged;
   if (mode === 'probe') return { ready: true, state: 'drained', reason: 'Owners are drained; the publication can perform close/migration' };
   for (const item of state.owners) {
