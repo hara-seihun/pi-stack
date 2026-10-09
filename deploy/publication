@@ -1138,7 +1138,7 @@ function nativeSourceProbe(request, target, ensureSource = false) {
 }
 
 export function nativeMaintenanceSourceProof(repository, candidate, retained) {
-  const files = ['deploy/native-history-boundary', 'deploy/native-history-coordinator.mjs', 'deploy/native-history-bridge.mjs',
+  const files = ['deploy/native-history-boundary', 'deploy/native-history-coordinator.mjs', 'deploy/native-history-owner-recovery.mjs', 'deploy/native-history-bridge.mjs',
     'deploy/native-history-closed-owner.mjs', 'deploy/native-history-package-identity.mjs', 'deploy/native-history-root-boundary',
     'deploy/one-kenan-activate', 'scripts/migrate-native-history.mjs'];
   try {
