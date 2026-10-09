@@ -96,9 +96,9 @@ Missing, stale, replaced-root, unreadable or failed measurements retain the full
 
 This ledger is native workspace state, `workspace_capacity` in the same registry. Its additive schema leaves existing source custody, leases and cleanup guards unchanged. No dependency installation, runtime activation or cache deletion occurs during admission.
 
-## Repricing completed unestimated work
+## Repricing operating admission
 
-A completed unestimated clone can opt into an explicit priced allowance without changing its source, files, lease, owner, state or original creation request:
+A completed unestimated clone can opt into an explicit priced allowance, and a source-only checkout can expand to a budgeted install/build allowance, without changing its source, files, lease, owner, state or original creation request:
 
 ```sh
 agent-workspace measure-capacity --path /absolute/checkout --budget-ms 40000 --json
@@ -108,7 +108,9 @@ agent-workspace reprice-capacity --path /absolute/checkout \
 
 Use source-only when the continuing work is only source edits; choose budgeted and enough growth for continuing installs/builds. Here `growth-mib` declares **additional remaining writes**, not a replacement total that forgets consumed growth. The tool requires a fresh successful root-identity-bound sample and immutable Git source custody. It forecasts the original source from the existing object store (no history import), uses that conservative source upper bound as baseline, and sets the growth budget to measured growth plus the requested remaining allowance. Admission applies the same 64 MiB/1% measurement margin. Repricing all completed unestimated rows removes their shared 30 GiB guard in favor of the maximum explicitly requested floor; other rows retain their own floors and remaining growth.
 
-Only active/referenced/blocked/repair-required unestimated rows may transition. Pending, reclaiming, released, unpriced, already-priced or unmeasurable rows fail without mutation. The checkout/group and filesystem fences cover pricing; a compare-and-swap and `workspace_capacity_repricing` journal atomically preserve the previous plan, new plan and exact sample. Dirty, live and unpublished work remain protected. This is a budget declaration, not evidence that work is published or deletable. Refresh after large manual deletion before repricing; never manufacture admission by editing the ledger.
+For source-only → budgeted expansion, the existing source forecast, import accounting and completion baseline stay unchanged. Measured growth is added to the explicitly requested **remaining** allowance, with the same credit margin. Neither total growth budget nor headroom may decrease. This changes mutable operating admission, not immutable submitted execution/proof source. For example, a source-only checkout admitted with 512 MiB can request `--intent budgeted --headroom-gib 8 --growth-mib 2048` before installing dependencies; it need not be cloned again.
+
+Only active/referenced/blocked/repair-required rows with an unestimated plan or a source-only → budgeted transition may reprice. Pending, reclaiming, released, unpriced, unsupported transitions and unmeasurable rows fail without mutation. The checkout/group and filesystem fences cover pricing and fresh-cache validation; admission excludes only the replaced reservation and accounts for every other live row. A compare-and-swap and `workspace_capacity_repricing` journal atomically preserve the previous plan, new plan and exact sample. Disk/inode refusal leaves the original budget, source and checkout intact. Dirty, live and unpublished work remain protected. This is a budget declaration, not evidence that work is published or deletable. Refresh after large manual deletion before repricing; never manufacture admission by editing the ledger.
 
 ## Finding out what became of a checkout
 

@@ -1815,11 +1815,15 @@ function remainingCapacityBytes(plan, state, measurement) {
   if (!Number.isSafeInteger(budget)) fail("capacity ledger total exceeds supported byte range");
   if (budget === 0 || !measurement.ok) return budget;
   if (!Number.isSafeInteger(measurement.bytes) || measurement.bytes < 0) fail("invalid capacity allocated-block measurement");
+  return Math.max(0, budget - Math.max(0, measurement.bytes - capacityAllocationBaseline(plan, state)));
+}
+
+function capacityAllocationBaseline(plan, state) {
   const sourceImportBytes = plan.sourceImportBytes ?? 0;
   if (!Number.isSafeInteger(sourceImportBytes) || sourceImportBytes < 0 || sourceImportBytes > plan.constructionBytes) fail("invalid capacity source import budget");
   const baseline = state === "creating" ? 0 : plan.completedAllocationBytes ?? (plan.constructionBytes - sourceImportBytes);
   if (!Number.isSafeInteger(baseline) || baseline < 0) fail("invalid capacity completed allocation baseline");
-  return Math.max(0, budget - Math.max(0, measurement.bytes - baseline));
+  return baseline;
 }
 
 const CAPACITY_MEASUREMENT_MAX_AGE_MS = 15 * 60_000;
@@ -2563,23 +2567,27 @@ function repriceCapacityCommand(database, args, statePath) {
     const record = recordBy(database, { id: selected.id });
     if (!["active", "referenced", "blocked", "repair-required"].includes(record.state)) fail(`workspace cannot reprice capacity from state ${record.state}`);
     const row = database.prepare("SELECT device_id,plan_json FROM workspace_capacity WHERE workspace_id=?").get(record.id);
-    if (row === undefined) fail("capacity repricing requires an existing unestimated plan");
+    if (row === undefined) fail("capacity repricing requires an existing capacity plan");
     const oldPlan = JSON.parse(row.plan_json);
-    if (oldPlan.intent !== "unestimated") fail("capacity repricing only accepts unestimated plans; an existing priced budget is immutable");
+    const expandingSourceOnly = oldPlan.intent === "source-only" && intent.intent === "budgeted";
+    if (oldPlan.intent !== "unestimated" && !expandingSourceOnly) fail("capacity repricing accepts unestimated plans or source-only to budgeted expansion");
     capacityRequirement(oldPlan, []);
-    const measurement = cachedWorkspaceAllocation(database, record.id, record.path, row.device_id);
-    if (!measurement.ok) fail(`capacity repricing requires a fresh allocated-block sample: ${measurement.error}; run measure-capacity first`);
     if (record.durableSourceCommit === null) fail("capacity repricing requires immutable source custody");
-    const sourceDirectory = git(record.path, ["rev-parse", "--absolute-git-dir"]);
-    const plan = sourceCapacityPlan(record.path, record.durableSourceCommit, intent, statfsSync(record.path).bsize, sourceDirectory);
-    const sample = JSON.parse(database.prepare("SELECT measurement_json FROM workspace_capacity_measurement WHERE workspace_id=?").get(record.id).measurement_json);
-    const sampledGrowthBytes = Math.max(0, sample.bytes - plan.constructionBytes);
-    plan.completedAllocationBytes = plan.constructionBytes;
-    plan.growthBytes += sampledGrowthBytes;
-    capacityRequirement(plan, []);
-    plan.repricing = { priorIntent: oldPlan.intent, sampledGrowthBytes, remainingGrowthBytes: intent.growthBytes,
-      measurementStartedAt: sample.startedAt, measurementCompletedAt: sample.completedAt, marginBytes: measurement.marginBytes };
+    const plan = expandingSourceOnly ? { ...oldPlan, ...intent } : sourceCapacityPlan(record.path,
+      record.durableSourceCommit, intent, statfsSync(record.path).bsize, git(record.path, ["rev-parse", "--absolute-git-dir"]));
+    if (!expandingSourceOnly) plan.completedAllocationBytes = plan.constructionBytes;
     withResourceLock(statePath, `capacity:${row.device_id}`, () => {
+      const measurement = cachedWorkspaceAllocation(database, record.id, record.path, row.device_id);
+      if (!measurement.ok) fail(`capacity repricing requires a fresh allocated-block sample: ${measurement.error}; run measure-capacity first`);
+      const sample = JSON.parse(database.prepare("SELECT measurement_json FROM workspace_capacity_measurement WHERE workspace_id=?").get(record.id).measurement_json);
+      const sampledGrowthBytes = Math.max(0, sample.bytes - capacityAllocationBaseline(plan, record.state));
+      plan.growthBytes += sampledGrowthBytes;
+      capacityRequirement(plan, []);
+      if (expandingSourceOnly && (plan.headroomBytes < oldPlan.headroomBytes || plan.growthBytes < oldPlan.growthBytes)) {
+        fail("source-only to budgeted expansion cannot reduce headroom or total growth budget");
+      }
+      plan.repricing = { priorIntent: oldPlan.intent, sampledGrowthBytes, remainingGrowthBytes: intent.growthBytes,
+        measurementStartedAt: sample.startedAt, measurementCompletedAt: sample.completedAt, marginBytes: measurement.marginBytes };
       plan.admission = assertCapacity(record.root, args, database, record.path, {
         ...plan, constructionBytes: 0, growthBytes: remainingCapacityBytes(plan, record.state, measurement),
       });

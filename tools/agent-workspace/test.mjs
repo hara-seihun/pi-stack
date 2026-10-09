@@ -860,7 +860,71 @@ test("fenced capacity repricing preserves live unestimated work and journals sam
     assert.equal(journal.length, 1);
     assert.equal(JSON.parse(journal[0].old_plan_json).intent, "unestimated");
     assert.deepEqual(JSON.parse(journal[0].new_plan_json), repriced.capacity);
-    assert.throws(() => run(args, f.env), /only accepts unestimated plans/);
+    assert.throws(() => run(args, f.env), /accepts unestimated plans or source-only to budgeted expansion/);
+    assert.equal(db.prepare("SELECT count(*) AS n FROM workspace_capacity_repricing").get().n, 1);
+    db.close();
+  } finally { f.close(); }
+});
+
+test("source-only build expansion preserves custody and conserves its original admission on refusal", () => {
+  const f = fixture();
+  try {
+    const created = JSON.parse(run(["create", "--root", f.workspaces, "--name", "build-expansion", "--repo", f.source,
+      "--intent", "source-only", "--headroom-gib", "1", "--growth-mib", "8", "--json"], f.env));
+    writeFileSync(path.join(created.path, "file.txt"), "unpublished source\n");
+    writeFileSync(path.join(created.path, "generated.bin"), Buffer.alloc(80 * 1024 ** 2));
+    const db = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    const before = db.prepare("SELECT * FROM workspace WHERE id=?").get(created.id);
+    const oldCapacity = db.prepare("SELECT * FROM workspace_capacity WHERE workspace_id=?").get(created.id);
+    const args = ["reprice-capacity", "--id", created.id, "--intent", "budgeted", "--headroom-gib", "1", "--growth-mib", "128", "--json"];
+    db.prepare("DELETE FROM workspace_capacity_measurement WHERE workspace_id=?").run(created.id);
+    assert.throws(() => run(args, f.env), /requires a fresh allocated-block sample/);
+    run(["measure-capacity", "--id", created.id, "--json"], f.env);
+    assert.throws(() => run(args.map(value => value === "128" ? "1000000" : value), f.env), /GiB is required/);
+    assert.throws(() => run(args.map(value => value === "1" ? "0.5" : value), f.env), /cannot reduce headroom/);
+    assert.deepEqual(db.prepare("SELECT * FROM workspace_capacity WHERE workspace_id=?").get(created.id), oldCapacity);
+    assert.deepEqual(db.prepare("SELECT * FROM workspace WHERE id=?").get(created.id), before);
+    assert.equal(db.prepare("SELECT count(*) AS n FROM workspace_capacity_repricing").get().n, 0);
+    const repriced = JSON.parse(run(args, f.env));
+    assert.equal(repriced.capacity.intent, "budgeted");
+    for (const key of ["sourceCommit", "sourceImportBytes", "constructionBytes", "completedAllocationBytes", "estimate"]) {
+      assert.equal(repriced.capacity[key], created.capacity[key]);
+    }
+    assert.ok(repriced.capacity.repricing.sampledGrowthBytes >= 80 * 1024 ** 2);
+    assert.equal(repriced.capacity.growthBytes, repriced.capacity.repricing.sampledGrowthBytes + 128 * 1024 ** 2);
+    const remaining = workspaceTesting.remainingCapacityBytes(repriced.capacity, "active",
+      workspaceTesting.cachedWorkspaceAllocation(db, created.id, created.path, oldCapacity.device_id));
+    assert.ok(remaining >= 128 * 1024 ** 2 && remaining <= 192 * 1024 ** 2);
+    assert.deepEqual(db.prepare("SELECT * FROM workspace WHERE id=?").get(created.id), before);
+    assert.equal(readFileSync(path.join(created.path, "file.txt"), "utf8"), "unpublished source\n");
+    const journal = db.prepare("SELECT * FROM workspace_capacity_repricing WHERE workspace_id=?").all(created.id);
+    assert.equal(journal.length, 1);
+    assert.equal(journal[0].old_plan_json, oldCapacity.plan_json);
+    assert.deepEqual(JSON.parse(journal[0].new_plan_json), repriced.capacity);
+    db.close();
+  } finally { f.close(); }
+});
+
+test("concurrent source-only build expansions cannot reuse filesystem capacity", async () => {
+  const f = fixture();
+  try {
+    const created = ["first", "second"].map(name => JSON.parse(run(["create", "--root", path.join(f.root, name),
+      "--name", "expand", "--repo", f.source, "--intent", "source-only", "--headroom-gib", "1", "--growth-mib", "8", "--json"], f.env)));
+    const db = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    const before = created.map(record => db.prepare("SELECT * FROM workspace WHERE id=?").get(record.id));
+    const stats = statfsSync(f.root);
+    const growthMiB = Math.floor(stats.bavail * stats.bsize / 1024 ** 2 * 0.6);
+    const results = await Promise.allSettled(created.map(record => runAsync(["reprice-capacity", "--id", record.id,
+      "--intent", "budgeted", "--headroom-gib", "1", "--growth-mib", String(growthMiB), "--json"], f.env)));
+    assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
+    assert.equal(results.filter(result => result.status === "rejected").length, 1);
+    assert.match(results.find(result => result.status === "rejected").reason.message, /GiB is required/);
+    const loserIndex = results.findIndex(result => result.status === "rejected");
+    assert.deepEqual(JSON.parse(db.prepare("SELECT plan_json FROM workspace_capacity WHERE workspace_id=?")
+      .get(created[loserIndex].id).plan_json), created[loserIndex].capacity);
+    for (let index = 0; index < created.length; index++) {
+      assert.deepEqual(db.prepare("SELECT * FROM workspace WHERE id=?").get(created[index].id), before[index]);
+    }
     assert.equal(db.prepare("SELECT count(*) AS n FROM workspace_capacity_repricing").get().n, 1);
     db.close();
   } finally { f.close(); }
