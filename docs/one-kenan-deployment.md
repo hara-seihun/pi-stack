@@ -244,7 +244,7 @@ The integrator's staging stack owns the complete-product acceptance tests.
 
 ## Explicit consumer release activation
 
-Source publication does not replace root or memory consumers. `deploy/host` automatically refreshes the installed `pi-kenan-access` command and its additive nft table on enabled hosts, then invokes the room-only rolling handoff and verifies the room startup commit. Root/memory/custody services are not restarted. Room self-instructions access is restricted to root and the room UID; root executor access to room state is a separate read-only filesystem grant.
+`deploy/host` refreshes the installed `pi-kenan-access` command and its additive nft table on enabled hosts, then invokes the normal One Kenan activator. The activator replaces stale memory/Root consumers and rolls rooms, proving each startup commit. Encrypted custody remains running. Room self-instructions access is restricted to root and the room UID; root executor access to room state is a separate read-only filesystem grant.
 
 After selecting committed Remote source, a room-only rolling handoff needs no root migration and touches no memory/root service. Health probes treat connection resets, early disconnects and incomplete/malformed responses during listener replacement as unavailable, just like connection refusal. Readiness still requires the expected startup commit and `ok:true` within the existing 40-second budget; persistent failures defer rather than accept a release or kill active work. This covers the room handoff reset that failed publication `PUB-ef31f4591b7a483ca18022a5` after the replacement listener was already starting.
 
@@ -265,49 +265,19 @@ PYTHONDONTWRITEBYTECODE=1 python3 scripts/one-kenan-activate.test.py
 node --test scripts/one-kenan-access-release.test.mjs
 ```
 
-The helper accepts custom listener/runtime paths from the root-owned `/etc/pi-stack/one-kenan.json`; `--config` overrides that file. Ordinary activation/proof never opens private stores, sessions or encrypted custody; first migration reads only the aggregate lifecycle counts described below. Disabled hosts change nothing. Activation runs in PID 1's mount namespace and holds an administrator-only activation lock. `check` refuses the pre-protocol root generation with exit 75: that generation exposes neither active asks nor consent reconciliation. Use the explicit controlled idle migration below, never a blind restart.
+The helper accepts custom listener/runtime paths from the root-owned `/etc/pi-stack/one-kenan.json`; `--config` overrides that file. Activation/proof never opens private stores, sessions or encrypted custody. Disabled hosts change nothing. Activation runs in PID 1's mount namespace and holds an administrator-only activation lock.
 
-### First pre-protocol migration
+Root exposes startup `releaseCommit`, `releaseProtocol:2` and aggregate execution/consent counters. The separately authenticated `POST /v1/admin/release` returns 409 while work is active, without changing admission or cancelling execution. At natural idle it pauses executor dispatch and consent reconciliation only. Normal asks remain authenticated, durably accepted and retrievable with their original request IDs; queued receipts carry `executor-handoff`. `DELETE` resumes dispatch. A running owner without an atomic idle release protocol is left untouched and activation returns 75; this is not a native-history preflight requirement.
 
-`migrate` supports the inspected startup source `1cd80555c5ce5b8f51e8e467fb6d598fcebcf73e` only. The administrator attests that source and the **previously inspected** live root MainPID; it refuses a changed PID, a protocol-enabled root, or different public source hashes. Keep that release's public Remote/runtime sources available through publication. No private session, transcript, prompt, request, reply, token value or consent body is inspected. SQLite probes issue only two `COUNT(*)` queries, in read-only/query-only mode inside the runtime mount namespace.
+Candidate source selection and drain configuration are prepared before any release request. For an existing protocol1 owner, its authenticated atomic idle POST is used once, immediately before replacing that Root executor: 409 leaves its intake and active execution untouched; 200 is followed directly by Root replacement, before memory or rooms. Clients reconnect with the same request ID across this bounded old-listener transition. The new protocol2 owner accepts durable pending asks; any remaining memory replacement pauses its dispatch, not its intake. Protocol2 replacements use accepting dispatch pause throughout.
 
-After publication has selected the target commit, run from its release checkout:
+Memory finishes accepted HTTP before SQLite closes. Root's main-only SIGTERM pauses new dispatch, waits for active asks and consent reconciliation while continuing to accept queued asks, then drains accepted HTTP and closes stores. Its mixed kill mode and infinite stop timeout prevent a readiness timeout from killing accepted native work. Queued asks and durable consent receipts survive in their existing stores and the next owner resumes them without admitting another consultation. Exact-ID clients reconnect across the brief listener swap rather than inventing acceptance or resubmitting a new request.
 
-```sh
-# Use the new launcher BEFORE either consumer starts: it pins source and sets startup commit.
-sudo nsenter -t 1 -m -- install -m 755 deploy/one-kenan-runtime /usr/local/libexec/pi-kenan-runtime
-# Keep the configured administrator prompt current separately; migration never replaces it.
-sudo nsenter -t 1 -m -- python3 /ABSOLUTE/RELEASE/deploy/one-kenan-activate migrate \
-  --host /etc/pi-stack/host.json --expected TARGET_COMMIT \
-  --preprotocol-commit 1cd80555c5ce5b8f51e8e467fb6d598fcebcf73e \
-  --preprotocol-pid INSPECTED_ROOT_MAINPID
-sudo nsenter -t 1 -m -- python3 /ABSOLUTE/RELEASE/deploy/one-kenan-activate proof \
-  --host /etc/pi-stack/host.json --expected TARGET_COMMIT
-
-PYTHONDONTWRITEBYTECODE=1 python3 scripts/one-kenan-activate.test.py
-sudo unshare --net -- python3 scripts/one-kenan-activate.test.py --network-rehearsal
-```
-
-The helper installs its own `inet pi_kenan_migration` nft table, rejecting new root-listener TCP SYNs without interrupting already accepted connections. Only the helper's root-only `SO_MARK` health/control sockets bypass that fence; there is no inspector/debug listener. Existing people, room services, custody and the host flag stay unchanged.
-
-It requires **all five counts to be zero**: root-role memory sessions (including disconnected model requests), undelivered consents, non-listening/non-TIME_WAIT root listener sockets, the root process's own connected TCP sockets (including outbound model/admission/consent calls), and descendant processes in the root cgroup. Under fenced admission, it freezes the root cgroup and repeats the counts before any restart. These source invariants ensure every admitted model retains a root token until disposal/finalization, and independent consent execution remains an undelivered row. Any nonzero count defers with sanitized counts and exit 75; historic failed tokens and waiting consent are retained, not declared idle or deleted. A socket-only check is not sufficient.
-
-With idle established, memory's infinite stop timeout lets accepted HTTP finish before SQLite closes. The helper replaces memory, thaws the idle root for its normal SIGTERM, replaces root, rolls rooms and proves each startup commit. Thaw and fence removal run on every normal failure; failed/pending readiness never claims success. The whole operation has a 40-second readiness budget, not a forced-kill budget.
-
-After a killed operator process or machine-level interruption, recover the **migration-only** fence and freezer explicitly, preserving any pending work:
-
-```sh
-sudo systemctl thaw pi-kenan-root.service
-sudo nft delete table inet pi_kenan_migration
-```
-
-Do not remove the ordinary `pi_one_kenan` listener-UID gates, restart custody, delete admission tokens/consent, or signal live Bun with `SIGUSR1`: the installed Bun 1.4.2 terminated on that signal in a disposable fixture. Inspect service readiness before retrying. A stale migration table is refused rather than overwritten.
-
-New root generations expose startup `releaseCommit` and `releaseProtocol:1`. The separately authenticated `POST /v1/admin/release` atomically refuses busy asks/consent continuations or gates new admission; `DELETE` releases the gate. Activation restarts only stale memory/root consumers while root is quiescent, lets memory finish accepted requests before closing SQLite, and never restarts custody. Root/memory/journal launchers pin their source and record the selected commit before dropping privilege. Sealed custody or readiness that exceeds the bounded activation deadline remains pending, never a completed release.
+Root/memory/journal launchers pin their source and record the selected commit before dropping privilege. The helper's 40-second readiness budget bounds its observation, not systemd's graceful drain. Pending readiness remains pending. The history adapter is observational throughout preparation and never establishes a Root admission journal or gate.
 
 Rooms use the existing `pi-remote-supervise` rolling handoff, so active runtime hosts keep running and the replacement supervisor adopts them without replay. The helper installs a room-only launcher drop-in. For an existing direct-Bun room unit, it temporarily sets `KillMode=process`, sends `SIGUSR2` to only the legacy main PID, and waits for a new main PID **and** expected startup health before removing that migration drop-in. Later handoffs keep `KillMode=control-group` for deliberate service shutdown. A failed first handoff retains its migration setting for repair rather than killing active hosts. Ordinary users' units are untouched.
 
-`proof` checks each consumer's live HTTP startup commit, not selected symlinks or service start times. Its output contains only role/unit/revision metadata. Existing general publication receipts cover ordinary supervisors, router and voice; host activation now checks rooms, but receipts still do not imply root/memory were activated.
+`proof` checks each consumer's live HTTP startup commit, not selected symlinks or service start times. Its output contains only role/unit/revision metadata. Successful enabled-host activation includes Root, memory and rooms; a pending consumer handoff is not a successful host release.
 
 ### Person-scoped implicit execution model
 

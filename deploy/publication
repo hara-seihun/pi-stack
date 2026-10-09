@@ -1063,6 +1063,7 @@ export function deployTarget(request, target, logPath) {
   if (/^(live meeting rooms on this host \([^\r\n]+\); deploying now would end them|meeting census unavailable on this host: .*)$/m.test(tail)) return { ...result, kind: "host-lock-busy", liveMeeting: true };
   if (/^native source prerequisite [^\r\n]+ requires [0-9a-f]{40} before Pi Stack [0-9a-f]{40}; selected [0-9a-f]{40}$/m.test(tail)) return { ...result, kind: "host-lock-busy", nativePrerequisite: true };
   if (/^native history boundary waiting: [^\r\n]+$/m.test(tail)) return { ...result, kind: "host-lock-busy", nativeHistory: true };
+  if (/^executor replacement waiting: [^\r\n]+$/m.test(tail)) return { ...result, kind: "host-lock-busy", executorReplacement: true };
   return result;
 }
 
@@ -1156,7 +1157,8 @@ function nativeSourceProbe(request, target, ensureSource = false) {
 export function nativeMaintenanceSourceProof(repository, candidate, retained) {
   const files = ['deploy/native-history-boundary', 'deploy/native-history-coordinator.mjs', 'deploy/native-history-owner-recovery.mjs', 'deploy/native-history-bridge.mjs',
     'deploy/native-history-closed-owner.mjs', 'deploy/native-history-package-identity.mjs', 'deploy/native-history-root-boundary',
-    'deploy/one-kenan-activate', 'scripts/migrate-native-history.mjs'];
+    'deploy/one-kenan-activate', 'scripts/migrate-native-history.mjs', 'deploy/prepare', 'deploy/host',
+    'deploy/runtime', 'deploy/lib', 'deploy/orchestrator', 'deploy/prepared-components.mjs'];
   try {
     const tree = sha => new Map(checked('git', ['-C', repository, 'ls-tree', '-r', '--format=%(objectname) %(path)', sha, '--', ...files])
       .split('\n').filter(Boolean).map(line => [line.slice(41), line.slice(0, 40)]));
@@ -1167,8 +1169,17 @@ export function nativeMaintenanceSourceProof(repository, candidate, retained) {
   } catch (error) { return { ok: false, error: { code: 'native-maintenance-source-unavailable', message: String(error) } }; }
 }
 
+export function nativeMaintenanceIntakeProof(repository, candidate) {
+  try {
+    const source = checked('git', ['-C', repository, 'show', `${candidate}:deploy/native-history-bridge.mjs`]);
+    return /^export const MAINTENANCE_INTAKE = ['"]always-open-v1['"];$/m.test(source)
+      ? { ok: true, value: { candidate, intake: 'always-open-v1' } }
+      : { ok: false, error: { code: 'closed-intake-maintenance-forbidden', candidate } };
+  } catch (error) { return { ok: false, error: { code: 'maintenance-intake-contract-unavailable', message: String(error) } }; }
+}
+
 export function nativeHistoryBoundaryTarget(request, target, mode, logPath) {
-  if (!["advance", "probe", "restore"].includes(mode)) throw new Error(`Unknown native history boundary mode: ${mode}`);
+  if (!["advance", "probe", "restore", "validate"].includes(mode)) throw new Error(`Unknown native history boundary mode: ${mode}`);
   const path = "deploy/native-history-boundary";
   const present = runCapture("git", ["-C", checkout, "ls-tree", "--name-only", request.integrationSha, "--", path]);
   if (!present) return { ok: true, status: 0, needed: false };
@@ -1181,6 +1192,13 @@ export function nativeHistoryBoundaryTarget(request, target, mode, logPath) {
       });
     }
   }
+  if (mode !== 'restore') {
+    const intake = nativeMaintenanceIntakeProof(checkout, request.integrationSha);
+    if (!intake.ok) throw Object.assign(new Error(`Deployment must keep agent intake open: ${JSON.stringify(intake.error)}`), {
+      probeFailure: { kind: 'native-source', mode, host: target.id, status: 1, intakeProof: intake.error },
+    });
+  }
+  if (mode === 'validate') return { ok: true, status: 0, needed: true };
   const source = runCapture("git", ["-C", checkout, "show", `${request.integrationSha}:${path}`]);
   const script = (mode === "advance" ? 'set -euo pipefail\ngit -C "$2" fetch --quiet --no-tags origin "$3"\n' : "") + source;
   const args = [target.hostConfig, target.releaseRepository, request.integrationSha, ...(mode === "advance" ? [] : [`--${mode}`])];
@@ -1298,6 +1316,9 @@ source /srv/pi/pi-remote/deploy/lib
 fleet_user=$(jq -er '.fleetUser | select(type == "string" and length > 0)' "$host_config")
 services=$("$service_check" "$fleet_user" "$environment" --json)
 voice=$(pi_stack_as_root curl -fsS --max-time 3 "$voice_url" | jq -r .releaseCommit)
+if jq -e '.oneKenan == true' "$host_config" >/dev/null; then
+  pi_stack_as_root python3 /srv/pi/pi-remote/deploy/one-kenan-activate proof --host "$host_config" --expected "$expected" >/dev/null
+fi
 [[ $remote == "$expected" && $orchestrator == "$expected" && $voice == "$expected" ]] || {
   printf '%s: deployed commit markers do not match integration: expected=%s remote=%s orchestrator=%s voice=%s\n' "$host" "$expected" "$remote" "$orchestrator" "$voice" >&2; exit 1;
 }
@@ -1928,7 +1949,7 @@ function deliverHost(request, target, logPath, previous) {
   try {
     const census = runtimeCensus(target.sshHost);
     retainSelectedSource(census, target.sshHost);
-    if (census.selectedCommit && commandResult("git", ["-C", checkout, "merge-base", "--is-ancestor", request.integrationSha, census.selectedCommit]).ok) {
+    if (!request.executorHandoffs?.[target.id] && census.selectedCommit && commandResult("git", ["-C", checkout, "merge-base", "--is-ancestor", request.integrationSha, census.selectedCommit]).ok) {
       if (census.selectedCommit !== request.integrationSha && !allRequests().some(candidate => candidate.integrationSha === census.selectedCommit && candidate.checks?.status === "passed")) throw new Error(`${target.id} selected descendant has no passing publication checks`);
       if (census.selectedCommit === request.integrationSha) publishAndroidArtifact(request, logPath, [target]);
       const proof = verifyTarget(target, census.selectedCommit);
@@ -1948,8 +1969,13 @@ function deliverHost(request, target, logPath, previous) {
     }
     const native = nativeSourceProbe(request, target, true);
     if (!native.ok) return hostWait(request, target, "native-source", logPath, `${target.id} needs a newer native source; other hosts continue.`, previous);
-    const history = nativeHistoryBoundaryTarget(request, target, "advance", logPath);
-    if (!history.ok) return hostWait(request, target, "native-history", logPath, `${target.id} old native generation must settle its history before any source artifacts change; other hosts continue.`, previous);
+    // The wrapper prepares all immutable artifacts while old listeners serve.
+    // Only deploy/host may advance the boundary, after that preparation proof.
+    const history = nativeHistoryBoundaryTarget(request, target, "validate", logPath);
+    if (history.needed) {
+      (request.nativeHistory ??= { hosts: {} }).hosts[target.id] = { state: "restore-required", integrationSha: request.integrationSha };
+      writeRequest(request);
+    }
     const bootstrap = !!request.contract && !selectedHasContract(census.selectedCommit, request);
     if (!request.contract && census.selectedCommit && hasExecutionContract(census.selectedCommit)) throw new Error(`${target.id} release would remove its thread execution contract`);
     if (bootstrap) {
@@ -1962,10 +1988,17 @@ function deliverHost(request, target, logPath, previous) {
       request.bootstrap.hosts[target.id].state = "deploying";
       writeRequest(request);
     }
-    publishAndroidArtifact(request, logPath, [target]);
     const deployed = deployTarget(request, target, logPath);
-    if (deployed.kind === "host-lock-busy") return hostWait(request, target, deployed.liveMeeting ? "live-meeting" : deployed.nativePrerequisite ? "native-source" : deployed.nativeHistory ? "native-history" : "host-lock", logPath, `${target.id} is not ready to activate; other hosts continue.`, previous);
+    if (deployed.kind === "host-lock-busy") {
+      if (deployed.executorReplacement) {
+        (request.executorHandoffs ??= {})[target.id] = { integrationSha: request.integrationSha, at: new Date().toISOString() };
+        writeRequest(request);
+      }
+      return hostWait(request, target, deployed.liveMeeting ? "live-meeting" : deployed.nativePrerequisite ? "native-source" : deployed.nativeHistory ? "native-history" : "host-lock", logPath, `${target.id} is not ready to activate; accepting controllers keep serving while the pending executor handoff resumes.`, previous);
+    }
+    if (request.executorHandoffs?.[target.id]) { delete request.executorHandoffs[target.id]; writeRequest(request); }
     if (!deployed.ok) throw new Error(`${target.id} release wrapper exited ${deployed.status}`);
+    publishAndroidArtifact(request, logPath, [target]);
     const proof = verifyTarget(target, request.integrationSha);
     const android = currentAndroidProof(target, request.integrationSha);
     const path = join(proofRoot, request.requestId, `${target.id}.json`);
@@ -2202,7 +2235,20 @@ function failStalled(requestId, reason) {
   updateFailure(request, reason, log, false);
 }
 
+export function publicationHold() {
+  const path = join(stateRoot, "always-open-source-hold.json");
+  if (!existsSync(path)) return null;
+  const hold = JSON.parse(readFileSync(path, "utf8"));
+  if (hold.version !== 1 || typeof hold.reason !== "string" || !hold.reason.trim()
+    || typeof hold.releaseWhen !== "string" || !hold.releaseWhen.trim()
+    || typeof hold.threadId !== "string" || !hold.threadId.trim() || hold.applicationStop !== false) {
+    throw new Error(`Invalid publication hold: ${path}`);
+  }
+  return { path, ...hold };
+}
+
 function failUnclaimed(requestId, observationJson) {
+  if (publicationHold()) return;
   const queue = allRequests();
   if (queue.some(request => recoveryNeeded(request) || request.status === "running")) return;
   const request = queue.find(request => runnable(request));
@@ -2223,13 +2269,16 @@ function watchdog() {
     if (request.status === "failed" && request.failure?.at >= activatedAt) ensureRepair(request);
   }
   const queue = allRequests();
+  const hold = publicationHold();
   const idlePath = join(stateRoot, "worker-watch.json");
   const idle = existsSync(idlePath) ? JSON.parse(readFileSync(idlePath, "utf8")) : {};
   const waiting = queue.find(request => runnable(request));
   const custodyOwners = queue.filter(recoveryNeeded);
   idle.blockedBy = custodyOwners.map(request => request.requestId);
+  if (hold) idle.hold = hold;
+  else delete idle.hold;
   delete idle.since;
-  if (waiting && custodyOwners.length === 0 && !queue.some(request => request.status === "running")) {
+  if (!hold && waiting && custodyOwners.length === 0 && !queue.some(request => request.status === "running")) {
     idle.queue = observeQueueProgress(waiting, idle.queue);
     if (queueStallReason(waiting, idle.queue)) {
       // A queued census can own the worker lock without entering running. Never stop it
@@ -2257,7 +2306,7 @@ function watchdog() {
         writeRepair(repair);
       }
     }
-    if (repair.status === "ready-to-retry") {
+    if (!publicationHold() && repair.status === "ready-to-retry") {
       if (locked("worker", "retry", [repair.requestId], true)) {
         repair.status = "retry-submitted";
         writeRepair(repair);
@@ -2301,7 +2350,7 @@ function watchdog() {
   const current = allRequests();
   const recoveryBlocked = current.some(request => (request.recoveryAttempts ?? 0) >= policy.maxAttempts
     && recoveryNeeded(request));
-  if (!recoveryBlocked && current.some(request => runnable(request) || request.status === "running"
+  if (!publicationHold() && !recoveryBlocked && current.some(request => runnable(request) || request.status === "running"
     || recoveryNeeded(request))) {
     const wake = commandResult("systemctl", ["--user", "start", "--no-block", "pi-stack-publication.service"], { timeoutSeconds: 5 });
     idle.wakeFailures = wake.ok ? 0 : (idle.wakeFailures ?? 0) + 1;
@@ -2313,6 +2362,24 @@ function watchdog() {
   } else {
     checked("systemctl", ["--user", "start", "--no-block", "pi-stack-publication-notices.service"], { timeoutSeconds: 5 });
   }
+}
+
+export function prepareRepairSource(request) {
+  validateRequestId(request.requestId);
+  validateSha(request.sourceSha);
+  if (request.sourceRef !== `refs/heads/pi-stack-publications/${request.requestId}`) {
+    throw new Error("Repair source ref does not match request id");
+  }
+  const retainedRef = `refs/pi-stack-publication/${request.requestId}/source`;
+  const retained = checked("git", ["-C", checkout, "for-each-ref", "--format=%(objectname)", retainedRef]);
+  if (retained && retained !== request.sourceSha) throw new Error("Retained repair source differs from request receipt");
+  if (!retained) {
+    checked("git", ["-C", checkout, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+      repositoryUrl, `${request.sourceRef}:${retainedRef}`], { timeoutSeconds: 40 });
+  }
+  const source = checked("git", ["-C", checkout, "rev-parse", "--verify", `${retainedRef}^{commit}`]);
+  if (source !== request.sourceSha) throw new Error("Fetched repair source differs from request receipt");
+  return source;
 }
 
 function repairRun(requestId) {
@@ -2329,15 +2396,13 @@ function repairRun(requestId) {
   try {
     checkCancellation(request);
     try {
+      prepareRepairSource(request);
       const workspace = JSON.parse(checked("agent-workspace", ["create", "--root", config.repairWorkspaceRoot,
         "--name", `publication-repair-${requestId}`, "--repo", checkout, "--ref", request.sourceSha,
         "--owner", repair.id, "--mode", "writer", "--intent", "source-only", "--headroom-gib", "2",
         "--growth-mib", "512", "--creation-timeout-seconds", "40", "--json"], { timeoutSeconds: 45 }));
       repair.workspace = workspace.path;
       writeRepair(repair);
-      if (!commandResult("git", ["cat-file", "-e", `${request.sourceSha}^{commit}`], { cwd: repair.workspace }).ok) {
-        checked("git", ["fetch", "--quiet", "origin", request.sourceRef], { cwd: repair.workspace });
-      }
       checked("git", ["checkout", "--detach", request.sourceSha], { cwd: repair.workspace });
     } catch (error) {
       repair.workspaceError = error instanceof Error ? error.message : String(error);
@@ -2570,6 +2635,7 @@ export function drain() {
   ensureState();
   // Re-read after each request. A submission while this service is active needs no timer turn.
   for (;;) {
+    if (publicationHold()) return;
     const requests = allRequests();
     let restorationBlocked = false;
     for (const request of requests) {

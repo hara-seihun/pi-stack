@@ -31,6 +31,7 @@ export function checkPolicy(name) {
     'Claude reset collector': ['tools/claude-reset'],
     runtime: ['packages/runtime', 'scripts'],
     'One Kenan deployment': deployment,
+    'prompt availability': ['deploy/prompt-availability', 'scripts/prompt-availability.test.py'],
     'Meet recognition protocol': ['apps/meet-recognition'],
     'action journal publication': deployment,
     'mail send boundary': ['tools/mail-send'],

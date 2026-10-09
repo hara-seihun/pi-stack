@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
-# Publish the pinned Pi, agent-browser, and the runtime extensions under
-# /srv/pi/runtime, backed by one production dependency tree that every other
-# component links instead of copying. Then point each Pi account's ~/.local/bin
-# at the selected release.
+# Prepare an immutable runtime and its durable proof while the selected runtime
+# keeps serving; activate that exact prepared candidate at the handoff.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 source "$root/deploy/lib"
 pi_stack_enter_deployment "$0" "$root" "$@"
 link_user=""
-if [[ ${1:-} == --links-only && $# == 2 ]]; then
+mode=deploy
+if [[ ${1:-} == --links-only && $# == 2 && -n $2 ]]; then
+  mode=links
   link_user=$2
+elif [[ ${1:-} == --prepare && $# == 1 ]]; then
+  mode=prepare
+elif [[ ${1:-} == --activate-prepared && $# == 1 ]]; then
+  mode=activate
 elif (( $# )); then
-  echo 'usage: deploy/runtime [--links-only USER]' >&2; exit 64
+  echo 'usage: deploy/runtime [--prepare | --activate-prepared | --links-only USER]' >&2; exit 64
 fi
 runtime_source="$root/packages/runtime"
 dest=${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}
@@ -21,15 +25,86 @@ PI_VERSION=0.87.1
 BROWSER_VERSION="agent-browser $(node -p 'require(process.argv[1]).packages["node_modules/agent-browser"].version' "$root/package-lock.json")"
 stage=""
 dependency_stage=""
+artifact_stage=""
 cleanup() {
   [[ -z $stage ]] || rm -rf "$stage"
   [[ -z $dependency_stage ]] || pi_stack_as_root rm -rf "$dependency_stage"
+  [[ -z $artifact_stage ]] || pi_stack_as_root rm -rf "$artifact_stage"
 }
 trap cleanup EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
 trap 'exit 129' HUP
 commit=$(git -C "$root" rev-parse HEAD)
+releases=${PI_STACK_RELEASES_ROOT:-$(dirname "$dest")/.pi-stack-releases}/runtime
+candidate="$releases/$commit"
+
+runtime_preparation_proof() {
+  pi_stack_as_root node --input-type=module - "$1" "$2" "$candidate" "$commit" "$dependencies_root" "$PI_VERSION" "$BROWSER_VERSION" <<'JS'
+import fs from 'node:fs';
+import path from 'node:path';
+const [operation, artifact, candidate, commit, dependenciesRoot, piVersion, browserVersion] = process.argv.slice(2);
+const proofPath = path.join(artifact, '.pi-stack-runtime-prepared.json');
+function fail(reason) {
+  console.error(`runtime preparation proof invalid: ${reason}`);
+  process.exit(66);
+}
+function syncDirectory(directory) {
+  const fd = fs.openSync(directory, 'r');
+  try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+}
+try {
+  const artifactStat = fs.lstatSync(artifact);
+  if (!artifactStat.isDirectory()) fail('candidate is not an immutable directory');
+  if (operation === 'verify' && (artifactStat.mode & 0o222) !== 0) fail('candidate is writable');
+  if (fs.readFileSync(path.join(artifact, '.pi-stack-commit'), 'utf8').trim() !== commit) fail('commit mismatch');
+  const modules = fs.readlinkSync(path.join(artifact, 'node_modules'));
+  const dependencyRelease = path.dirname(modules);
+  if (!/^[a-f0-9]{64}$/.test(path.basename(dependencyRelease)) ||
+      dependencyRelease !== path.join(dependenciesRoot, path.basename(dependencyRelease)) ||
+      modules !== path.join(dependencyRelease, 'node_modules')) fail('dependency identity mismatch');
+  for (const name of ['stack-pi.mjs', 'native-host.mjs', 'native-recovery.mjs', 'native-guardian.mjs', 'managed-agent.mjs', 'capacity']) {
+    if (fs.readlinkSync(path.join(artifact, name)) !== path.join(dependencyRelease, name)) fail(`${name} identity mismatch`);
+    fs.accessSync(path.join(artifact, name));
+  }
+  fs.accessSync(path.join(artifact, 'stack-pi.mjs'), fs.constants.X_OK);
+  fs.accessSync(path.join(artifact, 'capacity', 'native-session.js'));
+  for (const name of ['pi', 'agent-browser', 'pi-agent-browser-doctor', 'pi-model-selection-doctor']) {
+    fs.accessSync(path.join(modules, '.bin', name), fs.constants.X_OK);
+  }
+  const expected = { schema: 1, state: 'prepared', commit, candidate, dependencyRelease, piVersion, browserVersion };
+  if (operation === 'write') {
+    const fd = fs.openSync(proofPath, 'wx', 0o444);
+    try {
+      fs.writeFileSync(fd, `${JSON.stringify({ ...expected, preparedAt: new Date().toISOString() })}\n`);
+      fs.fsyncSync(fd);
+    } finally { fs.closeSync(fd); }
+    syncDirectory(artifact);
+  } else if (operation === 'verify') {
+    const proof = JSON.parse(fs.readFileSync(proofPath, 'utf8'));
+    for (const [key, value] of Object.entries(expected)) {
+      if (proof[key] !== value) fail(`${key} mismatch`);
+    }
+    if (typeof proof.preparedAt !== 'string' || !Number.isFinite(Date.parse(proof.preparedAt))) fail('preparation timestamp missing');
+    if ((fs.statSync(proofPath).mode & 0o222) !== 0) fail('proof is writable');
+  } else fail('unknown proof operation');
+} catch (error) {
+  fail(error.message);
+}
+JS
+}
+
+activate_prepared() {
+  runtime_preparation_proof verify "$candidate"
+  pi_stack_publish_release "$root" "$candidate" "$dest" runtime
+  reconcile_links
+}
+
+clean_live_spills() {
+  local spill_count
+  spill_count=$(pi_stack_as_root node "$root/deploy/clean-shell-spills.mjs" /tmp)
+  printf 'shell output custody proof passed; removed %s preexisting /tmp/pi-bash-*.log files\n' "$spill_count"
+}
 
 check_release() {
   local release=$1 version browser_version
@@ -72,9 +147,6 @@ JS
     node --test "$runtime_source/bash-spill.test.mjs"
   PI_TEST_RUNTIME_ENTRY="file://$release/node_modules/@earendil-works/pi-coding-agent/dist/index.js" \
     PI_TEST_BASH_CANCELLATION_PATCH=0 node --test "$runtime_source/bash-cancellation.test.mjs"
-  local spill_count
-  spill_count=$(pi_stack_as_root node "$root/deploy/clean-shell-spills.mjs" /tmp)
-  printf 'shell output custody proof passed; removed %s preexisting /tmp/pi-bash-*.log files\n' "$spill_count"
   cmp -s "$runtime_source/stack-pi.mjs" "$release/stack-pi.mjs" || { echo 'mandatory Pi launcher does not match this release' >&2; exit 1; }
   node --check "$release/stack-pi.mjs"
   cmp -s "$runtime_source/native-host.mjs" "$release/native-host.mjs" || { echo 'native session host does not match this release' >&2; exit 1; }
@@ -128,10 +200,32 @@ if [[ -n $link_user ]]; then
   exit 0
 fi
 
-if [[ -f $dest/.pi-stack-commit && $(<"$dest/.pi-stack-commit") == "$commit" && -x $dest/node_modules/.bin/pi ]]; then
+if [[ $mode == activate ]]; then
+  activate_prepared
+  printf 'activated prepared Pi %s from %s at %s\n' "$PI_VERSION" "$commit" "$dest"
+  exit 0
+fi
+
+if [[ $mode == deploy && -f $dest/.pi-stack-commit && $(<"$dest/.pi-stack-commit") == "$commit" && -x $dest/node_modules/.bin/pi ]]; then
   check_release "$dest"
+  clean_live_spills
   reconcile_links
   printf 'Pi %s from %s is already deployed\n' "$PI_VERSION" "$commit"
+  exit 0
+fi
+
+if [[ -d $candidate ]]; then
+  if [[ ! -f $candidate/.pi-stack-runtime-prepared.json ]]; then
+    check_release "$candidate"
+    runtime_preparation_proof write "$candidate"
+    pi_stack_as_root chmod -R a-w "$candidate"
+  fi
+  runtime_preparation_proof verify "$candidate"
+  if [[ $mode == deploy ]]; then
+    activate_prepared
+    clean_live_spills
+  fi
+  printf 'prepared Pi %s from %s at %s\n' "$PI_VERSION" "$commit" "$candidate"
   exit 0
 fi
 
@@ -200,6 +294,7 @@ if [[ ! -x $dependency_release/node_modules/.bin/pi ]]; then
   dependency_stage="$dependencies_root/.stage.$$.${RANDOM}"
   pi_stack_as_root install -d -m 755 "$dependency_stage"
   pi_stack_as_root rsync -a --delete --chmod=D755,Fu=rwX,Fgo=rX "$stage/" "$dependency_stage/"
+  pi_stack_as_root chmod -R a-w "$dependency_stage"
   pi_stack_as_root mv -T "$dependency_stage" "$dependency_release"
   dependency_stage=""
   rm -rf "$stage"
@@ -222,8 +317,20 @@ ln -s "$dependency_release/stack-pi.mjs" "$stage/release/stack-pi.mjs"
 ln -s "$dependency_release/managed-agent.mjs" "$stage/release/managed-agent.mjs"
 ln -s "$dependency_release/capacity" "$stage/release/capacity"
 printf '%s\n' "$commit" > "$stage/release/.pi-stack-commit"
-pi_stack_publish_release "$root" "$stage/release" "$dest" runtime
-
-check_release "$dest"
-reconcile_links
-printf 'deployed Pi %s and %s from %s to %s\n' "$PI_VERSION" "$BROWSER_VERSION" "$commit" "$dest"
+pi_stack_as_root install -d -m 755 "$releases"
+artifact_stage="$releases/.stage.$$.${RANDOM}"
+pi_stack_as_root install -d -m 755 "$artifact_stage"
+pi_stack_as_root rsync -a --delete --chmod=D755,Fu=rwX,Fgo=rX "$stage/release/" "$artifact_stage/"
+check_release "$artifact_stage"
+runtime_preparation_proof write "$artifact_stage"
+pi_stack_as_root chmod -R a-w "$artifact_stage"
+pi_stack_as_root mv -T "$artifact_stage" "$candidate"
+artifact_stage=""
+pi_stack_as_root sync -f "$releases"
+if [[ $mode == prepare ]]; then
+  printf 'prepared Pi %s and %s from %s at %s\n' "$PI_VERSION" "$BROWSER_VERSION" "$commit" "$candidate"
+else
+  activate_prepared
+  clean_live_spills
+  printf 'deployed Pi %s and %s from %s to %s\n' "$PI_VERSION" "$BROWSER_VERSION" "$commit" "$dest"
+fi

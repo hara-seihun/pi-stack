@@ -18,7 +18,7 @@ const jobs = [
   ["Kenan build", "npm", ["run", "build", "--workspace=kenan"], { dependsOn: ["Remote build"] }],
   ["manifests", "node", ["scripts/check-manifests.mjs"]],
   ["account deployment", "node", ["--test", "scripts/deploy-skills.test.mjs", "scripts/deploy-account.test.mjs", "scripts/deploy-person-configs.test.mjs"]],
-  ["deploy lock", "node", ["--test", "--test-skip-pattern=^host deployment activates Pi Remote", "scripts/deploy-lock.test.mjs", "scripts/deploy-runtime.test.mjs", "scripts/deploy-build.test.mjs", "scripts/deploy-prepare.test.mjs", "scripts/deploy-download.test.mjs", "scripts/deploy-retain.test.mjs", "scripts/release-checkout.test.mjs", "scripts/check-services.test.mjs"]],
+  ["deploy lock", "node", ["--test", "--test-skip-pattern=^host deployment activates Pi Remote", "scripts/deploy-lock.test.mjs", "scripts/deploy-runtime.test.mjs", "scripts/deploy-runtime-prepared.test.mjs", "scripts/prepared-components.test.mjs", "scripts/deploy-build.test.mjs", "scripts/deploy-prepare.test.mjs", "scripts/deploy-download.test.mjs", "scripts/deploy-retain.test.mjs", "scripts/release-checkout.test.mjs", "scripts/check-services.test.mjs"]],
   ...["disabled", "enabled"].map(guest => [
     `deploy host guest ${guest}`, "node", ["--test",
       `--test-name-pattern=^host deployment activates Pi Remote and reconciles daemons with guest ${guest}$`,
@@ -35,6 +35,7 @@ const jobs = [
   ["Claude reset collector", "node", ["--test", "tools/claude-reset/collect.test.mjs"]],
   ["runtime", "npm", ["test", "--workspace=@hara-seihun/pi-runtime"]],
   ["One Kenan deployment", "python3", ["-B", "scripts/one-kenan-deploy.test.py"]],
+  ["prompt availability", "python3", ["-B", "scripts/prompt-availability.test.py"]],
   ["Meet recognition protocol", "python3", ["-B", "-m", "unittest", "discover", "-s", "apps/meet-recognition", "-p", "test_protocol.py"]],
   ["action journal publication", "bun", ["test", "deploy/action-journal.test.ts"]],
   ["mail send boundary", "python3", ["-B", "tools/mail-send/test_send.py"]],
