@@ -1066,7 +1066,7 @@ function effectiveCachePaths(record) {
   return [...new Set([...record.cachePaths, ...repositoryManifestCachePaths(record.path)])];
 }
 
-function stripCaches(record, statePath) {
+function stripCaches(record, statePath, invalidateCapacity) {
   const removed = [];
   const seen = new Set();
   for (const target of cacheTargets(record.path, effectiveCachePaths(record))) {
@@ -1075,6 +1075,7 @@ function stripCaches(record, statePath) {
     if (holdsTrackedFiles(target)) continue;
     const cacheKey = createHash("sha256").update(path.relative(record.path, target)).digest("hex").slice(0, 12);
     const destination = gcDestination(statePath, record, `${path.basename(target)}-${cacheKey}`);
+    invalidateCapacity();
     moveToGc(target, destination);
     removed.push(path.relative(record.path, target));
   }
@@ -1224,8 +1225,7 @@ function reconcileRecord(database, record, options) {
       updateState(database, record, inspection.classification, inspection.reason);
       return { record, inspection, action: "none" };
     }
-    database.prepare("DELETE FROM workspace_capacity_measurement WHERE workspace_id=?").run(record.id);
-    removedCaches = stripCaches(record, options.statePath);
+    removedCaches = stripCaches(record, options.statePath, () => database.prepare("DELETE FROM workspace_capacity_measurement WHERE workspace_id=?").run(record.id));
     inspection = inspectRecord(record, { ignoreLease: true, safety, deadline: options.deadline });
   }
   if (inspection.classification === "repair-required") {
@@ -1303,8 +1303,7 @@ function groupReconciliation(database, records, options) {
   if (options.execute && !inspections.some((inspection) => ["referenced", "blocked"].includes(inspection.classification))) {
     records.forEach((record, index) => {
       if (inspections[index].classification !== "missing") {
-        database.prepare("DELETE FROM workspace_capacity_measurement WHERE workspace_id=?").run(record.id);
-        removedCaches.set(record.id, stripCaches(record, options.statePath));
+        removedCaches.set(record.id, stripCaches(record, options.statePath, () => database.prepare("DELETE FROM workspace_capacity_measurement WHERE workspace_id=?").run(record.id)));
       }
     });
     inspections = records.map((record) => inspectRecord(record,
