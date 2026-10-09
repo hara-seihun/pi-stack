@@ -1,6 +1,7 @@
 // The in-flight guarantee holds only if every API request goes through the
 // one door that reports it. This test is that guarantee's proof: it reads the
-// client source and fails when a request can leave by any other way.
+// client source and fails when a request can leave outside the native-owned
+// reporting transports.
 import { expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -14,12 +15,12 @@ const source = new Map(files(root).map(path => [relative(root, path), readFileSy
 
 /** The only ways a request may leave without passing the reporting door, each with the reason it is allowed. */
 const RAW_TRANSPORT_ALLOWED: Record<string, string> = {
-  "native.ts": "owns window.fetch: every API path passes through its override, which reports to in-flight.ts",
+  "native.ts": "owns window.fetch and the pinned/manager transports, which report to in-flight.ts",
   "notification-control.tsx": "a timer-driven GET poll of other environments' notification feeds; no person pressed anything",
   "websocket.ts": "owns authorized WebSocket construction; long-lived sockets do not belong in the fetch in-flight counter",
 };
 
-test("every API request leaves through the fetch override that reports it", () => {
+test("every API request leaves through a native-owned reporting transport", () => {
   const raw = /\b(browserFetch|XMLHttpRequest|sendBeacon|EventSource|new WebSocket)\b/;
   const offenders = [...source].filter(([file, text]) => raw.test(text) && !(file in RAW_TRANSPORT_ALLOWED)).map(([file]) => file);
   expect(offenders).toEqual([]);

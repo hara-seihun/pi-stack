@@ -311,6 +311,21 @@ async function getState(): Promise<EnvironmentState> {
   try { return await operation; } finally { if (selecting === operation) selecting = null; }
 }
 
+export async function managerFetch(url: string, init: RequestInit): Promise<Response> {
+  if (init.method !== API.manager.method && init.method !== API.updateManager.method) throw new Error("Invalid manager request method");
+  const user = auth.user, token = auth.session, revision = generation;
+  const signal = init.signal ? AbortSignal.any([init.signal, personRequests.signal]) : personRequests.signal;
+  signal.throwIfAborted();
+  if (!environments?.some(endpoint => url === `${endpoint.baseUrl}${API.manager.path()}`)) throw new Error("Manager endpoint is not authorized");
+  const settle = beginRequest(init.method, API.manager.path());
+  try {
+    const response = await abortable(browserFetch(url, { ...init, signal }), signal);
+    signal.throwIfAborted();
+    if (user !== auth.user || token !== auth.session || revision !== generation) throw new DOMException("Request owner changed", "AbortError");
+    return response;
+  } finally { settle(); }
+}
+
 export async function pinnedFetch(endpoint: Endpoint, user: string, path: string, init: RequestInit): Promise<Response> {
   const revision = generation;
   const selected = await getState();
