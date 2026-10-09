@@ -2569,9 +2569,9 @@ function repriceCapacityCommand(database, args, statePath) {
     capacityRequirement(oldPlan, []);
     const measurement = cachedWorkspaceAllocation(database, record.id, record.path, row.device_id);
     if (!measurement.ok) fail(`capacity repricing requires a fresh allocated-block sample: ${measurement.error}; run measure-capacity first`);
-    if (record.sourceCommit === null) fail("capacity repricing requires immutable source custody");
+    if (record.durableSourceCommit === null) fail("capacity repricing requires immutable source custody");
     const sourceDirectory = git(record.path, ["rev-parse", "--absolute-git-dir"]);
-    const plan = sourceCapacityPlan(record.path, record.sourceCommit, intent, statfsSync(record.path).bsize, sourceDirectory);
+    const plan = sourceCapacityPlan(record.path, record.durableSourceCommit, intent, statfsSync(record.path).bsize, sourceDirectory);
     const sample = JSON.parse(database.prepare("SELECT measurement_json FROM workspace_capacity_measurement WHERE workspace_id=?").get(record.id).measurement_json);
     const sampledGrowthBytes = Math.max(0, sample.bytes - plan.constructionBytes);
     plan.completedAllocationBytes = plan.constructionBytes;
