@@ -23,12 +23,23 @@ function database(path) {
     INSERT INTO thread(id) VALUES('accepted');`);
   return { db, sql: sql => db.prepare(sql), runtimes: new Map(), operations: new Map(), opening: new Map(), halts: new Map(), dependencyOperations: new Map() };
 }
+test('queued receipts survive replacement without blocking idle custody; dispatched work still blocks', t => {
+  const root = directory(t), service = database(join(root, 'threads.sqlite3'));
+  service.sql("INSERT INTO thread_work VALUES('unstarted','accepted',NULL,'queued')").run();
+  assert.deepEqual(serviceBusy(service), { work: 0, executions: 0, operations: 0, native: 0 });
+  service.sql("INSERT INTO thread_work VALUES('dispatched','accepted',NULL,'dispatched')").run();
+  assert.equal(serviceBusy(service).work, 1);
+  service.sql("UPDATE thread_work SET status='done' WHERE id='dispatched'").run();
+  assert.equal(serviceBusy(service).work, 0);
+  assert.equal(service.sql("SELECT status FROM thread_work WHERE id='unstarted'").get().status, 'queued');
+  service.db.close();
+});
 test('history observation never fences new roots, external input, answers or due wakes', t => {
   const path = directory(t), service = database(join(path, 'threads.sqlite3'));
   service.sql("INSERT INTO thread_work VALUES('receipt','accepted',NULL,'queued')").run();
   assert.equal(MAINTENANCE_INTAKE, 'always-open-v1');
   installObservation(service, { candidate, legacySource: old });
-  assert.equal(serviceBusy(service).work, 1);
+  assert.equal(serviceBusy(service).work, 0);
   service.sql("INSERT INTO thread_work VALUES('external','accepted',NULL,'queued')").run();
   service.sql("INSERT INTO thread(id,parent_id) VALUES('child','accepted')").run();
   service.sql("INSERT INTO thread_work VALUES('child-receipt','child','accepted','queued')").run();
@@ -207,7 +218,7 @@ test('old owner drains existing work/output, closes before private migration, an
   const socket = bridgeSocket(process.getuid(), root);
   const busy = await control(socket, 'GET', '/status');
   assert.equal(busy.ready, false); assert.equal(busy.owners[0].busy.executions, 1);
-  const settled = new DatabaseSync(threadPath); settled.exec("UPDATE thread_work SET status='done'; UPDATE thread_execution SET ended_at=1;"); settled.close();
+  const settled = new DatabaseSync(threadPath); settled.exec("UPDATE thread_work SET status='done'; UPDATE thread_execution SET ended_at=1; INSERT INTO thread_work VALUES('pre-handoff','accepted',NULL,'queued');"); settled.close();
   writeFileSync(threadPath+'.failure', 'fail one status proof');
   const failedProbe = await control(socket, 'GET', '/status');
   assert.match(failedProbe.error, /Status acknowledgement unavailable/);
@@ -239,6 +250,7 @@ test('old owner drains existing work/output, closes before private migration, an
   assert.equal(readiness.writersStopped, true); assert.equal(readiness.retainedOutput, 'acknowledged');
   assert.equal(JSON.parse(readFileSync(join(root, 'native-history-maintenance.json'), 'utf8')).phase, 'migrated');
   const retainedQueue = new DatabaseSync(threadPath);
+  assert.equal(retainedQueue.prepare("SELECT status FROM thread_work WHERE id='pre-handoff'").get().status, 'queued');
   assert.equal(retainedQueue.prepare("SELECT status FROM thread_work WHERE id='late-accepted'").get().status, 'queued');
   retainedQueue.close();
   const snapshotFiles = new DatabaseSync(join(root, 'supervisor.sqlite3'));
