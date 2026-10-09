@@ -7,6 +7,7 @@ import {
   closeSync,
   existsSync,
   openSync,
+  opendirSync,
   lstatSync,
   mkdirSync,
   readFileSync,
@@ -956,10 +957,11 @@ function spawnRemoval(target) {
   child.unref();
 }
 
-function drainGc(statePath) {
+function drainGc(statePath, scopedIds) {
   const root = path.join(path.dirname(statePath), "gc");
   if (!existsSync(root)) return;
   for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (scopedIds !== undefined && !scopedIds.some(id => entry.name.startsWith(`${id}-`))) continue;
     if (entry.isDirectory() || entry.isFile() || entry.isSymbolicLink()) spawnRemoval(path.join(root, entry.name));
   }
 }
@@ -1193,7 +1195,7 @@ function reconcileRecord(database, record, options) {
     }
     return { record, inspection, action: options.execute ? "forgot-missing" : "would-forget-missing" };
   }
-  if (inspection.classification === "referenced" && options.execute && options.reapExpired) {
+  if (inspection.classification === "referenced" && options.execute && options.reapExpired && !options.preserveRuntime) {
     const current = recordBy(database, { id: record.id });
     if (current.leaseExpiresAt > Date.now()) return { record: current, inspection: inspectRecord(current), action: "lease-renewed" };
     updateState(database, current, "reclaiming", "expired lease is fencing live references");
@@ -1270,7 +1272,7 @@ function groupReconciliation(database, records, options) {
 
   let inspections = records.map((record) => inspectRecord(record,
     groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline })));
-  if (options.execute && options.reapExpired && inspections.some((inspection) => inspection.classification === "referenced")) {
+  if (options.execute && options.reapExpired && !options.preserveRuntime && inspections.some((inspection) => inspection.classification === "referenced")) {
     const current = records.map((record) => recordBy(database, { id: record.id }));
     if (!options.ignoreLease && current.some((record) => record.leaseExpiresAt > Date.now())) {
       return groupReconciliation(database, current, { ...options, execute: false });
@@ -1721,11 +1723,14 @@ function sourceImportCapacity(repository, sourceCommit, mirror) {
   return bytes;
 }
 
-function capacityRequirement(plan, reservations) {
-  for (const value of [plan.constructionBytes, plan.growthBytes, plan.headroomBytes, ...reservations]) {
+function capacityRequirement(plan, reservations, sharedHeadroomBytes = 0) {
+  for (const value of [plan.constructionBytes, plan.growthBytes, plan.headroomBytes, sharedHeadroomBytes, ...reservations]) {
     if (!Number.isSafeInteger(value) || value < 0) fail("invalid capacity ledger byte budget");
   }
-  const requiredBytes = plan.constructionBytes + plan.growthBytes + plan.headroomBytes + reservations.reduce((sum, bytes) => sum + bytes, 0);
+  const unestimated = plan.intent === "unestimated";
+  const constructionBytes = unestimated ? 0 : plan.constructionBytes;
+  const headroomBytes = unestimated ? Math.max(plan.constructionBytes, plan.headroomBytes) : plan.headroomBytes;
+  const requiredBytes = constructionBytes + plan.growthBytes + Math.max(headroomBytes, sharedHeadroomBytes) + reservations.reduce((sum, bytes) => sum + bytes, 0);
   if (!Number.isSafeInteger(requiredBytes)) fail("capacity ledger total exceeds supported byte range");
   return requiredBytes;
 }
@@ -1745,8 +1750,57 @@ function creationFenceBusy(database, workspacePath) {
   } finally { closeSync(descriptor); }
 }
 
-function capacityReservations(database, device, reservedPath) {
-  if (database === undefined) return { priced: [], unpricedDormant: 0 };
+function allocatedWorkspaceBytes(workspacePath, device, { deadline = Date.now() + 500, maxEntries = 50_000, excludedPaths = [] } = {}) {
+  const excluded = new Set(excludedPaths);
+  const seen = new Set();
+  let entries = 0;
+  let bytes = 0;
+  let allocatedBytes = 0;
+  function walk(file) {
+    if (excluded.has(file)) return;
+    if (++entries > maxEntries || Date.now() >= deadline) throw new Error("allocated-block measurement budget exhausted");
+    const stats = lstatSync(file);
+    if (String(stats.dev) !== device) {
+      if (file === workspacePath) throw new Error("workspace moved to another filesystem");
+      return;
+    }
+    const inode = `${stats.dev}:${stats.ino}`;
+    if (seen.has(inode)) return;
+    seen.add(inode);
+    const blocks = stats.blocks * 512;
+    if (!Number.isSafeInteger(blocks) || blocks < 0) throw new Error("invalid allocated-block count");
+    allocatedBytes += blocks;
+    // Shared inodes cannot spend two workspaces' growth budgets.
+    if (stats.isDirectory() || stats.nlink === 1) bytes += blocks;
+    if (!Number.isSafeInteger(allocatedBytes)) throw new Error("allocated-block total exceeds supported byte range");
+    if (!stats.isDirectory()) return;
+    const directory = opendirSync(file);
+    try {
+      let entry;
+      while ((entry = directory.readSync()) !== null) walk(path.join(file, entry.name));
+    } finally { directory.closeSync(); }
+  }
+  try {
+    walk(workspacePath);
+    return { ok: true, bytes, allocatedBytes };
+  } catch (error) {
+    return { ok: false, error: `${error.code ?? "measurement-unavailable"}: ${error.message}` };
+  }
+}
+
+function remainingCapacityBytes(plan, state, measurement) {
+  capacityRequirement(plan, []);
+  const budget = plan.growthBytes + (state === "creating" ? plan.constructionBytes : 0);
+  if (!Number.isSafeInteger(budget)) fail("capacity ledger total exceeds supported byte range");
+  if (budget === 0 || !measurement.ok || (state !== "creating" && plan.completedAllocationBytes === null)) return budget;
+  if (!Number.isSafeInteger(measurement.bytes) || measurement.bytes < 0) fail("invalid capacity allocated-block measurement");
+  const baseline = state === "creating" ? 0 : plan.completedAllocationBytes ?? plan.constructionBytes;
+  if (!Number.isSafeInteger(baseline) || baseline < 0) fail("invalid capacity completed allocation baseline");
+  return Math.max(0, budget - Math.max(0, measurement.bytes - baseline));
+}
+
+function capacityReservations(database, device, reservedPath, measure = allocatedWorkspaceBytes) {
+  if (database === undefined) return { priced: [], headroomBytes: 0, unpricedDormant: 0 };
   const unknown = database.prepare(`SELECT w.path, w.root FROM workspace w LEFT JOIN workspace_capacity c ON c.workspace_id=w.id
     WHERE w.state='creating' AND c.workspace_id IS NULL AND w.path!=?`).all(reservedPath ?? "");
   let unpricedDormant = 0;
@@ -1757,17 +1811,30 @@ function capacityReservations(database, device, reservedPath) {
     if (creationFenceBusy(database, row.path)) fail(`capacity estimate unknown: active legacy creation at ${row.path}; await its owning creator`);
     unpricedDormant += 1;
   }
-  const priced = database.prepare(`SELECT c.plan_json, w.state FROM workspace_capacity c JOIN workspace w ON w.id=c.workspace_id
+  let headroomBytes = 0;
+  const measurementFailures = [];
+  const deadline = Date.now() + 3000;
+  const rows = database.prepare(`SELECT c.plan_json, w.state, w.path FROM workspace_capacity c JOIN workspace w ON w.id=c.workspace_id
     WHERE c.device_id=? AND w.path!=? AND w.state!='released'`)
-    .all(device, reservedPath ?? "").map(row => {
+    .all(device, reservedPath ?? "");
+  const paths = database.prepare("SELECT path FROM workspace WHERE state!='released'").all().map(row => row.path);
+  const priced = rows.map(row => {
       const plan = JSON.parse(row.plan_json);
       if (!["source-only", "budgeted", "unestimated"].includes(plan.intent) ||
         plan.estimate !== (plan.intent === "unestimated" ? "unknown" : "whole-tree-upper-bound")) fail("invalid capacity ledger intent or estimate");
       capacityRequirement(plan, []);
-      return plan.intent === "unestimated" ? plan.constructionBytes
-        : plan.growthBytes + (row.state === "creating" ? plan.constructionBytes : 0);
-    });
-  return { priced, unpricedDormant };
+      headroomBytes = Math.max(headroomBytes, plan.headroomBytes,
+        plan.intent === "unestimated" ? plan.constructionBytes : 0);
+      const budget = plan.growthBytes + (row.state === "creating" ? plan.constructionBytes : 0);
+      if (budget === 0) return 0;
+      const measurement = measure(row.path, device, {
+        deadline: Math.min(deadline, Date.now() + 500),
+        excludedPaths: paths.filter(candidate => candidate.startsWith(`${row.path}${path.sep}`)),
+      });
+      if (!measurement.ok) measurementFailures.push({ path: row.path, error: measurement.error, reservedBytes: budget });
+      return remainingCapacityBytes(plan, row.state, measurement);
+    }).filter(bytes => bytes > 0);
+  return { priced, headroomBytes, unpricedDormant, ...(measurementFailures.length ? { measurementFailures } : {}) };
 }
 
 function assertCapacity(root, args, database, reservedPath, plan) {
@@ -1780,17 +1847,22 @@ function assertCapacity(root, args, database, reservedPath, plan) {
       pending.filter((record) => record.path !== reservedPath && !existsSync(record.path)).length;
     if (count >= maxCount) fail(`workspace root has ${count} checkouts; limit is ${maxCount}. Reconcile it before creating another.`);
   }
-  const stats = statfsSync(root);
-  const freeBytes = stats.bavail * stats.bsize;
   const device = String(statSync(root).dev);
   const reservations = capacityReservations(database, device, reservedPath);
+  for (const failure of reservations.measurementFailures ?? []) {
+    process.stderr.write(`capacity measurement unavailable at ${failure.path}; retaining full ${(failure.reservedBytes / 1024 ** 3).toFixed(2)} GiB reservation: ${failure.error}\n`);
+  }
+  const stats = statfsSync(root);
+  const freeBytes = stats.bavail * stats.bsize;
   const minimum = Math.ceil(numberFlag(args, "min-free-gib", DEFAULT_MIN_FREE_GIB) * 1024 ** 3);
-  const requirement = capacityRequirement(plan ?? { constructionBytes: minimum, headroomBytes: 0, growthBytes: 0 }, reservations.priced);
+  const requirement = capacityRequirement(plan ?? { intent: "unestimated", constructionBytes: minimum, headroomBytes: 0, growthBytes: 0 }, reservations.priced, reservations.headroomBytes);
   if (freeBytes < requirement) fail(`${(freeBytes / 1024 ** 3).toFixed(2)} GiB is free; ${(requirement / 1024 ** 3).toFixed(2)} GiB is required${plan?.intent !== undefined && plan.intent !== "unestimated" ? " (source forecast + declared growth + operating headroom + other reservations)" : " (unestimated full work + other reservations)"}`);
   const freeInodes = stats.files > 0 ? 100 * stats.ffree / stats.files : 100;
   const minFreeInodes = numberFlag(args, "min-free-inodes-percent", DEFAULT_MIN_FREE_INODES_PERCENT);
   if (freeInodes < minFreeInodes) fail(`${freeInodes.toFixed(2)}% of inodes are free; ${minFreeInodes.toFixed(2)}% is required`);
-  return { freeBytes, requiredBytes: requirement, unpricedDormant: reservations.unpricedDormant };
+  return { freeBytes, requiredBytes: requirement, reservedBytes: reservations.priced.reduce((sum, bytes) => sum + bytes, 0),
+    sharedHeadroomBytes: reservations.headroomBytes, unpricedDormant: reservations.unpricedDormant,
+    ...(reservations.measurementFailures ? { measurementFailures: reservations.measurementFailures } : {}) };
 }
 
 function safeName(value) {
@@ -2296,9 +2368,29 @@ function creationRecord(database, id) {
 }
 
 function completeCreation(database, id, repository, leaseSeconds, detail, args) {
+  const row = database.prepare("SELECT w.path, c.device_id, c.plan_json FROM workspace w JOIN workspace_capacity c ON c.workspace_id=w.id WHERE w.id=? AND w.state='creating'").get(id);
+  let plan;
+  if (row !== undefined) {
+    plan = JSON.parse(row.plan_json);
+    const measurement = allocatedWorkspaceBytes(row.path, row.device_id);
+    if (measurement.ok) plan.completedAllocationBytes = measurement.allocatedBytes;
+    else {
+      plan.completedAllocationBytes = null;
+      plan.completedAllocationError = measurement.error;
+      process.stderr.write(`capacity baseline unavailable at ${row.path}; retaining full growth reservation: ${measurement.error}\n`);
+    }
+  }
   const now = Date.now();
-  database.prepare("UPDATE workspace SET repository=?, state='active', detail=?, updated_at=?, lease_expires_at=? WHERE id=? AND state='creating'")
-    .run(repository, detail, now, now + leaseSeconds * 1000, id);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    if (plan !== undefined) database.prepare("UPDATE workspace_capacity SET plan_json=? WHERE workspace_id=?").run(JSON.stringify(plan), id);
+    database.prepare("UPDATE workspace SET repository=?, state='active', detail=?, updated_at=?, lease_expires_at=? WHERE id=? AND state='creating'")
+      .run(repository, detail, now, now + leaseSeconds * 1000, id);
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
   print(creationRecord(database, id), bool(args, "json"));
 }
 
@@ -2369,7 +2461,7 @@ function heartbeatCommand(database, args) {
 }
 
 function releaseCommand(database, args, statePath) {
-  assertOnly(args, ["id", "path", "reap-expired", "json"]);
+  assertOnly(args, ["id", "path", "reap-expired", "preserve-runtime", "json"]);
   const record = recordBy(database, selectorFrom(args));
   const records = recordsInGroup(database, record);
   const statement = database.prepare("UPDATE workspace SET lease_expires_at = 0, updated_at = ?, detail = 'owner released lease' WHERE id = ?");
@@ -2379,6 +2471,7 @@ function releaseCommand(database, args, statePath) {
   const result = reconcileRecords(database, current, {
     execute: true,
     reapExpired: bool(args, "reap-expired"),
+    preserveRuntime: bool(args, "preserve-runtime"),
     ignoreLease: true,
     statePath,
     safety: safetySnapshot(database),
@@ -2390,8 +2483,10 @@ function releaseCommand(database, args, statePath) {
 // of it for questions like "what happened to that checkout" and no more; a
 // busy fleet registers thousands of checkouts and each one used to stay forever.
 const RELEASED_RETENTION_MS = 30 * 24 * 60 * 60_000;
-function pruneReleased(database, now = Date.now()) {
-  const stale = database.prepare("SELECT id, path FROM workspace WHERE state = 'released' AND updated_at < ?").all(now - RELEASED_RETENTION_MS);
+function pruneReleased(database, now = Date.now(), root) {
+  const stale = root === undefined
+    ? database.prepare("SELECT id, path FROM workspace WHERE state = 'released' AND updated_at < ?").all(now - RELEASED_RETENTION_MS)
+    : database.prepare("SELECT id, path FROM workspace WHERE state = 'released' AND updated_at < ? AND root=?").all(now - RELEASED_RETENTION_MS, path.resolve(root));
   const remove = database.prepare("DELETE FROM workspace WHERE id = ?");
   let pruned = 0;
   for (const row of stale) {
@@ -2404,14 +2499,14 @@ function pruneReleased(database, now = Date.now()) {
 }
 
 function reconcileCommand(database, args, statePath) {
-  assertOnly(args, ["root", "id", "path", "execute", "reap-expired", "ignore-lease", "json", "max-groups", "budget-ms", "after"]);
+  assertOnly(args, ["root", "id", "path", "execute", "reap-expired", "preserve-runtime", "ignore-lease", "json", "max-groups", "budget-ms", "after"]);
   const started = Date.now();
   const budget = numberFlag(args, "budget-ms", 20_000);
   const maxGroups = numberFlag(args, "max-groups", 32);
   if (budget < 1 || budget > 40_000) fail("--budget-ms must be between 1 and 40000");
   if (!Number.isSafeInteger(maxGroups) || maxGroups < 1) fail("--max-groups must be a positive integer");
   const execute = bool(args, "execute");
-  if (execute) pruneReleased(database);
+  if (execute) pruneReleased(database, Date.now(), one(args, "root"));
   let records;
   if (one(args, "id") !== undefined || one(args, "path") !== undefined) records = [recordBy(database, selectorFrom(args))];
   else records = listRecords(database, one(args, "root"));
@@ -2438,6 +2533,7 @@ function reconcileCommand(database, args, statePath) {
   const results = reconcileRecords(database, records, {
     execute,
     reapExpired: bool(args, "reap-expired"),
+    preserveRuntime: bool(args, "preserve-runtime"),
     ignoreLease: bool(args, "ignore-lease"),
     statePath,
     safety,
@@ -2553,8 +2649,8 @@ function help() {
   agent-workspace cancel-creation (--id ID|--path PATH)
   agent-workspace finalize-creation (--id ID|--path PATH)
   agent-workspace heartbeat (--id ID|--path PATH) [--lease-seconds N]
-  agent-workspace release (--id ID|--path PATH) [--reap-expired]
-  agent-workspace reconcile [--root PATH] [--execute] [--reap-expired]
+  agent-workspace release (--id ID|--path PATH) [--reap-expired] [--preserve-runtime]
+  agent-workspace reconcile [--root PATH] [--execute] [--reap-expired] [--preserve-runtime]
                             [--budget-ms 20000] [--max-groups 32] [--after ID|start]
   agent-workspace maintain [--root PATH | --path PATH] [--execute] [--json]
   agent-workspace status [--root PATH] [--path SUBSTRING] [--owner SUBSTRING] [--limit 100] [--after CURSOR|start] [--json]
@@ -2570,7 +2666,7 @@ Records outlive the directory, so status explains what became of a checkout that
 `);
 }
 
-export const workspaceTesting = { capacityRequirement, capacityReservations, sourceCapacityPlan, cacheTargets, dockerEndpointScope, dockerSnapshot, groupReconciliation, maintainReferenceClone, parseSystemdUnits, pruneReleased, systemdManagerSnapshot, systemdReferences, ownerThreadDatabases, threadSnapshot };
+export const workspaceTesting = { allocatedWorkspaceBytes, remainingCapacityBytes, capacityRequirement, capacityReservations, sourceCapacityPlan, cacheTargets, dockerEndpointScope, dockerSnapshot, groupReconciliation, maintainReferenceClone, parseSystemdUnits, pruneReleased, systemdManagerSnapshot, systemdReferences, ownerThreadDatabases, threadSnapshot };
 
 export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
   const [commandName, ...rest] = argv;
@@ -2608,10 +2704,15 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
     }
     creationDeadline = Date.now() + budgetMs;
   }
-  if (!["status", "list", "maintain", "cancel-creation", "finalize-creation", "reassign"].includes(commandName)
-    && (commandName !== "reconcile" || bool(args, "execute"))) drainGc(statePath);
   const database = openRegistry(statePath);
   try {
+    if (!["status", "list", "maintain", "cancel-creation", "finalize-creation", "reassign"].includes(commandName)
+      && (commandName !== "reconcile" || bool(args, "execute"))) {
+      const scopedRoot = commandName === "reconcile" ? one(args, "root") : undefined;
+      const scopedIds = scopedRoot === undefined ? undefined
+        : database.prepare("SELECT id FROM workspace WHERE root=?").all(path.resolve(scopedRoot)).map(row => row.id);
+      drainGc(statePath, scopedIds);
+    }
     if (commandName === "create") createCommand(database, args, statePath);
     else if (commandName === "register") registerCommand(database, args);
     else if (commandName === "reassign") reassignCommand(database, args);

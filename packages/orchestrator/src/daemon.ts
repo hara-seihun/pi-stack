@@ -105,6 +105,11 @@ export class Daemon {
   }
 
   async start():Promise<void>{
+    try { await this.startOwned(); }
+    finally { this.fleet.detach(); }
+  }
+
+  private async startOwned():Promise<void>{
     await this.loadManifest();
     if(!this.config.modelBrokerUrl)reconcileCompletionReceipts(this.completions,join(this.config.agentDir,"completion-receipts"));
     for(const row of this.store.db.prepare("SELECT value FROM control WHERE key LIKE 'thread-boundary:%'").all() as {value:string}[]){const boundary=JSON.parse(row.value);this.isolatedService(boundary.cwd,boundary.context);}

@@ -9,7 +9,7 @@ if (( EUID != 0 )); then
 fi
 umask 022
 source_root="${PI_NATIVE_HISTORY_STATE_ROOT:-/srv/pi/.pi-stack-maintenance/native-history}/$candidate/source"
-files=(deploy/native-history-coordinator.mjs deploy/native-history-bridge.mjs deploy/native-history-root-boundary deploy/one-kenan-activate scripts/migrate-native-history.mjs)
+files=(deploy/native-history-coordinator.mjs deploy/native-history-bridge.mjs deploy/native-history-closed-owner.mjs deploy/native-history-package-identity.mjs deploy/native-history-root-boundary deploy/one-kenan-activate scripts/migrate-native-history.mjs)
 if [[ $action == --probe && ! -f $source_root/deploy/native-history-coordinator.mjs ]]; then
   echo 'native history boundary waiting: selected legacy source has not entered maintenance' >&2
   exit 75
