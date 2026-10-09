@@ -10,7 +10,7 @@ The coordinator stages small entry wrappers pointing to the **immutable selected
 
 Inside each owning UID and namespace, the bridge loads the selected source's `ThreadService` and transport. Its durable SQLite fence closes admission of new external roots. Already accepted work, child assignments, collaborator completion receipts, and answers to admitted questions continue through the old owner. Future scheduled wakes stay in their existing schedule rows until the candidate resumes them. Cross-ledger children/completion replies resolve bounded public parent ancestry through the owning directory; recorded request retries stay with the old receipt/hash validator. A restored pre-migration attempt removes only its own fence.
 
-Readiness requires all admitted work and native executions settled, no pending owner operations, an acknowledged empty output spool, and a complete old-runner ownership census. Unknown native owners are an explicit custody repair, not absence. The bridge uses the old controller to attach and decode retained events; the candidate never consumes those frames.
+Readiness requires all admitted work and native executions settled, no pending owner operations, an acknowledged empty output spool, and a complete old-runner ownership census. Unknown native owners are an explicit custody repair, not absence. The bridge uses the old controller to attach and decode retained events; the candidate never consumes those frames. Repeated probes share one retained attachment. A positive native `get_state` reconciles idle/busy before work can resume; missing state or a competing command preserves custody instead of manufacturing idle.
 
 After all Remote/fleet/rooms owners are ready, the fixed Root boundary closes Root admission atomically and proves absence of its native writers. Pending consent/session records remain intact. Then each old thread controller closes its idle native sessions while the old capture listener still serves shutdown hooks. Every old runner receives retirement and must remove its control socket. The old supervisor's existing release path closes its other resources and databases. Only its final exit boundary invokes the private migration as the owning user.
 
@@ -30,7 +30,7 @@ The Orchestrator's [`cli.ts`](../packages/orchestrator/src/cli.ts) has its own f
 
 ## Interruption and restoration
 
-State lives outside the model session. A pre-migration terminal failure/cancellation may `--restore` the owned admission fences and transient selected pointers. Candidate pointers are never reverted by this operation. Once migration has crossed the schema boundary, the old capture source cannot be restarted; the publication retains repair custody until a candidate/descendant acquires serving custody. A checked serving native candidate allows the earlier boundary to release its custody without reenabling an old decoder.
+State lives outside the model session. A pre-migration terminal failure/cancellation may `--restore` the owned admission fences and transient selected pointers. Restoration records `restoring` and restores the selected old-source pointers before collecting every owner's acknowledgement; it never restarts fleets or aborts accepted provider requests. Partial restoration cannot advance or masquerade as an ordinary busy wait. A restored owner keeps that receipt across restart and does not reinstall its maintenance fence. Candidate pointers are never reverted by this operation. Once migration has crossed the schema boundary, the old capture source cannot be restarted; the publication retains repair custody until a candidate/descendant acquires serving custody. A checked serving native candidate allows the earlier boundary to release its custody without reenabling an old decoder.
 
 Private snapshots/preimages and readiness receipts belong to the person's backup coverage. The source-only `legacy.json` contains immutable module paths, never credentials or conversation bodies. `deploy/retain` pins both source releases and their linked dependencies while this first-unlock custody exists; remove the manifest only after every registered owner's migration has been acknowledged, not merely after the active host cohort deploys. The host coordinator receives only bounded maintenance counts/proofs from owner-local sockets reached through the retained mount namespace.
 
@@ -38,6 +38,7 @@ Focused contracts:
 
 ```sh
 node --test scripts/native-history-boundary.test.mjs \
+  scripts/native-history-attachment.test.mjs \
   apps/remote/server/native-history-startup.test.mjs \
   scripts/migrate-native-history.test.mjs \
   scripts/native-history-fleet-startup.test.mjs
