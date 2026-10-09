@@ -193,7 +193,25 @@ export async function installLegacyMaintenance(options) {
   const save = phase => { receipt = { ...receipt, phase, updatedAt: new Date().toISOString() }; atomicJson(receiptPath, receipt); };
   if (receipt.phase === 'restored') return true;
   if (receipt.phase === 'closing') save('draining');
-  const services = new Set(), controls = new Set(), daemons = new Set();
+  const services = new Set(), controls = new Set(), daemons = new Set(), detaching = new WeakSet(), startedServices = new WeakSet();
+  let controlServer, autoTimer;
+  let ownerQueue = Promise.resolve();
+  const ownerOperation = action => {
+    const operation = ownerQueue.then(action);
+    ownerQueue = operation.then(() => undefined, error => { receipt.error = String(error); save(receipt.phase); });
+    return operation;
+  };
+  const awaitingReplacement = () => ({ ...receipt, ready: false, reason: 'Legacy thread controller is awaiting startup or replacement; preserved producer custody is not ready' });
+  const activeServices = () => {
+    const active = [...services].filter(service => startedServices.has(service) && !service.closed && !detaching.has(service));
+    const paths = new Set(active.map(service => service.options.databasePath));
+    return [...services].every(service => paths.has(service.options.databasePath)) ? active : null;
+  };
+  function stopControl() {
+    clearInterval(autoTimer);
+    receipt.controllerStopped = true; receipt.ready = false; save(receipt.phase);
+    controlServer?.close(); controlServer?.closeIdleConnections();
+  }
   let restoreDaemonAdmission = () => {};
   if (options.mode === 'fleet' && receipt.phase === 'draining') {
     if (typeof options.ledgerPath !== 'string' || !options.ledgerPath.startsWith('/')) throw new Error('Fleet maintenance needs its exact owner ledger');
@@ -205,13 +223,16 @@ export async function installLegacyMaintenance(options) {
     restoreDaemonAdmission = () => { Daemon.prototype.loadManifest = loadManifest; Daemon.prototype.fillCapacity = fillCapacity; };
     const start = Daemon.prototype.start;
     Daemon.prototype.start = async function(...args) {
+      if (!(this.threads instanceof api.ThreadService) || typeof this.threads.options?.databasePath !== 'string'
+        || !this.threads.options.databasePath.startsWith('/')) throw new Error('Legacy daemon uses an uninstrumented or unbound thread service');
+      services.add(this.threads);
       daemons.add(this);
       try { return await start.apply(this, args); }
       finally {
         if (receipt.phase === 'owners-closed') {
           try { releaseFleetLedger(); delete receipt.error; save('migrated'); if (options.autoAdvance === true) originalExit(75); }
           catch (error) { receipt.error = String(error); save('migration-pending'); originalExit(1); }
-        }
+        } else stopControl();
       }
     };
   }
@@ -219,7 +240,12 @@ export async function installLegacyMaintenance(options) {
   const api = await import(pathToFileURL(options.oldApi).href);
   const prototype = api.ThreadService?.prototype;
   if (!prototype || !['start','close','attach','send','spawn','deliverScheduledWakes','rpc','busy','adoptReference','wake'].every(key => typeof prototype[key] === 'function')) throw new Error('Selected legacy ThreadService has no supported maintenance seam');
-  const originalStart = prototype.start, originalSend = prototype.send, originalSpawn = prototype.spawn, originalWakes = prototype.deliverScheduledWakes, originalAttach = prototype.attach;
+  const originalStart = prototype.start, originalSend = prototype.send, originalSpawn = prototype.spawn, originalWakes = prototype.deliverScheduledWakes, originalAttach = prototype.attach, originalDetach = prototype.detach;
+  if (typeof originalDetach === 'function') prototype.detach = async function(...args) {
+    detaching.add(this);
+    try { return await originalDetach.apply(this, args); }
+    finally { if (!this.closed) detaching.delete(this); }
+  };
   prototype.attach = function(id, recoverMissing = false) { return attachLegacyRuntime(this, originalAttach, id, recoverMissing); };
   const rejecting = () => ({ ok: false, error: { code: 'unavailable', retryable: true, message: 'Native history maintenance admission is closed; retry the same receipt after publication' } });
   const allowed = async (service, id) => {
@@ -244,7 +270,17 @@ export async function installLegacyMaintenance(options) {
     }
     return false;
   };
-  prototype.start = async function(...args) { installFence(this, identity); this.sql("DELETE FROM pi_history_bridge WHERE key='closing'").run(); services.add(this); return originalStart.apply(this, args); };
+  prototype.start = async function(...args) {
+    if (receipt.phase !== 'draining') return rejecting();
+    services.add(this);
+    installFence(this, identity); this.sql("DELETE FROM pi_history_bridge WHERE key='closing'").run();
+    const result = await originalStart.apply(this, args);
+    if (result?.ok === true) {
+      startedServices.add(this);
+      delete receipt.controllerStopped; delete receipt.ready; save(receipt.phase);
+    }
+    return result;
+  };
   const recordedRequest = (service, input) => typeof input?.requestId === 'string'
     && !!service.sql('SELECT id FROM thread_request WHERE id=?').get(input.requestId);
   prototype.send = async function(input) {
@@ -267,6 +303,8 @@ export async function installLegacyMaintenance(options) {
   async function status() {
     if (receipt.phase !== 'draining') return receipt;
     if (!services.size) return { ...receipt, ready: false, reason: 'Legacy owner has not registered its thread services' };
+    const active = activeServices();
+    if (active === null || !active.length) return awaitingReplacement();
     let ready = true; const owners = [];
     if (options.mode === 'fleet') {
       if (!daemons.size) return { ...receipt, ready: false, reason: 'Old fleet completion owner has not registered' };
@@ -275,12 +313,15 @@ export async function installLegacyMaintenance(options) {
         if (daemon.completionPool.size || daemon.reconciling) ready = false;
       }
     }
-    for (const service of services) {
+    for (const service of active) {
+      if (service.closed || detaching.has(service)) return awaitingReplacement();
       const references = service.sql("SELECT id,json_extract(metadata,'$.runnerReference') AS reference FROM thread WHERE json_extract(metadata,'$.runnerReference') IS NOT NULL").all();
       for (const row of references) {
         const reference = JSON.parse(row.reference);
         controls.add(reference.control);
-        await reconcileLegacyRuntime(service, row.id);
+        try { await reconcileLegacyRuntime(service, row.id); }
+        catch (error) { if (service.closed || detaching.has(service)) return awaitingReplacement(); throw error; }
+        if (service.closed || detaching.has(service)) return awaitingReplacement();
       }
       const busy = serviceBusy(service), spools = [];
       for (const row of service.sql("SELECT json_extract(metadata,'$.runnerReference') AS reference FROM thread WHERE json_extract(metadata,'$.runnerReference') IS NOT NULL").all()) {
@@ -290,7 +331,8 @@ export async function installLegacyMaintenance(options) {
       if (Object.values(busy).some(Boolean) || spools.length) ready = false;
       owners.push({ database: service.options.databasePath, busy, unacknowledgedSpools: spools.length });
     }
-    const known = new Set([...services].flatMap(service => service.sql('SELECT id FROM thread').all().map(row => row.id)));
+    if (active.some(service => service.closed || detaching.has(service))) return awaitingReplacement();
+    const known = new Set(active.flatMap(service => service.sql('SELECT id FROM thread').all().map(row => row.id)));
     const directory = join(socketDir, 'thread-runners');
     if (existsSync(directory)) for (const name of readdirSync(directory).filter(name => name.endsWith('.sock'))) {
       const control = join(directory, name);
@@ -309,11 +351,13 @@ export async function installLegacyMaintenance(options) {
     if (closing) return closing;
     closing = (async () => {
       const current = await status(); if (!current.ready) return current;
-      for (const service of services) service.sql("INSERT OR REPLACE INTO pi_history_bridge VALUES('closing','1')").run();
-      const raced = [...services].some(service => Object.values(serviceBusy(service)).some(Boolean));
-      if (raced) { for (const service of services) service.sql("DELETE FROM pi_history_bridge WHERE key='closing'").run(); return { ...receipt, ready: false, reason: 'Accepted work raced final admission closure' }; }
+      const active = activeServices();
+      if (active === null || !active.length) return awaitingReplacement();
+      for (const service of active) service.sql("INSERT OR REPLACE INTO pi_history_bridge VALUES('closing','1')").run();
+      const raced = active.some(service => Object.values(serviceBusy(service)).some(Boolean));
+      if (raced) { for (const service of active) service.sql("DELETE FROM pi_history_bridge WHERE key='closing'").run(); return { ...receipt, ready: false, reason: 'Accepted work raced final admission closure' }; }
       save('closing');
-      for (const service of services) { const result = await service.close(); if (!result.ok) throw new Error(`Legacy owner close refused: ${result.error.message}`); }
+      for (const service of active) { const result = await service.close(); if (!result.ok) throw new Error(`Legacy owner close refused: ${result.error.message}`); }
       for (const control of controls) {
         try { const result = await runnerRequest(control, { type: 'drain' }); if (result.ok !== true) throw new Error('Legacy runner refused idle retirement'); }
         catch (error) { if (error.code !== 'ENOENT' && error.code !== 'ECONNREFUSED') throw error; }
@@ -323,11 +367,11 @@ export async function installLegacyMaintenance(options) {
         while (existsSync(control) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
         if (existsSync(control)) throw new Error('Legacy runner control still exists after acknowledged retirement');
       }
-      receipt.databases = [...services].map(service => service.options.databasePath);
+      receipt.databases = active.map(service => service.options.databasePath);
       save('owners-closed');
       // The old release closes capture/image/server databases before calling process.exit.
       if (options.mode === 'fleet') {
-        for (const service of services) dropFenceFile(service.options.databasePath);
+        for (const service of active) dropFenceFile(service.options.databasePath);
         process.emit('SIGTERM'); // Daemon.start acknowledges provider/resource closure before marking migrated.
       } else process.emit('SIGUSR2');
       return receipt;
@@ -363,7 +407,7 @@ export async function installLegacyMaintenance(options) {
   const socketPath = bridgeSocket(uid, dataDir);
   const endpoint = await prepareBridgeSocket(socketPath);
   if (!endpoint.ok) throw new Error(`${endpoint.error.code}: ${endpoint.error.message}`);
-  const server = createServer((request, response) => { void (async () => {
+  const server = createServer((request, response) => { void ownerOperation(async () => {
     let value;
     if (request.method === 'GET' && request.url === '/status') value = await status();
     else if (request.method === 'POST' && request.url === '/close') value = await closeOwners();
@@ -373,11 +417,13 @@ export async function installLegacyMaintenance(options) {
       if (options.mode === 'fleet') releaseFleetLedger();
       restoreDaemonAdmission();
       prototype.start = originalStart; prototype.send = originalSend; prototype.spawn = originalSpawn; prototype.deliverScheduledWakes = originalWakes; prototype.attach = originalAttach;
-      save('restored'); value = receipt;
+      if (originalDetach) prototype.detach = originalDetach;
+      delete receipt.error; save('restored'); value = receipt;
     }
     else { response.writeHead(404); response.end(); return; }
     response.setHeader('content-type', 'application/json'); response.end(JSON.stringify(value));
-  })().catch(error => { response.writeHead(503); response.end(JSON.stringify({ ...receipt, error: String(error) })); }); });
+  }).catch(error => { response.writeHead(503); response.end(JSON.stringify({ ...receipt, error: String(error) })); }); });
+  controlServer = server;
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(socketPath, resolve); });
   if (['owners-closed', 'migration-pending'].includes(receipt.phase)) {
     if (options.mode === 'fleet') {
@@ -396,14 +442,17 @@ export async function installLegacyMaintenance(options) {
   save('draining');
   if (options.autoAdvance === true) {
     let checking = false;
-    const timer = setInterval(() => {
+    autoTimer = setInterval(() => {
       if (checking || receipt.phase !== 'draining') return;
       checking = true;
-      void status().then(value => value.ready ? closeOwners() : undefined).catch(error => {
-        receipt.error = String(error); save('draining'); console.error(`Native history maintenance: ${error}`);
+      void ownerOperation(async () => {
+        const value = await status();
+        if (value.ready) await closeOwners();
+      }).catch(error => {
+        console.error(`Native history maintenance: ${error}`);
       }).finally(() => { checking = false; });
     }, 1000);
-    timer.unref();
+    autoTimer.unref();
   }
   return true;
 }
