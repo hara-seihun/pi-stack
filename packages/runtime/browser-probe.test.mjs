@@ -25,9 +25,12 @@ function fixture(t, defect) {
       const state = sessions.get(name);
       assert.ok(state, "semantic fill reuses the owned live session");
       assert.equal(input.semanticAction.action, "fill");
-      assert.equal(input.semanticAction.locator, "label");
-      const target = input.semanticAction.value === "Controlled date" ? "#controlled-date" : input.semanticAction.value === "Controlled datetime" ? "#controlled-datetime" : "#controlled-timezone";
-      if (defect !== "semantic-date-value") state.values.set(`main:${target}`, input.semanticAction.text);
+      if (input.semanticAction.text === undefined) return { details: {
+        resultCategory: defect === "semantic-unset-success" ? "success" : "failure",
+        failureCategory: "validation-error", validationError: "semanticAction.text is required for fill.",
+      } };
+      const target = input.semanticAction.selector ?? (input.semanticAction.value === "Controlled date" ? "#controlled-date" : input.semanticAction.value === "Controlled datetime" ? "#controlled-datetime" : "#controlled-timezone");
+      if (defect !== "semantic-date-value" && !(defect === "semantic-clear-noop" && input.semanticAction.text === "")) state.values.set(`main:${target}`, input.semanticAction.text);
       state.dateRoute = "semantic";
       return { details: { resultCategory: "success" } };
     }
@@ -119,7 +122,7 @@ test("complete native proof keeps linear batches and exact download/frame subcom
   assert.deepEqual(f.closed, ["attached", "owner"]);
 });
 
-for (const defect of ["date-value", "date-state", "find-date-value", "find-date-state", "semantic-date-value", "semantic-date-state", "rejected-fill-success", "rejected-value-mutated", "static-realm", "dynamic-realm", "remote-value", "download-bytes", "unverified-artifact", "truncated-batch", "failed-row", "attached-cleanup", "sensitive-snapshot", "sensitive-getter", "sensitive-html", "saved-sensitive-value", "unsafe-eval-success", "wrong-refusal", "unsafe-artifact"]) {
+for (const defect of ["semantic-clear-noop", "semantic-unset-success", "date-value", "date-state", "find-date-value", "find-date-state", "semantic-date-value", "semantic-date-state", "rejected-fill-success", "rejected-value-mutated", "static-realm", "dynamic-realm", "remote-value", "download-bytes", "unverified-artifact", "truncated-batch", "failed-row", "attached-cleanup", "sensitive-snapshot", "sensitive-getter", "sensitive-html", "saved-sensitive-value", "unsafe-eval-success", "wrong-refusal", "unsafe-artifact"]) {
   test(`rejects ${defect} and still closes the owner`, async (t) => {
     const f = fixture(t, defect);
     await assert.rejects(probeBrowser(f.tool, f.options));

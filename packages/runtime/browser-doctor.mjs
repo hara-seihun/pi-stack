@@ -152,7 +152,7 @@ try {
     record: phase => { phases.push(phase); writeFileSync(join(directory, "browser-proof.json"), JSON.stringify(phases, null, 2)); },
   });
   accepted = true;
-  console.log(JSON.stringify({ host: hostname(), sdk, runtime, bin, wrapperVersion, browserVersion, recovered: !!values["session-file"], phases: phases.map(({ phase, elapsedMs }) => ({ phase, elapsedMs })), nativeOpen: true, snapshot: true, visibleText: true, screenshot: true, download: true, crossOriginFrameFill: true, dynamicCrossOriginFrameFill: true, remoteExistingFrameFill: true, controlledDateFill: true, controlledDatetimeFill: true, controlledFindFill: true, controlledSemanticFill: true, authorizedTabRestoration: true, frameEval: true, sensitiveInputRedaction: true, cleanup: "closed" }));
+  console.log(JSON.stringify({ host: hostname(), sdk, runtime, bin, wrapperVersion, browserVersion, recovered: !!values["session-file"], phases: phases.map(({ phase, elapsedMs }) => ({ phase, elapsedMs })), nativeOpen: true, snapshot: true, visibleText: true, screenshot: true, download: true, crossOriginFrameFill: true, dynamicCrossOriginFrameFill: true, remoteExistingFrameFill: true, controlledDateFill: true, controlledDatetimeFill: true, controlledFindFill: true, controlledSemanticFill: true, semanticEmptyFill: true, semanticUnsetTextRejected: true, semanticZeroFill: true, semanticNonemptyFill: true, authorizedTabRestoration: true, frameEval: true, sensitiveInputRedaction: true, cleanup: "closed" }));
 } finally {
   try {
     if (session) await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
