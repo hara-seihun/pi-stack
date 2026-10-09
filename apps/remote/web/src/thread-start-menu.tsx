@@ -1,6 +1,7 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { API } from "../../server/api";
 import { api } from "./client";
+import { CONTROLLER_REPLACEMENT_TIMEOUT_MS } from "./controller-replacement";
 import { validateSession, stateArray } from "../../shared/state-validation";
 import { ChatIcon } from "./chat-row";
 import { aiChat, roomChat, type Chat } from "./chats";
@@ -131,7 +132,7 @@ export const ChatPicker = forwardRef<ChatPickerHandle, ChatPickerProps>(function
   useEffect(() => {
     if (!request) return;
     let active = true;
-    void api(API.createSession.method, API.createSession.path(), request).then(() => {
+    void api(API.createSession.method, API.createSession.path(), request, CONTROLLER_REPLACEMENT_TIMEOUT_MS).then(() => {
       if (active && current.current.kind === "creating" && current.current.request === request) { close(); onCreated(request.sessionId); }
     }, (cause: unknown) => {
       if (active) dispatch({ type: "failed", requestId: request.requestId, error: cause instanceof Error ? cause.message : String(cause) });
