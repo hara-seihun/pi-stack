@@ -19,6 +19,7 @@ import { scopedBashOperations } from "./pi-bash-resources.js";
 import { loadConfig } from "../config.js";
 import { modeEnvironment, modeTools } from "./pi-mode.js";
 import { PiCommandReceipts } from "./pi-command-receipts.js";
+import { PiInputStatus } from "./pi-input-status.js";
 import { installMessageDelivery } from "./message-delivery.js";
 import { previewCurrentContext } from "./pi-current-context.js";
 import { inputReceipts } from "./pi-input-receipts.js";
@@ -208,6 +209,7 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
     const runtime = await createAgentSessionRuntime(factory, { cwd: options.cwd, agentDir,
       sessionManager: SessionManager.open(options.sessionFile, undefined, options.cwd) });
     const commands = new PiCommandReceipts();
+    let inputStatuses = new PiInputStatus(runtime.session.sessionManager);
     const activeWork = new Set<string>();
     let executionStart: string | null | undefined;
     // Accepted inputs awaiting Pi's acknowledgement. Each is dispatched only after the previous one is acknowledged,
@@ -280,6 +282,7 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
         preparePiSession(runtime.session.sessionManager);
         checkpointPiSession(runtime.session.sessionManager);
         commands.attach(runtime.session.sessionManager);
+        inputStatuses = new PiInputStatus(runtime.session.sessionManager);
         output({ type: "session_changed", sessionFile: runtime.session.sessionFile, sessionId: runtime.session.sessionId, cwd: runtime.cwd });
         return result;
       } finally { replacing = false; }
@@ -307,6 +310,7 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
         event = requireRuntimeEvent(event);
         if (event.type === "response") {
           if (internalResponses.has(String(event.id))) { internalResponses.set(String(event.id), event); return; }
+          inputStatuses.finish(event);
           commands.finish(event, runtime.session.sessionManager);
           if (backgroundCommands.delete(String(event.id))) {
             output({ type: "compaction_end", commandId: event.id, success: event.success, error: event.error, result: event.data });
@@ -346,7 +350,26 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
       checkpointPiSession(runtime.session.sessionManager);
       return {
         command: command => piEnvironmentScope.run(env, async () => {
-          const response = (success: boolean, error?: string, data?: unknown) => output({ type: "response", id: command.id, command: command.type, success, ...(error ? { error } : {}), ...(data === undefined ? {} : { data }) });
+          const response = (success: boolean, error?: string, data?: unknown) => {
+            const event = { type: "response", id: command.id, command: command.type, success, ...(error ? { error } : {}), ...(data === undefined ? {} : { data }) };
+            inputStatuses.finish(event);
+            output(event);
+          };
+          if (command.type === "get_input_status") {
+            if (typeof command.commandId !== "string" || typeof command.workId !== "string") { response(false, "Input status requires commandId and workId"); return; }
+            response(true, undefined, inputStatuses.query(command.commandId, command.workId)); return;
+          }
+          if (inputCommands.has(command.type) && command.workId && command.resume !== true && command.resumeProviderWait !== true) {
+            if (!command.id) { response(false, "Native input requires command identity"); return; }
+            const prior = inputStatuses.begin(command.id, String(command.workId));
+            if (prior) {
+              if (prior.state === "accepted") response(true, undefined, { alreadyAccepted: true });
+              else if (prior.state === "rejected") response(false, prior.error);
+              else output({ type: "response", id: command.id, command: command.type, success: false,
+                inputUnconfirmed: true, error: "Native input is still in flight; it will not be dispatched again" });
+              return;
+            }
+          }
           if (closed) { response(false, "Pi session is closed"); return; }
           if (sandbox && ["bash", "switch_session", "new_session", "fork", "import_from_jsonl"].includes(command.type)) {
             response(false, "Sandbox sessions use only their confined tools and workspace"); return;
