@@ -50,6 +50,17 @@ function originalEntryProof(input, source, cgroup, namespace) {
   if (matches.length !== 1) throw new Error('Expected exactly one source-bound original serving entry in the owning unit');
   return matches[0];
 }
+export function publishedSourceProof(path, legacySource, publisherUid) {
+  if (!Number.isSafeInteger(publisherUid) || publisherUid < 0 || typeof path !== 'string' || !path.startsWith('/')
+    || resolve(path) !== path || !/^[0-9a-f]{40}$/.test(legacySource)) return failure('source-proof-input', 'Explicit trusted publisher UID and immutable source identity are required');
+  try {
+    const source = realpathSync(path), info = statSync(source), markerPath = join(source, '.pi-stack-commit'), marker = statSync(markerPath);
+    if (basename(source) !== legacySource || !info.isDirectory() || info.uid !== publisherUid || (info.mode & 0o022)
+      || !marker.isFile() || marker.uid !== publisherUid || (marker.mode & 0o022)
+      || readFileSync(markerPath, 'utf8').trim() !== legacySource) return failure('source-mismatch', 'Selected package is not the exact immutable source owned by the declared publisher');
+    return { ok: true, value: { source, publisherUid } };
+  } catch (error) { return failure('source-proof-failed', error instanceof Error ? error.message : String(error)); }
+}
 export function liveUnitProof(input) {
   try {
     if (!Number.isSafeInteger(input.ownerPid) || input.ownerPid <= 0 || !Number.isSafeInteger(input.healthPort)
@@ -60,9 +71,9 @@ export function liveUnitProof(input) {
     const fields = Object.fromEntries(result.stdout.trim().split('\n').map(line => { const i = line.indexOf('='); return [line.slice(0, i), line.slice(i + 1)]; }));
     if (fields.LoadState !== 'loaded' || fields.ActiveState !== 'active' || fields.MainPID !== String(input.ownerPid)
       || !fields.ControlGroup?.startsWith('/')) return failure('owner-not-live', 'Declared owner is not the active PID/cgroup');
-    const source = realpathSync(input.selectedSource), sourceInfo = statSync(source);
-    if (basename(source) !== input.legacySource || sourceInfo.uid !== 0 || (sourceInfo.mode & 0o022)
-      || readFileSync(join(source, '.pi-stack-commit'), 'utf8').trim() !== input.legacySource) return failure('source-mismatch', 'Selected package is not the exact root-owned immutable old source');
+    const published = publishedSourceProof(input.selectedSource, input.legacySource, input.publisherUid);
+    if (!published.ok) return published;
+    const { source, publisherUid } = published.value;
     const proc = `/proc/${input.ownerPid}`;
     if (statSync(proc).uid !== input.uid || readlinkSync(join(proc, 'ns/mnt')) !== readlinkSync('/proc/self/ns/mnt')) return failure('namespace-mismatch', 'Live restoration must execute in the actual own-UID owner namespace');
     const cgroup = readFileSync(join(proc, 'cgroup'), 'utf8').trim();
@@ -76,7 +87,7 @@ export function liveUnitProof(input) {
     const value = JSON.parse(health.stdout);
     if (value.ok !== true || value.releaseCommit !== input.legacySource) return failure('health-source', 'Live owner is not serving the exact immutable old source');
     return { ok: true, value: { unit: input.unit, pid: input.ownerPid, startTicks, cgroup: fields.ControlGroup,
-      source, healthPort: input.healthPort, releaseCommit: value.releaseCommit, namespace, servingEntry } };
+      source, publisherUid, healthPort: input.healthPort, releaseCommit: value.releaseCommit, namespace, servingEntry } };
   } catch (error) { return failure('live-proof-failed', error instanceof Error ? error.message : String(error)); }
 }
 function sameIdentity(record, identity) { return record?.candidate === identity.candidate && record?.legacySource === identity.legacySource; }

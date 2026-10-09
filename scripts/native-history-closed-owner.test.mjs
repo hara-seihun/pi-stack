@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir, userInfo } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
-import { restoreClosedOwner, restoreLiveOwner, readRestoredOwner, liveUnitProof } from '../deploy/native-history-closed-owner.mjs';
+import { restoreClosedOwner, restoreLiveOwner, readRestoredOwner, liveUnitProof, publishedSourceProof } from '../deploy/native-history-closed-owner.mjs';
 import { stageLegacyRemoteIdentity, isLegacyCapturePackage } from '../deploy/native-history-package-identity.mjs';
 const candidate = 'a'.repeat(40), legacySource = 'b'.repeat(40);
 const closed = () => ({ ok: true, value: { LoadState: 'loaded', ActiveState: 'failed', MainPID: '0', ControlGroup: '' } });
@@ -99,6 +99,16 @@ test('live source/PID drift before fence release rolls back; postcommit drift is
   assert.equal(committed.error.fenceReleaseCommitted, true);
   assert.equal(JSON.parse(readFileSync(join(input.dataDir, 'native-history-maintenance.json'))).phase, 'draining');
   assert.equal(restoreLiveOwner(input, () => live(input)).ok, true);
+});
+test('immutable package accepts its explicit non-root publisher and rejects wrong or missing publisher UID', t => {
+  assert.notEqual(process.getuid(), 0, 'This fixture exercises the actual non-root publisher');
+  const root = mkdtempSync(join(tmpdir(), 'history-publisher-')); t.after(() => rmSync(root, { recursive: true, force: true }));
+  const source = join(root, legacySource); mkdirSync(source, { mode: 0o755 });
+  writeFileSync(join(source, '.pi-stack-commit'), legacySource, { mode: 0o644 });
+  const alias = join(root, 'selected'); symlinkSync(source, alias);
+  assert.deepEqual(publishedSourceProof(alias, legacySource, process.getuid()), { ok: true, value: { source, publisherUid: process.getuid() } });
+  assert.equal(publishedSourceProof(alias, legacySource, 0).error.code, 'source-mismatch');
+  assert.equal(publishedSourceProof(alias, legacySource, undefined).error.code, 'source-proof-input');
 });
 test('live route rejects unavailable source proof and preclosure crossing without inventing a live boolean', t => {
   const input = fixture(t); fence(input);
