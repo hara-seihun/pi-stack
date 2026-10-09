@@ -305,7 +305,10 @@ export async function boundary({ hostFile, root, candidate, mode = 'advance', st
     const fleetReady = new Set();
     for (const item of fleets) {
       const proof = fleetAdmission(item, root, identity, 'prepare');
-      if (proof.prepared !== true) throw new Error(`Fleet dispatch cohort was not established for ${item.unit}`);
+      if (proof.prepared !== true) {
+        if (proof.code === 'ledger-transaction-active') continue;
+        throw new Error(`Fleet dispatch cohort was not established for ${item.unit}`);
+      }
       if (proof.ready === true) fleetReady.add(item.unit);
     }
     stageRemote(state.legacyRemote, state.remoteStage, state.manifestPath);
