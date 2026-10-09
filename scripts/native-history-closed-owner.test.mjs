@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir, userInfo } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
-import { restoreClosedOwner, readRestoredOwner } from '../deploy/native-history-closed-owner.mjs';
+import { restoreClosedOwner, restoreLiveOwner, readRestoredOwner, liveUnitProof, publishedSourceProof } from '../deploy/native-history-closed-owner.mjs';
 import { stageLegacyRemoteIdentity, isLegacyCapturePackage } from '../deploy/native-history-package-identity.mjs';
 const candidate = 'a'.repeat(40), legacySource = 'b'.repeat(40);
 const closed = () => ({ ok: true, value: { LoadState: 'loaded', ActiveState: 'failed', MainPID: '0', ControlGroup: '' } });
@@ -75,6 +75,48 @@ test('readonly restoration rejects receipt claiming restored while any fence rem
   const path = join(input.dataDir, 'native-history-maintenance.json'); const receipt = JSON.parse(readFileSync(path));
   receipt.phase = 'restored'; writeFileSync(path, JSON.stringify(receipt));
   assert.equal(readRestoredOwner(input).error.code, 'fence-present');
+});
+function live(input, pid = 42) {
+  return { ok: true, value: { unit: input.unit, pid, startTicks: '12345', cgroup: '/system.slice/test', source: `/immutable/${legacySource}`,
+    healthPort: 2460, releaseCommit: legacySource, namespace: 'mnt:[test]', servingEntry: { pid, startTicks: '12345', entry: `/immutable/${legacySource}/dist/cli.js`, selection: { kind: 'literal-immutable-entry' } } } };
+}
+test('live old fleet removes only its fences while accepted provider state continues unchanged', t => {
+  const input = fixture(t, 'fleet'); fence(input);
+  const ledger = new DatabaseSync(input.ledgerPath);
+  ledger.prepare('INSERT INTO control VALUES(?,?)').run('native-history-maintenance', JSON.stringify({ candidate, legacySource }));
+  ledger.exec("INSERT INTO run VALUES('completion1','running','completion:old'); CREATE TRIGGER pi_history_completion_admission BEFORE INSERT ON run BEGIN SELECT RAISE(ABORT,'fenced'); END;"); ledger.close();
+  const result = restoreLiveOwner(input, () => live(input)); assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.value.restorationProof.owner, 'live-old-unit'); assert.equal(result.value.restorationProof.pendingCompletions, 1);
+  const after = new DatabaseSync(input.ledgerPath, { readOnly: true }); assert.equal(after.prepare('SELECT state FROM run').get().state, 'running'); after.close();
+  assert.equal(readRestoredOwner(input).ok, true); assert.deepEqual(readThread(input).map(row => row.body), ['preserve-me']);
+});
+test('live source/PID drift before fence release rolls back; postcommit drift is an explicit committed-effect error', t => {
+  const input = fixture(t); fence(input); let count = 0;
+  assert.equal(restoreLiveOwner(input, () => live(input, ++count === 1 ? 42 : 43)).error.code, 'owner-generation-changed');
+  const db = new DatabaseSync(join(input.dataDir, 'threads.sqlite3'), { readOnly: true }); assert.equal(db.prepare('SELECT count(*) AS n FROM pi_history_bridge').get().n, 1); db.close();
+  count = 0;
+  const committed = restoreLiveOwner(input, () => live(input, ++count < 3 ? 42 : 43));
+  assert.equal(committed.error.fenceReleaseCommitted, true);
+  assert.equal(JSON.parse(readFileSync(join(input.dataDir, 'native-history-maintenance.json'))).phase, 'draining');
+  assert.equal(restoreLiveOwner(input, () => live(input)).ok, true);
+});
+test('immutable package accepts its explicit non-root publisher and rejects wrong or missing publisher UID', t => {
+  assert.notEqual(process.getuid(), 0, 'This fixture exercises the actual non-root publisher');
+  const root = mkdtempSync(join(tmpdir(), 'history-publisher-')); t.after(() => rmSync(root, { recursive: true, force: true }));
+  const source = join(root, legacySource); mkdirSync(source, { mode: 0o755 });
+  writeFileSync(join(source, '.pi-stack-commit'), legacySource, { mode: 0o644 });
+  const alias = join(root, 'selected'); symlinkSync(source, alias);
+  assert.deepEqual(publishedSourceProof(alias, legacySource, process.getuid()), { ok: true, value: { source, publisherUid: process.getuid() } });
+  assert.equal(publishedSourceProof(alias, legacySource, 0).error.code, 'source-mismatch');
+  assert.equal(publishedSourceProof(alias, legacySource, undefined).error.code, 'source-proof-input');
+});
+test('live route rejects unavailable source proof and preclosure crossing without inventing a live boolean', t => {
+  const input = fixture(t); fence(input);
+  assert.equal(liveUnitProof(input).error.code, 'live-proof-input');
+  assert.equal(restoreLiveOwner(input, () => ({ ok: false, error: { code: 'health-source' } })).error.code, 'health-source');
+  const db = new DatabaseSync(join(input.dataDir, 'threads.sqlite3')); db.exec("INSERT INTO pi_history_bridge VALUES('closing','1')"); db.close();
+  assert.equal(restoreLiveOwner(input, () => live(input)).ok, false);
+  assert.equal(JSON.parse(readFileSync(join(input.dataDir, 'native-history-maintenance.json'))).phase, 'draining');
 });
 test('staged local entry/server preserve package assertion and one old API module graph without settings edits', t => {
   const root = mkdtempSync(join(tmpdir(), 'history-package-')); t.after(() => rmSync(root, { recursive: true, force: true }));

@@ -1,10 +1,10 @@
-import { existsSync, readFileSync, statSync } from 'node:fs';
-import { join, resolve, dirname } from 'node:path';
+import { existsSync, readFileSync, statSync, lstatSync, realpathSync, readlinkSync } from 'node:fs';
+import { join, resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { userInfo } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
-import { atomicJson, BRIDGE_PROTOCOL } from './native-history-bridge.mjs';
+import { atomicJson, bridgeSocket, BRIDGE_PROTOCOL } from './native-history-bridge.mjs';
 
 function failure(code, message) { return { ok: false, error: { code, message } }; }
 export function closedUnitProof(unit) {
@@ -14,6 +14,91 @@ export function closedUnitProof(unit) {
   return fields.LoadState === 'loaded' && ['failed', 'inactive'].includes(fields.ActiveState)
     && fields.MainPID === '0' && fields.ControlGroup === ''
     ? { ok: true, value: fields } : failure('owner-live', 'Owner is not a loaded, closed unit with an empty cgroup');
+}
+function processStartTicks(pid) {
+  const rawStat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+  const ticks = rawStat.slice(rawStat.lastIndexOf(')') + 2).split(' ')[19];
+  if (!/^[0-9]+$/.test(ticks)) throw new Error('Live actor has no stable process generation');
+  return ticks;
+}
+export function originalEntryProof(input, source, cgroup, namespace) {
+  const expectedEntry = join(source, input.mode === 'fleet' ? 'dist/cli.js' : input.mode === 'rooms' ? 'server/rooms-main.ts' : 'server/main.ts');
+  const matches = [];
+  const pids = readFileSync(`/sys/fs/cgroup${cgroup}/cgroup.procs`, 'utf8').trim().split('\n');
+  for (const pid of pids) {
+    if (!/^[1-9][0-9]*$/.test(pid)) continue;
+    try {
+      if (statSync(`/proc/${pid}`).uid !== input.uid) continue;
+      const executable = basename(readlinkSync(`/proc/${pid}/exe`));
+      if (executable !== 'node' && executable !== 'bun') continue;
+      const args = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0');
+      const entry = args.find(arg => arg.startsWith('/') && arg.endsWith(`/${input.mode === 'fleet' ? 'dist/cli.js' : input.mode === 'rooms' ? 'server/rooms-main.ts' : 'server/main.ts'}`));
+      if (!entry || realpathSync(entry) !== expectedEntry) continue;
+      if (readlinkSync(`/proc/${pid}/ns/mnt`) !== namespace || readFileSync(`/proc/${pid}/cgroup`, 'utf8').trim() !== `0::${cgroup}`) throw new Error('Serving entry escaped its declared owner namespace/cgroup');
+      const startTicks = processStartTicks(pid);
+      let selection = { kind: 'literal-immutable-entry', path: entry };
+      if (entry !== expectedEntry) {
+        const alias = dirname(dirname(entry)), info = lstatSync(alias);
+        if (!info.isSymbolicLink() || realpathSync(alias) !== source) throw new Error('Serving entry has no exact source selection alias');
+        const hz = spawnSync('getconf', ['CLK_TCK'], { encoding: 'utf8', timeout: 1000 });
+        if (hz.status !== 0 || !/^[1-9][0-9]*$/.test(hz.stdout.trim())) throw new Error('Process start clock is unavailable');
+        const before = Date.now(), uptime = Number(readFileSync('/proc/uptime', 'utf8').split(' ')[0]);
+        if (!Number.isFinite(uptime) || before - uptime * 1000 + Number(startTicks) / Number(hz.stdout.trim()) * 1000 - 20 <= info.ctimeMs) throw new Error('Serving actor predates immutable source selection; unbridged generation is not proven');
+        selection = { kind: 'post-selection-entry', path: alias, inode: info.ino, selectedAt: info.ctimeMs };
+      }
+      matches.push({ pid: Number(pid), startTicks, entry: expectedEntry, selection });
+    } catch (error) { if (error.code !== 'ENOENT' && error.code !== 'ESRCH') throw error; }
+  }
+  if (matches.length !== 1) throw new Error('Expected exactly one source-bound original serving entry in the owning unit');
+  return matches[0];
+}
+export function publishedSourceProof(path, legacySource, publisherUid) {
+  if (!Number.isSafeInteger(publisherUid) || publisherUid < 0 || typeof path !== 'string' || !path.startsWith('/')
+    || resolve(path) !== path || !/^[0-9a-f]{40}$/.test(legacySource)) return failure('source-proof-input', 'Explicit trusted publisher UID and immutable source identity are required');
+  try {
+    const source = realpathSync(path), info = statSync(source), markerPath = join(source, '.pi-stack-commit'), marker = statSync(markerPath);
+    if (basename(source) !== legacySource || !info.isDirectory() || info.uid !== publisherUid || (info.mode & 0o022)
+      || !marker.isFile() || marker.uid !== publisherUid || (marker.mode & 0o022)
+      || readFileSync(markerPath, 'utf8').trim() !== legacySource) return failure('source-mismatch', 'Selected package is not the exact immutable source owned by the declared publisher');
+    return { ok: true, value: { source, publisherUid } };
+  } catch (error) { return failure('source-proof-failed', error instanceof Error ? error.message : String(error)); }
+}
+export function liveUnitProof(input) {
+  try {
+    if (!Number.isSafeInteger(input.ownerPid) || input.ownerPid <= 0 || !Number.isSafeInteger(input.healthPort)
+      || input.healthPort <= 0 || input.healthPort >= 65536 || typeof input.selectedSource !== 'string'
+      || !input.selectedSource.startsWith('/') || resolve(input.selectedSource) !== input.selectedSource) return failure('live-proof-input', 'Live restoration requires an explicit owner PID, health port and selected source');
+    const result = spawnSync('systemctl', ['show', input.unit, '-p', 'LoadState', '-p', 'ActiveState', '-p', 'MainPID', '-p', 'ControlGroup'], { encoding: 'utf8', timeout: 3000 });
+    if (result.status !== 0) return failure('unit-inspection', 'Live owning unit inspection failed');
+    const fields = Object.fromEntries(result.stdout.trim().split('\n').map(line => { const i = line.indexOf('='); return [line.slice(0, i), line.slice(i + 1)]; }));
+    if (fields.LoadState !== 'loaded' || fields.ActiveState !== 'active' || fields.MainPID !== String(input.ownerPid)
+      || !fields.ControlGroup?.startsWith('/')) return failure('owner-not-live', 'Declared owner is not the active PID/cgroup');
+    const published = publishedSourceProof(input.selectedSource, input.legacySource, input.publisherUid);
+    if (!published.ok) return published;
+    const { source, publisherUid } = published.value;
+    const proc = `/proc/${input.ownerPid}`;
+    if (statSync(proc).uid !== input.uid || readlinkSync(join(proc, 'ns/mnt')) !== readlinkSync('/proc/self/ns/mnt')) return failure('namespace-mismatch', 'Live restoration must execute in the actual own-UID owner namespace');
+    const cgroup = readFileSync(join(proc, 'cgroup'), 'utf8').trim();
+    if (cgroup !== `0::${fields.ControlGroup}`) return failure('owner-cgroup', 'Live PID is not in the declared owning unit cgroup');
+    const startTicks = processStartTicks(input.ownerPid);
+    const namespace = readlinkSync(join(proc, 'ns/mnt'));
+    const servingEntry = originalEntryProof(input, source, fields.ControlGroup, namespace);
+    const endpoint = bridgeSocket(input.uid, input.dataDir);
+    if (existsSync(endpoint)) {
+      const probe = spawnSync(process.execPath, [fileURLToPath(new URL('./native-history-bridge.mjs', import.meta.url)), '--probe-socket', endpoint],
+        { encoding: 'utf8', timeout: 1500, maxBuffer: 16384 });
+      const observed = probe.stdout ? JSON.parse(probe.stdout) : null;
+      if (probe.status !== 0 || observed?.ok !== true) return failure('bridge-unavailable', 'Maintenance endpoint has no positive connection-state proof');
+      if (observed.value.kind === 'live') return failure('bridge-present', 'Live maintenance controller exists; restore through its owning bridge');
+      if (observed.value.kind !== 'absent' && observed.value.kind !== 'stale') return failure('bridge-unavailable', 'Unknown maintenance endpoint connection-state proof');
+    }
+    const health = spawnSync('curl', ['-fsS', '--max-time', '2', `http://127.0.0.1:${input.healthPort}/v1/health`], { encoding: 'utf8', timeout: 3000, maxBuffer: 16384 });
+    if (health.status !== 0) return failure('health-unavailable', 'Actual own-UID old-owner health is unavailable');
+    const value = JSON.parse(health.stdout);
+    if (value.ok !== true || value.releaseCommit !== input.legacySource) return failure('health-source', 'Live owner is not serving the exact immutable old source');
+    return { ok: true, value: { unit: input.unit, pid: input.ownerPid, startTicks, cgroup: fields.ControlGroup,
+      source, publisherUid, healthPort: input.healthPort, releaseCommit: value.releaseCommit, namespace, servingEntry } };
+  } catch (error) { return failure('live-proof-failed', error instanceof Error ? error.message : String(error)); }
 }
 function sameIdentity(record, identity) { return record?.candidate === identity.candidate && record?.legacySource === identity.legacySource; }
 function ownedFile(path, uid) {
@@ -79,19 +164,25 @@ export function readRestoredOwner(input) {
 }
 
 export function restoreClosedOwner(input, inspectUnit = closedUnitProof) {
+  return restoreOwner(input, { kind: 'closed-unit', inspect: () => inspectUnit(input.unit) });
+}
+export function restoreLiveOwner(input, inspectOwner = liveUnitProof) {
+  return restoreOwner(input, { kind: 'live-old-unit', inspect: () => inspectOwner(input) });
+}
+function restoreOwner(input, route) {
   const databases = [];
   try {
     const uid = process.getuid(), username = userInfo().username;
     if (input.uid !== uid || !['remote', 'rooms', 'fleet'].includes(input.mode)
       || !/^[0-9a-f]{40}$/.test(input.candidate) || !/^[0-9a-f]{40}$/.test(input.legacySource)
       || typeof input.dataDir !== 'string' || !input.dataDir.startsWith('/') || resolve(input.dataDir) !== input.dataDir) {
-      return failure('identity', 'Closed-owner restoration requires exact own UID, mode, data directory and source identities');
+      return failure('identity', 'Restoration requires exact own UID, mode, data directory and source identities');
     }
     const expectedUnit = input.mode === 'rooms' && username === 'pi-rooms' ? 'pi-rooms.service'
       : input.mode === 'fleet' ? `pi-orchestrator@${username}.service` : `pi-remote@${username}.service`;
     if (input.unit !== expectedUnit) return failure('identity', 'Unit does not belong to the executing owner');
-    const closed = inspectUnit(input.unit);
-    if (!closed.ok) return closed;
+    const initial = route.inspect();
+    if (!initial.ok) return initial;
     const identity = { candidate: input.candidate, legacySource: input.legacySource };
     const receiptPath = join(input.dataDir, 'native-history-maintenance.json');
     if (existsSync(join(input.dataDir, 'native-history-readiness.json'))) return failure('migration-started', 'Native readiness exists; resume the candidate instead of the old decoder');
@@ -117,10 +208,11 @@ export function restoreClosedOwner(input, inspectUnit = closedUnitProof) {
       ownedFile(input.ledgerPath, uid);
       ledger = new DatabaseSync(input.ledgerPath); databases.push(ledger); ledger.exec('PRAGMA busy_timeout=2000; BEGIN IMMEDIATE');
       fleet = fleetFence(ledger, identity);
-      if (fleet.pendingCompletions !== 0) return failure('accepted-completions', `Accepted fleet completions remain pending: ${fleet.pendingCompletions}`);
+      if (route.kind === 'closed-unit' && fleet.pendingCompletions !== 0) return failure('accepted-completions', `Accepted fleet completions remain pending: ${fleet.pendingCompletions}`);
     }
-    const stillClosed = inspectUnit(input.unit);
-    if (!stillClosed.ok) return stillClosed;
+    const current = route.inspect();
+    if (!current.ok) return current;
+    if (route.kind === 'live-old-unit' && JSON.stringify(current.value) !== JSON.stringify(initial.value)) return failure('owner-generation-changed', 'Live owner source/PID/namespace changed before fence release');
     if (thread === 'identity-bound') threads.exec('DROP TRIGGER IF EXISTS pi_history_admission; DROP TRIGGER IF EXISTS pi_history_children; DROP TRIGGER IF EXISTS pi_history_question_cohort; DROP TABLE IF EXISTS pi_history_questions; DROP TABLE IF EXISTS pi_history_cohort; DROP TABLE pi_history_bridge;');
     if (ledger) {
       if (fleet.fence === 'identity-bound') {
@@ -130,7 +222,12 @@ export function restoreClosedOwner(input, inspectUnit = closedUnitProof) {
       ledger.exec('COMMIT');
     }
     threads.exec('COMMIT');
-    const proof = { owner: 'closed-unit', unit: input.unit, threadFence: thread, receipt: receipt ? 'identity-bound' : 'absent',
+    if (route.kind === 'live-old-unit') {
+      const after = route.inspect();
+      if (!after.ok || JSON.stringify(after.value) !== JSON.stringify(initial.value)) return {
+        ok: false, error: { code: 'owner-generation-changed', message: 'Fences were released but live source/PID proof changed; receipt remains untouched', fenceReleaseCommitted: true } };
+    }
+    const proof = { owner: route.kind, unit: input.unit, ...(route.kind === 'live-old-unit' ? { live: initial.value } : {}), threadFence: thread, receipt: receipt ? 'identity-bound' : 'absent',
       ...(fleet ? { fleetFence: fleet.fence, pendingCompletions: fleet.pendingCompletions } : {}) };
     if (receipt) atomicJson(receiptPath, { ...receipt, phase: 'restored', updatedAt: new Date().toISOString(), restorationProof: proof });
     return { ok: true, value: { protocol: BRIDGE_PROTOCOL, uid, dataDir: input.dataDir, ...identity, phase: 'restored', ready: true, restorationProof: proof } };
@@ -146,7 +243,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   try {
     const input = JSON.parse(process.argv[2]);
     result = process.argv[3] === '--read-restored' ? readRestoredOwner(input)
-      : process.argv[3] === undefined ? restoreClosedOwner(input) : failure('input', 'Unknown closed-owner proof action');
+      : process.argv[3] === '--restore-live' ? restoreLiveOwner(input)
+      : process.argv[3] === undefined ? restoreClosedOwner(input) : failure('input', 'Unknown owner proof action');
   }
   catch { result = failure('input', 'Expected one JSON closed-owner restoration configuration'); }
   console.log(JSON.stringify(result));

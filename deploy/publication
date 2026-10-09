@@ -1004,7 +1004,18 @@ case "$operation" in
 esac
 `.replaceAll("\\${", "${");
 
+export function nativeHistoryCustodyOwners(request, target) {
+  return allRequests().filter(owner => owner.requestId !== request.requestId).flatMap(owner => {
+    const history = owner.nativeHistory?.hosts?.[target.id];
+    if (!history || ["restored", "released"].includes(history.state)) return [];
+    return [{ requestId: owner.requestId, integrationSha: history.integrationSha, state: history.state, receipt: requestPath(owner.requestId) }];
+  });
+}
+
 export function reserveTarget(request, target, logPath) {
+  ensureState();
+  const owners = nativeHistoryCustodyOwners(request, target);
+  if (owners.length) return { ok: false, status: 75, kind: "native-history-custody", owners };
   request.reservations ??= {};
   request.reservations[target.id] = { state: "restore-required", integrationSha: request.integrationSha };
   writeRequest(request);
@@ -1862,6 +1873,12 @@ function deliverHost(request, target, logPath, previous) {
   if (previous?.status === "waiting" && ["host-lock", "thread-contract"].includes(previous.waiting.kind) && Date.now() - Date.parse(previous.waiting.at) > policy.blockedLimitMs) throw new Error(`${target.id} ${previous.waiting.kind} wait budget exhausted`);
   const result = reserveTarget(request, target, logPath);
   if (!result.ok) {
+    if (result.kind === "native-history-custody") {
+      const outcome = hostWait(request, target, "native-history-custody", logPath,
+        `${target.id} native history custody belongs to ${result.owners.map(owner => owner.requestId).join(", ")}; only their positive restoration or release permits another host admission.`, previous);
+      outcome.waiting.owners = result.owners;
+      return outcome;
+    }
     if (result.status === 75) {
       request.reservations[target.id].state = "released";
       writeRequest(request);
@@ -2410,6 +2427,13 @@ export function refreshHostWaits(request) {
           const result = nativeSourceProbe(request, target);
           host.waiting.probe = { at: new Date().toISOString(), selected: result.ok ? "ready" : result.stderr.trim() };
           available = result.ok;
+          break;
+        }
+        case "native-history-custody": {
+          const owners = nativeHistoryCustodyOwners(request, target);
+          host.waiting.owners = owners;
+          host.waiting.probe = { at: new Date().toISOString(), owners };
+          available = owners.length === 0;
           break;
         }
         case "native-history": {
