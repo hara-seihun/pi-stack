@@ -1084,7 +1084,7 @@ export function deployTarget(request, target, logPath) {
   if (waiting(/^another Pi stack deployment owns \/[^\r\n]+$/)) return { ...result, kind: "host-lock-busy" };
   if (waiting(/^(live meeting rooms on this host \([^\r\n]+\); deploying now would end them|meeting census unavailable on this host: .*)$/)) return { ...result, kind: "host-lock-busy", liveMeeting: true };
   if (waiting(/^native source prerequisite [^\r\n]+ requires [0-9a-f]{40} before Pi Stack [0-9a-f]{40}; selected [0-9a-f]{40}$/)) return { ...result, kind: "host-lock-busy", nativePrerequisite: true };
-  if (waiting(/^native history boundary waiting: [^\r\n]+$/)) return { ...result, kind: "host-lock-busy", nativeHistory: true };
+  if (waiting(/native history boundary waiting: [^\r\n]+$/)) return { ...result, kind: "host-lock-busy", nativeHistory: true };
   if (waiting(/^executor replacement waiting: [^\r\n]+$/)) return { ...result, kind: "host-lock-busy", executorReplacement: true };
   return result;
 }
@@ -1244,7 +1244,7 @@ export function nativeHistoryBoundaryTarget(request, target, mode, logPath) {
     return { ...result, kind: "native-history-resume-required" };
   }
   const waiting = mode !== "restore" && result.status === 75 && (mode === "advance"
-    ? logMatches(logPath, start, /^native history boundary waiting: [^\r\n]+$/)
+    ? logMatches(logPath, start, /native history boundary waiting: [^\r\n]+$/)
     : /^native history boundary waiting: [^\r\n]+$/m.test(detail));
   if (!result.ok && !waiting) {
     throw Object.assign(new Error(detail.trim() || `native history boundary ${mode} exited ${result.status}`), {

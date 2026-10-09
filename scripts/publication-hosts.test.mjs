@@ -189,8 +189,11 @@ if (name === "ssh") {
   event("prepare", { revision: args[0], serving: state.hosts[host].selected });
   event("host-native-history-advance", { revision: args[0], custody });
   if (mode === "native-history") {
+    const noise = state.hosts[host].noisyStatus;
+    if (noise === "interleaved") writeFileSync(1, '{"priorRestoration":"' + "x".repeat(65536));
     process.stderr.write("native history boundary waiting: fixture old generation is busy\n");
-    if (state.hosts[host].noisyStatus) writeFileSync(1, JSON.stringify({ priorRestoration: "x".repeat(200000) }) + "\n");
+    if (noise === "interleaved") writeFileSync(1, "x".repeat(200000) + '"}\n');
+    if (noise === "trailing") writeFileSync(1, JSON.stringify({ priorRestoration: "x".repeat(200000) }) + "\n");
     process.exit(75);
   }
   if (mode === "executor-replacement") {
@@ -497,9 +500,9 @@ for (const waitingHost of hostIds) for (const mode of ["live-meeting", "native-s
   });
 }
 
-for (const host of hostIds) test(`large trailing native history status on ${host} cannot turn pending custody into rollback`, async t => {
+for (const host of hostIds) for (const noise of ["trailing", "interleaved"]) test(`large ${noise} native history status on ${host} cannot turn pending custody into rollback`, async t => {
   const f = fixture(t, host, "native-history");
-  f.update(value => { value.hosts[host].noisyStatus = true; });
+  f.update(value => { value.hosts[host].noisyStatus = noise; });
   const waiting = await f.run();
   assert.equal(waiting.status, "queued", JSON.stringify(waiting.failure));
   assert.equal(waiting.hosts[host].waiting.kind, "native-history");
