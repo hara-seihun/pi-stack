@@ -225,6 +225,7 @@ export async function installLegacyMaintenance(options) {
       daemons.add(this);
       releaseFleetLedger();
       try { return await start.apply(this, args); }
+      catch (error) { receipt.error = `Legacy daemon startup failed: ${String(error)}`; throw error; }
       finally {
         if (receipt.phase === 'owners-closed') {
           try { releaseFleetLedger(); delete receipt.error; save('migrated'); if (options.autoAdvance === true) originalExit(75); }
