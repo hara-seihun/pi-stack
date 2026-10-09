@@ -7,6 +7,7 @@ import {
   closeSync,
   existsSync,
   openSync,
+  opendirSync,
   lstatSync,
   mkdirSync,
   readFileSync,
@@ -1749,7 +1750,56 @@ function creationFenceBusy(database, workspacePath) {
   } finally { closeSync(descriptor); }
 }
 
-function capacityReservations(database, device, reservedPath) {
+function allocatedWorkspaceBytes(workspacePath, device, { deadline = Date.now() + 500, maxEntries = 50_000, excludedPaths = [] } = {}) {
+  const excluded = new Set(excludedPaths);
+  const seen = new Set();
+  let entries = 0;
+  let bytes = 0;
+  let allocatedBytes = 0;
+  function walk(file) {
+    if (excluded.has(file)) return;
+    if (++entries > maxEntries || Date.now() >= deadline) throw new Error("allocated-block measurement budget exhausted");
+    const stats = lstatSync(file);
+    if (String(stats.dev) !== device) {
+      if (file === workspacePath) throw new Error("workspace moved to another filesystem");
+      return;
+    }
+    const inode = `${stats.dev}:${stats.ino}`;
+    if (seen.has(inode)) return;
+    seen.add(inode);
+    const blocks = stats.blocks * 512;
+    if (!Number.isSafeInteger(blocks) || blocks < 0) throw new Error("invalid allocated-block count");
+    allocatedBytes += blocks;
+    // Shared inodes cannot spend two workspaces' growth budgets.
+    if (stats.isDirectory() || stats.nlink === 1) bytes += blocks;
+    if (!Number.isSafeInteger(allocatedBytes)) throw new Error("allocated-block total exceeds supported byte range");
+    if (!stats.isDirectory()) return;
+    const directory = opendirSync(file);
+    try {
+      let entry;
+      while ((entry = directory.readSync()) !== null) walk(path.join(file, entry.name));
+    } finally { directory.closeSync(); }
+  }
+  try {
+    walk(workspacePath);
+    return { ok: true, bytes, allocatedBytes };
+  } catch (error) {
+    return { ok: false, error: `${error.code ?? "measurement-unavailable"}: ${error.message}` };
+  }
+}
+
+function remainingCapacityBytes(plan, state, measurement) {
+  capacityRequirement(plan, []);
+  const budget = plan.growthBytes + (state === "creating" ? plan.constructionBytes : 0);
+  if (!Number.isSafeInteger(budget)) fail("capacity ledger total exceeds supported byte range");
+  if (budget === 0 || !measurement.ok || (state !== "creating" && plan.completedAllocationBytes === null)) return budget;
+  if (!Number.isSafeInteger(measurement.bytes) || measurement.bytes < 0) fail("invalid capacity allocated-block measurement");
+  const baseline = state === "creating" ? 0 : plan.completedAllocationBytes ?? plan.constructionBytes;
+  if (!Number.isSafeInteger(baseline) || baseline < 0) fail("invalid capacity completed allocation baseline");
+  return Math.max(0, budget - Math.max(0, measurement.bytes - baseline));
+}
+
+function capacityReservations(database, device, reservedPath, measure = allocatedWorkspaceBytes) {
   if (database === undefined) return { priced: [], headroomBytes: 0, unpricedDormant: 0 };
   const unknown = database.prepare(`SELECT w.path, w.root FROM workspace w LEFT JOIN workspace_capacity c ON c.workspace_id=w.id
     WHERE w.state='creating' AND c.workspace_id IS NULL AND w.path!=?`).all(reservedPath ?? "");
@@ -1762,18 +1812,29 @@ function capacityReservations(database, device, reservedPath) {
     unpricedDormant += 1;
   }
   let headroomBytes = 0;
-  const priced = database.prepare(`SELECT c.plan_json, w.state FROM workspace_capacity c JOIN workspace w ON w.id=c.workspace_id
+  const measurementFailures = [];
+  const deadline = Date.now() + 3000;
+  const rows = database.prepare(`SELECT c.plan_json, w.state, w.path FROM workspace_capacity c JOIN workspace w ON w.id=c.workspace_id
     WHERE c.device_id=? AND w.path!=? AND w.state!='released'`)
-    .all(device, reservedPath ?? "").map(row => {
+    .all(device, reservedPath ?? "");
+  const paths = database.prepare("SELECT path FROM workspace WHERE state!='released'").all().map(row => row.path);
+  const priced = rows.map(row => {
       const plan = JSON.parse(row.plan_json);
       if (!["source-only", "budgeted", "unestimated"].includes(plan.intent) ||
         plan.estimate !== (plan.intent === "unestimated" ? "unknown" : "whole-tree-upper-bound")) fail("invalid capacity ledger intent or estimate");
       capacityRequirement(plan, []);
       headroomBytes = Math.max(headroomBytes, plan.headroomBytes,
         plan.intent === "unestimated" ? plan.constructionBytes : 0);
-      return plan.growthBytes + (row.state === "creating" ? plan.constructionBytes : 0);
+      const budget = plan.growthBytes + (row.state === "creating" ? plan.constructionBytes : 0);
+      if (budget === 0) return 0;
+      const measurement = measure(row.path, device, {
+        deadline: Math.min(deadline, Date.now() + 500),
+        excludedPaths: paths.filter(candidate => candidate.startsWith(`${row.path}${path.sep}`)),
+      });
+      if (!measurement.ok) measurementFailures.push({ path: row.path, error: measurement.error, reservedBytes: budget });
+      return remainingCapacityBytes(plan, row.state, measurement);
     }).filter(bytes => bytes > 0);
-  return { priced, headroomBytes, unpricedDormant };
+  return { priced, headroomBytes, unpricedDormant, ...(measurementFailures.length ? { measurementFailures } : {}) };
 }
 
 function assertCapacity(root, args, database, reservedPath, plan) {
@@ -1786,10 +1847,13 @@ function assertCapacity(root, args, database, reservedPath, plan) {
       pending.filter((record) => record.path !== reservedPath && !existsSync(record.path)).length;
     if (count >= maxCount) fail(`workspace root has ${count} checkouts; limit is ${maxCount}. Reconcile it before creating another.`);
   }
-  const stats = statfsSync(root);
-  const freeBytes = stats.bavail * stats.bsize;
   const device = String(statSync(root).dev);
   const reservations = capacityReservations(database, device, reservedPath);
+  for (const failure of reservations.measurementFailures ?? []) {
+    process.stderr.write(`capacity measurement unavailable at ${failure.path}; retaining full ${(failure.reservedBytes / 1024 ** 3).toFixed(2)} GiB reservation: ${failure.error}\n`);
+  }
+  const stats = statfsSync(root);
+  const freeBytes = stats.bavail * stats.bsize;
   const minimum = Math.ceil(numberFlag(args, "min-free-gib", DEFAULT_MIN_FREE_GIB) * 1024 ** 3);
   const requirement = capacityRequirement(plan ?? { intent: "unestimated", constructionBytes: minimum, headroomBytes: 0, growthBytes: 0 }, reservations.priced, reservations.headroomBytes);
   if (freeBytes < requirement) fail(`${(freeBytes / 1024 ** 3).toFixed(2)} GiB is free; ${(requirement / 1024 ** 3).toFixed(2)} GiB is required${plan?.intent !== undefined && plan.intent !== "unestimated" ? " (source forecast + declared growth + operating headroom + other reservations)" : " (unestimated full work + other reservations)"}`);
@@ -1797,7 +1861,8 @@ function assertCapacity(root, args, database, reservedPath, plan) {
   const minFreeInodes = numberFlag(args, "min-free-inodes-percent", DEFAULT_MIN_FREE_INODES_PERCENT);
   if (freeInodes < minFreeInodes) fail(`${freeInodes.toFixed(2)}% of inodes are free; ${minFreeInodes.toFixed(2)}% is required`);
   return { freeBytes, requiredBytes: requirement, reservedBytes: reservations.priced.reduce((sum, bytes) => sum + bytes, 0),
-    sharedHeadroomBytes: reservations.headroomBytes, unpricedDormant: reservations.unpricedDormant };
+    sharedHeadroomBytes: reservations.headroomBytes, unpricedDormant: reservations.unpricedDormant,
+    ...(reservations.measurementFailures ? { measurementFailures: reservations.measurementFailures } : {}) };
 }
 
 function safeName(value) {
@@ -2303,9 +2368,29 @@ function creationRecord(database, id) {
 }
 
 function completeCreation(database, id, repository, leaseSeconds, detail, args) {
+  const row = database.prepare("SELECT w.path, c.device_id, c.plan_json FROM workspace w JOIN workspace_capacity c ON c.workspace_id=w.id WHERE w.id=? AND w.state='creating'").get(id);
+  let plan;
+  if (row !== undefined) {
+    plan = JSON.parse(row.plan_json);
+    const measurement = allocatedWorkspaceBytes(row.path, row.device_id);
+    if (measurement.ok) plan.completedAllocationBytes = measurement.allocatedBytes;
+    else {
+      plan.completedAllocationBytes = null;
+      plan.completedAllocationError = measurement.error;
+      process.stderr.write(`capacity baseline unavailable at ${row.path}; retaining full growth reservation: ${measurement.error}\n`);
+    }
+  }
   const now = Date.now();
-  database.prepare("UPDATE workspace SET repository=?, state='active', detail=?, updated_at=?, lease_expires_at=? WHERE id=? AND state='creating'")
-    .run(repository, detail, now, now + leaseSeconds * 1000, id);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    if (plan !== undefined) database.prepare("UPDATE workspace_capacity SET plan_json=? WHERE workspace_id=?").run(JSON.stringify(plan), id);
+    database.prepare("UPDATE workspace SET repository=?, state='active', detail=?, updated_at=?, lease_expires_at=? WHERE id=? AND state='creating'")
+      .run(repository, detail, now, now + leaseSeconds * 1000, id);
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
   print(creationRecord(database, id), bool(args, "json"));
 }
 
@@ -2581,7 +2666,7 @@ Records outlive the directory, so status explains what became of a checkout that
 `);
 }
 
-export const workspaceTesting = { capacityRequirement, capacityReservations, sourceCapacityPlan, cacheTargets, dockerEndpointScope, dockerSnapshot, groupReconciliation, maintainReferenceClone, parseSystemdUnits, pruneReleased, systemdManagerSnapshot, systemdReferences, ownerThreadDatabases, threadSnapshot };
+export const workspaceTesting = { allocatedWorkspaceBytes, remainingCapacityBytes, capacityRequirement, capacityReservations, sourceCapacityPlan, cacheTargets, dockerEndpointScope, dockerSnapshot, groupReconciliation, maintainReferenceClone, parseSystemdUnits, pruneReleased, systemdManagerSnapshot, systemdReferences, ownerThreadDatabases, threadSnapshot };
 
 export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
   const [commandName, ...rest] = argv;

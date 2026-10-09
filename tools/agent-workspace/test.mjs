@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statfsSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statfsSync, statSync, symlinkSync, linkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createServer } from "node:net";
 import path from "node:path";
@@ -766,8 +766,9 @@ test("filesystem headroom is shared across completed workspaces while pending co
     assert.equal(workspaceTesting.capacityRequirement(plan, reservations.priced, reservations.headroomBytes), 30 * GiB);
     db.prepare("UPDATE workspace SET state='creating' WHERE id=?").run(records[0].id);
     reservations = workspaceTesting.capacityReservations(db, device);
-    assert.deepEqual(reservations, { priced: [30 * GiB], headroomBytes: 30 * GiB, unpricedDormant: 0 });
-    assert.equal(workspaceTesting.capacityRequirement(plan, reservations.priced, reservations.headroomBytes), 60 * GiB);
+    const constructionSpent = workspaceTesting.allocatedWorkspaceBytes(records[0].path, device).bytes;
+    assert.deepEqual(reservations, { priced: [30 * GiB - constructionSpent], headroomBytes: 30 * GiB, unpricedDormant: 0 });
+    assert.equal(workspaceTesting.capacityRequirement(plan, reservations.priced, reservations.headroomBytes), 60 * GiB - constructionSpent);
     db.prepare("UPDATE workspace SET state='released' WHERE id=?").run(records[0].id);
     const budgeted = { intent: "budgeted", estimate: "whole-tree-upper-bound", constructionBytes: 5 * GiB, growthBytes: 2 * GiB, headroomBytes: 40 * GiB };
     db.prepare("UPDATE workspace_capacity SET plan_json=? WHERE workspace_id=?").run(JSON.stringify(budgeted), records[1].id);
@@ -778,6 +779,55 @@ test("filesystem headroom is shared across completed workspaces while pending co
     db.prepare("UPDATE workspace SET state='released'").run();
     assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [], headroomBytes: 0, unpricedDormant: 0 });
     db.close();
+  } finally { f.close(); }
+});
+
+test("capacity charges only remaining growth and partial construction; failed measurements retain the full budget", () => {
+  const MiB = 1024 ** 2;
+  const plan = { intent: "budgeted", constructionBytes: 20 * MiB, growthBytes: 8 * MiB, headroomBytes: 1024 ** 3,
+    completedAllocationBytes: 4 * MiB };
+  assert.equal(workspaceTesting.remainingCapacityBytes(plan, "active", { ok: true, bytes: 7 * MiB }), 5 * MiB);
+  for (const state of ["active", "referenced", "repair-required", "blocked"]) {
+    assert.equal(workspaceTesting.remainingCapacityBytes(plan, state, { ok: true, bytes: 12 * MiB }), 0);
+    assert.equal(workspaceTesting.remainingCapacityBytes(plan, state, { ok: true, bytes: 30 * MiB }), 0);
+    assert.equal(workspaceTesting.remainingCapacityBytes(plan, state, { ok: false, error: "unreadable" }), 8 * MiB);
+  }
+  assert.equal(workspaceTesting.remainingCapacityBytes(plan, "active", { ok: true, bytes: 2 * MiB }), 8 * MiB);
+  assert.equal(workspaceTesting.remainingCapacityBytes({ ...plan, completedAllocationBytes: null }, "active", { ok: true, bytes: 30 * MiB }), 8 * MiB);
+  assert.equal(workspaceTesting.remainingCapacityBytes(plan, "creating", { ok: true, bytes: 7 * MiB }), 21 * MiB);
+  assert.equal(workspaceTesting.remainingCapacityBytes(plan, "creating", { ok: false, error: "absent" }), 28 * MiB);
+  const { completedAllocationBytes, ...earlierPlan } = plan;
+  assert.equal(workspaceTesting.remainingCapacityBytes(earlierPlan, "active", { ok: true, bytes: 23 * MiB }), 5 * MiB);
+  assert.throws(() => workspaceTesting.remainingCapacityBytes({ ...plan, completedAllocationBytes: -1 }, "active", { ok: true, bytes: 0 }), /invalid capacity completed allocation/);
+});
+
+test("allocated-block growth excludes symlink targets, shared inodes and separately registered descendants", () => {
+  const f = fixture();
+  try {
+    mkdirSync(f.workspaces, { recursive: true });
+    const workspace = path.join(f.workspaces, "measured");
+    mkdirSync(workspace);
+    const device = String(statSync(workspace).dev);
+    const outside = path.join(f.root, "outside");
+    writeFileSync(outside, Buffer.alloc(1024 ** 2));
+    symlinkSync(outside, path.join(workspace, "external-link"));
+    const before = workspaceTesting.allocatedWorkspaceBytes(workspace, device);
+    assert.equal(before.ok, true);
+    linkSync(outside, path.join(workspace, "shared-file"));
+    const shared = workspaceTesting.allocatedWorkspaceBytes(workspace, device);
+    assert.equal(shared.ok, true);
+    assert.equal(shared.bytes, before.bytes);
+    assert.equal(shared.allocatedBytes, before.allocatedBytes + statSync(outside).blocks * 512);
+    writeFileSync(path.join(workspace, "own-file"), Buffer.alloc(1024 ** 2));
+    const after = workspaceTesting.allocatedWorkspaceBytes(workspace, device);
+    assert.equal(after.bytes - shared.bytes, 1024 ** 2);
+    const child = path.join(workspace, "child");
+    mkdirSync(child);
+    writeFileSync(path.join(child, "child-file"), Buffer.alloc(1024 ** 2));
+    assert.equal(workspaceTesting.allocatedWorkspaceBytes(workspace, device, { excludedPaths: [child] }).bytes, after.bytes);
+    assert.equal(workspaceTesting.allocatedWorkspaceBytes(workspace, device, { maxEntries: 1 }).ok, false);
+    assert.equal(workspaceTesting.allocatedWorkspaceBytes(workspace, device, { deadline: 0 }).ok, false);
+    assert.equal(workspaceTesting.allocatedWorkspaceBytes(path.join(workspace, "absent"), device).ok, false);
   } finally { f.close(); }
 });
 
@@ -827,7 +877,9 @@ test("budgeted source creation shares existing objects and records immutable who
     db.prepare("UPDATE workspace SET lease_expires_at=0 WHERE id=?").run(created.id);
     assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [8 * 1024 ** 2], headroomBytes: 1024 ** 3, unpricedDormant: 0 });
     db.prepare("UPDATE workspace SET state='creating', lease_expires_at=0 WHERE id=?").run(created.id);
-    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [created.capacity.growthBytes + created.capacity.constructionBytes], headroomBytes: 1024 ** 3, unpricedDormant: 0 });
+    const allocated = workspaceTesting.allocatedWorkspaceBytes(created.path, device);
+    assert.equal(allocated.ok, true);
+    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [created.capacity.growthBytes + created.capacity.constructionBytes - allocated.bytes], headroomBytes: 1024 ** 3, unpricedDormant: 0 });
     db.prepare("DELETE FROM workspace_capacity WHERE workspace_id=?").run(created.id);
     assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [], headroomBytes: 0, unpricedDormant: 1 });
     assert.deepEqual(workspaceTesting.capacityReservations(db, device, created.path), { priced: [], headroomBytes: 0, unpricedDormant: 0 });
@@ -835,6 +887,17 @@ test("budgeted source creation shares existing objects and records immutable who
     const resumed = JSON.parse(run(args, f.env));
     assert.equal(resumed.id, created.id);
     assert.equal(resumed.capacity.sourceCommit, created.sourceCommit);
+    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [8 * 1024 ** 2], headroomBytes: 1024 ** 3, unpricedDormant: 0 });
+    const beforeGrowth = workspaceTesting.allocatedWorkspaceBytes(created.path, device);
+    writeFileSync(path.join(created.path, "generated.bin"), Buffer.alloc(3 * 1024 ** 2));
+    const partialGrowth = workspaceTesting.allocatedWorkspaceBytes(created.path, device).bytes - beforeGrowth.bytes;
+    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [8 * 1024 ** 2 - partialGrowth], headroomBytes: 1024 ** 3, unpricedDormant: 0 });
+    const unavailable = workspaceTesting.capacityReservations(db, device, undefined, () => ({ ok: false, error: "unreadable fixture" }));
+    assert.deepEqual(unavailable, { priced: [8 * 1024 ** 2], headroomBytes: 1024 ** 3, unpricedDormant: 0,
+      measurementFailures: [{ path: created.path, error: "unreadable fixture", reservedBytes: 8 * 1024 ** 2 }] });
+    writeFileSync(path.join(created.path, "generated.bin"), Buffer.alloc(10 * 1024 ** 2));
+    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [], headroomBytes: 1024 ** 3, unpricedDormant: 0 });
+    rmSync(path.join(created.path, "generated.bin"));
     assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [8 * 1024 ** 2], headroomBytes: 1024 ** 3, unpricedDormant: 0 });
     db.prepare("UPDATE workspace SET state='creating' WHERE id=?").run(created.id);
     rmSync(created.path, { recursive: true });
@@ -978,7 +1041,7 @@ test("an active legacy creator refuses unknown capacity while a dormant one must
     child.stdin.end();
     await closed;
     child = undefined;
-    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [], unpricedDormant: 1 });
+    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [], headroomBytes: 0, unpricedDormant: 1 });
     assert.equal(JSON.parse(run([...base, "--name", "other"], f.env)).capacity.admission.unpricedDormant, 1);
     assert.throws(() => run([...base.map(arg => arg === "0" ? "1000000" : arg), "--name", "legacy"], f.env), /GiB is required/);
     assert.equal(db.prepare("SELECT count(*) AS count FROM workspace_capacity WHERE workspace_id=?").get(created.id).count, 0);
