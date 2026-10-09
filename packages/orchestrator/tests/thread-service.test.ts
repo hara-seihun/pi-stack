@@ -69,6 +69,8 @@ class FakePiSession implements PiSession {
       acceptedWorkIds: [...this.acceptedWorkIds],
       completedWorkIds: [...this.completedWorkIds],
       lastAssistantMessage: this.lastAssistantMessage,
+    } : command.type === "get_input_status" ? {
+      state: this.acceptedWorkIds.has(String(command.workId)) ? "accepted" : "in_flight", commandId: command.commandId, workId: command.workId,
     } : command.type === "get_context" ? this.currentContext : {};
     this.output({ type: "response", id: command.id, command: command.type, success: true, data });
   }
@@ -153,7 +155,40 @@ describe("delayed native input acknowledgements", () => {
       await vi.advanceTimersByTimeAsync(30_000); service.reconcile(); await turn(); await turn();
       expect(service.get(thread.id)?.metadata?.acknowledgementWait).toBeUndefined();
       expect(service.pending(thread.id).find(work => work.id === "delayed")?.insertedAt).toEqual(expect.any(Number));
-      expect(session.commands.filter(command => command.workId === "delayed")).toHaveLength(1);
+      expect(session.commands.filter(command => command.type === "steer" && command.workId === "delayed")).toHaveLength(1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("drains later messages from native terminal status after acceptance acknowledgement was lost", async () => {
+    try {
+      const { service, session, thread } = await delayed();
+      value(await service.send({ requestId: "after-lost-ack", threadId: thread.id, text: "later", delivery: "steer" }));
+      await vi.advanceTimersByTimeAsync(210_000); service.reconcile(); await turn(); await turn();
+      expect(service.get(thread.id)?.metadata?.acknowledgementWait).toBeUndefined();
+      expect(session.commands.filter(command => command.type === "steer" && command.workId === "delayed")).toHaveLength(1);
+      await waitFor(() => session.commands.some(command => command.type === "steer" && command.workId === "after-lost-ack"));
+      expect(session.commands.filter(command => command.type === "get_input_status")).toHaveLength(1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("reconciles a retained pre-status adapter through its ordered ingress barrier without replay or cancelling the active run", async () => {
+    try {
+      const { service, session, thread } = await delayed();
+      const original = session.command.bind(session);
+      session.acceptedWorkIds.delete("delayed");
+      session.command = async command => {
+        if (command.type === "get_input_status") {
+          session.commands.push(command);
+          session.emit({ type: "response", id: command.id, command: command.type, success: false, error: "Unknown command: get_input_status" });
+        } else await original(command);
+      };
+      await vi.advanceTimersByTimeAsync(210_000); service.reconcile(); await turn(); await turn(); await turn();
+      expect(service.get(thread.id)?.metadata?.acknowledgementWait).toBeUndefined();
+      expect(service.get(thread.id)?.metadata?.inputReconciliation).toMatchObject({ workId: "delayed", state: "rejected" });
+      expect(service.pending(thread.id).some(work => work.id === "delayed")).toBe(false);
+      expect(service.get(thread.id)?.state).toBe("running");
+      expect(session.commands.some(command => command.type === "abort")).toBe(false);
+      expect(session.commands.filter(command => command.type === "steer" && command.workId === "delayed")).toHaveLength(1);
     } finally { vi.useRealTimers(); }
   });
 

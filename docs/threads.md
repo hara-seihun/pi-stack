@@ -287,6 +287,19 @@ no process-lifetime lock owner. Unknown generations, conflicting ownership or an
 unacknowledged fence retain the original capacity identity. Recovery never
 replays stopped input or changes an already-completed assignment receipt.
 
+Native input acknowledgement custody is queried by `get_input_status` with the exact
+`commandId` and `workId`. Native `thread_input_status` receipts distinguish accepted,
+rejected and in-flight commands across acknowledgement loss and restart. A query
+returns `never_accepted` only after crossing the runner's ordered ingress barrier.
+An accepted result confirms insertion without dispatching again; rejection/non-admission
+retires only that input and leaves the active execution and later queue intact.
+An in-flight result retains custody. Unknown identities and malformed status replies
+are errors, not acceptance. Retained pre-status adapters are recognized by their exact
+unknown-command response, then queried through their ordered native state barrier:
+the adapter writes admission synchronously before its first await, so native absence
+after that barrier proves non-admission. This route neither restarts the runner nor
+replays the input. Explicit Stop/close still fences all reconciliation.
+
 Retained attachment has one in-flight operation and one native client per thread.
 Repeated custody probes reuse that client; concurrent native opens await its
 attachment. A new attachment reads native `get_state` before claiming busy or
