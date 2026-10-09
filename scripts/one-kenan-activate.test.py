@@ -33,6 +33,7 @@ class Host:
             role = next(role for role, unit in module['UNITS'].items() if unit == args[-1])
             if self.fail == role: raise RuntimeError('failed restart')
             self.commits[role] = 'new'
+            if role == 'root': self.protocol = 2; self.paused = False
         if args[1] in ['reload', 'kill']: self.commits['rooms'] = 'new'
         return ''
 
@@ -45,13 +46,15 @@ class Host:
             if self.busy: return 409, {}
             self.paused = True
         else: self.paused = False
-        return 200, {'ok': True, 'dispatchPaused': self.paused}
+        return 200, {'ok': True, 'quiescing' if self.protocol == 1 else 'dispatchPaused': self.paused}
 
     def ready(self, role, previous_pid=None):
         self.calls.append(('ready', role, previous_pid))
         return self.health(role)
 
-    def install_drain(self, role): self.calls.append(('drain', role))
+    def prepare(self, role):
+        self.calls.append(('prepared', role))
+        if self.fail == 'prepare': raise RuntimeError('candidate source not selected')
     def install_room_launcher(self):
         self.calls.append(('room-launcher',))
         return 'fixture-dropin', '123' if self.migration else None
@@ -105,11 +108,11 @@ class HTTPProbes(unittest.TestCase):
 
 class Activation(unittest.TestCase):
     def test_busy_or_non_graceful_owner_is_preserved_without_an_admission_gate(self):
-        for host in [Host(protocol=1), Host(protocol=None), Host(busy=True)]:
+        for host in [Host(protocol=None), Host(busy=True), Host(protocol=1, busy=True)]:
             with self.assertRaises(Deferred): activate(host)
             self.assertFalse(any(call[:2] in [('systemctl', 'restart'), ('systemctl', 'reload')] for call in host.calls))
             self.assertFalse(host.paused)
-            if host.protocol != 2:
+            if host.protocol is None:
                 self.assertNotIn(('POST', '/v1/admin/release'), host.calls)
 
     def test_only_stale_consumers_are_replaced_with_own_drain_and_running_proof(self):
@@ -118,11 +121,41 @@ class Activation(unittest.TestCase):
         self.assertTrue(result['enabled'])
         self.assertEqual([call[-1] for call in host.calls if call[:2] == ('systemctl', 'restart')], ['pi-kenan-memory.service', 'pi-kenan-root.service'])
         for role, unit in [('memory', 'pi-kenan-memory.service'), ('root', 'pi-kenan-root.service')]:
-            self.assertLess(host.calls.index(('drain', role)), host.calls.index(('systemctl', 'restart', '--no-block', unit)))
+            self.assertLess(host.calls.index(('prepared', role)), host.calls.index(('POST', '/v1/admin/release')))
+            self.assertLess(host.calls.index(('prepared', role)), host.calls.index(('systemctl', 'restart', '--no-block', unit)))
         self.assertIn(('ready', 'rooms', '123'), host.calls)
         self.assertFalse(host.paused)
         self.assertFalse(any('custody' in ' '.join(call) for call in host.calls))
         with self.assertRaisesRegex(RuntimeError, 'running release'): prove(Host())
+
+    def test_prepared_protocol_one_idle_owner_is_replaced_before_memory_or_rooms(self):
+        host = Host(protocol=1)
+        self.assertTrue(activate(host)['enabled'])
+        self.assertEqual([call[-1] for call in host.calls if call[:2] == ('systemctl', 'restart')], ['pi-kenan-root.service', 'pi-kenan-memory.service'])
+        pause = host.calls.index(('POST', '/v1/admin/release'))
+        restart = host.calls.index(('systemctl', 'restart', '--no-block', 'pi-kenan-root.service'))
+        self.assertEqual(host.calls[pause + 1:restart], [('systemctl', 'show', 'pi-kenan-root.service', '-p', 'MainPID', '--value')])
+        self.assertLess(host.calls.index(('ready', 'root', '123')), host.calls.index(('systemctl', 'restart', '--no-block', 'pi-kenan-memory.service')))
+        self.assertEqual(host.protocol, 2)
+        self.assertFalse(host.paused)
+
+    def test_generation_change_after_atomic_idle_cannot_restart_a_new_owner(self):
+        host = Host(protocol=1)
+        original = host.command
+        def changed(*args):
+            result = original(*args)
+            return '456' if 'MainPID' in args and ('POST', '/v1/admin/release') in host.calls else result
+        host.command = changed
+        with self.assertRaisesRegex(Deferred, 'generation changed'): activate(host)
+        self.assertFalse(host.paused)
+        self.assertFalse(any(call[:2] == ('systemctl', 'restart') for call in host.calls))
+
+    def test_unprepared_candidate_never_closes_old_intake(self):
+        host = Host(protocol=1, fail='prepare')
+        with self.assertRaisesRegex(RuntimeError, 'not selected'): activate(host)
+        self.assertFalse(host.paused)
+        self.assertNotIn(('POST', '/v1/admin/release'), host.calls)
+        self.assertFalse(any(call[:2] == ('systemctl', 'restart') for call in host.calls))
 
     def test_unchanged_consumers_do_not_pause_dispatch_or_restart(self):
         host = Host(selected=True)

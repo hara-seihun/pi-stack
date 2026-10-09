@@ -93,9 +93,12 @@ class Host:
         self.command('systemctl', 'daemon-reload')
         return migration, previous_pid
 
-    def install_drain(self, role):
+    def prepare(self, role):
         if role not in ('root', 'memory'):
             raise RuntimeError('Only Root and memory have executor drain declarations')
+        selection = self.config.get('remoteRoot', '/srv/pi/pi-remote') if role == 'root' else self.config.get('runtimeRoot', '/srv/pi/runtime')
+        if not os.path.isabs(selection) or (pathlib.Path(selection) / '.pi-stack-commit').read_text().strip() != self.expected:
+            raise RuntimeError(f'{role} candidate source is not selected; accepting owner remains untouched')
         directory = pathlib.Path('/etc/systemd/system/' + UNITS[role] + '.d')
         directory.mkdir(mode=0o755, exist_ok=True)
         dropin = directory/'release.conf'
@@ -113,8 +116,11 @@ def check(host):
     for role, unit in UNITS.items():
         if host.command('systemctl', 'show', unit, '-p', 'LoadState', '--value') != 'loaded':
             raise RuntimeError(f'Enabled One Kenan is missing {unit}')
-    if host.health('root').get('releaseProtocol') != 2:
-        raise Deferred('The running Root executor does not expose the accepting dispatch-only handoff protocol; it remains running')
+    health = host.health('root')
+    protocol = health.get('releaseProtocol')
+    if health.get('ok') is not True or type(protocol) is not int or protocol not in (1, 2):
+        raise Deferred('The running Root executor has no atomic idle handoff protocol; it remains running')
+    return protocol
 
 
 def prove(host):
@@ -149,23 +155,48 @@ def activate(host):
     if not stale:
         activate_rooms(host)
         return prove(host)
-    check(host)
+    protocol = check(host)
+    if protocol == 1 and 'root' not in stale:
+        raise Deferred('Protocol 1 owner needs a prepared accepting Root replacement before memory activation')
+    # All preparation happens before protocol 1's one-time atomic idle handoff.
+    for role in stale:
+        host.prepare(role)
+    paused_pid = host.command('systemctl', 'show', UNITS['root'], '-p', 'MainPID', '--value')
+    if not re.fullmatch(r'[1-9][0-9]*', paused_pid):
+        raise Deferred('Root owner changed during preparation; intake remains unchanged')
     status, body = host.http('root', '/v1/admin/release', 'POST')
     if status == 409:
         raise Deferred('Root has active work; request intake is unchanged and executor replacement waits for natural idle')
     try:
-        if status != 200 or body != {'ok': True, 'dispatchPaused': True}:
-            raise Deferred('Root dispatch pause was not confirmed; no consumers restarted')
+        expected_pause = {'ok': True, 'quiescing': True} if protocol == 1 else {'ok': True, 'dispatchPaused': True}
+        if status != 200 or body != expected_pause:
+            raise Deferred('Root idle handoff was not confirmed; no consumers restarted')
+        if host.command('systemctl', 'show', UNITS['root'], '-p', 'MainPID', '--value') != paused_pid:
+            raise Deferred('Root generation changed after idle handoff; no consumers restarted')
+        if protocol == 1:
+            host.command('systemctl', 'restart', '--no-block', UNITS['root'])
+            health = host.ready('root', paused_pid)
+            if health.get('releaseProtocol') != 2:
+                raise Deferred('Root replacement has not established accepting dispatch-only handoff')
+            protocol = 2
+            stale.remove('root')
+            if 'memory' in stale:
+                status, body = host.http('root', '/v1/admin/release', 'POST')
+                if status != 200 or body != {'ok': True, 'dispatchPaused': True}:
+                    raise Deferred('New Root has active work; memory activation waits with normal intake accepting')
         for role in stale:
-            host.install_drain(role)
             previous_pid = host.command('systemctl', 'show', UNITS[role], '-p', 'MainPID', '--value')
             host.command('systemctl', 'restart', '--no-block', UNITS[role])
             host.ready(role, previous_pid)
+        status, body = host.http('root', '/v1/admin/release', 'DELETE')
+        if status != 200 or body != {'ok': True, 'dispatchPaused': False}:
+            raise Deferred('Root dispatch resume was not confirmed')
         activate_rooms(host)
         return prove(host)
     finally:
         status, body = host.http('root', '/v1/admin/release', 'DELETE')
-        if status != 200 or body != {'ok': True, 'dispatchPaused': False}:
+        resumed = {'ok': True, 'quiescing': False} if protocol == 1 else {'ok': True, 'dispatchPaused': False}
+        if status != 200 or body != resumed:
             raise Deferred('Root replacement is still settling; request receipts remain durable and dispatch resume must be reconciled')
 
 
