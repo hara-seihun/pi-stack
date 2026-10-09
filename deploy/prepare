@@ -1,56 +1,54 @@
 #!/usr/bin/env bash
-# Prepare everything deploy/host would otherwise build inside its 50-second
-# deadline: checkout dependencies, the Orchestrator, Remote and Root builds, the
-# production runtime tree and Meet recognition service. Every step is
-# idempotent and receipt-cached, so deploy/host then reuses the results and
-# spends its whole budget on publishing, activation and smoke checks.
-#
-# Host release wrappers call this before deploy/host. Preparation touches no
-# running service, so it runs without the deployment deadline; the caller
-# (the publication step or an operator) bounds it.
-#
-#   deploy/prepare
+# Build and prove immutable candidates while the selected controllers keep serving.
 set -euo pipefail
-
 root=$(cd "$(dirname "$0")/.." && pwd)
 source "$root/deploy/lib"
 pi_stack_acquire_deploy_lock "$root"
 export PI_STACK_DEPLOY_DEADLINE_ACTIVE=1
 if [[ ${PI_STACK_ALLOW_DIRTY:-0} != 1 && -n $(git -C "$root" status --porcelain) ]]; then
-  echo "refusing to prepare an uncommitted Pi stack; set PI_STACK_ALLOW_DIRTY=1 only for a temporary test" >&2
+  echo 'refusing to prepare an uncommitted Pi stack' >&2
   exit 65
 fi
-
-if [[ -z ${PI_STACK_REMOTE_DEST:-}${PI_STACK_ORCHESTRATOR_DEST:-}${PI_STACK_RUNTIME_DEST:-} || ${PI_STACK_SERVICES:-0} == 1 ]]; then
-  "$root/deploy/native-history-boundary" "${PI_STACK_HOST_FILE:-$(pi_stack_host_file)}" "$root" "$(git -C "$root" rev-parse HEAD)"
+commit=$(git -C "$root" rev-parse HEAD)
+export PI_STACK_RELEASES_ROOT=$(pi_stack_component_releases_root)
+if pi_stack_as_root test -f "$PI_STACK_RELEASES_ROOT/.prepared/$commit.json"; then
+  pi_stack_as_root node "$root/deploy/prepared-components.mjs" "$PI_STACK_RELEASES_ROOT" "$commit" verify
+  "$root/deploy/meet-recognition"
+  printf 'Pi stack %s is already prepared; selected owners are unchanged\n' "$commit"
+  exit 0
 fi
-
 started=$SECONDS
-# Bound the release store before this release adds to it. Retention is not
-# part of this release's correctness, so its failure is loud but not fatal.
-"$root/deploy/retain" || echo 'Pi stack release retention failed; the release store was left as it was' >&2
+"$root/deploy/retain" || echo 'Pi stack release retention failed; existing assets retained' >&2
 pi_stack_prepare_builds "$root" &
 builds_pid=$!
 "$root/deploy/meet-recognition" &
 recognition_pid=$!
 failed=0
-# Runtime packages consume the declarations built above. Keep recognition independent,
-# but never install/compile that closure while checkout builds are still writing it.
 if wait "$builds_pid"; then
-  if "$root/deploy/runtime"; then :; else
-    status=$?
-    printf 'Pi stack preparation runtime exited %s\n' "$status" >&2
-    failed=1
+  if "$root/deploy/runtime" --prepare; then :; else
+    status=$?; printf 'Pi stack preparation runtime exited %s\n' "$status" >&2; failed=1
   fi
 else
-  status=$?
-  printf 'Pi stack preparation builds exited %s\n' "$status" >&2
-  failed=1
+  status=$?; printf 'Pi stack preparation builds exited %s\n' "$status" >&2; failed=1
 fi
 if wait "$recognition_pid"; then :; else
-  status=$?
-  printf 'Pi stack preparation meet-recognition exited %s\n' "$status" >&2
-  failed=1
+  status=$?; printf 'Pi stack preparation meet-recognition exited %s\n' "$status" >&2; failed=1
 fi
-(( failed == 0 )) || { echo "Pi stack preparation failed" >&2; exit 1; }
-printf 'prepared Pi stack %s in %ss\n' "$(git -C "$root" rev-parse --short HEAD)" "$((SECONDS - started))"
+(( failed == 0 )) || exit 1
+# Scratch selectors are never referenced by a service or an account command.
+prepared="$(dirname "$PI_STACK_RELEASES_ROOT")/.pi-stack-prepared/$commit"
+export PI_STACK_PREPARE_ONLY=1 PI_STACK_SKIP_TOOL_LINKS=1
+export PI_STACK_RUNTIME_DEST="$PI_STACK_RELEASES_ROOT/runtime/$commit"
+export PI_STACK_ORCHESTRATOR_DEST="$prepared/orchestrator" PI_STACK_REMOTE_DEST="$prepared/remote" PI_STACK_TOOLS_DEST="$prepared/tools"
+pi_stack_as_root install -d -m755 "$prepared"
+"$root/deploy/orchestrator"
+"$root/deploy/remote" &
+remote_pid=$!
+"$root/deploy/tools" &
+tools_pid=$!
+failed=0
+wait "$remote_pid" || failed=1
+wait "$tools_pid" || failed=1
+(( failed == 0 )) || exit 1
+pi_stack_as_root node "$root/deploy/prepared-components.mjs" "$PI_STACK_RELEASES_ROOT" "$commit" record
+printf 'prepared Pi stack %s in %ss without changing selected owners\n' "$commit" "$((SECONDS - started))"

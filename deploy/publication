@@ -1063,6 +1063,7 @@ export function deployTarget(request, target, logPath) {
   if (/^(live meeting rooms on this host \([^\r\n]+\); deploying now would end them|meeting census unavailable on this host: .*)$/m.test(tail)) return { ...result, kind: "host-lock-busy", liveMeeting: true };
   if (/^native source prerequisite [^\r\n]+ requires [0-9a-f]{40} before Pi Stack [0-9a-f]{40}; selected [0-9a-f]{40}$/m.test(tail)) return { ...result, kind: "host-lock-busy", nativePrerequisite: true };
   if (/^native history boundary waiting: [^\r\n]+$/m.test(tail)) return { ...result, kind: "host-lock-busy", nativeHistory: true };
+  if (/^executor replacement waiting: [^\r\n]+$/m.test(tail)) return { ...result, kind: "host-lock-busy", executorReplacement: true };
   return result;
 }
 
@@ -1156,7 +1157,8 @@ function nativeSourceProbe(request, target, ensureSource = false) {
 export function nativeMaintenanceSourceProof(repository, candidate, retained) {
   const files = ['deploy/native-history-boundary', 'deploy/native-history-coordinator.mjs', 'deploy/native-history-owner-recovery.mjs', 'deploy/native-history-bridge.mjs',
     'deploy/native-history-closed-owner.mjs', 'deploy/native-history-package-identity.mjs', 'deploy/native-history-root-boundary',
-    'deploy/one-kenan-activate', 'scripts/migrate-native-history.mjs'];
+    'deploy/one-kenan-activate', 'scripts/migrate-native-history.mjs', 'deploy/prepare', 'deploy/host',
+    'deploy/runtime', 'deploy/lib', 'deploy/orchestrator', 'deploy/prepared-components.mjs'];
   try {
     const tree = sha => new Map(checked('git', ['-C', repository, 'ls-tree', '-r', '--format=%(objectname) %(path)', sha, '--', ...files])
       .split('\n').filter(Boolean).map(line => [line.slice(41), line.slice(0, 40)]));
@@ -1177,7 +1179,7 @@ export function nativeMaintenanceIntakeProof(repository, candidate) {
 }
 
 export function nativeHistoryBoundaryTarget(request, target, mode, logPath) {
-  if (!["advance", "probe", "restore"].includes(mode)) throw new Error(`Unknown native history boundary mode: ${mode}`);
+  if (!["advance", "probe", "restore", "validate"].includes(mode)) throw new Error(`Unknown native history boundary mode: ${mode}`);
   const path = "deploy/native-history-boundary";
   const present = runCapture("git", ["-C", checkout, "ls-tree", "--name-only", request.integrationSha, "--", path]);
   if (!present) return { ok: true, status: 0, needed: false };
@@ -1196,6 +1198,7 @@ export function nativeHistoryBoundaryTarget(request, target, mode, logPath) {
       probeFailure: { kind: 'native-source', mode, host: target.id, status: 1, intakeProof: intake.error },
     });
   }
+  if (mode === 'validate') return { ok: true, status: 0, needed: true };
   const source = runCapture("git", ["-C", checkout, "show", `${request.integrationSha}:${path}`]);
   const script = (mode === "advance" ? 'set -euo pipefail\ngit -C "$2" fetch --quiet --no-tags origin "$3"\n' : "") + source;
   const args = [target.hostConfig, target.releaseRepository, request.integrationSha, ...(mode === "advance" ? [] : [`--${mode}`])];
@@ -1313,6 +1316,9 @@ source /srv/pi/pi-remote/deploy/lib
 fleet_user=$(jq -er '.fleetUser | select(type == "string" and length > 0)' "$host_config")
 services=$("$service_check" "$fleet_user" "$environment" --json)
 voice=$(pi_stack_as_root curl -fsS --max-time 3 "$voice_url" | jq -r .releaseCommit)
+if jq -e '.oneKenan == true' "$host_config" >/dev/null; then
+  pi_stack_as_root python3 /srv/pi/pi-remote/deploy/one-kenan-activate proof --host "$host_config" --expected "$expected" >/dev/null
+fi
 [[ $remote == "$expected" && $orchestrator == "$expected" && $voice == "$expected" ]] || {
   printf '%s: deployed commit markers do not match integration: expected=%s remote=%s orchestrator=%s voice=%s\n' "$host" "$expected" "$remote" "$orchestrator" "$voice" >&2; exit 1;
 }
@@ -1943,7 +1949,7 @@ function deliverHost(request, target, logPath, previous) {
   try {
     const census = runtimeCensus(target.sshHost);
     retainSelectedSource(census, target.sshHost);
-    if (census.selectedCommit && commandResult("git", ["-C", checkout, "merge-base", "--is-ancestor", request.integrationSha, census.selectedCommit]).ok) {
+    if (!request.executorHandoffs?.[target.id] && census.selectedCommit && commandResult("git", ["-C", checkout, "merge-base", "--is-ancestor", request.integrationSha, census.selectedCommit]).ok) {
       if (census.selectedCommit !== request.integrationSha && !allRequests().some(candidate => candidate.integrationSha === census.selectedCommit && candidate.checks?.status === "passed")) throw new Error(`${target.id} selected descendant has no passing publication checks`);
       if (census.selectedCommit === request.integrationSha) publishAndroidArtifact(request, logPath, [target]);
       const proof = verifyTarget(target, census.selectedCommit);
@@ -1963,8 +1969,13 @@ function deliverHost(request, target, logPath, previous) {
     }
     const native = nativeSourceProbe(request, target, true);
     if (!native.ok) return hostWait(request, target, "native-source", logPath, `${target.id} needs a newer native source; other hosts continue.`, previous);
-    const history = nativeHistoryBoundaryTarget(request, target, "advance", logPath);
-    if (!history.ok) return hostWait(request, target, "native-history", logPath, `${target.id} old native generation must settle its history before any source artifacts change; other hosts continue.`, previous);
+    // The wrapper prepares all immutable artifacts while old listeners serve.
+    // Only deploy/host may advance the boundary, after that preparation proof.
+    const history = nativeHistoryBoundaryTarget(request, target, "validate", logPath);
+    if (history.needed) {
+      (request.nativeHistory ??= { hosts: {} }).hosts[target.id] = { state: "restore-required", integrationSha: request.integrationSha };
+      writeRequest(request);
+    }
     const bootstrap = !!request.contract && !selectedHasContract(census.selectedCommit, request);
     if (!request.contract && census.selectedCommit && hasExecutionContract(census.selectedCommit)) throw new Error(`${target.id} release would remove its thread execution contract`);
     if (bootstrap) {
@@ -1979,7 +1990,14 @@ function deliverHost(request, target, logPath, previous) {
     }
     publishAndroidArtifact(request, logPath, [target]);
     const deployed = deployTarget(request, target, logPath);
-    if (deployed.kind === "host-lock-busy") return hostWait(request, target, deployed.liveMeeting ? "live-meeting" : deployed.nativePrerequisite ? "native-source" : deployed.nativeHistory ? "native-history" : "host-lock", logPath, `${target.id} is not ready to activate; other hosts continue.`, previous);
+    if (deployed.kind === "host-lock-busy") {
+      if (deployed.executorReplacement) {
+        (request.executorHandoffs ??= {})[target.id] = { integrationSha: request.integrationSha, at: new Date().toISOString() };
+        writeRequest(request);
+      }
+      return hostWait(request, target, deployed.liveMeeting ? "live-meeting" : deployed.nativePrerequisite ? "native-source" : deployed.nativeHistory ? "native-history" : "host-lock", logPath, `${target.id} is not ready to activate; accepting controllers keep serving while the pending executor handoff resumes.`, previous);
+    }
+    if (request.executorHandoffs?.[target.id]) { delete request.executorHandoffs[target.id]; writeRequest(request); }
     if (!deployed.ok) throw new Error(`${target.id} release wrapper exited ${deployed.status}`);
     const proof = verifyTarget(target, request.integrationSha);
     const android = currentAndroidProof(target, request.integrationSha);

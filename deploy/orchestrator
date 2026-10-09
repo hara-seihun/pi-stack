@@ -7,6 +7,7 @@ pi_stack_enter_deployment "$0" "$root" "$@"
 dest=${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}
 runtime=${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}
 commit=$(git -C "$root" rev-parse HEAD)
+[[ $# == 0 || ( $# == 1 && $1 == --links-only ) ]] || { echo 'usage: deploy/orchestrator [--links-only]' >&2; exit 64; }
 
 # Every account that runs orchestrator commands reaches the CLI through
 # ~/.local/bin/pi-orchestrator, so the links are reconciled on every run,
@@ -26,6 +27,12 @@ reconcile_cli_links() {
     pi_stack_as_root chown -h "$owner:$group" "$link"
   done < <(pi_stack_users)
 }
+
+if [[ ${1:-} == --links-only ]]; then
+  pi_stack_require_release "$dest" "$commit"
+  reconcile_cli_links
+  exit 0
+fi
 
 normalize_model_defaults() {
   local fleet home config
@@ -51,7 +58,7 @@ if (changed) {
 }
 NODE
 }
-normalize_model_defaults
+[[ ${PI_STACK_PREPARE_ONLY:-0} == 1 ]] || normalize_model_defaults
 
 reconcile_model_availability() {
   local fleet path group
@@ -66,7 +73,7 @@ reconcile_model_availability() {
     pi_stack_as_root chmod 644 "$path"
   fi
 }
-reconcile_model_availability
+[[ ${PI_STACK_PREPARE_ONLY:-0} == 1 ]] || reconcile_model_availability
 
 # The fleet user's operator config names the lane manifest. A release whose
 # daemon cannot parse the live manifest must not be selected.
@@ -98,7 +105,7 @@ if [[ -f $dest/.pi-stack-commit && $(<"$dest/.pi-stack-commit") == "$commit" && 
   check_cli &
   cli_pid=$!
   validate_manifest
-  reconcile_cli_links
+  [[ ${PI_STACK_PREPARE_ONLY:-0} == 1 ]] || reconcile_cli_links
   wait "$cli_pid" || { echo "deployed Pi Orchestrator CLI does not answer: $dest/dist/cli.js" >&2; exit 1; }
   printf 'Pi Orchestrator from %s is already deployed\n' "$commit"
   exit 0
@@ -127,6 +134,6 @@ pi_stack_publish_release "$root" "$stage/release" "$dest" orchestrator
 
 check_cli &
 cli_pid=$!
-reconcile_cli_links
+[[ ${PI_STACK_PREPARE_ONLY:-0} == 1 ]] || reconcile_cli_links
 wait "$cli_pid" || { echo "deployed Pi Orchestrator CLI does not answer: $dest/dist/cli.js" >&2; exit 1; }
 printf 'deployed Pi Orchestrator from %s to %s\n' "$commit" "$dest"

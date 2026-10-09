@@ -8,6 +8,12 @@ Publication is background work. People continue creating agents, sending message
 
 Observation records only source ownership. It changes neither `ThreadService.spawn`/`send` nor scheduled-wake delivery, and creates no admission trigger. The old request validator and durable `thread_request`/`thread_work` transactions remain authoritative for every new request and retry. Busy old work makes publication wait, not the person.
 
+## Preparation before replacement
+
+`deploy/prepare` builds and proves Runtime, Orchestrator, Remote and tools in immutable source-bound release directories while the selected controllers keep serving. It does not advance history maintenance, select the runtime, rewrite account commands or mutate fleet policy. `deploy/prepared-components.mjs` records file-byte and symlink identities; changed or missing prepared artifacts are errors, not a new proof for the same receipt. Recognition preparation likewise leaves its selected service untouched.
+
+Only after that proof does `deploy/host` observe readiness and perform the short history/controller replacement. Publication never closes an old listener and then downloads, compiles, or tests its successor. Runtime activation consumes its prepared proof; component activation selects the already-proved artifacts. A busy final Root handoff stays pending with the new Remote accepting, rather than rolling back migrated history or reporting an accepted host prematurely.
+
 ## Owner replacement
 
 The coordinator stages entry wrappers referring to the immutable selected Remote and Orchestrator releases. Their resource identities, decoder and API module graph remain those of that release. The existing namespace launcher retains the encrypted mount. Inventory includes every registered active `pi-orchestrator@USER`, deduplicating the administrator. Ledger placement comes from the live owning namespace, then the exact registry declaration, then the inspected old CLI's HOME placement.
@@ -22,7 +28,7 @@ When naturally idle, the bridge pauses **dispatch only** for the immediate contr
 
 A brief listener replacement is reconciled using the same immutable request identity, URL, body, authorization and environment. Native thread clients and web creation/prompt transport retry transient connection/body loss and 502/503/504 responses for at most 60 seconds. Acceptance is reported only from the owner's real receipt. Person/environment changes, cancellation, authorization and validation errors remain terminal. PromptOutbox remains the durable client intent owner.
 
-Root preflight is observational. Its executor replacement belongs to normal One Kenan activation and its durable ask/consent receipts, not a history-wide intake pause.
+Root preflight is observational. Its executor replacement belongs to normal One Kenan activation and its durable ask/consent receipts, not a history-wide intake pause. A protocol-1 predecessor upgrades only through its generation-bound atomic idle handoff immediately before replacing Root; a busy response leaves it serving. Root is replaced first, then the new protocol-2 owner accepts durable queued asks while memory/rooms reconcile. Ask transport retries the same request identity through the short connection handoff. No executor is killed to manufacture idle evidence.
 
 ## Preservation and prerequisites
 

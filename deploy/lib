@@ -281,6 +281,10 @@ pi_stack_require_release() {
   }
 }
 
+pi_stack_component_releases_root() {
+  printf '%s\n' "${PI_STACK_RELEASES_ROOT:-$(dirname "${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}")/.pi-stack-releases}"
+}
+
 pi_stack_release_for_commit() {
   local root=$1 releases=$2
   printf '%s/%s\n' "$releases" "$(git -C "$root" rev-parse HEAD)"
@@ -305,10 +309,16 @@ pi_stack_publish_release() {
     echo "$release does not carry Pi stack $commit" >&2
     return 1
   }
+  pi_stack_select_release "$release" "$dest" "$commit"
+}
+
+pi_stack_select_release() {
+  local release=$1 dest=$2 commit=$3 candidate
+  pi_stack_require_release "$release" "$commit" || return
   if [[ -L $dest && $(readlink -f "$dest") == "$release" ]]; then
     return
   fi
-  candidate="$releases/.activate.$$.${RANDOM}"
+  candidate="$(dirname "$release")/.activate.$$.${RANDOM}"
   pi_stack_as_root ln -s "$release" "$candidate"
   if pi_stack_as_root test -L "$dest"; then
     # POSIX rename semantics make this an atomic symlink replacement. Unlike

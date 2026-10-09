@@ -135,7 +135,7 @@ export function serviceBusy(service) {
   const work = service.sql(`SELECT count(*) AS n FROM thread_work w JOIN thread t ON t.id=w.thread_id
     WHERE w.status!='done' AND t.held=0 AND json_extract(t.metadata,'$.archived') IS NOT 1`).get().n;
   const executions = service.sql('SELECT count(*) AS n FROM thread_execution WHERE ended_at IS NULL').get().n;
-  const operations = ['operations','opening','halts','dependencyOperations'].reduce((count, key) => count + (service[key]?.size ?? 0), 0);
+  const operations = ['operations','opening','halts','dependencyOperations'].reduce((count, key) => count + (service[key]?.size ?? 0), Number(service.routing === true));
   const native = [...service.runtimes.values()].filter(runtime => runtime.busy || runtime.executionId || runtime.commandRunning || runtime.waiters?.size).length;
   return { work, executions, operations, native };
 }
