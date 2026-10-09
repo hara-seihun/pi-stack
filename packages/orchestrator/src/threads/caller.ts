@@ -283,6 +283,8 @@ export function callerResolver(options: CallerResolverOptions): CallerResolver {
         if (caller.kind === "thread" && input.threadId !== caller.threadId) return refuse(`Thread ${caller.threadId} can only manage its own waiting and wakes`);
         if (caller.kind !== "thread" && caller.kind !== "runtime" && caller.kind !== "service") return refuse("Self waiting and wakes require a thread capability or the Pi runtime");
       }
+      if (operation === "managerQuestionCustody" && caller.kind !== "runtime" && caller.kind !== "service")
+        return refuse("Manager question custody requires an owning runtime or service");
       if (operation === "managerQuestions") {
         if (caller.kind === "thread" && input.threadId !== caller.threadId) return refuse(`Thread ${caller.threadId} can only manage its own held questions`);
         if (caller.kind !== "thread" && caller.kind !== "runtime" && caller.kind !== "service") return refuse("Manager questions require the manager's thread capability or the Pi runtime");
@@ -327,7 +329,7 @@ export function callerResolver(options: CallerResolverOptions): CallerResolver {
 export function admissionFor(resolver: CallerResolver, source: CallerSource): (operation: string, input: Record<string, any>) => Promise<AdmissionResult> {
   let caller: ThreadCaller | { error: string } | undefined;
   return async (operation, input) => {
-    if (operation !== "control" && operation !== "spawn" && operation !== "send" && operation !== "watch" && operation !== "agentWait" && operation !== "wakeSchedule" && operation !== "attention" && operation !== "managerQuestions") return { ok: true, input };
+    if (operation !== "control" && operation !== "spawn" && operation !== "send" && operation !== "watch" && operation !== "agentWait" && operation !== "wakeSchedule" && operation !== "attention" && operation !== "managerQuestions" && operation !== "managerQuestionCustody") return { ok: true, input };
     caller ??= resolver.resolve(source);
     if ("error" in caller) return { ok: false, status: 401, message: caller.error };
     return resolver.admit(operation, input, caller);

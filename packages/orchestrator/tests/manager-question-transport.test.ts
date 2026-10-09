@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { admissionFor, callerResolver, THREAD_TOKEN_HEADER, type ThreadCaller } from "../src/threads/caller.js";
-import type { ManagerQuestionsRequest, ManagerQuestionsResponse, Result, Thread, ThreadApi } from "../src/threads/contracts.js";
+import type { ManagerQuestionCustodyRequest, ManagerQuestionsRequest, ManagerQuestionsResponse, Result, Thread, ThreadApi } from "../src/threads/contracts.js";
 import { ThreadDirectory } from "../src/threads/directory.js";
 import { createThreadClient, threadHttp } from "../src/threads/http.js";
 import { threadTools } from "../src/threads/pi-tools.js";
@@ -23,6 +23,8 @@ function owner(ids: string[]) {
   const calls = {
     list: vi.fn(async (input: { id?: string }) => ({ ok: true, value: { threads: ids.filter(id => id === input.id).map(id => ({ id } as Thread)) } })),
     managerQuestions: vi.fn(async (input: ManagerQuestionsRequest) => responseFor(input)),
+    managerThread: vi.fn(async (): Promise<Result<Thread | null>> => ({ ok: true, value: ids.includes("manager") ? { id: "manager" } as Thread : null })),
+    managerQuestionCustody: vi.fn(async (_input: ManagerQuestionCustodyRequest) => ({ ok: true as const, value: { accepted: true as const } })),
   };
   return { api: calls as unknown as ThreadApi, calls };
 }
@@ -92,6 +94,66 @@ describe("manager-question caller authority", () => {
     for (const caller of [{ kind: "thread", threadId: "manager" }, { kind: "runtime", pid: 1 }, { kind: "service", pid: 2 }] satisfies ThreadCaller[]) {
       expect(await resolver.admit("managerQuestions", requests[0]!, caller)).toEqual({ ok: true, input: requests[0] });
     }
+  });
+});
+
+describe("internal manager-question custody", () => {
+  const custodyRequests: ManagerQuestionCustodyRequest[] = [
+    { action: "receive", threadId: "manager", requestId: "receive", originThreadId: "child", deadlineAt: 1000, questions: [{ id: "child:q", threadId: "child", question: authored.question, suggestions: [{ id: "child:q:0", text: authored.suggestions[0]! }], createdAt: 1 }] },
+    { action: "answer", threadId: "child", requestId: "answer", originThreadId: "manager", answer: { threadId: "child", questionId: "child:q", selectedSuggestionIds: ["child:q:0"], text: "North" } },
+    { action: "transition", threadId: "child", requestId: "forward-transition", managerId: "manager", questionId: "child:q", transition: { state: "forwarded", forwardedQuestionId: "manager:q" } },
+    { action: "transition", threadId: "child", requestId: "answer-transition", managerId: "manager", questionId: "child:q", transition: { state: "answered", answer: { selectedSuggestionIds: [], text: "North", answeredBy: { kind: "manager", threadId: "manager" } } } },
+  ];
+
+  it.each(custodyRequests)("round-trips $requestId as a service with durable retry identity and routes to the target owner", async input => {
+    const central = owner(["manager"]), fleet = owner(["child"]);
+    const directory = new ThreadDirectory({ id: "person", api: central.api }, [{ id: "fleet", api: fleet.api }]);
+    const resolver = callerResolver({ capability, peer: () => ({ kind: "service", pid: 2 }) });
+    const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const request = new Request(url, init);
+      const response = await threadHttp(directory, request, "/v1/threads", admissionFor(resolver, { headers: request.headers, socket: { address: "127.0.0.1", port: 1, localAddress: "127.0.0.1", localPort: 2 } }));
+      expect(response?.status).toBe(200);
+      if (fetcher.mock.calls.length === 1) throw new TypeError("lost response");
+      return response!;
+    });
+    expect(await createThreadClient("http://owner/v1/threads", fetcher).managerQuestionCustody(input)).toEqual({ ok: true, value: { accepted: true } });
+    const target = input.threadId === "manager" ? central : fleet;
+    const other = input.threadId === "manager" ? fleet : central;
+    expect(target.calls.managerQuestionCustody.mock.calls).toEqual([[input], [input]]);
+    expect(other.calls.managerQuestionCustody).not.toHaveBeenCalled();
+    expect(fetcher.mock.calls[0]![1]?.body).toBe(fetcher.mock.calls[1]![1]?.body);
+  });
+
+  it("denies custody to threads, people, and processes before dispatch, but admits owning runtimes and services", async () => {
+    const local = owner(["manager"]);
+    for (const caller of [{ kind: "thread", threadId: "manager" }, { kind: "person", via: "router" }, { kind: "process", uid: 1000 }, { kind: "runtime", pid: 1 }, { kind: "service", pid: 2 }] satisfies ThreadCaller[]) {
+      const resolver = callerResolver({ capability, peer: () => caller });
+      const request = new Request("http://owner/v1/threads/managerQuestionCustody", { method: "POST", body: JSON.stringify(custodyRequests[0]), headers: caller.kind === "thread" ? { [THREAD_TOKEN_HEADER]: "token:manager" } : {} });
+      const response = await threadHttp(local.api, request, "/v1/threads", admissionFor(resolver, { headers: request.headers, socket: { address: "127.0.0.1", port: 1, localAddress: "127.0.0.1", localPort: 2 } }));
+      expect(response?.status).toBe(caller.kind === "runtime" || caller.kind === "service" ? 200 : 403);
+    }
+    expect(local.calls.managerQuestionCustody).toHaveBeenCalledTimes(2);
+  });
+
+  it("reads the manager only from the person's owner, preserving unset and unavailable without probing fleet", async () => {
+    const fleet = owner(["manager"]), person = owner([]);
+    const directory = new ThreadDirectory({ id: "fleet", api: fleet.api }, [{ id: "person", api: person.api }]);
+    const resolver = callerResolver({ capability, peer: () => { throw new Error("Reads do not require caller resolution"); } });
+    const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const request = new Request(url, init);
+      const response = await threadHttp(directory, request, "/v1/threads", admissionFor(resolver, { headers: request.headers }));
+      if (fetcher.mock.calls.length === 1) throw new TypeError("lost read response");
+      return response!;
+    });
+    expect(await createThreadClient("http://owner/v1/threads", fetcher).managerThread()).toEqual({ ok: true, value: null });
+    expect(person.calls.managerThread).toHaveBeenCalledTimes(2);
+    person.calls.managerThread.mockResolvedValue({ ok: false, error: { code: "unavailable", message: "Person owner locked" } });
+    expect(await directory.managerThread()).toMatchObject({ ok: false, error: { code: "unavailable" } });
+    expect(fleet.calls.managerThread).not.toHaveBeenCalled();
+    expect(fleet.calls.list).not.toHaveBeenCalled();
+    expect(person.calls.list).not.toHaveBeenCalled();
+    expect(await new ThreadDirectory({ id: "local", api: fleet.api }).managerThread()).toMatchObject({ ok: true, value: { id: "manager" } });
+    expect(threadTools({ threadId: "manager", cwd: "/work", sessionFile: "/work/session.jsonl", args: [], env: {}, threads: person.api }).some(tool => /custody|manager_thread/.test(tool.name))).toBe(false);
   });
 });
 
