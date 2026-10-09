@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -111,6 +111,32 @@ test("preparation proves exact artifacts while native history is busy without ch
     assert.equal(repeat.status, 0, repeat.stderr);
     assert.match(repeat.stdout, /already prepared/);
     assert.deepEqual(f.calls(), ["builds", "meet-recognition", "meet-recognition", "orchestrator", "remote", "runtime", "tools"], "a verified receipt reuses stack artifacts while recognition checks its independent inputs");
+    f.assertServing();
+  } finally { f.close(); }
+});
+
+for (const state of ["missing", "restricted", "cached"]) test(`preparation makes public scratch ancestors traversable from ${state} state under a private umask`, () => {
+  const f = preparationFixture();
+  try {
+    const scratchRoot = join(dirname(f.env.PI_STACK_RELEASES_ROOT), ".pi-stack-prepared");
+    const candidate = join(scratchRoot, f.commitId());
+    if (state === "cached") assert.equal(f.run("prepare").status, 0);
+    if (state !== "missing") {
+      mkdirSync(candidate, { recursive: true });
+      chmodSync(scratchRoot, 0o700);
+      chmodSync(candidate, 0o700);
+    }
+    const receipt = state === "cached" ? readFileSync(f.receipt(), "utf8") : undefined;
+    const result = spawnSync("bash", ["-c", 'umask 077; exec "$@"', "prepare-fixture", join(f.repo, "deploy/prepare")], {
+      env: { ...f.env, BUILD_EXIT: state === "cached" ? "99" : "0" }, encoding: "utf8", timeout: 3000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    for (const path of [scratchRoot, candidate]) assert.equal(statSync(path).mode & 0o777, 0o755, `${path} must be traversable by public artifact consumers`);
+    if (state === "cached") {
+      assert.match(result.stdout, /already prepared/);
+      assert.equal(readFileSync(f.receipt(), "utf8"), receipt, "mode reconciliation preserves the immutable artifact proof");
+      assert.deepEqual(f.calls(), ["builds", "meet-recognition", "meet-recognition", "orchestrator", "remote", "runtime", "tools"]);
+    }
     f.assertServing();
   } finally { f.close(); }
 });
