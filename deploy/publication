@@ -1167,6 +1167,15 @@ export function nativeMaintenanceSourceProof(repository, candidate, retained) {
   } catch (error) { return { ok: false, error: { code: 'native-maintenance-source-unavailable', message: String(error) } }; }
 }
 
+export function nativeMaintenanceIntakeProof(repository, candidate) {
+  try {
+    const source = checked('git', ['-C', repository, 'show', `${candidate}:deploy/native-history-bridge.mjs`]);
+    return /^export const MAINTENANCE_INTAKE = ['"]always-open-v1['"];$/m.test(source)
+      ? { ok: true, value: { candidate, intake: 'always-open-v1' } }
+      : { ok: false, error: { code: 'closed-intake-maintenance-forbidden', candidate } };
+  } catch (error) { return { ok: false, error: { code: 'maintenance-intake-contract-unavailable', message: String(error) } }; }
+}
+
 export function nativeHistoryBoundaryTarget(request, target, mode, logPath) {
   if (!["advance", "probe", "restore"].includes(mode)) throw new Error(`Unknown native history boundary mode: ${mode}`);
   const path = "deploy/native-history-boundary";
@@ -1180,6 +1189,12 @@ export function nativeHistoryBoundaryTarget(request, target, mode, logPath) {
         probeFailure: { kind: 'native-source', mode, host: target.id, status: 1, sourceProof: proof.error },
       });
     }
+  }
+  if (mode !== 'restore') {
+    const intake = nativeMaintenanceIntakeProof(checkout, request.integrationSha);
+    if (!intake.ok) throw Object.assign(new Error(`Deployment must keep agent intake open: ${JSON.stringify(intake.error)}`), {
+      probeFailure: { kind: 'native-source', mode, host: target.id, status: 1, intakeProof: intake.error },
+    });
   }
   const source = runCapture("git", ["-C", checkout, "show", `${request.integrationSha}:${path}`]);
   const script = (mode === "advance" ? 'set -euo pipefail\ngit -C "$2" fetch --quiet --no-tags origin "$3"\n' : "") + source;
