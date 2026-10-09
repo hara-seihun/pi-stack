@@ -79,6 +79,11 @@ test("persisted checkpoint replay preserves live context, aliases, repeated comp
   const context = checkpointContext(live, branch, { ...model, provider: "openai-codex-9" });
   assert.equal(context.ok, true, context.error);
   assert.deepEqual(context.value.messages.map(message => message.content), [context.value.marker, "After checkpoint", "Queued but not persisted yet"]);
+  // The Orchestrator's model-delivery stamp must leave the marker byte-identical for replaceMarker.
+  assert.equal(context.value.messages[0][Symbol.for("pi-stack.model-delivery.exempt")], true);
+  assert.equal(context.value.messages.slice(1).some(message => Symbol.for("pi-stack.model-delivery.exempt") in message), false);
+  const stamped = { input: [{ role: "user", content: [{ type: "input_text", text: `[Model delivery: 2026-10-09 16:05:22.000 -07:00 (America/Los_Angeles)]\n${context.value.marker}` }] }] };
+  assert.equal(replaceMarker(stamped, context.value.marker, details.replacementHistory).ok, false);
   const payload = { input: context.value.messages.map(message => ({ role: "user", content: [{ type: "input_text", text: message.content }] })), tools: ["untouched"], previous_response_id: "removed" };
   const rewritten = replaceMarker(payload, context.value.marker, details.replacementHistory);
   assert.equal(rewritten.ok, true);

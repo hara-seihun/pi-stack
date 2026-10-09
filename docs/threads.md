@@ -354,6 +354,13 @@ Every incoming system, user and tool-result message receives a leading timestamp
 assistant output is unchanged. Roles, tool IDs, sender labels and external-callee
 boundaries are retained. Ingress routes do not prepend their own timestamps.
 
+A provider placeholder that its owner replaces in the payload before the request
+leaves the process is never delivered, so it carries the registered symbol
+`Symbol.for("pi-stack.model-delivery.exempt")` set to `true` and is passed through
+byte-identical, without a receipt. The Codex checkpoint marker is the one user:
+stamping it made `replaceMarker` abort every compacted Sol turn. Any other value
+of the symbol is an invalid context.
+
 Delivery time is sampled when a message first enters a prepared model request,
 not when a queued receipt was accepted or a runner launched. The prefix contains
 local ISO calendar date, millisecond time, numeric UTC offset and IANA zone.

@@ -10,6 +10,8 @@ import { ATTEMPT, abortFailure, blockedAttempt, cancellableResponse, operationSc
 
 const OPERATION_EVENT = "pi-stack:provider-operation";
 const markerFor = checkpoint => `Pi Codex checkpoint ${checkpoint.entry.id}`;
+/** Orchestrator model-delivery contract: the marker is replaced in the payload, never delivered, so it is not stamped. */
+export const MODEL_DELIVERY_EXEMPT = Symbol.for("pi-stack.model-delivery.exempt");
 
 /** Only the model and API determine whether a checkpoint can be replayed. */
 export function checkpointContext(messages, branch, model) {
@@ -29,7 +31,7 @@ export function checkpointContext(messages, branch, model) {
   }
   const marker = markerFor(checkpoint);
   return success({
-    messages: [...messages.slice(0, index), { role: "user", content: marker, timestamp: messages[index].timestamp }, ...messages.slice(index + kept.length + 1)],
+    messages: [...messages.slice(0, index), { role: "user", content: marker, timestamp: messages[index].timestamp, [MODEL_DELIVERY_EXEMPT]: true }, ...messages.slice(index + kept.length + 1)],
     checkpoint,
     marker,
   });
