@@ -2,6 +2,10 @@
 
 `agent-workspace` owns temporary Git clones and worktrees used by agents. It gives every checkout a lease, records its owner and durable source commit, blocks new allocation when disk or inode reserves are low, and removes a checkout only after proving that it has no unique local work. Processes, active systemd units, Docker containers, and durable work in this Unix person's thread databases count as live owners.
 
+## Checks
+
+`node tools/agent-workspace/check.mjs` checks component deployment and partitions the lifecycle fixtures into 24 disjoint index shards. Each fixture runs exactly once; each shard has a 55-second deadline and shares the root check runner's concurrency budget. Fine-grained shards keep Git/SQLite-backed fixture batches bounded without increasing deadlines or dropping custody contracts.
+
 ## Normal flow
 
 For source edits from an existing local repository, declare source-only intent and a growth budget. Use `budgeted` with enough growth for dependencies/builds when the task installs or generates them. Remote imports have no local-source forecast; omit intent explicitly for that unestimated route.
