@@ -21,7 +21,7 @@
   "dependencies": {
     "@earendil-works/pi-ai": "file:vendor/pi/earendil-works-pi-ai-0.87.1.tgz",
     "@earendil-works/pi-coding-agent": "file:vendor/pi/earendil-works-pi-coding-agent-0.87.1-runtime.tgz",
-    "agent-browser": "https://github.com/hara-seihun/agent-browser/releases/download/browser-controlled-tabs-policy-20261008-glibc235/agent-browser-0.37.1.tgz",
+    "agent-browser": "https://github.com/hara-seihun/agent-browser/releases/download/browser-controlled-empty-fill-20261009-glibc235/agent-browser-0.37.1.tgz",
     "pi-agent-browser-native": "0.6.6"
   },
   "overrides": {
