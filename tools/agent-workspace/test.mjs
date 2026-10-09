@@ -978,7 +978,7 @@ test("an active legacy creator refuses unknown capacity while a dormant one must
     child.stdin.end();
     await closed;
     child = undefined;
-    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [], unpricedDormant: 1 });
+    assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [], headroomBytes: 0, unpricedDormant: 1 });
     assert.equal(JSON.parse(run([...base, "--name", "other"], f.env)).capacity.admission.unpricedDormant, 1);
     assert.throws(() => run([...base.map(arg => arg === "0" ? "1000000" : arg), "--name", "legacy"], f.env), /GiB is required/);
     assert.equal(db.prepare("SELECT count(*) AS count FROM workspace_capacity WHERE workspace_id=?").get(created.id).count, 0);

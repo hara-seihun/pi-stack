@@ -16,7 +16,12 @@ const jobs = [
   ["Kenan build", "npm", ["run", "build", "--workspace=kenan"]],
   ["manifests", "node", ["scripts/check-manifests.mjs"]],
   ["account deployment", "node", ["--test", "scripts/deploy-skills.test.mjs", "scripts/deploy-account.test.mjs", "scripts/deploy-person-configs.test.mjs"]],
-  ["deploy lock", "node", ["--test", "scripts/deploy-lock.test.mjs", "scripts/deploy-runtime.test.mjs", "scripts/deploy-build.test.mjs", "scripts/deploy-prepare.test.mjs", "scripts/deploy-download.test.mjs", "scripts/deploy-retain.test.mjs", "scripts/release-checkout.test.mjs", "scripts/check-services.test.mjs"]],
+  ["deploy lock", "node", ["--test", "--test-skip-pattern=^host deployment activates Pi Remote", "scripts/deploy-lock.test.mjs", "scripts/deploy-runtime.test.mjs", "scripts/deploy-build.test.mjs", "scripts/deploy-prepare.test.mjs", "scripts/deploy-download.test.mjs", "scripts/deploy-retain.test.mjs", "scripts/release-checkout.test.mjs", "scripts/check-services.test.mjs"]],
+  ...["disabled", "enabled"].map(guest => [
+    `deploy host guest ${guest}`, "node", ["--test",
+      `--test-name-pattern=^host deployment activates Pi Remote and reconciles daemons with guest ${guest}$`,
+      "scripts/deploy-lock.test.mjs"],
+  ]),
   ["publication", "node", ["--test", "scripts/publication-config.test.mjs", "scripts/publication-transport.test.mjs", "scripts/publication-roots.test.mjs", "scripts/publication.test.mjs", "scripts/publication-gate.test.mjs", "scripts/publication-source.test.mjs", "scripts/publication-progress.test.mjs", "scripts/publication-proof.test.mjs"]],
   ["Android publication", "node", ["--test", "scripts/android-update.test.mjs"]],
   ["remote deployment", "node", ["--test", "scripts/deploy-remote.test.mjs", "scripts/deploy-voice.test.mjs", "scripts/deploy-phone.test.mjs", "scripts/meet-recognition-service.test.mjs", "scripts/meet-recognition-host.test.mjs", "scripts/meet-recognition-retain.test.mjs", "scripts/supervisor-health.test.mjs"]],
