@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { request } from 'node:http';
 import { once } from 'node:events';
-import { installFence, removeFence, serviceBusy, bridgeSocket, legacyFleetLedger } from '../deploy/native-history-bridge.mjs';
+import { installFence, removeFence, serviceBusy, bridgeSocket, legacyFleetLedger, attachLegacyRuntime, reconcileLegacyRuntime, installLegacyMaintenance } from '../deploy/native-history-bridge.mjs';
 import { allOwnersReady, stageRemote, stageFleet, selectPointer, fleetInventory, fleetCompletionBarrier } from '../deploy/native-history-coordinator.mjs';
 const old = 'a'.repeat(40), candidate = 'b'.repeat(40);
 function directory(t) { const path = mkdtempSync(join(tmpdir(), 'history-boundary-')); t.after(() => rmSync(path, { recursive: true, force: true })); return path; }
@@ -45,13 +45,17 @@ test('durable admission fence preserves admitted roots/children/receipts but ref
 test('transient wrappers pin old modules and source identity without rewriting the immutable selected release', t => {
   const root = directory(t), remote = join(root, 'old-remote'), fleet = join(root, 'old-fleet');
   mkdirSync(join(remote, 'server'), { recursive: true }); mkdirSync(join(fleet, 'dist'), { recursive: true });
-  writeFileSync(join(remote, '.pi-stack-commit'), old); writeFileSync(join(remote, 'server/main.ts'), 'original remote');
+  const oldMain = 'await import("./server");';
+  writeFileSync(join(remote, '.pi-stack-commit'), old); writeFileSync(join(remote, 'server/main.ts'), oldMain);
+  writeFileSync(join(remote, 'server/server.ts'), 'const PACKAGE_ROOT = realpathSync(join(import.meta.dir, ".."));\nif (configuredRoot !== PACKAGE_ROOT) { throw new Error("package identity"); }');
+  writeFileSync(join(remote, 'server/context-mirror.ts'), 'old decoder');
+  writeFileSync(join(remote, 'package.json'), '{}');
   writeFileSync(join(fleet, '.pi-stack-commit'), old); writeFileSync(join(fleet, 'dist/cli.js'), 'original fleet');
   const stagedRemote = join(root, 'remote'), stagedFleet = join(root, 'fleet');
   stageRemote(remote, stagedRemote, '/immutable/legacy.json'); stageFleet(fleet, stagedFleet, '/immutable/legacy.json');
   // A restarted coordinator completes the same staged generation, not another release.
   stageRemote(remote, stagedRemote, '/immutable/legacy.json'); stageFleet(fleet, stagedFleet, '/immutable/legacy.json');
-  assert.equal(readFileSync(join(remote, 'server/main.ts'), 'utf8'), 'original remote');
+  assert.equal(readFileSync(join(remote, 'server/main.ts'), 'utf8'), oldMain);
   assert.equal(readFileSync(join(fleet, 'dist/cli.js'), 'utf8'), 'original fleet');
   assert.equal(readFileSync(join(stagedRemote, '.pi-stack-commit'), 'utf8'), old);
   assert.match(readFileSync(join(stagedRemote, 'server/main.ts'), 'utf8'), /legacyRemote/);
@@ -113,7 +117,11 @@ test('old owner drains existing work/output, closes before private migration, an
   writeFileSync(transportModule, 'export const runnerSocketDirectory = data => data;');
   writeFileSync(fakeApi, `import {DatabaseSync} from 'node:sqlite'; export class ThreadService {
     constructor(path){this.options={databasePath:path};this.db=new DatabaseSync(path);this.runtimes=new Map();this.operations=new Map();this.opening=new Map();this.halts=new Map();this.dependencyOperations=new Map();this.directory={list:async({id})=>({ok:true,value:{threads:id==='remote-parent'?[{id,createdAt:0}]:id==='remote-child'?[{id,createdAt:Date.now()+100000,parentId:'remote-parent'}]:[]}})};}
-    sql(sql){return this.db.prepare(sql)} async start(){return {ok:true}} async attach(){} async send(){return {ok:true}} async spawn(){return {ok:true}} deliverScheduledWakes(){}
+    sql(sql){return this.db.prepare(sql)} async start(){return {ok:true}}
+    async attach(id){const runtime={waiters:new Map(),busy:true};this.runtimes.set(id,runtime);return runtime}
+    async rpc(){return {isStreaming:false,isCompacting:false,localTools:0,pendingCommandCount:0}}
+    busy(state){return state.isStreaming||state.isCompacting||state.localTools>0||state.pendingCommandCount>0} adoptReference(){} wake(){}
+    async send(){return {ok:true}} async spawn(){return {ok:true}} deliverScheduledWakes(){}
     async close(){this.db.exec("UPDATE thread SET metadata=json_remove(metadata,'$.runnerReference')");this.db.close();this.closed=true;return {ok:true}}
   }`);
   const harness = join(root, 'harness.mjs');
@@ -175,7 +183,7 @@ test('interrupted fleet closure releases its durable fences and locked bootstrap
   await legacyFleetLedger(ledgerPath, { candidate, legacySource: old });
   writeFileSync(join(root, 'native-history-maintenance.json'), JSON.stringify({ version: 1, protocol: 'native-history-maintenance-v1', uid: process.getuid(), dataDir: root, candidate, legacySource: old, phase: 'owners-closed', databases: [threadPath], ledgerPath }));
   const oldApi = join(root, 'api.mjs'), transportModule = join(root, 'transport.mjs');
-  writeFileSync(oldApi, 'export class ThreadService {start(){} close(){} attach(){} send(){} spawn(){} deliverScheduledWakes(){}}');
+  writeFileSync(oldApi, 'export class ThreadService {start(){} close(){} attach(){} send(){} spawn(){} deliverScheduledWakes(){} rpc(){} busy(){} adoptReference(){} wake(){}}');
   writeFileSync(transportModule, 'export const runnerSocketDirectory = data => data;');
   const harness = join(root, 'resume.mjs');
   writeFileSync(harness, `import {installLegacyMaintenance} from ${JSON.stringify(pathToFileURL(resolve('deploy/native-history-bridge.mjs')).href)}; await installLegacyMaintenance(${JSON.stringify({ candidate, legacySource: old, dataDir: root, oldApi, transportModule, mode: 'fleet', autoAdvance: true, node: process.execPath })}); throw new Error('Old work must not reopen');`);
