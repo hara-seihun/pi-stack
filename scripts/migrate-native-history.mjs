@@ -253,7 +253,8 @@ async function migrate(options) {
       CREATE TABLE IF NOT EXISTS matched(session_id TEXT NOT NULL,finalizes_message TEXT NOT NULL,new_key TEXT NOT NULL,PRIMARY KEY(session_id,finalizes_message));
       CREATE TABLE IF NOT EXISTS fact_source(session_id TEXT NOT NULL,finalizes_message TEXT NOT NULL,thinking TEXT NOT NULL,PRIMARY KEY(session_id,finalizes_message));
       CREATE TABLE IF NOT EXISTS preserved_orphans(session_id TEXT PRIMARY KEY,facts INTEGER NOT NULL,capture_rows INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS source_sessions(session_id TEXT PRIMARY KEY);`);
+      CREATE TABLE IF NOT EXISTS source_sessions(session_id TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS preserved_capture_only(session_id TEXT PRIMARY KEY,native_state TEXT NOT NULL CHECK(native_state IN ('present','unavailable','unmapped')));`);
     journal.prepare("ATTACH DATABASE ? AS source_snapshot").run(join(output, "supervisor.sqlite"));
     journal.prepare("ATTACH DATABASE ? AS thread_snapshot").run(join(output, "threads.sqlite"));
     journal.exec("PRAGMA temp_store=FILE; PRAGMA cache_size=-4096");
@@ -295,7 +296,13 @@ async function migrate(options) {
       await unlink(checkPath);
       if (current !== manifest.supervisorSha) fail("supervisor-changed", "Supervisor differs from immutable source snapshot; do not reuse this migration directory for different data");
     }
-    for (const row of journal.prepare(`SELECT f.session_id FROM source_sessions f
+    for (const row of journal.prepare(`SELECT s.session_id FROM source_sessions s
+      WHERE NOT EXISTS(SELECT 1 FROM fact_source f WHERE f.session_id=s.session_id) ORDER BY s.session_id`).iterate()) {
+      const mapped = mapping.prepare("SELECT session_file FROM thread WHERE id=?").get(row.session_id);
+      const nativeState = !mapped?.session_file ? 'unmapped' : await exists(mapped.session_file) ? 'present' : 'unavailable';
+      journal.prepare("INSERT OR REPLACE INTO preserved_capture_only VALUES(?,?)").run(row.session_id, nativeState);
+    }
+    for (const row of journal.prepare(`SELECT DISTINCT f.session_id FROM fact_source f
       WHERE NOT EXISTS(SELECT 1 FROM preserved_orphans o WHERE o.session_id=f.session_id) ORDER BY f.session_id`).iterate()) {
       await processSession(mapping, journal, output, row.session_id);
     }
@@ -336,6 +343,7 @@ async function migrate(options) {
     const orphanNames = [...journal.prepare("SELECT session_id AS sessionId,facts,capture_rows AS captureRows FROM preserved_orphans ORDER BY session_id LIMIT 20").iterate()].map(row => ({ ...row }));
     return { state: "complete", outputDir: output, retiredTables: manifest.tables, ...sums, unmatchedFacts: facts - matched,
       preservedOrphans: { ...orphans, firstSessions: orphanNames },
+      preservedCaptureOnly: [...journal.prepare("SELECT native_state AS nativeState,COUNT(*) AS sessions FROM preserved_capture_only GROUP BY native_state ORDER BY native_state").iterate()].map(row => ({ ...row })), 
       supervisorSnapshot: join(output, "supervisor.sqlite"), receipt: join(output, "receipt.sqlite") };
   } finally {
     for (const db of [journal, mapping, source, live, lock]) if (db) db.close();

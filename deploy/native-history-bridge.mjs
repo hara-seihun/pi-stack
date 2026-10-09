@@ -438,7 +438,13 @@ export async function installLegacyMaintenance(options) {
   }
   async function migrate() {
     const result = spawnSync(options.node ?? '/usr/local/bin/node', [options.migrator, '--supervisor-db', join(dataDir, 'supervisor.sqlite3'), '--thread-db', join(dataDir, 'threads.sqlite3'), '--output-dir', join(dataDir, 'native-history-retirement'), '--writers-stopped'], { encoding: 'utf8', timeout: 45000 });
-    if (result.status !== 0) { receipt.error = result.error?.message ?? result.stderr; save('migration-pending'); return; }
+    if (result.status !== 0) {
+      let failure;
+      try { const output = JSON.parse(result.stdout); if (output.ok === false && typeof output.error?.code === 'string' && typeof output.error.message === 'string') failure = `${output.error.code}: ${output.error.message}`; }
+      catch { failure = undefined; }
+      receipt.error = failure ?? result.error?.message ?? (result.stderr?.trim() || `Migration exited with status=${result.status} signal=${result.signal}`);
+      save('migration-pending'); return;
+    }
     // The source-bound observation belongs to the retiring controller.
     dropFenceFile(join(dataDir, 'threads.sqlite3'));
     atomicJson(join(dataDir, 'native-history-readiness.json'), { version: 1, contract: 'native-history-v1', uid, dataDir, state: 'ready', writersStopped: true, retainedOutput: 'acknowledged', ...identity, migratedAt: new Date().toISOString() });
