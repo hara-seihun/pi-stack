@@ -45,6 +45,20 @@ test("a reader's viewport stays put as live text grows", () => {
   expect(page.scroller.scrollTop).toBe(-420);
 });
 
+test("a resize arriving before the scroll event does not undo the person's movement", () => {
+  const page = fixture();
+  const reading = new ReadingAnchor();
+  reading.setReading(page.scroller, true);
+  page.scroller.scrollTop = -240;
+  page.prependAbove(200);
+  reading.afterResize(page.scroller);
+  expect(page.scroller.scrollTop).toBe(-240);
+
+  page.growBelow(80);
+  reading.afterResize(page.scroller);
+  expect(page.scroller.scrollTop).toBe(-320);
+});
+
 test("completion preserves the reading offset when the live anchor is replaced", () => {
   const page = fixture();
   const reading = new ReadingAnchor();
