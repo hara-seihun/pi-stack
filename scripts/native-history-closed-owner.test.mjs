@@ -239,6 +239,22 @@ test('observation restore removes only observation/dispatch custody with provide
   assert.equal(readRestoredOwner(input).ok, true);
   assert.equal(restoreObservationOwner(input, () => observationLive(input)).ok, false, 'Absent observation is not fabricated positive custody');
 });
+test('fleet dispatch-only observation requires its positive owned marker and preserves running providers', t => {
+  const input = fixture(t, 'fleet');
+  assert.equal(restoreObservationOwner(input, () => observationLive(input)).error.code, 'observation-unacquired');
+  const ledger = new DatabaseSync(input.ledgerPath);
+  ledger.prepare('INSERT INTO control VALUES(?,?)').run('native-history-maintenance', JSON.stringify({ candidate, legacySource }));
+  ledger.exec("INSERT INTO run VALUES('active','running','completion:old'); CREATE TRIGGER pi_history_completion_dispatch BEFORE UPDATE ON run WHEN OLD.state='queued' AND NEW.state='starting' BEGIN SELECT RAISE(ABORT,'dispatch-paused'); END;"); ledger.close();
+  const result = restoreObservationOwner(input, () => observationLive(input));
+  assert.equal(result.ok, true, JSON.stringify(result)); assert.equal(result.value.restorationProof.threadFence, 'absent-dispatch-only');
+  const after = new DatabaseSync(input.ledgerPath); assert.equal(after.prepare('SELECT state FROM run').get().state, 'running'); after.close();
+  assert.equal(readRestoredOwner(input).ok, true);
+  const historical = fixture(t, 'fleet'); fence(historical);
+  const old = new DatabaseSync(historical.ledgerPath);
+  old.prepare('INSERT INTO control VALUES(?,?)').run('native-history-maintenance', JSON.stringify({ candidate, legacySource }));
+  old.exec("CREATE TRIGGER pi_history_completion_dispatch BEFORE UPDATE ON run BEGIN SELECT RAISE(ABORT,'paused'); END;"); old.close();
+  assert.equal(restoreObservationOwner(historical, () => observationLive(historical)).ok, false);
+});
 test('observation proof requires health outside locks and repeated kernel identity under both locks', t => {
   const input = fixture(t, 'fleet'); observe(input); let healthChecks = 0, lockedChecks = 0;
   const health = () => {
