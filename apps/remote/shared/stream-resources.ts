@@ -6,7 +6,7 @@ export function streamResource(snapshot: StreamSnapshot): string {
 }
 
 export function streamWants(subscription: StreamSubscription): string[] {
-  const wants = ["bootstrap", "state", "messaging"];
+  const wants = ["bootstrap", "state"];
   if (subscription.dashboard) wants.push("dashboard");
   if (subscription.workers) wants.push("workers");
   if (subscription.session) {

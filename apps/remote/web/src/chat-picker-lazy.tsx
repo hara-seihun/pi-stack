@@ -1,6 +1,4 @@
-// The + button belongs to the first paint of the inbox; the picker behind it
-// does not. Archived search, the messaging directory, account linking and its
-// QR code are a screen of their own, and most inbox visits never open it.
+// The inbox paints the + button before loading thread and room creation.
 
 import { forwardRef, Suspense, useCallback, useImperativeHandle, useRef, useState } from "react";
 import { preloadView } from "./app/preload-view";

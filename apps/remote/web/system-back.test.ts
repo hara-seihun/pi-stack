@@ -44,11 +44,11 @@ function press(document = fakeDocument()) {
 }
 
 test("back closes what is on top first: a dialog, then a menu or editor, then a panel, then the chat, then returns to Chats", () => {
-  page = { hash: "#/chats/human/abc/inspector", dialog: ["sheet"] };
+  page = { hash: "#/chats/room/abc/inspector", dialog: ["sheet"] };
   expect(press()).toBe(true);
   expect(events).toEqual(["closePanel"]);
 
-  events = []; page = { hash: "#/chats/human/abc", dialog: ["paste-text-dialog"] };
+  events = []; page = { hash: "#/chats/ai/abc", dialog: ["paste-text-dialog"] };
   const doc = fakeDocument();
   const dialog = doc.querySelector("dialog[open]") as unknown as EventTarget;
   const cancelled: string[] = [];
@@ -58,7 +58,7 @@ test("back closes what is on top first: a dialog, then a menu or editor, then a 
   expect(cancelled).toEqual(["cancel"]);
   expect(events).toEqual([]);
 
-  events = []; page = { hash: "#/chats/human/abc", overlay: "message-menu" };
+  events = []; page = { hash: "#/chats/room/abc", overlay: "message-menu" };
   expect(press()).toBe(true);
   expect(events).toEqual(["keydown:Escape"]);
 
@@ -70,11 +70,11 @@ test("back closes what is on top first: a dialog, then a menu or editor, then a 
   expect(press()).toBe(true);
   expect(events).toEqual(["keydown:Escape"]);
 
-  events = []; page = { hash: "#/chats/human/abc/queue" };
+  events = []; page = { hash: "#/chats/ai/abc/queue" };
   expect(press()).toBe(true);
   expect(events).toEqual(["closePanel"]);
 
-  events = []; page = { hash: "#/chats/human/abc" };
+  events = []; page = { hash: "#/chats/room/abc" };
   expect(press()).toBe(true);
   expect(events).toEqual(["closeDetail"]);
 
@@ -96,7 +96,7 @@ test("back at the Chats home, or behind a dialog that refuses to cancel, leaves 
   expect(press()).toBe(false);
   page = { hash: "" };
   expect(press()).toBe(false);
-  page = { hash: "#/chats/human/abc", dialog: ["unlock-dialog"] };
+  page = { hash: "#/chats/room/abc", dialog: ["unlock-dialog"] };
   expect(press()).toBe(false);
   page = { hash: "#/workers/t", dialog: ["sign-in-dialog"] };
   expect(press()).toBe(false);

@@ -73,7 +73,7 @@ button:disabled { cursor: default; opacity: .45; }
 .transcript { width: min(100%, 880px); margin: 0 auto; }
 .message { margin-top: var(--space-6); overflow-wrap: anywhere; font-size: 16px; line-height: 1.55; user-select: text; content-visibility: auto; contain-intrinsic-block-size: auto 160px; }
 .message:first-child { margin-top: 0; }
-.context-earlier { display: block; margin: 0 auto var(--space-5); padding: var(--space-2) var(--space-4); border: 0; border-radius: var(--radius-2); color: var(--muted); background: var(--surface); font: inherit; }
+.context-earlier { display: block; min-height: var(--touch); margin: 0 auto var(--space-5); padding: var(--space-2) var(--space-4); border: 0; border-radius: var(--radius-2); color: var(--muted); background: var(--surface); font: inherit; }
 .context-earlier[disabled] { opacity: .6; }
 .context-earlier-error { margin: 0 auto var(--space-4); color: var(--danger); font-size: 13px; text-align: center; }
 .message-header { min-height: 20px; display: flex; align-items: baseline; gap: 8px; margin-bottom: var(--space-2); }
@@ -155,12 +155,10 @@ div.math-pending { display: block; padding: .2em 0; }
 .slash-command:hover, .slash-command:focus-visible { background: var(--surface); }
 .slash-command-name { flex: 0 0 auto; color: var(--accent); font: 700 13px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .slash-command-description { min-width: 0; overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.composer-body { display: grid; grid-auto-rows: min-content; min-width: 0; min-height: 0; max-height: calc(min(420px, 60dvh) - 56px); overflow-y: auto; }
+.composer-body { display: grid; grid-template-columns: minmax(0, 1fr); grid-auto-rows: min-content; min-width: 0; min-height: 0; max-height: calc(min(420px, 60dvh) - 56px); overflow-y: auto; }
 .composer-prompt { width: 100%; height: 44px; min-height: 44px; max-height: min(180px, 30dvh); align-self: start; resize: none; border: 0; border-radius: 0; padding: 10px 11px; color: var(--text); background: transparent; line-height: 1.4; }
 .composer-actions { display: flex; align-items: center; min-width: 0; background: var(--surface); }
 .composer-spacer { flex: 1; }
-.write-tail { padding: 0 11px 5px; color: var(--muted); font-style: italic; overflow-wrap: anywhere; }
-.write-error { padding: 0 11px 5px; color: var(--danger); }
 .composer-icon { width: 40px; height: 40px; display: grid; place-items: center; padding: 0; color: var(--text); background: transparent; }
 .composer-icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
 .composer-icon.send { border-radius: var(--radius-2); color: var(--bg); background: var(--accent); }
@@ -191,6 +189,7 @@ div.math-pending { display: block; padding: .2em 0; }
 .paste-text-form label { color: var(--muted); font-size: 11px; font-weight: 850; letter-spacing: .06em; text-transform: uppercase; }
 .paste-text-form input, .paste-text-form textarea { width: 100%; border: 0; border-radius: var(--radius-2); padding: 10px 12px; color: var(--text); background: var(--surface-2); }
 .paste-text-form textarea { min-height: 220px; max-height: min(52vh, 520px); resize: vertical; line-height: 1.4; }
+.paste-text-form .dismissible-error-message { max-height: min(22dvh, 160px); overflow-y: auto; }
 .paste-text-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 .paste-text-actions button { min-height: 42px; padding: 0 15px; color: var(--text); background: var(--surface-2); font-weight: 750; }
 .paste-text-actions .accent { color: var(--bg); background: var(--accent); }
@@ -225,3 +224,10 @@ div.math-pending { display: block; padding: .2em 0; }
 .app-update { display: grid; gap: var(--space-2); }
 .app-update p { margin: 0; font-size: var(--text-sm); }
 .app-update-detail { color: var(--muted); }
+@media (max-width: 899px) {
+  .composer-icon { width: var(--touch); height: var(--touch); }
+  .message-action { width: var(--touch); min-width: var(--touch); height: var(--touch); }
+  .attachment-chip { height: var(--touch); }
+  .attachment-remove { flex-basis: var(--touch); height: var(--touch); }
+  .setting-options button, .paste-text-actions button, .accent { min-height: var(--touch); }
+}

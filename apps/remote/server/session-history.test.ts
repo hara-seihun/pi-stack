@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { HISTORY_MARKER, READ_THREAD_CONTRACT } from "../../../tools/read-condensed-session/contract.mjs";
-import contextMirror from "./context-mirror";
+import conversation from "./conversation";
 
 test("history metadata derives from the reader contract and keeps the system prefix unchanged as the branch grows", async () => {
   const handlers = new Map<string, (...args: any[]) => any>();
   let contractReads = 0;
-  contextMirror({
+  conversation({
     on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
     exec: async (command: string, args: string[]) => {
       expect([command, ...args]).toEqual(["read-thread", "--contract"]);
@@ -37,7 +37,7 @@ test("history metadata derives from the reader contract and keeps the system pre
 test("a failed command contract is reported and not retained as working metadata", async () => {
   const handlers = new Map<string, (...args: any[]) => any>();
   let fail = true;
-  contextMirror({
+  conversation({
     on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
     exec: async () => fail
       ? { code: 1, stdout: "", stderr: "unsupported contract", killed: false }

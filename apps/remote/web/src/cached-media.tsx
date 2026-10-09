@@ -10,11 +10,7 @@ export function mediaCacheKey(src: string): string | null {
   const start = url.pathname.lastIndexOf("/v1/");
   if (start < 0) return null;
   const path = url.pathname.slice(start);
-  const avatar = API.messagingAvatar.match("GET", path);
-  if (!(avatar && /^\d+$/.test(url.searchParams.get("v") ?? ""))
-    && !API.messagingAttachment.match("GET", path)
-    && !API.messagingPreviewImage.match("GET", path)
-    && !API.sessionImage.match("GET", path)) return null;
+  if (!API.sessionImage.match("GET", path)) return null;
   url.searchParams.delete("session");
   url.searchParams.delete("user");
   url.searchParams.delete("retry");

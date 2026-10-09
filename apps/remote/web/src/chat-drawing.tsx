@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { DrawingAttachmentResult } from "./DrawingCanvas";
 import { findDrawingDraft, type DrawingBackground, type DrawingDraft } from "./drawing-drafts";
+import { recordFeatureUsage } from "./feature-usage";
 
 // The canvas, its colour picker and the paper geometry are a drawing
 // application inside the chat, and a chat opens far more often than the
@@ -73,6 +74,7 @@ export function useChatDrawing(chatId: string | null, attach: (file: File, chatI
   }, [isOpen, selectedId, chatId]);
   const open = (background?: DrawingBackground) => {
     if (!chatId) return;
+    recordFeatureUsage("drawing");
     const draft = findDrawingDraft(drafts, chatId, background) ?? { id: crypto.randomUUID(), chatId, background };
     setDrafts(current => current.some(item => item.id === draft.id) ? current : [...current, draft]);
     if (document.activeElement instanceof HTMLElement) opener.current = { chatId, element: document.activeElement };

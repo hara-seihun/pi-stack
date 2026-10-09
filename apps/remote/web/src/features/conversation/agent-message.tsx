@@ -85,15 +85,15 @@ function RouteName({ end }: { end: RouteEnd }) {
   const error = directory?.lookupError(end.threadId);
   return directory
     ? <button type="button" className="agent-route-name" title={error ? `Name unavailable: ${error}. Open ${name}` : title ? `${name}: ${title}` : `Open ${name}`} onClick={event => { event.stopPropagation(); directory.open(end.threadId); }}>{name}</button>
-    : <span className="agent-route-name">{name}</span>;
+    : <span className="agent-route-name peer">{name}</span>;
 }
 
-/** "Sender → Recipient" over a message one agent sent another. */
 export function AgentRoute({ from, to, direction }: { from: RouteEnd; to: RouteEnd; direction: "incoming" | "outgoing" }) {
+  const incoming = direction === "incoming";
   return <span className={`agent-route ${direction}`}>
-    <RouteName end={from} />
-    <svg className="agent-route-arrow" viewBox="0 0 24 24" role="img" aria-label="to"><path d="M4 12h15m-5-5 5 5-5 5" /></svg>
-    <RouteName end={to} />
+    <RouteName end={incoming ? to : from} />
+    <svg className="agent-route-arrow" viewBox="0 0 24 24" role="img" aria-label={incoming ? "from" : "to"}><path d={incoming ? "M20 12H5m5-5-5 5 5 5" : "M4 12h15m-5-5 5 5-5 5"} /></svg>
+    <RouteName end={incoming ? from : to} />
   </span>;
 }
 

@@ -68,25 +68,19 @@ public class KenanOverlayTest {
         field.setAccessible(true);
         field.set(null, value);
     }
-    static void bindSharedOverlay(AccessibilityService owner, PhoneAccessibilityService phone,
-        WriteAccessibilityService write, KenanOverlay overlay) throws Exception {
-        shared("owner", owner);
+    static void bindSharedOverlay(PhoneAccessibilityService phone, KenanOverlay overlay) throws Exception {
         shared("phone", phone);
-        shared("write", write);
         shared("overlay", overlay);
     }
     static void clearSharedOverlay() throws Exception {
-        KenanOverlay overlay = SharedOverlay.current();
-        bindSharedOverlay(null, null, null, null);
-        if (overlay != null) overlay.close();
-        Field active = WriteAccessibilityService.class.getDeclaredField("active");
-        active.setAccessible(true);
-        active.set(null, null);
+        PhoneAccessibilityService phone = org.robolectric.util.ReflectionHelpers.getStaticField(SharedOverlay.class, "phone");
+        if (phone != null) SharedOverlay.detach(phone);
+        PhoneAccessibilityService.current = null;
     }
     @After public void clearSharedOwner() throws Exception { clearSharedOverlay(); }
 
     private KenanOverlay overlay(Windows windows) {
-        WriteAccessibilityService service = Robolectric.buildService(WriteAccessibilityService.class).get();
+        PhoneAccessibilityService service = Robolectric.buildService(PhoneAccessibilityService.class).get();
         return new KenanOverlay(service, windows.manager());
     }
     private void position(KenanOverlay overlay) throws Exception {
@@ -103,7 +97,7 @@ public class KenanOverlayTest {
     private KenanOverlay phoneOverlay(Windows windows) throws Exception {
         PhoneAccessibilityService service = Robolectric.buildService(PhoneAccessibilityService.class).get();
         KenanOverlay overlay = new KenanOverlay(service, windows.manager());
-        bindSharedOverlay(service, service, null, overlay);
+        bindSharedOverlay(service, overlay);
         overlay.refresh();
         return overlay;
     }
@@ -202,6 +196,76 @@ public class KenanOverlayTest {
         overlay.close();
         assertEquals(1, windows.updates);
         assertEquals(removed, windows.removes);
+    }
+    @Test public void disabledChatReleasesReceiptTimersAndReenablesOneFreshScope() throws Exception {
+        Windows windows = new Windows();
+        PhoneAccessibilityService service = Robolectric.buildService(PhoneAccessibilityService.class).get();
+        org.robolectric.Shadows.shadowOf(service.getApplication()).setSystemService(android.content.Context.WINDOW_SERVICE, windows.manager());
+        PhoneControlService.settings(service).edit().putBoolean("overlayVisible", true).putBoolean("enabled", true).apply();
+        KenanOverlay overlay = SharedOverlay.phone(service);
+        assertNotNull(overlay);
+        SharedOverlay.phone(service);
+        assertEquals(2, windows.adds);
+        overlay.say("Reply", 20000);
+        overlay.state("thinking");
+        @SuppressWarnings("unchecked") java.util.Map<String, Runnable> receipts = (java.util.Map<String, Runnable>) field(overlay, "pending");
+        int[] fired = {0};
+        Runnable receipt = () -> fired[0]++;
+        receipts.put("receipt", receipt);
+        ((android.os.Handler) field(overlay, "main")).postDelayed(receipt, 15000);
+        SharedOverlay.requestRefresh(false);
+        KenanOverlay.setVisible(service, false);
+        assertNull(SharedOverlay.current());
+        assertTrue(overlay.closed());
+        assertTrue(windows.attached.isEmpty());
+        assertTrue(receipts.isEmpty());
+        assertTrue(PhoneControlService.settings(service).getBoolean("enabled", false));
+        int adds = windows.adds, updates = windows.updates;
+        SharedOverlay.phone(service); SharedOverlay.requestRefresh(false);
+        overlay.say("Late reply", 1000); overlay.moveToTarget(20, 20, 100); overlay.gesture(1, 1, 2, 2, 100, true);
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(21));
+        assertEquals(0, fired[0]);
+        assertEquals(adds, windows.adds);
+        assertEquals(updates, windows.updates);
+        KenanOverlay.setVisible(service, true);
+        KenanOverlay next = SharedOverlay.current();
+        assertNotNull(next); assertNotSame(overlay, next);
+        assertEquals(adds + 2, windows.adds);
+        SharedOverlay.phone(service); KenanOverlay.setVisible(service, true);
+        assertSame(next, SharedOverlay.current());
+        assertEquals(adds + 2, windows.adds);
+    }
+    @Test public void disabledPhoneActionsOwnOnlyFiniteVisualsAndDoNotReenableChat() throws Exception {
+        Windows windows = new Windows();
+        PhoneAccessibilityService service = Robolectric.buildService(PhoneAccessibilityService.class).get();
+        org.robolectric.Shadows.shadowOf(service.getApplication()).setSystemService(android.content.Context.WINDOW_SERVICE, windows.manager());
+        PhoneControlService.settings(service).edit().putBoolean("overlayVisible", false).apply();
+        assertNull(SharedOverlay.phone(service));
+        KenanOverlay visual = SharedOverlay.visualize(service, 1700);
+        visual.refresh(); visual.highlight(new android.graphics.Rect(10, 10, 20, 20));
+        assertNull(SharedOverlay.current());
+        assertEquals(2, windows.attached.size());
+        assertFalse(KenanOverlay.isVisible(service));
+        visual.say("Must not create a chat receipt", 1000);
+        assertTrue(((java.util.Map<?, ?>) field(visual, "pending")).isEmpty());
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofSeconds(2));
+        assertTrue(visual.closed()); assertTrue(windows.attached.isEmpty());
+        assertNull(org.robolectric.util.ReflectionHelpers.getStaticField(SharedOverlay.class, "action"));
+        KenanOverlay.setVisible(service, true);
+        assertNotNull(SharedOverlay.current());
+        assertEquals(2, windows.attached.size());
+    }
+    @Test public void enableDuringCaptureRemainsHiddenUntilCaptureReleases() throws Exception {
+        Windows windows = new Windows();
+        PhoneAccessibilityService service = Robolectric.buildService(PhoneAccessibilityService.class).get();
+        org.robolectric.Shadows.shadowOf(service.getApplication()).setSystemService(android.content.Context.WINDOW_SERVICE, windows.manager());
+        PhoneControlService.settings(service).edit().putBoolean("overlayVisible", false).apply();
+        SharedOverlay.phone(service); SharedOverlay.suspendCapture(service);
+        KenanOverlay.setVisible(service, true);
+        KenanOverlay overlay = SharedOverlay.current();
+        assertEquals(View.INVISIBLE, ((View) field(overlay, "dot")).getVisibility());
+        SharedOverlay.restoreCapture(service);
+        assertEquals(View.VISIBLE, ((View) field(overlay, "dot")).getVisibility());
     }
     @Test public void closeRemovesAllWindowsOnlyOnce() {
         Windows windows = new Windows();

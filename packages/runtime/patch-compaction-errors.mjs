@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -39,24 +39,28 @@ export function patchCompactionErrors(source) {
 }
 
 export function patchContextErrors(source) {
-  if (source.includes("Pi Stack context rejection result")) return source;
+  if (source.includes("Pi Stack two-phase context rejection result")) return source;
   const start = source.indexOf("async emitContext(messages)");
   const end = source.indexOf("async emitBeforeProviderRequest(", start);
   if (start < 0 || end < 0 || !source.slice(start, end).includes("return currentMessages")) throw new Error("Pinned Pi context handler boundary changed");
   const method = `async emitContext(messages) {
-    /* Pi Stack context rejection result */
+    /* Pi Stack two-phase context rejection result */
     const ctx = this.createContext();
     let currentMessages = structuredClone(messages);
-    for (const ext of this.extensions) {
-      for (const handler of ext.handlers.get("context") ?? []) {
-        let result;
-        try { result = await handler({ type: "context", messages: currentMessages }, ctx); }
-        catch (error) {
-          this.emitError({ extensionPath: ext.path, event: "context", error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined });
-          continue;
+    for (const event of ["context", "context_with_system"]) {
+      for (const { ext, handlers } of snapshotEventHandlers(this.extensions, event)) {
+        for (const handler of handlers) {
+          const visible = event === "context" ? currentMessages.filter(message => message.role !== "system") : currentMessages;
+          let result;
+          try { result = await handler({ type: event, messages: visible }, ctx); }
+          catch (error) {
+            this.emitError({ extensionPath: ext.path, event, error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined });
+            throw new Error(\`Context rejected: \${error instanceof Error ? error.message : String(error)}\`);
+          }
+          if (result?.error) throw new Error(\`Context rejected: \${result.error}\`);
+          if (result?.messages) currentMessages = event === "context"
+            ? restoreSystemMessages(currentMessages, visible, result.messages) : result.messages;
         }
-        if (result?.error) throw new Error(\`Context rejected: \${result.error}\`);
-        if (result?.messages) currentMessages = result.messages;
       }
     }
     return currentMessages;
@@ -67,14 +71,11 @@ export function patchContextErrors(source) {
 
 export function patchCompactionErrorCopies(nodeModules) {
   const base = join(nodeModules, "@earendil-works/pi-coding-agent/dist");
-  const chunks = join(base, "bundle/chunks");
-  const bundled = readdirSync(chunks).filter(name => name.endsWith(".js")).map(name => join(chunks, name));
-  for (const [file, marker, patch] of [
-    ["core/agent-session.js", "async _runAutoCompaction(", patchCompactionErrors],
-    ["core/extensions/runner.js", "async emitContext(messages)", patchContextErrors],
+  for (const [file, patch] of [
+    ["core/agent-session.js", patchCompactionErrors],
+    ["core/extensions/runner.js", patchContextErrors],
   ]) {
-    const paths = [join(base, file), ...bundled.filter(path => readFileSync(path, "utf8").includes(marker))];
-    if (paths.length !== 2) throw new Error(`Expected two Pi failure consumers for ${file}, found ${paths.length}`);
+    const paths = [join(base, file)];
     for (const path of paths) {
       const source = readFileSync(path, "utf8"), patched = patch(source);
       if (source !== patched) writeFileSync(path, patched);

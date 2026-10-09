@@ -14,9 +14,8 @@ test("placement, not custody or provenance, controls Chats", () => {
   const rows = [session("foreground", { foreground: true, origin: "fleet", parentId: "other" }), session("background", { foreground: false }), session("historical")];
   expect(conversationThreads(rows).map(row => row.id)).toEqual(["foreground", "historical"]);
   for (const row of rows) expect(conversationTab(row)).toBe("chats");
-  const messaging = { version: 0, backends: [], conversations: [], calls: [] };
-  expect(inboxRows(rows, [], messaging).map(row => row.chat.id)).not.toContain("ai:background");
-  expect(selectionAfterSync("ai:historical", { sessions: rows, messaging }, { sessions: rows, messaging })).toBe("ai:historical");
+  expect(inboxRows(rows, []).map(row => row.chat.id)).not.toContain("ai:background");
+  expect(selectionAfterSync("ai:historical", { sessions: rows }, { sessions: rows })).toBe("ai:historical");
 });
 
 test("cancelling targets only the selected agent even when it launched agents", () => {
@@ -34,7 +33,7 @@ test("historical cancellation holds never create a persistent Resume composer st
 test("cancel transport carries selected-only scope and retains dependency refusal data", async () => {
   const descriptors = new Map(["window", "fetch"].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
   try {
-    Object.defineProperty(globalThis, "window", { configurable: true, value: { PiRemotePerson: { session: () => "session" } } });
+    Object.defineProperty(globalThis, "window", { configurable: true, value: { PiRemotePerson: { get: () => "person", session: () => "session" } } });
     Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (url: string, init: RequestInit) => {
       expect(url).toBe("/v1/sessions/parent/abort");
       expect(JSON.parse(String(init.body))).toEqual({ descendants: false });

@@ -37,6 +37,6 @@ it("isolates synthetic admissions without bypassing explicit credential rejectio
     } }));
     const refused = assign(store, "opus", "force", { ...config, authPath });
     expect(refused.assignment).toBeUndefined();
-    expect(refused.refusals).toEqual([{ accountId: "anthropic", reason: "capacity 0/0: shared OAuth credential requires login" }]);
+    expect(refused.refusals).toEqual([{ accountId: "anthropic", reason: "shared OAuth credential requires login" }]);
   } finally { store.close(); }
 });

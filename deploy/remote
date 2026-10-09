@@ -28,7 +28,7 @@ cd "$root"
   exit 66
 }
 orchestrator_release=$(readlink -f "$orchestrator")
-[[ -f $orchestrator_release/src/api.ts && -f $orchestrator_release/src/boost.ts ]] || {
+[[ -f $orchestrator_release/src/api.ts ]] || {
   echo "Pi Orchestrator release is incomplete at $orchestrator_release" >&2
   exit 66
 }

@@ -1,14 +1,14 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, lstatSync } from "node:fs";
 import { join } from "node:path";
 import { createConnection } from "node:net";
 import { openSqlite } from "./sqlite.js";
-import { isAgentExecution, configuredAgentCapacityStatus } from "./agent-capacity.js";
+import { isAgentExecution } from "./agent-capacity.js";
 import { AgentCapacityAuthority, readAgentCapacityAuthorityConfig, runAgentCapacityAuthority, type CensusEntry } from "./agent-capacity-authority.js";
 
 export interface CapacityCensusPlan {
   host: string;
   barrierId: string;
-  owners: { ownerId: string; threadDatabases: string[]; standaloneDirectories: string[]; standaloneRecords: string[] }[];
+  owners: { ownerId: string; threadDatabases: string[]; threadDatabaseDirectories: string[] }[];
 }
 export interface CapacityCensus {
   version: 1; barrierId: string;
@@ -20,18 +20,20 @@ function planFrom(path: string): CapacityCensusPlan {
   const plan = JSON.parse(readFileSync(path === "-" ? 0 : path, "utf8")) as CapacityCensusPlan;
   if (!plan || typeof plan.host !== "string" || !plan.host || typeof plan.barrierId !== "string" || !plan.barrierId
     || !Array.isArray(plan.owners) || !plan.owners.length || plan.owners.some(owner => !owner || typeof owner.ownerId !== "string" || !owner.ownerId
-      || !strings(owner.threadDatabases) || !strings(owner.standaloneDirectories) || !strings(owner.standaloneRecords))
+      || !strings(owner.threadDatabases) || !strings(owner.threadDatabaseDirectories))
     || new Set(plan.owners.map(owner => owner.ownerId)).size !== plan.owners.length) throw new Error("Census plan needs an explicit host, admission barrier identity and every owner/source path");
   return plan;
 }
-function standaloneRecords(root: string): string[] {
-  const records: string[] = [];
-  for (const entry of readdirSync(root, { withFileTypes: true })) {
+function threadDatabases(root: string): string[] {
+  if (!lstatSync(root).isDirectory()) throw new Error(`Census source must be an owned directory: ${root}`);
+  const databases: string[] = [];
+  for (const entry of readdirSync(root, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
     const path = join(root, entry.name);
-    if (entry.isDirectory()) records.push(...standaloneRecords(path));
-    else if (entry.isFile() && entry.name === "capacity.json") records.push(path);
+    if (entry.isDirectory()) databases.push(...threadDatabases(path));
+    else if (entry.isFile() && entry.name === "threads.sqlite3") databases.push(path);
+    else if (entry.isSymbolicLink()) throw new Error(`Census directory must contain owned paths, not symbolic links: ${path}`);
   }
-  return records;
+  return databases;
 }
 function runnerStatus(control: string): Promise<{ activeSessions: number; activeThreadIds?: string[] } | undefined> {
   return new Promise(resolve => {
@@ -55,53 +57,38 @@ function runnerStatus(control: string): Promise<{ activeSessions: number; active
 /** Reads execution receipts, never the misleading thread state='running' projection. Run inside each owner's authorized namespace. */
 export async function collectAgentCapacityCensus(plan: CapacityCensusPlan): Promise<CapacityCensus> {
   const entries: CapacityCensus["entries"] = [], controls = new Map<string, Promise<Awaited<ReturnType<typeof runnerStatus>>>>();
-  let authorityStatus: ReturnType<typeof configuredAgentCapacityStatus> | undefined;
   const put = (entry: CapacityCensus["entries"][number]) => {
     const prior = entries.find(other => other.agentId === entry.agentId || other.executionId === entry.executionId);
     if (prior && (prior.agentId !== entry.agentId || prior.executionId !== entry.executionId || prior.ownerId !== entry.ownerId)) throw new Error(`Overlapping census execution identities at ${entry.source}; reconcile native custody before cutover`);
     if (!prior) entries.push(entry);
   };
   for (const owner of plan.owners) {
-    for (const path of owner.threadDatabases) {
+    for (const path of new Set([...owner.threadDatabases, ...owner.threadDatabaseDirectories.flatMap(threadDatabases)])) {
       const db = openSqlite(path, true);
       try {
-        const active = db.prepare(`SELECT e.id AS executionId,e.thread_id AS agentId,t.metadata FROM thread_execution e JOIN thread t ON t.id=e.thread_id WHERE e.ended_at IS NULL`).all() as { executionId: string; agentId: string; metadata: string }[];
+        const active = db.prepare(`SELECT e.id AS executionId,e.thread_id AS agentId,json_extract(t.metadata,'$.providerWait') AS providerWait,json_extract(t.metadata,'$.runnerReference') AS runnerReference FROM thread_execution e JOIN thread t ON t.id=e.thread_id WHERE e.ended_at IS NULL`).all() as { executionId: string; agentId: string; providerWait: string | null; runnerReference: string | null }[];
         for (const row of active) {
-          const metadata = JSON.parse(row.metadata);
           // Provider waiting has a durable idle retirement receipt; unfinished work itself is not execution.
-          if (metadata.providerWait && !metadata.runnerReference) continue;
+          if (row.providerWait && !row.runnerReference) continue;
           const table = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='thread_capacity'").get();
           const capacity = table ? db.prepare("SELECT execution_id AS executionId,entered_native,lease_id FROM thread_capacity WHERE thread_id=? AND logical_execution_id=? AND state!='released'").get(row.agentId, row.executionId) as { executionId: string; entered_native: number; lease_id: string | null } | undefined : undefined;
-          if (capacity && capacity.entered_native === 0 && capacity.lease_id === null && !metadata.runnerReference) continue;
+          if (capacity && capacity.entered_native === 0 && capacity.lease_id === null && !row.runnerReference) continue;
           put({ agentId: row.agentId, executionId: capacity?.executionId ?? row.executionId, ownerId: owner.ownerId, source: path, uncertain: true });
         }
         if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='thread_capacity'").get()) {
           const capacity = db.prepare("SELECT thread_id AS agentId,execution_id AS executionId FROM thread_capacity WHERE state!='released' AND (entered_native=1 OR lease_id IS NOT NULL)").all() as { agentId: string; executionId: string }[];
           for (const row of capacity) put({ ...row, ownerId: owner.ownerId, source: path, uncertain: true });
         }
-        const retained = db.prepare("SELECT id,metadata FROM thread WHERE json_extract(metadata,'$.runnerReference') IS NOT NULL").all() as { id: string; metadata: string }[];
+        const retained = db.prepare("SELECT id,json_extract(metadata,'$.runnerReference.control') AS control FROM thread WHERE json_extract(metadata,'$.runnerReference') IS NOT NULL").all() as { id: string; control: string | null }[];
         for (const row of retained) {
           if (entries.some(entry => entry.agentId === row.id)) continue;
-          const reference = JSON.parse(row.metadata).runnerReference;
-          if (!reference || typeof reference.control !== "string") throw new Error(`Invalid retained native reference at ${path}`);
-          if (!controls.has(reference.control)) controls.set(reference.control, runnerStatus(reference.control));
-          const status = await controls.get(reference.control)!;
+          if (typeof row.control !== "string" || !row.control) throw new Error(`Invalid retained native reference at ${path}`);
+          if (!controls.has(row.control)) controls.set(row.control, runnerStatus(row.control));
+          const status = await controls.get(row.control)!;
           if (status?.activeSessions === 0 || status?.activeThreadIds && !status.activeThreadIds.includes(row.id)) continue;
           put({ agentId: row.id, executionId: `native-census:${row.id}`, ownerId: owner.ownerId, source: path, uncertain: true });
         }
       } finally { db.close(); }
-    }
-    const records = new Set([...owner.standaloneRecords, ...owner.standaloneDirectories.flatMap(standaloneRecords)]);
-    for (const path of records) {
-      const record = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-      if (record.version !== 1 || !isAgentExecution(record) || record.ownerId !== owner.ownerId || typeof record.state !== "string" || !["acquiring", "held", "settled", "released"].includes(record.state)) throw new Error(`Invalid or wrong-owner standalone capacity record at ${path}`);
-      if (record.state === "released") continue;
-      if (record.state === "acquiring") {
-        authorityStatus ??= configuredAgentCapacityStatus();
-        const status = await authorityStatus;
-        if (status.ok && !status.value.initialized && status.value.active === 0) continue;
-      }
-      put({ agentId: record.agentId, executionId: record.executionId, ownerId: owner.ownerId, source: path, uncertain: record.state !== "settled" });
     }
   }
   return { version: 1, barrierId: plan.barrierId, hosts: [{ host: plan.host, capturedAt: new Date().toISOString(), owners: plan.owners.map(owner => owner.ownerId) }], entries };

@@ -6,23 +6,23 @@ import { assign } from "../src/policy.js";
 import { Store } from "../src/store.js";
 import type { Thread } from "../src/threads/contracts.js";
 
-it("account urgency ignores background pacing but retains quota and explicit pause gates", () => {
+it.each(["background", "force", "live"] as const)("account admission %s retains quota and explicit pause gates", admission => {
   const store = Store.open(":memory:");
   const config = loadConfig("/missing");
   store.upsertAccount({ id: "a", provider: "openai-codex", concurrency: 1 });
   try {
     for (let i = 0; i < 48; i++) {
-      expect(assign(store, "sol", "force", config).assignment?.accountId).toBe("a");
+      expect(assign(store, "sol", admission, config).assignment?.accountId).toBe("a");
       store.createLease(`worker:${i}`, "a", "fleet");
     }
-    expect(assign(store, "sol", "background", config).refusals[0]?.reason).toContain("capacity 48/1");
+    expect(assign(store, "sol", "background", config).assignment?.accountId).toBe("a");
     for (const [key, reason] of [["launches", "emergency halt"], ["ordinary-launches", "ordinary work paused"]]) {
       store.setControl(key!, "paused");
-      expect(assign(store, "sol", "force", config).refusals[0]?.reason).toBe(reason);
+      expect(assign(store, "sol", admission, config).refusals[0]?.reason).toBe(reason);
       store.setControl(key!, "enabled");
     }
     store.setCooldown("a", Date.now() + 60_000);
-    expect(assign(store, "sol", "force", config).refusals[0]?.reason).toContain("account cooling down");
+    expect(assign(store, "sol", admission, config).refusals[0]?.reason).toContain("account cooling down");
   } finally { store.close(); }
 });
 

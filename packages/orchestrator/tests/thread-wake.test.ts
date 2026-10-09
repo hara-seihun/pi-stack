@@ -14,6 +14,19 @@ const roots: string[] = [], owners: ThreadService[] = [];
 const unwrap = <T>(value: Result<T>): T => { if (!value.ok) throw new Error(value.error.message); return value.value; };
 const boundary = () => new Promise<void>(resolve => setImmediate(resolve));
 async function until(check: () => boolean) { for (let n = 0; n < 100; n++) { if (check()) return; await boundary(); } throw new Error("Lifecycle did not reach expected boundary"); }
+function pauseRegistration(service: ThreadService, kind: "agents" | "message", entered: () => void): () => void {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  if (kind === "agents") {
+    const call = service.await.bind(service);
+    vi.spyOn(service, "await").mockImplementationOnce(async input => { const result = call(input); entered(); await gate; return result; });
+  } else {
+    const owner = service as unknown as { validateDependencies(id: string, ids: string[]): Promise<Result<void>> };
+    const call = owner.validateDependencies.bind(service);
+    vi.spyOn(owner, "validateDependencies").mockImplementationOnce(async (id, ids) => { const result = await call(id, ids); entered(); await gate; return result; });
+  }
+  return release;
+}
 function fixture(root = mkdtempSync(join(tmpdir(), "thread-wake-")), options: Partial<ThreadServiceOptions> = {}, beforeOpen?: () => Promise<void>) {
   if (!roots.includes(root)) roots.push(root);
   const sessions: Array<{ commands: PiCommand[]; settle(): void; emit(event: PiEvent): void }> = [];
@@ -86,7 +99,7 @@ it.each([true, false])("dependency settlement resumes a durable waiter through t
   unwrap(await parent.service.agentWait({ requestId: "release-result", threadId: "parent", action: "clear" }));
   parent.sessions[0]!.settle(); await until(() => parent.service.get("parent")?.state === "idle");
   await until(() => child.service.get("child")?.metadata?.archived === true);
-  expect(await parent.service.agentWait({ requestId: "wait-closed-child", threadId: "parent", action: "set", kind: "agents", reason: "Already arrived", threadIds: ["child"] })).toMatchObject({ ok: false, error: { code: "conflict" } });
+  expect(await parent.service.agentWait({ requestId: "wait-closed-child", threadId: "parent", action: "set", kind: "agents", reason: "Already arrived", threadIds: ["child"] })).toMatchObject({ ok: true, value: { waitRegistration: { status: "already_arrived", settlement: { outcome: "complete" } } } });
   unwrap(await child.service.control({ threadId: "child", action: "reopen" }));
   const arrived = unwrap(await parent.service.agentWait({ requestId: "wait-after-result", threadId: "parent", action: "set", kind: "agents", reason: "Already arrived", threadIds: ["child"] }));
   expect(arrived.waitingOnAgents).toBeUndefined();
@@ -103,22 +116,15 @@ it.each([
   const f = fixture(); await spawn(f, "self"); await spawn(f, "collaborator");
   unwrap(await f.service.spawn({ requestId: "child", id: "child", parentId: "self", cwd: f.root }));
   const directory = new ThreadDirectory({ id: "person", api: f.service }); f.service.setDirectory(directory);
-  let release!: () => void, entered = false;
-  const gate = new Promise<void>(resolve => { release = resolve; });
-  if (kind === "agents") vi.spyOn(directory, "await").mockImplementationOnce(async input => {
-    const result = f.service.await(input); entered = true; await gate; return result;
-  });
-  else vi.spyOn(directory, "list").mockImplementationOnce(async input => {
-    const result = await f.service.list(input); entered = true; await gate; return result;
-  });
+  let entered = false;
+  const release = pauseRegistration(f.service, kind, () => { entered = true; });
   const request = { requestId: "racing-wait", threadId: "self", action: "set" as const, reason: "Dependency result",
     ...(kind === "agents" ? { kind, threadIds: ["child"] } : { kind, fromThreadId: "collaborator" }) };
   const registering = f.service.agentWait(request); await until(() => entered);
   unwrap(await f.service.send({ requestId: "human", threadId: "self", text: "Continue with my new instruction" }));
   if (completed) {
     unwrap(await f.service.start()); await until(() => f.sessions[0]?.commands.some(c => c.type === "prompt") === true);
-    f.sessions[0]!.settle(); await until(() => f.service.get("self")?.state === "idle");
-    expect(f.service.latestSettlement("self")?.outcome).toBe("complete");
+    f.sessions[0]!.settle(); await until(() => f.service.latestSettlement("self")?.outcome === "complete");
     expect(f.service.pending("self")).toHaveLength(0);
   }
   release();
@@ -189,10 +195,12 @@ it.each([false, true])("delayed historical notifications preserve a current peer
   const notification = { requestId: staleId, threadId: "parent", senderId: "peer", source: "notification" as const, text: "Delayed first result" };
   unwrap(await parent.service.send(notification));
   expect(parent.service.get("parent")?.waitingOnAgents).toEqual(registered.waitingOnAgents);
+  expect(parent.service.get("parent")?.dependencies).toEqual(["peer"]);
   expect(parent.service.pending("parent")).toContainEqual(expect.objectContaining({ id: staleId }));
   expect(unwrap(await parent.service.agentWait(request)).waitRegistration).toEqual(registered.waitRegistration);
   peer.sessions[0]!.settle(); await until(() => peer.service.latestSettlement("peer")?.workId === "second");
   await until(() => parent.service.get("parent")?.waitingOnAgents === undefined);
+  expect(parent.service.get("parent")?.dependencies).toEqual([]);
   const current = peer.service.latestSettlement("peer")!;
   expect(parent.service.pending("parent")).toContainEqual(expect.objectContaining({ id: `thread-result:${current.executionId}:parent` }));
 });
@@ -220,11 +228,8 @@ it("reports the latest completed assignment and new input without terminating ei
 it("withdrawn unlanded input cannot swallow a wait during validation", async () => {
   const f = fixture(); await spawn(f, "self"); await spawn(f, "child");
   const directory = new ThreadDirectory({ id: "person", api: f.service }); f.service.setDirectory(directory);
-  let release!: () => void, entered = false;
-  const gate = new Promise<void>(resolve => { release = resolve; });
-  vi.spyOn(directory, "await").mockImplementationOnce(async input => {
-    const result = f.service.await(input); entered = true; await gate; return result;
-  });
+  let entered = false;
+  const release = pauseRegistration(f.service, "agents", () => { entered = true; });
   const registering = f.service.agentWait({ requestId: "wait", threadId: "self", action: "set", kind: "agents", threadIds: ["child"], reason: "Child result" });
   await until(() => entered);
   unwrap(await f.service.send({ requestId: "withdrawn", threadId: "self", text: "Never mind" }));
@@ -236,11 +241,8 @@ it("withdrawn unlanded input cannot swallow a wait during validation", async () 
 it("rejects a competing registration without overwriting accepted intent", async () => {
   const f = fixture(); await spawn(f, "self"); await spawn(f, "child");
   const directory = new ThreadDirectory({ id: "person", api: f.service }); f.service.setDirectory(directory);
-  let release!: () => void, entered = false;
-  const gate = new Promise<void>(resolve => { release = resolve; });
-  vi.spyOn(directory, "await").mockImplementationOnce(async input => {
-    const result = f.service.await(input); entered = true; await gate; return result;
-  });
+  let entered = false;
+  const release = pauseRegistration(f.service, "agents", () => { entered = true; });
   const registering = f.service.agentWait({ requestId: "wait", threadId: "self", action: "set", kind: "agents", threadIds: ["child"], reason: "Child result" });
   await until(() => entered);
   expect(await f.service.agentWait({ requestId: "clear", threadId: "self", action: "clear" })).toMatchObject({ ok: false, error: { code: "conflict" } });
@@ -268,11 +270,8 @@ it.each([
 it.each(["collaborator", "other"])("completed notification from %s during validation obeys the named message dependency", async senderId => {
   const f = fixture(); for (const id of ["self", "collaborator", "other"]) await spawn(f, id);
   const directory = new ThreadDirectory({ id: "person", api: f.service }); f.service.setDirectory(directory);
-  let release!: () => void, entered = false;
-  const gate = new Promise<void>(resolve => { release = resolve; });
-  vi.spyOn(directory, "list").mockImplementationOnce(async input => {
-    const result = await f.service.list(input); entered = true; await gate; return result;
-  });
+  let entered = false;
+  const release = pauseRegistration(f.service, "message", () => { entered = true; });
   const registering = f.service.agentWait({ requestId: "wait", threadId: "self", action: "set", kind: "message", reason: "Named result", fromThreadId: "collaborator" });
   await until(() => entered);
   unwrap(await f.service.send({ requestId: "notification", threadId: "self", senderId, source: "notification", text: "Result" }));

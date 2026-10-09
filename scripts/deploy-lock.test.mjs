@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync as spawnSyncProcess } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
 import { copyDeploymentOwner } from "./deployment-fixture.mjs";
+
+function spawnSync(command, args, options = {}) {
+  return spawnSyncProcess(command, args, { timeout: 20_000, killSignal: "SIGKILL", ...options });
+}
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const helper = join(root, "deploy", "lib");
@@ -285,6 +289,7 @@ for (const enableGuest of [false, true]) test(`host deployment activates Pi Remo
     const repository = join(directory, "repo"), deploy = join(repository, "deploy"), remoteApp = join(repository, "apps", "remote"), bin = join(directory, "bin");
     mkdirSync(deploy, { recursive: true });mkdirSync(remoteApp, { recursive: true });mkdirSync(bin);
     copyDeploymentOwner(root, repository);
+    writeFileSync(join(deploy, "native-history-boundary"), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     writeFileSync(join(remoteApp, "data-contract.json"), readFileSync(join(root, "apps/remote/data-contract.json")));
     writeFileSync(join(deploy, "lib"), `${readFileSync(join(root, "deploy", "lib"), "utf8")}\npi_stack_prepare_builds() { return "\${BUILD_EXIT:-0}"; }\n`);
     const component=`#!/usr/bin/env bash\nset -euo pipefail\nname=$(basename "$0")\ncommit=$(git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD)\ncase "$name" in runtime) destination=$PI_STACK_RUNTIME_DEST;; orchestrator) destination=$PI_STACK_ORCHESTRATOR_DEST;; tools) destination=$PI_STACK_TOOLS_DEST;; skills) destination=$PI_STACK_SKILLS_DEST;; settings) printf '%s\\n' "$1" >> "$SETTINGS_TRACE"; exit 0;;\n remote) destination=$PI_STACK_REMOTE_DEST; release="$(dirname "$destination")/.pi-stack-releases/remote/$commit"; mkdir -p "$release/dist" "$release/server/voice" "$release/server/phone"; touch "$release/server/voice/service.ts" "$release/server/phone/service.ts"; cp "$(cd "$(dirname "$0")/.." && pwd)/apps/remote/data-contract.json" "$release/data-contract.json"; printf '%s\\n' "$commit" > "$release/.pi-stack-commit"; ln -sfn "$release" "$destination.tmp"; mv -Tf "$destination.tmp" "$destination"; exit 0;; esac\nmkdir -p "$destination/dist"\nprintf '%s\\n' "$commit" > "$destination/.pi-stack-commit"\n`;
@@ -464,7 +469,7 @@ exit 64
     assert.equal(existsSync(destinations.PI_STACK_RUNTIME_DEST), false, "failed discovery cannot publish components");
     rmSync(systemctlTrace);
     const buildFailure = spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:{...env,BUILD_EXIT:"1"}});
-    assert.equal(buildFailure.status, 1, buildFailure.stderr);
+    assert.equal(buildFailure.status, 1, `${buildFailure.stdout}\n${buildFailure.stderr}`);
     assert.equal(existsSync(destinations.PI_STACK_REMOTE_DEST), false, "failed preparation cannot select Remote");
     assert.doesNotMatch(readFileSync(systemctlTrace, "utf8"), /^restart /m, "failed preparation cannot activate services");
     rmSync(env.VOICE_TRACE, { force: true });

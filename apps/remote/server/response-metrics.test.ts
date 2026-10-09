@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { displayContextDocument } from "./context-display";
+import { displayContextMessage } from "./context-display";
 import { messageFinalizationKey } from "./sync";
 import { deriveTranscriptItems } from "./transcript-items";
 import { isResponseMetrics, outputUsageOf, ResponseTiming } from "./response-metrics";
@@ -91,9 +91,8 @@ describe("delivery to the transcript", () => {
     const message = { role: "assistant", timestamp: 7, model: "sol", usage: { output: 3 },
       content: [{ type: "text", text: "done" }] };
     const metrics = { ttftMs: 900, generationMs: 1_000, outputTokens: 30, tokensPerSecond: 30 };
-    const projected = JSON.parse(displayContextDocument(JSON.stringify({ messages: [message] }),
-      new Map(), undefined, [], new Map([[messageFinalizationKey(message), metrics]])));
-    expect(projected.messages[0]).toEqual({ role: "assistant", timestamp: 7, responseMetrics: metrics,
+    const projected = displayContextMessage(message, undefined, metrics);
+    expect(projected).toEqual({ role: "assistant", timestamp: 7, responseMetrics: metrics,
       content: [{ type: "text", text: "done" }] });
   });
 

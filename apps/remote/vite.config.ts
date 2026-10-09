@@ -23,7 +23,6 @@ export default defineConfig({
       input: {
         index: resolve(import.meta.dirname, "web/index.html"),
         voice: resolve(import.meta.dirname, "web/voice.html"),
-        meet: resolve(import.meta.dirname, "web/meet.html"),
       },
       output: {
         // Three HTML entries share React, so Rolldown hoists it into a shared

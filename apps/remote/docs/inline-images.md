@@ -18,7 +18,7 @@ The file's extension chooses the presentation, and every presentation keeps the 
 - Text, code, Markdown, JSON and CSV files show their first 64 KiB in a scrollable, expandable block. A complete JSON document is pretty-printed.
 - Anything else is a download link.
 
-The file stays on the thread's host. The session file endpoint serves it with range support; `inline=1` displays PDFs, audio, video and raster images in place, while scriptable types such as HTML and SVG are always sent as attachments. [`web/src/inline-files.ts`](../web/src/inline-files.ts) owns the presentation. Signal attachments follow the same rule: pictures inline, voice notes and videos as players.
+The file stays on the thread's host. The session file endpoint serves it with range support; `inline=1` displays PDFs, audio, video and raster images in place, while scriptable types such as HTML and SVG are always sent as attachments. [`web/src/inline-files.ts`](../web/src/inline-files.ts) owns the presentation.
 
 ## Background generation
 

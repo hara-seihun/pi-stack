@@ -15,13 +15,13 @@ test("executor logs failing stage and bounded reason, never exception/private co
   const admission = { rootSessionId: randomUUID(), person: "private-person", threadId: "private-thread", recipients: ["private-person"], subjects: [], memoryToken: "private-token" };
   try {
     const report = (event: InfrastructureEvent) => events.push(event);
-    const creating = createRootExecutor(config, { prompt: "private-policy", report, factory: async () => { throw new Error("private-error-request-content"); } });
+    const creating = createRootExecutor(config, { prompt: "private-policy", capacity: { mode: "unmanaged" }, report, factory: async () => { throw new Error("private-error-request-content"); } });
     expect((await creating(admission, "private-request")).ok).toBe(false);
     expect(events.at(-1)).toMatchObject({ stage: "create-session", outcome: "failed", reason: "unexpected" });
-    const turning = createRootExecutor(config, { prompt: "private-policy", report, factory: async () => ({ prompt: async () => { throw new DOMException("private-error", "TimeoutError"); }, reply: () => "private-reply", dispose() {} }) });
+    const turning = createRootExecutor(config, { prompt: "private-policy", capacity: { mode: "unmanaged" }, report, factory: async () => ({ prompt: async () => { throw new DOMException("private-error", "TimeoutError"); }, reply: () => "private-reply", dispose() {} }) });
     expect((await turning({ ...admission, rootSessionId: randomUUID() }, "private-request")).ok).toBe(false);
     expect(events.at(-1)).toMatchObject({ stage: "model-turn", reason: "timeout" });
-    const missing = createRootExecutor(config, { prompt: "private-policy", report, factory: async () => ({ prompt: async () => {}, reply: () => undefined, dispose() {} }) });
+    const missing = createRootExecutor(config, { prompt: "private-policy", capacity: { mode: "unmanaged" }, report, factory: async () => ({ prompt: async () => {}, reply: () => undefined, dispose() {} }) });
     expect((await missing({ ...admission, rootSessionId: randomUUID() }, "private-request")).ok).toBe(false);
     expect(events.at(-1)).toMatchObject({ stage: "model-turn", reason: "no-reply" });
     expect(JSON.stringify(events)).not.toContain("private-");

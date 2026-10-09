@@ -113,7 +113,7 @@ for (const remoteHost of [undefined, "converge-kenan"]) {
   });
 }
 
-test("host lock, meeting and native-source waits retain the integration, while unrelated exit 75 remains a failure", t => {
+test("typed host waits retain the integration, while unrelated exit 75 remains a failure", t => {
   const f = fixture(t);
   const release = join(f.root, "release");
   const log = join(f.root, "deployment.log");
@@ -127,7 +127,7 @@ test("host lock, meeting and native-source waits retain the integration, while u
       const request = ${JSON.stringify(request)};
       const target = { id: "converge", sshHost: null, releaseCommand: ${JSON.stringify(release)} };
       const result = deployTarget(request, target, ${JSON.stringify(log)});
-      if (result.kind === "host-lock-busy") requeueBusyHost(request, target, ${JSON.stringify(log)}, result.liveMeeting ? "live-meeting" : result.nativePrerequisite ? "native-source" : "host-lock");
+      if (result.kind === "host-lock-busy") requeueBusyHost(request, target, ${JSON.stringify(log)}, result.liveMeeting ? "live-meeting" : result.nativePrerequisite ? "native-source" : result.nativeHistory ? "native-history" : "host-lock");
       console.log(JSON.stringify({ result, request }));
     `], { encoding: "utf8", timeout: 5000, env: { ...process.env,
       PI_STACK_PUBLICATION_STATE: f.root, PI_STACK_PUBLICATION_CONFIG: publicationConfig(f.root, f.source) } });
@@ -169,6 +169,13 @@ test("host lock, meeting and native-source waits retain the integration, while u
   assert.equal(native.request.attempt, 1);
   assert.deepEqual(native.request.hosts, request.hosts);
   assert.equal(native.request.integrationSha, f.commit);
+  const history = run("native history boundary waiting: old generation has admitted errands");
+  assert.equal(history.result.kind, "host-lock-busy");
+  assert.equal(history.request.waiting.kind, "native-history");
+  assert.equal(history.request.step, "waiting-for-native-history");
+  assert.equal(history.request.attempt, 1);
+  assert.equal(history.request.blockedSince, undefined);
+  assert.deepEqual(history.request.hosts, request.hosts);
   const unrelated = run("release checkout failed for another reason");
   assert.equal(unrelated.result.kind, undefined);
   assert.equal(unrelated.request.status, "running");

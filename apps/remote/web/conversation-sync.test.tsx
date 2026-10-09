@@ -66,7 +66,7 @@ test("a running conversation defaults to steer rather than waiting for the turn 
   expect(html).not.toContain('aria-label="Change delivery. Current: Queued"');
 });
 
-test("questions replace messaging, expose only the next answer, and preserve dictation and stop", () => {
+test("questions replace messaging, expose only the next answer, and preserve stop", () => {
   const originalWindow = globalThis.window;
   const originalStorage = globalThis.localStorage;
   Object.assign(globalThis, { window: { PiRemotePerson: { get: () => "person" } }, localStorage: { getItem: () => null } });
@@ -78,7 +78,6 @@ test("questions replace messaging, expose only the next answer, and preserve dic
     expect(html).not.toContain('id="prompt"');
     expect(html).not.toContain("Unsent message");
     expect(html).toContain('aria-label="Submit answer"');
-    expect(html).toContain('aria-label="Start dictation"');
     expect(html).toContain("Dismiss question");
     expect(html).toContain("Cancel work");
     expect(html).toContain("Recommended");

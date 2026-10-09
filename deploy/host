@@ -53,12 +53,12 @@ fi
 # The host declares which native selected sources this Pi Stack commit depends on.
 # Check after the meeting census and before any build or service change.
 if (( services )); then
-  "$root/deploy/native-prerequisites" "$PI_STACK_HOST_FILE" "$root" "$(git -C "$root" rev-parse HEAD)"
+  candidate=$(git -C "$root" rev-parse HEAD)
+  "$root/deploy/native-prerequisites" "$PI_STACK_HOST_FILE" "$root" "$candidate"
+  "$root/deploy/native-history-boundary" "$PI_STACK_HOST_FILE" "$root" "$candidate"
 fi
-# Write needs its host-declared engine unit and a CPU able to stream Nemotron;
-# a host without the unit keeps Remote working and reports Write unavailable.
-write=0
-if (( services )) && "$root/deploy/write-service" --check 2>/dev/null; then write=1; fi
+recognition=0
+if (( services )) && "$root/deploy/meet-recognition-service" --check 2>/dev/null; then recognition=1; fi
 
 fleet=$(pi_stack_fleet_user)
 mapfile -t users < <(pi_stack_users)
@@ -69,42 +69,104 @@ if (( services )); then
   if [[ -n $daemon_units ]]; then mapfile -t daemons <<< "$daemon_units"; fi
 fi
 
-write_base=${PI_STACK_WRITE_ENGINE_DEST:-/srv/pi/write-engine}
-previous_write=$(readlink -f "$write_base" 2>/dev/null || true)
-write_was_active=0
-write_was_enabled=0
-write_started=0
-write_pid=""
-if (( write )); then
-  systemctl is-active --quiet pi-stack-write.service && write_was_active=1
-  systemctl is-enabled --quiet pi-stack-write.service && write_was_enabled=1
+recognition_base=${PI_STACK_MEET_RECOGNITION_DEST:-/srv/pi/meet-recognition}
+previous_recognition=$(readlink -f "$recognition_base" 2>/dev/null || true)
+recognition_was_active=0
+recognition_was_enabled=0
+recognition_started=0
+recognition_pid=""
+old_write_loaded=not-found
+old_write_active=inactive
+old_write_enabled=disabled
+recognition_transition=${PI_STACK_RECOGNITION_TRANSITION_FILE:-$(dirname "$recognition_base")/.pi-meet-recognition/host-transition.json}
+recognition_journal_owner=0
+if (( recognition )); then
+  systemctl is-active --quiet pi-stack-meet-recognition.service && recognition_was_active=1
+  systemctl is-enabled --quiet pi-stack-meet-recognition.service && recognition_was_enabled=1
+  old_write_loaded=$(systemctl show pi-stack-write.service -p LoadState --value)
+  case $old_write_loaded in
+    not-found) ;;
+    loaded)
+      old_write_active=$(systemctl show pi-stack-write.service -p ActiveState --value)
+      old_write_enabled=$(systemctl show pi-stack-write.service -p UnitFileState --value)
+      case $old_write_active in active|inactive) ;; *) echo 'Previous speech unit has an unsettled lifecycle' >&2; exit 75;; esac
+      case $old_write_enabled in enabled|disabled|static) ;; *) echo 'Previous speech unit has unknown enablement' >&2; exit 66;; esac
+      ;;
+    *) echo 'Previous speech unit declaration state is unknown' >&2; exit 66;;
+  esac
 fi
-restore_write() {
-  local status=$? candidate="$write_base.rollback.$$"
+recognition_journal() {
+  pi_stack_as_root python3 - "$recognition_transition" "$1" "$(git -C "$root" rev-parse HEAD)" "$previous_recognition" "$recognition_was_active" "$recognition_was_enabled" "$old_write_loaded" "$old_write_active" "$old_write_enabled" <<'PY'
+import json, os, sys, tempfile
+from pathlib import Path
+path, phase, commit, previous, active, enabled, old_loaded, old_active, old_enabled = sys.argv[1:]
+path = Path(path)
+path.parent.mkdir(parents=True, exist_ok=True)
+if phase == 'pending' and path.is_file():
+    record = json.loads(path.read_text())
+    if record['version'] != 1 or record['phase'] not in ('accepted', 'rolled_back'):
+        raise SystemExit('Unresolved speech host transition; reconcile its saved assets/lifecycle before another release')
+record = {'version': 1, 'phase': phase, 'commit': commit, 'previousRecognition': previous,
+          'recognitionWasActive': active == '1', 'recognitionWasEnabled': enabled == '1',
+          'oldWrite': {'loaded': old_loaded, 'active': old_active, 'enabled': old_enabled,
+                       'selection': str(Path('/srv/pi/write-engine').resolve())}}
+fd, temporary = tempfile.mkstemp(prefix='.speech-transition-', dir=path.parent)
+with os.fdopen(fd, 'w') as stream:
+    os.fchmod(stream.fileno(), 0o600)
+    json.dump(record, stream)
+    stream.flush()
+    os.fsync(stream.fileno())
+os.replace(temporary, path)
+fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+os.fsync(fd)
+os.close(fd)
+PY
+}
+if (( recognition )) && [[ -z ${PI_STACK_HOST_PHASE:-} ]]; then
+  recognition_journal pending
+  recognition_journal_owner=1
+fi
+restore_recognition() {
+  local status=$? candidate="$recognition_base.rollback.$$" restore_failed=0
   trap - EXIT TERM INT HUP
-  if (( status != 0 && write_started )); then
-    # Stop the readiness job before restoring: it must not restart the rejected
-    # engine after the selection has gone back. Queue the old unit immediately;
-    # cold rollback readiness cannot fit inside an already failed deadline.
-    if [[ -n $write_pid ]]; then
-      kill "$write_pid" 2>/dev/null || true
-      wait "$write_pid" 2>/dev/null || true
+  if (( status != 0 && recognition_started )); then
+    if [[ -n $recognition_pid ]]; then
+      kill "$recognition_pid" 2>/dev/null || true
+      wait "$recognition_pid" 2>/dev/null || true
     fi
-    echo 'release failed; restoring previous Write selection and service state' >&2
-    if [[ -n $previous_write && -d $previous_write ]]; then
-      pi_stack_as_root ln -s "$previous_write" "$candidate" &&
-        pi_stack_as_root mv -Tf "$candidate" "$write_base" || echo 'Write selection rollback failed' >&2
+    echo 'release failed; restoring previous Meet recognition selection and service state' >&2
+    if [[ -n $previous_recognition && -d $previous_recognition ]]; then
+      pi_stack_as_root ln -s "$previous_recognition" "$candidate" &&
+        pi_stack_as_root mv -Tf "$candidate" "$recognition_base" || { echo 'Meet recognition selection rollback failed' >&2; restore_failed=1; }
     else
-      pi_stack_as_root rm -f "$write_base"
+      pi_stack_as_root rm -f "$recognition_base" || restore_failed=1
     fi
-    if (( write_was_active )); then
-      pi_stack_as_root systemctl reset-failed pi-stack-write.service || true
-      pi_stack_as_root systemctl restart --no-block pi-stack-write.service || echo 'Write rollback restart failed' >&2
+    if (( recognition_was_active )); then
+      pi_stack_as_root systemctl reset-failed pi-stack-meet-recognition.service || true
+      pi_stack_as_root systemctl restart pi-stack-meet-recognition.service || { echo 'Meet recognition rollback restart failed' >&2; restore_failed=1; }
     else
-      pi_stack_as_root systemctl stop --no-block pi-stack-write.service || echo 'Write rollback stop failed' >&2
+      # The old same-port listener cannot resume until candidate shutdown completes.
+      pi_stack_as_root systemctl stop pi-stack-meet-recognition.service || { echo 'Meet recognition rollback stop failed' >&2; restore_failed=1; }
     fi
-    (( write_was_enabled )) || pi_stack_as_root systemctl disable pi-stack-write.service || true
+    (( recognition_was_enabled )) || pi_stack_as_root systemctl disable pi-stack-meet-recognition.service || restore_failed=1
+    if [[ $old_write_loaded == loaded ]]; then
+      case $old_write_enabled in
+        enabled) pi_stack_as_root systemctl enable pi-stack-write.service || restore_failed=1 ;;
+        disabled) pi_stack_as_root systemctl disable pi-stack-write.service || restore_failed=1 ;;
+        static) ;;
+      esac
+      if [[ $old_write_active == active ]]; then
+        if (( restore_failed == 0 )); then
+          pi_stack_as_root systemctl start pi-stack-write.service || { echo 'Previous speech service rollback failed' >&2; restore_failed=1; }
+        fi
+      fi
+    fi
     pi_stack_as_root rm -f "$candidate"
+  fi
+  if (( recognition_journal_owner )); then
+    if (( status == 0 )); then recognition_journal accepted || status=1
+    elif (( restore_failed )); then recognition_journal rollback_failed || status=1
+    else recognition_journal rolled_back || status=1; fi
   fi
   # Join bounded proof jobs before releasing deployment custody.
   if [[ -n ${doctor_pid:-} ]]; then
@@ -112,7 +174,7 @@ restore_write() {
   fi
   exit "$status"
 }
-trap restore_write EXIT
+trap restore_recognition EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
 trap 'exit 129' HUP
@@ -129,7 +191,7 @@ if [[ -z ${PI_STACK_HOST_PHASE:-} ]]; then
     echo "release phase=$name completed status=$status"
     return "$status"
   }
-  (( ! write )) || write_started=1
+  (( ! recognition )) || recognition_started=1
   phase publication 50 env PI_STACK_HOST_PHASE=publication "$0" "$@"
   if (( services )); then
     phase capacity-ready 10 bash -c 'source "$1/deploy/lib"; shift; pi_stack_run_as "$@"' -- "$control" "${fleet:-${users[0]}}" node "$control/deploy/capacity-ready.mjs" "${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}/dist/agent-capacity.js"
@@ -172,20 +234,18 @@ previous_remote=${PI_STACK_PREVIOUS_REMOTE:-}
 previous_remote_release=${PI_STACK_PREVIOUS_REMOTE_RELEASE:-}
 if [[ $PI_STACK_HOST_PHASE == publication ]]; then
 # Builds share checkout dependencies, not output directories. Prepare them
-# together while selecting and warming Write on hosts that own it.
-# The Write engine's 1.2 GB model is fetched by deploy/prepare, outside this
+# together while selecting recognition on hosts that own it.
+# The recognizer model is fetched by deploy/prepare, outside this
 # deadline; here it is only selected, and a missing preparation fails loudly.
 pi_stack_prepare_builds "$root" &
 builds_pid=$!
 "$root/deploy/runtime" &
 runtime_pid=$!
-if (( write )); then
-  # Join selection in this shell: an orphan selector must not overwrite a
-  # rollback after an independent build failure or signal.
-  write_started=1
-  "$root/deploy/write-engine" --select
+if (( recognition )); then
+  recognition_started=1
+  "$root/deploy/meet-recognition" --select
 else
-  echo 'Pi Stack Write: no pi-stack-write.service on this host; skipping the engine' >&2
+  echo 'Meet recognition: no host service declaration; skipping local ASR' >&2
 fi
 preparation_failed=0
 wait "$builds_pid" || preparation_failed=1
@@ -196,6 +256,14 @@ if [[ ! -f $runtime/.pi-stack-commit || $(<"$runtime/.pi-stack-commit") != "$exp
 fi
 (( preparation_failed == 0 )) || exit 1
 "$root/deploy/orchestrator"
+if (( services )) && [[ ${PI_STACK_DEPLOY_NO_SUDO:-0} != 1 ]]; then
+  timezone_users=()
+  for user in "${users[@]}"; do timezone_users+=(--user "$user"); done
+  pi_stack_as_root python3 "$root/apps/remote/server/pi-timezone-provision" --configure "${timezone_users[@]}"
+  if jq -e '.oneKenan == true' "$PI_STACK_HOST_FILE" >/dev/null; then
+    pi_stack_as_root install -m755 "$root/deploy/one-kenan-runtime" /usr/local/libexec/pi-kenan-runtime
+  fi
+fi
 # Once Orchestrator is selected, Remote, the tools and the accounts touch
 # disjoint state: separate release directories, ~/.local/bin, and ~/.pi/agent.
 # The shared skills release is published once, serially; each account's
@@ -291,11 +359,11 @@ activate_remote() {
   printf 'supervisors did not activate Pi Remote %s within their start/stop budget: %s\n' "$target_commit" "${pending[*]}" >&2
   return 1
 }
-# A daemon's graceful stop can consume its full systemd stop budget. Remote
-# handoff does not depend on it; join both jobs before smoke instead of spending
-# that budget before the supervisors even receive their reload (PUB-bf877cd4).
-(
-  failed=0
+# Remote owns canonical settings and publishes its narrow timezone projection
+# before fleet admissions start. Locked owners retain explicit unavailable state.
+activate_daemons() {
+  local failed=0 broker_units
+  local -a brokers=()
   if (( ${#daemons[@]} )); then
     pi_stack_as_root systemctl restart "${daemons[@]}" || failed=1
   fi
@@ -304,15 +372,14 @@ activate_remote() {
   if (( ${#brokers[@]} )); then
     pi_stack_as_root systemctl restart "${brokers[@]}" || failed=1
   fi
-  exit "$failed"
-) &
-daemon_activation_pid=$!
+  return "$failed"
+}
 activation_failed=0
 if [[ ${PI_STACK_FORCE_ROLLBACK:-0} != 1 ]]; then
-  if (( write )); then
-    write_started=1
-    "$root/deploy/write-service" --activate &
-    write_pid=$!
+  if (( recognition )); then
+    recognition_started=1
+    "$root/deploy/meet-recognition-service" --activate &
+    recognition_pid=$!
   fi
 if ! "$root/deploy/voice" --activate || ! "$root/deploy/phone" --activate; then
   activation_failed=1
@@ -324,17 +391,28 @@ elif ! remote_matches_release "$expected"; then
   activate_remote "$expected" || activation_failed=1
 fi
 
+if (( activation_failed == 0 )) && [[ ${PI_STACK_DEPLOY_NO_SUDO:-0} != 1 ]]; then
+  "$root/deploy/timezone-ready" "$router_base" || activation_failed=1
+fi
+if (( activation_failed == 0 )); then
+  activate_daemons &
+  daemon_activation_pid=$!
+fi
+
 # Refresh the additive gates before rolling the shared-room supervisor. Root,
 # memory and encrypted custody remain untouched by the ordinary host release.
 if ! "$root/deploy/one-kenan-access-release" "$PI_STACK_HOST_FILE"; then
   activation_failed=1
 elif jq -e '.oneKenan == true' "$PI_STACK_HOST_FILE" >/dev/null; then
+  if [[ ${PI_STACK_DEPLOY_NO_SUDO:-0} != 1 ]]; then
+    pi_stack_as_root python3 "$root/deploy/native-history-root-activate" "$PI_STACK_HOST_FILE" "$expected" || activation_failed=1
+  fi
   pi_stack_as_root python3 "$root/deploy/one-kenan-activate" rooms --host "$PI_STACK_HOST_FILE" --expected "$expected" || activation_failed=1
 fi
-if (( write )); then
-  wait "$write_pid" || activation_failed=1
+if (( recognition )); then
+  wait "$recognition_pid" || activation_failed=1
 fi
-wait "$daemon_activation_pid" || activation_failed=1
+if [[ -n ${daemon_activation_pid:-} ]]; then wait "$daemon_activation_pid" || activation_failed=1; fi
 
 fi
 # Then walk the front door the way the clients do. A release that locks a
@@ -368,7 +446,7 @@ if (( smoke_failed )); then
     echo "Pi stack $expected is not accepted on this host" >&2
     exit 1
 fi
-if (( write )); then
-  "$root/deploy/write-engine" --retain || echo 'Write retention failed; retained store needs collection' >&2
+if (( recognition )); then
+  "$root/deploy/meet-recognition" --retain || echo 'Meet recognition retention failed; retained store needs collection' >&2
 fi
 printf 'deployed Pi stack %s for %s\n' "$expected" "${users[*]}"

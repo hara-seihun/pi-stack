@@ -150,7 +150,7 @@ function resultHead(result: any): ToolCallResultHead {
 type DistributiveOmit<T, K extends keyof any> = T extends unknown ? Omit<T, K> : never;
 type PartialHead = DistributiveOmit<TranscriptItemHead, "seq" | "id" | "size">;
 
-/** Ordered items of one captured display context. */
+/** Ordered display items from the requested native messages. */
 export type ResolveAgentName = (threadId: string) => string | undefined;
 
 export function deriveTranscriptItems(context: any, resolveAgentName?: ResolveAgentName): DerivedItem[] {

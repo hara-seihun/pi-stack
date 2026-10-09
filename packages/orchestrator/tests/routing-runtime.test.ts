@@ -225,7 +225,7 @@ globalThis.fetch=async()=>{
 const events=[],settlers=[];
 const output=event=>{events.push(event);if(event.type==='agent_settled'&&event.workIds?.includes('accepted'))settlers.shift()?.(event);};
 const next=()=>new Promise(resolve=>settlers.push(resolve));
-const options={cwd:root,threadId:'native-wait',sessionFile:join(root,'history.jsonl'),args:['--raw','--provider','anthropic','--model','claude-opus-5-5','--thinking','high'],env:{PI_CODING_AGENT_DIR:dir,PI_ORCHESTRATOR_ASSIGNED:'1',PI_ORCHESTRATOR_ACCOUNT_ID:'anthropic-2'}};
+const options={cwd:root,threadId:'native-wait',sessionFile:join(root,'history.jsonl'),args:['--raw','--provider','anthropic','--model','claude-opus-5-5','--thinking','high'],env:{PI_CODING_AGENT_DIR:dir,PI_MODEL_DELIVERY_TIMEZONE:'null',PI_ORCHESTRATOR_ASSIGNED:'1',PI_ORCHESTRATOR_ACCOUNT_ID:'anthropic-2'}};
 let session=await openPiSession(options,output,()=>{});
 try{
   const failed=next();await session.command({type:'prompt',id:'initial',workId:'accepted',message:'finish the real work'});

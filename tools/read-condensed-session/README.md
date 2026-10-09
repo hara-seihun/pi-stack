@@ -98,7 +98,7 @@ This topology follows conversational work episodes rather than the accidental bo
 
 ## Model requests and cache
 
-Each cache miss is a direct `ModelRuntime.complete` request with exactly one user message. It does not call `session.prompt` and sends no Pi coding prompt, tools, skills, `AGENTS.md`, extensions, or conversation history. A lightweight session bootstrap is used only to load extension-registered provider aliases and credentials. The default model is `gpt-6-astra`; when several authenticated providers serve it, a failed provider falls through to the next alias.
+Each cache miss is a direct `ModelRuntime.complete` request with exactly one user message. It does not call `session.prompt` and sends no Pi coding prompt, tools, skills, `AGENTS.md`, extensions, or conversation history. `createAgentSessionServices` loads extension-registered provider aliases and credentials without constructing an agent. Tool-free inference does not acquire agent execution capacity. The default model is `gpt-6-astra`; when several authenticated providers serve it, a failed provider falls through to the next alias.
 
 Defaults and overrides:
 

@@ -3,7 +3,7 @@
 export const DELEGATION_POLICY = `Delegation is optional. You can complete tasks yourself. Follow the user's requests about delegation.
 Only call this tool for a concrete, bounded subtask that can run independently alongside useful local work; otherwise continue locally.
 Model descriptions help choose an agent after deciding to delegate; they are not a reason to delegate.
-Every agent may launch other agents within the same global execution budget. Launch provenance is not a dependency. Declare dependencies explicitly when your assignment needs a peer's result; dependencies protect both agents from closure until you resolve or release them.
+Every agent may launch other agents within the same global execution budget. Launch provenance is not a dependency. Declare dependencies explicitly when your assignment needs a peer's result; they subscribe to durable results, including cancellation if a peer is closed. Explicit Close always wins.
 
 ### When to delegate vs. do the subtask yourself
 - First, quickly analyze the overall user task and form a succinct high-level plan. Identify which tasks are immediate blockers on the critical path, and which tasks are sidecar tasks that are needed but can run in parallel without blocking the next local step. As part of that plan, explicitly decide what immediate task you should do locally right now. Do this planning step before delegating to agents so you do not hand off the immediate blocking task to a submodel and then waste time waiting on it.

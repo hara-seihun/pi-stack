@@ -155,7 +155,8 @@ final class AppUpdates {
         }
         Release apk = manifest.release;
         if (apk != null && apk.versionCode > installedVersionCode) {
-            boolean sameShell = shellId.equals(apk.shellId) && web != null && web.revision.equals(apk.revision);
+            boolean sameShell = shellId.equals(apk.shellId) && web != null && shellId.equals(web.shellId)
+                && web.versionCode >= apk.versionCode;
             if (!sameShell) return new Update(NativeState.UpdateKind.APK, apk.revision, apk.versionCode);
         }
         return null;

@@ -17,7 +17,7 @@ function fixture() {
     assign(store, "thread", "force", { ...config, profiles: { thread: [{ ...opus, model }] } }, Date.now(), pin, id, "user", exclude).assignment?.accountId };
 }
 
-it.each(["force", "live"] as const)("retains eligible %s thread affinity across idle execution and scheduler restart despite changed load", async admission => {
+it.each(["background", "force", "live"] as const)("retains eligible %s thread affinity across idle execution and scheduler restart despite changed load", async admission => {
   const { store, config } = fixture();
   try {
     let fleet = new Fleet(store, config);
@@ -72,11 +72,11 @@ it("scopes affinity to thread, provider and model, without changing ordinary pro
   } finally { store.close(); }
 });
 
-it("keeps background account pacing ahead of affinity, independently of global execution slots", () => {
+it("retains background account affinity despite changed load, independently of global execution slots", () => {
   const { store, config, choose } = fixture();
   try {
     expect(choose()).toBe("anthropic-1");
     store.createLease("busy-preferred", "anthropic-1", "interactive");
-    expect(assign(store, "thread", "background", config, Date.now(), undefined, thread.id).assignment?.accountId).toBe("anthropic-2");
+    expect(assign(store, "thread", "background", config, Date.now(), undefined, thread.id).assignment?.accountId).toBe("anthropic-1");
   } finally { store.close(); }
 });

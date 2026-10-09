@@ -4,7 +4,6 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ChatIcon } from "./src/chat-row";
 import { InboxRowView } from "./src/features/chats/Inbox";
 import type { Session } from "../server/protocol";
-import type { MessagingSnapshot } from "../server/messaging/protocol";
 import { currentChats, inboxRows, reconcileDiscoveredSessions, selectedAiId, selectionAfterSync } from "./src/chats";
 import { threadStatus } from "./src/features/status/thread-status";
 
@@ -18,17 +17,7 @@ const session = (id: string, patch: Partial<Session> = {}): Session => ({
   queuedMessages: [], archivedAt: null, ...patch,
 });
 const queued: Session["queuedMessages"][number] = { id: "q", text: "later", delivery: "queue", state: "queued", canSteer: false, canHardSteer: false, canCancel: true, createdAt: "" };
-const messaging: MessagingSnapshot = {
-  version: 1,
-  backends: [{ id: "signal-personal", plugin: "signal", label: "Signal", icon: "signal", status: "ready", detail: "", capabilities: { attachments: true, groups: true } }],
-  conversations: [
-    { id: "same-id", backendId: "signal-personal", externalId: "+123", title: "A person", kind: "direct", updatedAt: 5, unread: 0, current: true, avatar: null, revision: 0 },
-    { id: "unread", backendId: "signal-personal", externalId: "+789", title: "Waiting", kind: "direct", updatedAt: 2, unread: 3, current: true, avatar: 1700 },
-    { id: "directory-only", backendId: "signal-personal", externalId: "+456", title: "Not open", kind: "direct", updatedAt: 1, unread: 0, current: false, avatar: null, revision: 0 },
-  ],
-};
-
-test("inbox ranks attention, then work, then quiet, mixing AI and human chats", () => {
+test("inbox ranks attention, then work, then quiet",  () => {
   const ai = session("same-id");
   const rows = inboxRows([
     ai,
@@ -38,19 +27,18 @@ test("inbox ranks attention, then work, then quiet, mixing AI and human chats", 
     session("busy", { state: "running", activity: "waiting_on_tool", activeTools: ["bash"] }),
     session("parent", { activity: "awaiting", hasChildren: true, waitingOnAgents: { kind: "agents", threadIds: ["child"], reason: "Need result", since: 1 } }),
     session("old", { updatedAt: "2025-01-01T00:00:00Z", lastUserMessageAt: "2025-01-01T00:00:00Z" }),
-  ], [], messaging);
-  expect(rows.map(row => row.chat.id)).toEqual(["ai:unread", "human:unread", "ai:busy", "ai:parent", "ai:held", "ai:same-id", "ai:old", "human:same-id"]);
-  expect(rows.map(row => row.section)).toEqual(["attention", "attention", "working", "working", "quiet", "quiet", "quiet", "quiet"]);
+  ], []);
+  expect(rows.map(row => row.chat.id)).toEqual(["ai:unread", "ai:busy", "ai:parent", "ai:held", "ai:same-id", "ai:old"]);
+  expect(rows.map(row => row.section)).toEqual(["attention", "working", "working", "quiet", "quiet", "quiet"]);
   expect(rows[0].chat).toMatchObject({ kind: "ai", session: { id: "unread" } });
-  expect(rows[1].chat).toMatchObject({ kind: "human", icon: "signal" });
-  expect(currentChats([ai], [], messaging).map(item => item.id)).toEqual(["human:unread", "ai:same-id", "human:same-id"]);
+  expect(currentChats([ai], []).map(item => item.id)).toEqual(["ai:same-id"]);
 });
 
 test("user-message recency, not agent activity or edits, orders threads within each rank", () => {
   const older = session("older", { lastUserMessageAt: "2026-01-02T00:00:00Z", updatedAt: "2026-01-09T00:00:00Z" });
   const newer = session("newer", { lastUserMessageAt: "2026-01-03T00:00:00Z", updatedAt: "2026-01-03T00:00:00Z" });
   const empty = session("empty", { lastUserMessageAt: undefined, createdAt: "2026-01-04T00:00:00Z" });
-  const order = () => inboxRows([older, newer, empty], [], { ...messaging, conversations: [] }).map(row => row.chat.id);
+  const order = () => inboxRows([older, newer, empty], []).map(row => row.chat.id);
   expect(order()).toEqual(["ai:empty", "ai:newer", "ai:older"]);
   older.updatedAt = "2026-01-10T00:00:00Z";
   expect(order()).toEqual(["ai:empty", "ai:newer", "ai:older"]);
@@ -65,33 +53,15 @@ test("rooms share inbox ranking and row controls, and closing excludes only that
     { id: "closed", title: "Closed room", members: [], current: false, unreadCount: 5 },
     { id: "question", title: "Question", members: [], pendingQuestions: 1, updatedAt: 30 },
   ];
-  const rows = inboxRows([session("busy", { state: "running", updatedAt: new Date(15).toISOString(), lastUserMessageAt: new Date(15).toISOString() })], [], messaging, rooms);
-  expect(rows.map(row => row.chat.id)).toEqual(["room:question", "room:shared", "human:unread", "room:working", "ai:busy", "human:same-id"]);
-  expect(rows.map(row => row.section)).toEqual(["attention", "attention", "attention", "working", "working", "quiet"]);
+  const rows = inboxRows([session("busy", { state: "running", updatedAt: new Date(15).toISOString(), lastUserMessageAt: new Date(15).toISOString() })], [], rooms);
+  expect(rows.map(row => row.chat.id)).toEqual(["room:question", "room:shared", "room:working", "ai:busy"]);
+  expect(rows.map(row => row.section)).toEqual(["attention", "attention", "working", "working"]);
   const room = rows.find(row => row.chat.id === "room:shared")!;
   const markup = renderToStaticMarkup(createElement(InboxRowView, { row: room, selected: true, compactSelected: false, place: "", onOpen() {}, onClose() {} }));
   expect(markup).toContain('aria-current="true"');
   expect(markup).toContain('class="inbox-close"');
   expect(markup).toContain("2 unread");
   expect(markup).toContain("Hara");
-});
-
-test("a Signal chat with a picture shows it in the inbox; one without keeps the service glyph", () => {
-  const previous = globalThis.window;
-  globalThis.window = { PiRemotePerson: { href: (path: string) => `${path}&session=s` }, KenanRemote: { resolveApiUrl: (path: string) => path } } as unknown as Window & typeof globalThis;
-  try {
-    const rows = inboxRows([], [], messaging);
-    const withPicture = rows.find(row => row.chat.id === "human:unread")!;
-    const without = rows.find(row => row.chat.id === "human:same-id")!;
-    expect(withPicture.chat).toMatchObject({ kind: "human", avatar: "/v1/messaging/backends/signal-personal/avatars/%2B789?v=1700&session=s" });
-    expect(without.chat).not.toHaveProperty("avatar");
-    const render = (row: typeof withPicture) => renderToStaticMarkup(createElement(InboxRowView, { row, selected: false, compactSelected: false, place: "", onOpen() {}, onClose() {} }));
-    const avatar = render(withPicture).match(/<img\b[^>]*>/)?.[0];
-    expect(avatar).toContain('class="chat-avatar"');
-    expect(avatar).toContain(' src="/v1/messaging/backends/signal-personal/avatars/%2B789?v=1700&amp;session=s"');
-    expect(render(without)).toContain('class="thread-provider"');
-    expect(render(without)).not.toContain("chat-avatar");
-  } finally { globalThis.window = previous; }
 });
 
 test("destination pictures retain their artwork when a thread has a colour", () => {
@@ -111,8 +81,8 @@ test("running and dependency-waiting launched agents do not make an idle launche
   expect(threadStatus(parent)).toMatchObject({ key: "idle", busy: false });
   expect(parent.waitingOnAgents).toBeUndefined();
   expect(threadStatus(local)).toMatchObject({ key: "thinking", busy: true });
-  expect(threadStatus(fleet)).toMatchObject({ key: "waiting_for_message", busy: true });
-  const row = inboxRows([parent, local, fleet], [], { ...messaging, conversations: [] }).find(row => row.chat.id === "ai:parent")!;
+  expect(threadStatus(fleet)).toMatchObject({ key: "waiting", busy: true });
+  const row = inboxRows([parent, local, fleet], []).find(row => row.chat.id === "ai:parent")!;
   expect(row.section).toBe("quiet");
   expect(row.chat.id).toBe("ai:parent");
   const markup = renderToStaticMarkup(createElement(InboxRowView, {
@@ -120,7 +90,7 @@ test("running and dependency-waiting launched agents do not make an idle launche
   }));
   expect(markup).toContain('data-status="idle"');
   expect(markup).not.toContain("Waiting on agents");
-  const unread = inboxRows([{ ...parent, idleUnread: true }], [], { ...messaging, conversations: [] })[0];
+  const unread = inboxRows([{ ...parent, idleUnread: true }], [])[0];
   expect(unread).toMatchObject({ section: "attention", status: { key: "idle", attention: true } });
   expect(threadStatus({ ...parent, activity: "idle" })).toMatchObject({ key: "idle", busy: false });
 });
@@ -135,13 +105,13 @@ test("status vocabulary covers every lifecycle and flag", () => {
   expect(threadStatus(session("a", { held: true, queuedMessages: [queued] }))).toMatchObject({ key: "idle", label: "Idle", attention: false });
   expect(threadStatus(session("a", { idleUnread: true }))).toMatchObject({ key: "idle", label: "Idle", attention: true });
   expect(threadStatus(session("a", { archivedAt: "2026" })).key).toBe("archived");
-  expect(threadStatus(session("a", { activity: "awaiting", waitingOnAgents: { kind: "agents", threadIds: ["child"], reason: "Need result", since: 1 } }))).toMatchObject({ key: "awaiting", busy: true });
-  expect(selectedAiId({ selectedChatId: "human:same-id" })).toBeNull();
+  expect(threadStatus(session("a", { activity: "awaiting", waitingOnAgents: { kind: "agents", threadIds: ["child"], reason: "Need result", since: 1 } }))).toMatchObject({ key: "waiting", busy: true });
+  expect(selectedAiId({ selectedChatId: "room:same-id" })).toBeNull();
   expect(selectedAiId({ selectedChatId: "ai:same-id" })).toBe("same-id");
 });
 
 test("inbox rows show only the mutable topic title while preserving agent identity and state glyphs", () => {
-  const named = inboxRows([session("named", { agentName: "Tainetaimu Sizhukein", name: "Fix the inbox" })], [], { ...messaging, conversations: [] })[0]!;
+  const named = inboxRows([session("named", { agentName: "Tainetaimu Sizhukein", name: "Fix the inbox" })], [])[0]!;
   expect(named.chat).toMatchObject({ kind: "ai", name: "Tainetaimu", title: "Fix the inbox" });
   const markup = renderToStaticMarkup(createElement(InboxRowView, { row: named, selected: false, compactSelected: false, place: "", onOpen() {}, onClose() {} }));
   expect(markup).toContain('class="inbox-title">Fix the inbox</span>');
@@ -152,7 +122,7 @@ test("inbox rows show only the mutable topic title while preserving agent identi
 });
 
 test("the inbox shows idle unread as its own glyph and gives multi-tool names as title detail", () => {
-  const unread = inboxRows([session("unread", { idleUnread: true })], [], { ...messaging, conversations: [] })[0]!;
+  const unread = inboxRows([session("unread", { idleUnread: true })], [])[0]!;
   const unreadMarkup = renderToStaticMarkup(createElement(InboxRowView, {
     row: { ...unread, chat: { ...unread.chat, icon: "🤖" } }, selected: false, compactSelected: false, place: "", onOpen() {}, onClose() {},
   }));
@@ -161,7 +131,7 @@ test("the inbox shows idle unread as its own glyph and gives multi-tool names as
   expect(unreadMarkup).not.toContain('class="inbox-unread-dot"');
   expect(unreadMarkup).not.toContain("Done");
 
-  const tools = inboxRows([session("tools", { state: "running", activity: "waiting_on_tool", activeTools: ["bash", "functions.web_search", "agent_browser"] })], [], { ...messaging, conversations: [] })[0]!;
+  const tools = inboxRows([session("tools", { state: "running", activity: "waiting_on_tool", activeTools: ["bash", "functions.web_search", "agent_browser"] })], [])[0]!;
   const toolsMarkup = renderToStaticMarkup(createElement(InboxRowView, {
     row: { ...tools, chat: { ...tools.chat, icon: "🤖" } }, selected: false, compactSelected: false, place: "", onOpen() {}, onClose() {},
   }));
@@ -169,7 +139,7 @@ test("the inbox shows idle unread as its own glyph and gives multi-tool names as
   expect(toolsMarkup).toContain('title="Running 3 tools — bash, web search, agent browser"');
 
   // Queued is an owned scheduling phase, not a claim of model progress.
-  const working = inboxRows([session("busy", { state: "running", activity: "queued" })], [], { ...messaging, conversations: [] })[0]!;
+  const working = inboxRows([session("busy", { state: "running", activity: "queued" })], [])[0]!;
   const workingMarkup = renderToStaticMarkup(createElement(InboxRowView, {
     row: { ...working, chat: { ...working.chat, icon: "🤖" } }, selected: false, compactSelected: false, place: "", onOpen() {}, onClose() {},
   }));
@@ -185,10 +155,9 @@ test("directly discovered rows yield to the authoritative directory", () => {
 });
 
 test("sync clears chats closed on another device but incoming reopen never takes focus", () => {
-  const before = { sessions: [session("a")], messaging };
-  const closed = { sessions: [], messaging: { ...messaging, conversations: messaging.conversations.map(item => ({ ...item, current: false })) } };
+  const before = { sessions: [session("a")] };
+  const closed = { sessions: [] };
   expect(selectionAfterSync("ai:a", before, closed)).toBeNull();
-  expect(selectionAfterSync("human:same-id", before, closed)).toBeNull();
   expect(selectionAfterSync(null, closed, before)).toBeNull();
   expect(selectionAfterSync("ai:a", { ...closed, sessions: before.sessions }, before)).toBe("ai:a");
   expect(selectionAfterSync("ai:just-created", closed, before)).toBe("ai:just-created");
@@ -202,7 +171,7 @@ test("chosen titles remain title-only in both ordinary and compact selected list
   for (const [name, agentName] of [["Thread titles", "Saihiramei Teheitain"], ["Nebulani reference", "Nozanoshinei Lomekein"]]) {
     const original = session("named", { name, agentName });
     const before = JSON.stringify(original);
-    const row = inboxRows([original], [], { ...messaging, conversations: [] })[0]!;
+    const row = inboxRows([original], [])[0]!;
     for (const compactSelected of [false, true]) {
       const html = renderToStaticMarkup(createElement(InboxRowView, { row, selected: true, compactSelected, place: "", onOpen() {}, onClose() {} }));
       expect(html).toContain(`class="inbox-title">${name}</span>`);

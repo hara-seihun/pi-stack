@@ -1,8 +1,6 @@
-// Files a client may read from this host: the web client itself, the vendor
-// assets, a directory listing for the Files drawer, and downloads of absolute
-// paths with range support. Nothing here knows about sessions.
-import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+// Attachment path inspection, authenticated artifact delivery and public web assets.
+import { existsSync, realpathSync, statSync } from "node:fs";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import { API_CORS_HEADERS } from "./cors";
 import { sha256 } from "./sync";
 
@@ -19,26 +17,6 @@ export function inspectPath(requested: string): FileBrowserEntry {
   const path = resolve(requested);
   const stat = statSync(path);
   return { path, name: basename(path) || "/", kind: stat.isDirectory() ? "directory" : stat.isFile() ? "file" : "other" };
-}
-
-export function listDirectory(requested: string) {
-  if (!isAbsolute(requested)) throw Object.assign(new Error("Valid absolute folder path required"), { code: "EINVAL" });
-  const path = resolve(requested);
-  const entries: FileBrowserEntry[] = readdirSync(path, { withFileTypes: true }).map((entry) => {
-    const child = join(path, entry.name);
-    let kind: FileBrowserEntry["kind"] = entry.isDirectory() ? "directory" : entry.isFile() ? "file" : "other";
-    if (entry.isSymbolicLink()) {
-      try {
-        const target = statSync(child);
-        kind = target.isDirectory() ? "directory" : target.isFile() ? "file" : "other";
-      } catch {}
-    }
-    return { name: entry.name, path: child, kind };
-  });
-  const rank = { directory: 0, file: 1, other: 2 } as const;
-  entries.sort((left, right) => rank[left.kind] - rank[right.kind]
-    || left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: "base" }));
-  return { path, parent: path === "/" ? null : dirname(path), entries };
 }
 
 // Bun names several media types by their old `x-` spellings; a media element

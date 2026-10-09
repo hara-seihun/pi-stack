@@ -267,7 +267,7 @@ export function callerResolver(options: CallerResolverOptions): CallerResolver {
     },
     async admit(operation, input, caller) {
       if (operation === "control") {
-        if ((input.action === "dependencyClaim" || input.action === "dependencyRelease") && caller.kind !== "runtime" && caller.kind !== "service") return refuse("Dependency endpoint reservations require an owning runtime or service");
+        if (input.action === "resultSubscribe" && caller.kind !== "runtime" && caller.kind !== "service") return refuse("Result subscriptions require an owning runtime or service");
         if (input.action === "open" || input.action === "placement" || input.action === "view") {
           if (caller.kind !== "person" && caller.kind !== "service") return refuse("Only a human opening or placing an agent can change foreground placement");
         }

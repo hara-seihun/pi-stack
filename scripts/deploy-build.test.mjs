@@ -43,6 +43,10 @@ async function run() {
   const out = name === 'remote' ? 'apps/remote/web/dist' : 'packages/' + name + '/dist';
   fs.mkdirSync(out, { recursive: true });
   fs.writeFileSync(out + '/main.js', 'built');
+  if (name === 'remote') {
+    fs.mkdirSync('apps/remote/server/phone/dist', { recursive: true });
+    fs.writeFileSync('apps/remote/server/phone/dist/retell-sdk.js', 'sdk');
+  }
 }
 run();
 `);
@@ -120,9 +124,11 @@ test("build reuse requires unchanged source, dependencies and complete output", 
   f.put("apps/remote/web/dist/main.js", "corrupted output"); build();
   rmSync(join(f.repo, "apps/remote/web/dist/main.js")); build();
   assert.equal(f.calls().length, 6);
+  rmSync(join(f.repo, "apps/remote/server/phone/dist"), { recursive: true }); build();
+  assert.equal(f.calls().length, 7, "missing telephone SDK invalidates the frontend build receipt");
   f.put("package-lock.json", "changed lock");
   assert.equal(f.run("remote", { BUILD_FAIL: "remote" }).status, 42);
   assert.equal(existsSync(join(f.repo, "node_modules/.pi-stack-build-remote.json")), false);
   build();
-  assert.equal(f.calls().length, 8);
+  assert.equal(f.calls().length, 9);
 });

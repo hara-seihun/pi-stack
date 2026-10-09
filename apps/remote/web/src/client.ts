@@ -98,17 +98,19 @@ export async function piFetch(input: RequestInfo | URL, init?: RequestInit, retr
   const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
   const wait = <T>(operation: Promise<T>) => signal ? abortable(operation, signal) : operation;
   const send = () => fetch(input instanceof Request ? input.clone() : input, init);
+  const person = window.PiRemotePerson.get();
   const session = window.PiRemotePerson.session();
   const response = await wait(send());
   if (response.status !== 423 || !retryOnLock) return response;
   window.PiRemotePerson.clearSession(session);
   await wait(ensureUnlocked());
   signal?.throwIfAborted();
+  if (person && window.PiRemotePerson.get() !== person) throw new ApiError("The selected person changed; repeat this action in their own session", "identity-changed");
   return wait(send());
 }
 
 export class ApiError extends Error {
-  constructor(message: string, readonly code?: string, readonly dependencies?: Array<{ threadId: string; dependsOn: string; ownerId?: string }>) { super(message); }
+  constructor(message: string, readonly code?: string) { super(message); }
 }
 
 export async function api(method: string, path: string, body?: unknown, timeout = 20_000): Promise<any> {
@@ -123,7 +125,7 @@ export async function api(method: string, path: string, body?: unknown, timeout 
       cache: "no-store",
     });
     const result = await responseJson(response);
-    if (!response.ok) throw new ApiError(result.error || `HTTP ${response.status}`, result.code, result.dependencies);
+    if (!response.ok) throw new ApiError(result.error || `HTTP ${response.status}`, result.code);
     return result;
   } finally {
     clearTimeout(timer);

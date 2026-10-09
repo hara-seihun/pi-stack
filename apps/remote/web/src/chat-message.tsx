@@ -6,7 +6,6 @@ import { MessageReactions } from "./message-reactions";
 import { AGENT_AVATAR } from "../../server/agent-identity";
 import { appPath } from "./app-path";
 import { CachedImage, useCachedMedia } from "./cached-media";
-import { MessageLinkPreviews } from "./link-previews";
 import { useNearViewport } from "./near-viewport";
 import { formatResponseMetrics } from "./response-metrics";
 import { copyText, useMessageMenu, type MessageMenuItem } from "./message-menu";
@@ -41,7 +40,7 @@ export function attachmentKind(mimeType: string): ChatAttachmentKind {
   if (type.startsWith("video/")) return "video";
   return "file";
 }
-export type ChatDelivery = { status: string; error?: string | null; canCheck: boolean; canRetry: boolean };
+export type ChatDelivery = { status: string; error?: string | null };
 
 /** Kenan's head, for the agent's own messages. */
 export const agentAvatar = () => appPath(AGENT_AVATAR);
@@ -58,7 +57,6 @@ export type ChatMessageProps = {
   resolveCopyText?(): Promise<string>;
   timestamp?: number;
   responseMetrics?: ResponseMetrics;
-  previewMessageId?: string;
   identity?: MessageIdentity;
   reactions?: MessageReaction[];
   reply?: MessageReply;
@@ -67,9 +65,6 @@ export type ChatMessageProps = {
   menu?: MessageMenuItem[];
   attachments?: ChatAttachment[];
   delivery?: ChatDelivery;
-  checking?: boolean;
-  onCheck?(): void;
-  onRetry?(): void;
   onEditImage?(image: HTMLImageElement): void;
 } & ({ contentFormat: "literal"; renderMarkdown?: never } | { contentFormat: "markdown"; renderMarkdown(text: string): ReactNode });
 
@@ -121,12 +116,9 @@ function MessageFrame({ kind, label, heading, avatar, text, resolveCopyText, tim
   </article>;
 }
 
-function MessageBody({ attachments = [], delivery, checking = false, onCheck, onRetry, onEditImage, children }: {
+function MessageBody({ attachments = [], delivery, onEditImage, children }: {
   attachments?: ChatAttachment[];
   delivery?: ChatDelivery;
-  checking?: boolean;
-  onCheck?(): void;
-  onRetry?(): void;
   onEditImage?(image: HTMLImageElement): void;
   children?: ReactNode;
 }) {
@@ -140,19 +132,16 @@ function MessageBody({ attachments = [], delivery, checking = false, onCheck, on
         </>}
     </div>)}
     {delivery && <footer className={`message-status ${delivery.status}`}>{delivery.status}{delivery.error ? ` · ${delivery.error}` : ""}</footer>}
-    {delivery?.canCheck && onCheck && <button type="button" className="message-delivery-action" disabled={checking} onClick={onCheck}>Check send status</button>}
-    {delivery?.canRetry && onRetry && <button type="button" className="message-delivery-action" disabled={checking} onClick={onRetry}>Use failed draft</button>}
   </>;
 }
 
 export function ChatMessage(props: ChatMessageProps) {
-  const { kind, label, heading, avatar, text, resolveCopyText, timestamp, responseMetrics, menu, attachments, delivery, checking, onCheck, onRetry, onEditImage, identity, reactions, reply, onReply } = props;
+  const { kind, label, heading, avatar, text, resolveCopyText, timestamp, responseMetrics, menu, attachments, delivery, onEditImage, identity, reactions, reply, onReply } = props;
   const [reactionsOpen, setReactionsOpen] = useState(false);
   return <MessageFrame kind={kind} label={label} heading={heading} avatar={avatar} text={text} resolveCopyText={resolveCopyText} timestamp={timestamp} menu={menu} identity={identity} onReply={onReply} onReact={identity ? () => setReactionsOpen(true) : undefined}>
-    <MessageBody attachments={attachments} delivery={delivery} checking={checking} onCheck={onCheck} onRetry={onRetry} onEditImage={onEditImage}>
+    <MessageBody attachments={attachments} delivery={delivery} onEditImage={onEditImage}>
       {reply && <ReplyQuote reply={reply} />}
       {props.contentFormat === "markdown" ? props.renderMarkdown(text) : text && <div className="message-text">{text}</div>}
-      {props.previewMessageId && <MessageLinkPreviews key={props.previewMessageId} messageId={props.previewMessageId} />}
       {responseMetrics && <footer className="message-metrics">{formatResponseMetrics(responseMetrics)}</footer>}
     </MessageBody>
     {identity && <MessageReactions identity={identity} reactions={reactions} open={reactionsOpen} onOpenChange={setReactionsOpen} />}

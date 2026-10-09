@@ -18,12 +18,13 @@ import { POOLED_ACCOUNT_WAIT, pooledRetryAvailability } from "../extension/routi
 import { modelBrokerUrl } from "../model-broker-contract.js";
 import { resolveSpawnSettings, resolveThreadSettings, validateThreadSettings } from "./settings.js";
 import { getRandomName } from "../nebulani-names.js";
-import { liveDependency, waitsOn } from "./dependency-liveness.js";
 import { threadSettingsMetadata } from "./settings-metadata.js";
+import { isTelephoneContext, TELEPHONE_CONTEXT_ARGUMENT } from "./telephone-context.js";
 import { inputReceipts } from "./pi-input-receipts.js";
 import { measureJsonBytes } from "./json-size.js";
 import { MetadataCache } from "./metadata-cache.js";
 import { formatThreadMessage, serializeThreadNotification } from "./message-format.js";
+import { readMessageDeliveryTimezone } from "./message-delivery.js";
 import { RAW_ARGUMENT, SANDBOX_ARGUMENT, SANDBOX_POLICY_ARGUMENT, sandboxPolicy, validSandboxBoundary } from "./pi-raw.js";
 import { isThreadModeName, threadMode } from "./modes.js";
 import type { ThreadCapability } from "./caller.js";
@@ -94,7 +95,9 @@ export interface ImportMessage {
   state?: "queued" | "dispatched" | "done"; insertedAt?: number; outcome?: WorkOutcome;
   executionId?: string; finalMessage?: Record<string, unknown> | null; settings?: ThreadSettings;
 }
-class NativeRejection extends Error {}
+class NativeRejection extends Error {
+  constructor(message: string, readonly code: ThreadError["code"] = "unavailable") { super(message); }
+}
 class AcknowledgementTimeout extends Error {}
 class AdmissionWait extends Error {}
 function inputCommandReceipt(value: unknown): [string, string] | undefined {
@@ -106,7 +109,7 @@ function inputCommandReceipt(value: unknown): [string, string] | undefined {
 }
 interface Runtime {
   session?: PiSession; epoch: string; executionId?: string; lease?: ThreadAdmission; busy: boolean; settings?: ThreadSettings; environmentKey?: string; parked?: boolean;
-  finalMessage?: Json; outcome?: WorkOutcome; broker?: boolean; commandRunning?: string; commandNumber: number; waiters: Map<string, { resolve(value: any): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>;
+  finalMessage?: Json; outcome?: WorkOutcome; broker?: boolean; commandRunning?: string; commandNumber: number; waiters: Map<string, { resolve(value: any): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> | undefined }>;
 }
 const good = <T>(value: T): Result<T> => ({ ok: true, value });
 const bad = <T = never>(code: ThreadError["code"], message: string): Result<T> => ({ ok: false, error: { code, message } });
@@ -126,7 +129,7 @@ const resultExecutionId = (id: string, recipientId: string): string | null => {
   return id.startsWith(prefix) && id.endsWith(suffix) && id.length > prefix.length + suffix.length
     ? id.slice(prefix.length, -suffix.length) : null;
 };
-type WaitResultEvidence = { wait: import("./contracts.js").AgentWait; settlement: ThreadSettlement | null };
+type WaitResultEvidence = { wait?: import("./contracts.js").AgentWait; settlement: ThreadSettlement | null };
 const resumesDependency = (dependency: import("./contracts.js").WaitDependency, message: Pick<ThreadMessage, "senderId" | "source">): boolean =>
   message.source !== "notification" || !!message.senderId && (dependency.kind === "agents" && dependency.threadIds.includes(message.senderId)
     || dependency.kind === "message" && dependency.fromThreadId === message.senderId);
@@ -153,8 +156,8 @@ export class ThreadService implements ThreadApi {
   private readonly operations = new Map<string, Promise<unknown>>();
   private readonly halts = new Map<string, Promise<Result<Thread>>>();
   private readonly opening = new Map<string, Promise<Runtime>>();
+  private readonly attaching = new Map<string, Promise<Runtime | undefined>>();
   private readonly dependencyOperations = new Map<string, Promise<Result<void>>>();
-  private readonly dependencyRegistering = new Set<string>();
   private readonly waitRegistering = new Set<string>();
   private readonly listeners = new Set<(event: ThreadServiceEvent) => void>();
   private readonly awaiting = new Set<() => void>();
@@ -174,7 +177,7 @@ export class ThreadService implements ThreadApi {
   private workerOwner?: (parent: Thread, input: SpawnThread) => ThreadApi | undefined;
   private routing = false;
   private transactionDepth = 0;
-  private readonly projections = new Map<string, { context?: Json; live: Json; activity: ExecutionActivity }>();
+  private readonly projections = new Map<string, { live: Json; activity: ExecutionActivity }>();
   private readonly nativeContexts = new MetadataCache<NativeContextMetadata>(32, 64 * 1024 * 1024);
   // Compiling SQL is the expensive half of a small query, and the supervisor
   // reads threads thousands of times a second while projecting its inbox. The
@@ -238,8 +241,10 @@ export class ThreadService implements ThreadApi {
       UPDATE thread SET metadata=json_set(metadata,'$.peerDependencies',json_array(json_extract(metadata,'$.agentWait.fromThreadId')))
         WHERE json_extract(metadata,'$.peerDependencies') IS NULL AND json_type(metadata,'$.agentWait.fromThreadId')='text';
       UPDATE thread_work SET status='dispatched' WHERE status IN ('dispatching','inserted');
-      UPDATE thread SET metadata=json_set(metadata,'$.dependencyUpdate',json_object('previous',json_extract(metadata,'$.peerDependencies'),'desired',json_extract(metadata,'$.peerDependencies'),'phase','claim'))
-        WHERE json_array_length(json_extract(metadata,'$.peerDependencies'))>0 AND json_extract(metadata,'$.peerDependencyVersion') IS NULL AND json_extract(metadata,'$.dependencyUpdate') IS NULL;`);
+      UPDATE thread SET metadata=json_set(metadata,'$.peerDependencies',json_extract(metadata,'$.dependencyUpdate.desired'))
+        WHERE json_type(metadata,'$.dependencyUpdate.desired')='array';
+      UPDATE thread SET metadata=json_set(metadata,'$.dependencyUpdate',json_object('previous',json_extract(metadata,'$.peerDependencies'),'desired',json_extract(metadata,'$.peerDependencies')))
+        WHERE json_array_length(json_extract(metadata,'$.peerDependencies'))>0 AND json_extract(metadata,'$.dependencyUpdate') IS NULL;`);
     this.transaction(() => {
       const unnamed = this.sql("SELECT id,metadata FROM thread WHERE json_type(metadata,'$.agentName') IS NOT 'text' OR trim(json_extract(metadata,'$.agentName'))=''").all() as Array<{ id: string; metadata: string }>;
       for (const row of unnamed) {
@@ -292,7 +297,7 @@ export class ThreadService implements ThreadApi {
         activityDetail: fallback === "queued" ? "Waiting for execution dispatch" : fallback === "recovering" ? "Reattaching the retained execution" : "Awaiting cancellation confirmation" }),
         activeTools: projection?.live.tools.map((tool: Json) => String(tool.toolName)) ?? [] };
     return { executionActivity, ...(metadata.agentWait ? { waitingOnAgents: metadata.agentWait } : {}), ...(row.wake_data ? { wakeSchedule: { ...JSON.parse(row.wake_data), ...(row.wake_landed_at ? { lastLandedAt: row.wake_landed_at } : {}), deferredReason: metadata.archived ? "archived" : row.held ? "stopped" : row.state === "running" ? "busy" : undefined } } : {}), id: row.id, parentId: row.parent_id, role: "agent", agentName: metadata.agentName, dependencies: metadata.peerDependencies ?? [], title: row.title, cwd: row.cwd, sessionFile: row.session_file,
-      settings: JSON.parse(row.settings), effectiveSettings: this.effectiveSettings(row.id), admission: row.admission, state: row.state === "idle" && !metadata.archived && metadata.agentWait ? "waiting" : row.state, held: !!row.held, revision: row.revision,
+      settings: JSON.parse(row.settings), effectiveSettings: this.effectiveSettings(row.id), admission: row.admission, state: row.state === "idle" && !row.held && !metadata.archived && (metadata.agentWait || metadata.peerDependencies?.length) ? "waiting" : row.state, held: !!row.held, revision: row.revision,
       createdAt: row.created_at, updatedAt: row.updated_at, ...(row.last_user_message_at !== null ? { lastUserMessageAt: row.last_user_message_at } : {}), pendingMessages: pending, metadata };
   }
   get(id: string): Thread | null { const row = this.row(id); return row ? this.project(row) : null; }
@@ -327,6 +332,10 @@ export class ThreadService implements ThreadApi {
     if (!Number.isSafeInteger(after) || after < 0 || !Number.isInteger(limit) || limit < 1 || limit > 1000) return bad("invalid_request", "Invalid settlement cursor or limit");
     const rows = this.sql("SELECT * FROM thread_execution WHERE settlement_seq>? ORDER BY settlement_seq LIMIT ?").all(after, limit) as Json[];
     return good({ items: rows.map(row => ({ seq: row.settlement_seq, executionId: row.id, threadId: row.thread_id, workId: row.work_id, outcome: row.outcome, ...(row.assignment_pending ? { assignmentPending: true } : {}), time: row.ended_at, finalMessage: JSON.parse(row.final_message ?? "null"), ...(row.error ? { error: row.error } : {}) })), cursor: rows.at(-1)?.settlement_seq ?? after });
+  }
+  settlementFor(threadId: string, workId: string): Result<ThreadSettlement | null> {
+    const row = this.sql("SELECT * FROM thread_execution WHERE thread_id=? AND work_id=? AND settlement_seq IS NOT NULL ORDER BY settlement_seq DESC LIMIT 1").get(threadId, workId) as Json | undefined;
+    return good(row ? { seq: row.settlement_seq, executionId: row.id, threadId: row.thread_id, workId: row.work_id, outcome: row.outcome, time: row.ended_at, finalMessage: JSON.parse(row.final_message ?? "null"), ...(row.error ? { error: row.error } : {}) } : null);
   }
   async await(input: AwaitThreads, signal?: AbortSignal): Promise<Result<ThreadAwaitResult>> {
     const valid = validateThreadAwait(input); if (!valid.ok) return valid;
@@ -382,9 +391,11 @@ export class ThreadService implements ThreadApi {
   }
   private currentAssignmentResult(row: Json): boolean {
     const thread = this.get(row.thread_id);
-    if (!thread || thread.state !== "idle" || thread.metadata?.agentWait || thread.wakeSchedule || row.assignment_pending) return false;
+    if (!thread || row.assignment_pending) return false;
     const latest = this.sql("SELECT MAX(settlement_seq) seq FROM thread_execution WHERE thread_id=?").get(thread.id) as { seq: number | null };
-    if (latest.seq !== row.settlement_seq || thread.dependencies?.some(target => liveDependency(thread, target, this.get(target) ?? "unknown"))) return false;
+    if (latest.seq !== row.settlement_seq) return false;
+    if (row.outcome === "cancelled" && (thread.metadata?.cancellationRequest || thread.metadata?.archived)) return true;
+    if (thread.state !== "idle" || thread.metadata?.agentWait || thread.wakeSchedule || thread.dependencies?.length) return false;
     return !this.sql(`SELECT 1 FROM thread_execution WHERE thread_id=? AND ended_at IS NULL
       UNION ALL SELECT 1 FROM thread_work WHERE thread_id=? AND status!='done'
       UNION ALL SELECT 1 FROM thread_question WHERE thread_id=? AND accepted_at IS NULL LIMIT 1`).get(thread.id, thread.id, thread.id);
@@ -401,6 +412,13 @@ export class ThreadService implements ThreadApi {
     const thread = this.get(id); if (!thread) return bad("not_found", "Thread not found");
     const projection = this.projections.get(id);
     const state = { thread, pending: this.pending(id), ...(projection ? { live: projection.live } : {}) };
+    if (options.inputReceipts) {
+      const ids = options.inputReceipts.workIds;
+      const rows = this.sql(`SELECT id,landed_at FROM thread_work WHERE thread_id=? AND id IN (${ids.map(() => "?").join(",")})`).all(id, ...ids) as Array<{ id: string; landed_at: number | null }>;
+      const receipts = new Map(rows.map(row => [row.id, { workId: row.id, landedAt: row.landed_at }]));
+      if (ids.some(id => !receipts.has(id))) return bad("not_found", "Requested input receipt does not belong to this thread");
+      return this.boundedInspection({ ...state, inputReceipts: ids.map(id => receipts.get(id)!) });
+    }
     if (options.context === "omit") return good(state);
     if (options.contextWindow) {
       const window = this.nativeContextWindow(thread, options.contextWindow);
@@ -413,8 +431,41 @@ export class ThreadService implements ThreadApi {
       return this.boundedInspection({ ...state, contextRecords: page.value });
     }
     if (options.context !== "full") return good(state);
-    if (!this.execution(id) && options.contextRevision === thread.revision) return good(state);
-    return this.fullInspection(thread, state, this.execution(id) && projection?.context ? projection.context : undefined);
+    const active = !!this.execution(id) || thread.state === "running";
+    if (!active && options.contextRevision === thread.revision) return good(state);
+    if (!active) return this.fullInspection(thread, state);
+    return this.serial(id, async () => {
+      if (this.suspended || this.closed) return bad("unavailable", "Thread controller is suspended");
+      try {
+        const runtime = this.runtimes.get(id) ?? (thread.metadata?.runnerReference ? await this.attach(id) : undefined);
+        if (!runtime?.session) return bad("unavailable", "Current context requires a reachable native runtime");
+        const current = await this.rpc(runtime, { type: "get_context" });
+        if (!current || typeof current !== "object" || !Array.isArray(current.messages)
+          || typeof current.systemPrompt !== "string" || !Array.isArray(current.tools)) return bad("unavailable", "Runtime returned an invalid current context");
+        return this.fullInspection(thread, state, current);
+      } catch (error) { return bad(error instanceof NativeRejection ? error.code : "unavailable", errorText(error)); }
+    });
+  }
+  private nativeMessageIdentity(thread: Thread, entry: Json, message: Json): Json {
+    if (message.role !== "user" && message.role !== "assistant") return message;
+    const metadata = entry.type === "message" ? entry.message : entry.details;
+    const identity = metadata?.identity;
+    const senderValue = (value: unknown): Json | undefined => {
+      if (!value || typeof value !== "object") return;
+      const sender = value as Json;
+      if (typeof sender.id !== "string" || !sender.id.trim()) return;
+      return { id: sender.id, ...(typeof sender.name === "string" && sender.name ? { name: sender.name } : {}) };
+    };
+    const recorded = senderValue(identity?.sender);
+    if (recorded && typeof identity.id === "string" && /^(pi\/[^/]+\/[^/]+|messaging\/[^/]+|slack\/[^/]+\/[^/]+\/[^/]+)$/.test(identity.id)
+      && Number.isFinite(identity.timestamp)) return { ...message, identity: { id: identity.id, timestamp: identity.timestamp, sender: recorded } };
+    const env = { ...process.env, ...this.options.environment?.(thread) };
+    const owner = env.PI_REMOTE_SENDER_ID ?? thread.ownerId;
+    const sender = recorded ?? senderValue(metadata?.sender) ?? (message.role === "assistant" ? { id: "assistant", name: "Kenan" }
+      : env.PI_REMOTE_ROOM_ID || !owner ? undefined : { id: owner, ...(env.PI_REMOTE_SENDER_NAME ? { name: env.PI_REMOTE_SENDER_NAME } : {}) });
+    const timestamp = timestampMs(message.timestamp) ?? timestampMs(entry.timestamp);
+    if (!sender || timestamp === null || timestamp === undefined) return message;
+    return { ...message, identity: { id: ["pi", thread.id, entry.id].map(encodeURIComponent).join("/"), timestamp, sender } };
   }
   private boundedInspection(inspection: ThreadInspection): Result<ThreadInspection> {
     const measured = measureJsonBytes(good(inspection), CONTEXT_WINDOW_MAX_BYTES);
@@ -533,9 +584,9 @@ export class ThreadService implements ThreadApi {
       generation, revision: generation, size: 0, leafId: null };
   }
   private nativeContextRecords(thread: Thread, request: NonNullable<InspectOptions["contextRecords"]>): Result<ThreadContextRecords> {
-    const indexed = indexedThreadHistory(thread.sessionFile);
+    const indexed = indexedThreadHistory(thread.sessionFile, request.leafId);
     if (!indexed.ok) {
-      if (indexed.error.code !== "missing" || thread.metadata?.nativeHistoryRequired === true) return historyFailure(indexed.error);
+      if (indexed.error.code !== "missing" || thread.metadata?.nativeHistoryRequired === true || request.leafId !== undefined) return historyFailure(indexed.error);
       const source = this.unstartedContextSource(thread);
       if (request.revision !== undefined && request.revision !== source.revision) return bad("conflict", "Native context source revision changed; restart the context export");
       return good({ source, total: 0, records: [] });
@@ -549,7 +600,7 @@ export class ThreadService implements ThreadApi {
       this.nativeContexts.set(thread.id, metadata.key, metadata, metadata.bytes);
     }
     const projected = includeEntries ? metadata.entries! : metadata.messages;
-    const revision = digest({ native: history.source.revision, receipts: metadata.receiptHash, includeEntries });
+    const revision = digest({ native: history.source.revision, leafId: history.source.leafId, receipts: metadata.receiptHash, includeEntries });
     if (request.revision !== undefined && request.revision !== revision) return bad("conflict", "Native context source revision changed; restart the context export");
     const records: ThreadContextRecords["records"] = [];
     const end = request.before === undefined ? Math.min(projected.length, (request.after ?? -1) + 1 + request.limit) : Math.min(projected.length, request.before);
@@ -570,7 +621,7 @@ export class ThreadService implements ThreadApi {
       const message = entry.type === "message" ? entry.message
         : entry.type === "custom_message" ? { role: "custom", content: entry.content, customType: entry.customType, details: entry.details }
         : { role: "notice", content: entry, timestamp: timestampMs(entry.timestamp) };
-      const record = { index, entryId: entry.id, message };
+      const record = { index, entryId: entry.id, message: this.nativeMessageIdentity(thread, entry, message), ...(includeEntries ? { entry } : {}) };
       const measured = measureJsonBytes(record, CONTEXT_WINDOW_MAX_BYTES - bytes);
       if (!measured.ok) return measured;
       bytes += measured.value + 1;
@@ -598,7 +649,7 @@ export class ThreadService implements ThreadApi {
     const codes = new Int32Array(metadata.messages.length);
     const seqs = new Float64Array(metadata.messages.length);
     const counts = new Uint32Array(metadata.messages.length);
-    let total = 1, length = 0;
+    let total = 0, length = 0;
     for (const code of metadata.messages) {
       const count = code < 0 ? 1 : paired.has(code) ? 0 : history.messages[code]!.displayedItemCount;
       if (!count) continue;
@@ -607,14 +658,13 @@ export class ThreadService implements ThreadApi {
     const previous = this.sql("SELECT generation,key_count,key_hash FROM thread_context_generation WHERE thread_id=?").get(thread.id) as { generation: string; key_count: number; key_hash: string } | undefined;
     const keys = createHash("sha256");
     let keyCount = 0;
-    let prefixHash: string | undefined;
+    let prefixHash: string | undefined = previous?.key_count === 0 ? keys.copy().digest("hex") : undefined;
     const key = (parts: unknown[]) => {
       const encoded = JSON.stringify(parts);
       keys.update(String(Buffer.byteLength(encoded))).update(":").update(encoded);
       keyCount++;
       if (previous && keyCount === previous.key_count) prefixHash = keys.copy().digest("hex");
     };
-    key(["system"]);
     for (let index = 0; index < length; index++) {
       const code = codes[index]!, count = counts[index]!;
       if (code < 0) { key([metadata.receipts[-code - 1]!.entryId, "user"]); continue; }
@@ -643,12 +693,12 @@ export class ThreadService implements ThreadApi {
     return window;
   }
   private nativeContextWindow(thread: Thread, request: NonNullable<InspectOptions["contextWindow"]>): Result<ThreadContextWindow> {
-    const indexed = indexedThreadHistory(thread.sessionFile);
+    const indexed = indexedThreadHistory(thread.sessionFile, request.leafId);
     if (!indexed.ok) {
-      if (indexed.error.code !== "missing" || thread.metadata?.nativeHistoryRequired === true) return historyFailure(indexed.error);
+      if (indexed.error.code !== "missing" || thread.metadata?.nativeHistoryRequired === true || request.leafId !== undefined) return historyFailure(indexed.error);
       const source = this.unstartedContextSource(thread);
       if (request.generation !== undefined && request.generation !== source.generation) return bad("conflict", "Context source generation changed; reopen the transcript window");
-      return good({ source, total: 0, records: [], knownToolCallIds: [] });
+      return good({ source, total: 0, records: [], knownToolCallIds: [], completedToolCallIds: [] });
     }
     const history = indexed.value;
     const metadata = this.nativeContextMetadata(thread, history);
@@ -658,7 +708,6 @@ export class ThreadService implements ThreadApi {
     const before = Math.min(request.before ?? total, total);
     const start = Math.max(0, before - request.limit);
     const records: ThreadContextWindow["records"] = [];
-    if (start === 0 && before > 0) records.push({ seq: 0, count: 1, entryId: "system", message: { role: "system", content: "" }, results: [] });
     let bytes = Buffer.byteLength(JSON.stringify(records));
     const message = (entry: Json): Json => entry.type === "message" ? entry.message : { role: "custom", content: entry.content, customType: entry.customType, details: entry.details };
     let low = 0, high = window.length;
@@ -681,7 +730,7 @@ export class ThreadService implements ThreadApi {
         const descriptor = history.messages[code]!;
         const entry = history.read(descriptor);
         if (!entry.ok) return historyFailure(entry.error);
-        sourceMessage = message(entry.value);
+        sourceMessage = this.nativeMessageIdentity(thread, entry.value, message(entry.value));
         entryId = descriptor.id;
         const selectedCalls = new Set<string>();
         let ordinal = 0;
@@ -709,7 +758,8 @@ export class ThreadService implements ThreadApi {
       records.push(selected);
     }
     return good({ source: { ...window.source }, total, records,
-      knownToolCallIds: (request.toolCallIds ?? []).filter(id => calls.has(id)) });
+      knownToolCallIds: (request.toolCallIds ?? []).filter(id => calls.has(id)),
+      completedToolCallIds: (request.toolCallIds ?? []).filter(id => { const call = calls.get(id); return call !== undefined && results.get(call)?.some(index => history.messages[index]!.toolResultId === id); }) });
   }
   private message(row: Json): ThreadMessage { return { id: row.id, threadId: row.thread_id, senderId: row.sender_id, ...(row.sender_name || row.sender_id && this.get(row.sender_id)?.agentName ? { senderName: row.sender_name ?? this.get(row.sender_id)!.agentName } : {}), text: row.text, images: JSON.parse(row.images), delivery: row.delivery, source: row.source, state: row.status, createdAt: row.created_at, insertedAt: row.inserted_at, landedAt: row.landed_at, ...(row.outcome ? { outcome: row.outcome } : {}), ...(row.reply_to ? { replyTo: row.reply_to } : {}) }; }
   pending(id: string): PendingMessage[] {
@@ -889,7 +939,7 @@ export class ThreadService implements ThreadApi {
       });
     }
     for (const row of this.sql("SELECT id FROM thread WHERE json_extract(metadata,'$.dependencyUpdate') IS NOT NULL").all() as Array<{ id: string }>) {
-      if (!this.dependencyOperations.has(row.id) && !this.dependencyRegistering.has(row.id)) void this.recoverDependencies(row.id).then(result => {
+      if (!this.dependencyOperations.has(row.id)) void this.recoverDependencies(row.id).then(result => {
         if (!result.ok && !this.closed && !this.suspended) this.sql("UPDATE thread SET metadata=json_set(metadata,'$.dependencyError',?) WHERE id=?").run(result.error.message, row.id);
       });
     }
@@ -907,121 +957,35 @@ export class ThreadService implements ThreadApi {
     });
   }
 
-  private async dependencyGraph(roots: string[]): Promise<Result<Thread[]>> {
-    const peers = new Map<string, Thread>();
-    const queue = [...roots];
-    for (const id of queue) {
-      if (peers.has(id)) continue;
-      const local = this.get(id);
-      let thread = local;
-      if (!thread && this.directory) {
-        const page = await this.directory.list({ id, limit: 1 });
-        if (!page.ok) return page;
-        thread = page.value.threads.find(peer => peer.id === id) ?? null;
-      }
-      if (!thread) return bad("not_found", `Dependency ${id} is not accessible`);
-      peers.set(id, thread);
-      queue.push(...(thread.dependencies ?? []), ...((thread.metadata?.peerDependents as string[] | undefined) ?? []));
-      const incoming = this.sql("SELECT t.id FROM thread t,json_each(COALESCE(json_extract(t.metadata,'$.peerDependencies'),'[]')) d WHERE d.value=?").all(id) as Array<{ id: string }>;
-      queue.push(...incoming.map(peer => peer.id));
-    }
-    return good([...peers.values()]);
-  }
-  private dependencyEdges(threads: Thread[], id: string): import("./contracts.js").ThreadDependency[] {
-    return threads.flatMap(thread => (thread.dependencies ?? []).filter(target => thread.id === id || target === id)
-      .map(dependsOn => ({ threadId: thread.id, dependsOn, ...(thread.ownerId ? { ownerId: thread.ownerId } : {}) })));
-  }
   private async validateDependencies(id: string, ids: string[]): Promise<Result<void>> {
     if (!Array.isArray(ids) || ids.length > 100 || ids.some(target => typeof target !== "string" || !target.trim() || target === id) || new Set(ids).size !== ids.length)
       return bad("invalid_request", "Dependencies require up to 100 unique accessible peers, excluding self");
-    const graph = await this.dependencyGraph(ids); if (!graph.ok) return graph;
-    const peers = new Map(graph.value.map(thread => [thread.id, thread]));
     for (const target of ids) {
-      const peer = peers.get(target);
-      if (!peer) return bad("not_found", `Dependency ${target} is not accessible`);
-      if (peer.held || peer.metadata?.archived || this.halts.has(target)) return bad("conflict", `Dependency ${target} is closing or archived; reopen it first`);
-      const seen = new Set<string>(), queue = [target];
-      for (const current of queue) {
-        if (current === id) return bad("conflict", "Peer dependencies cannot contain a cycle");
-        if (seen.has(current)) continue;
-        seen.add(current);
-        queue.push(...(peers.get(current)?.dependencies ?? []));
-      }
-    }
-    return good(undefined);
-  }
-  /** Edges whose result is still owed. Inert edges (settled target, dependent not waiting on it) protect nothing. */
-  private liveEdges(threads: Thread[], id: string): import("./contracts.js").ThreadDependency[] {
-    const byId = new Map(threads.map(thread => [thread.id, thread]));
-    return this.dependencyEdges(threads, id).filter(edge => liveDependency(byId.get(edge.threadId), edge.dependsOn, byId.get(edge.dependsOn)));
-  }
-  /** Authoritative across owners. On success returns the graph it checked, for releasing the inert edges. */
-  private async closeProtection(id: string): Promise<Result<Thread[]>> {
-    const graph = await this.dependencyGraph([id]); if (!graph.ok) return graph;
-    const dependencies = this.liveEdges(graph.value, id);
-    return dependencies.length ? { ok: false, error: { code: "dependency_conflict", message: "This agent is part of an unresolved dependency. Ask the dependent agent to resolve or release it before closing either endpoint.", dependencies } } : good(graph.value);
-  }
-  /** Local view: in-flight registration or a live edge. Edges to other owners count as live until closeProtection releases them. */
-  private localDependencyProtection(id: string): boolean {
-    const thread = this.get(id);
-    if (!thread) return false;
-    if (thread.metadata?.dependencyUpdate || this.dependencyOperations.has(id) || this.dependencyRegistering.has(id)) return true;
-    if ((thread.dependencies ?? []).some(target => liveDependency(thread, target, this.get(target) ?? "unknown"))) return true;
-    const local = (this.sql("SELECT t.id FROM thread t,json_each(COALESCE(json_extract(t.metadata,'$.peerDependencies'),'[]')) d WHERE d.value=?").all(id) as Array<{ id: string }>).map(row => row.id);
-    const dependents = new Set([...((thread.metadata?.peerDependents as string[] | undefined) ?? []), ...local]);
-    for (const dependentId of dependents) {
-      const dependent = this.get(dependentId);
-      if (dependent ? liveDependency(dependent, id, thread) : !thread.held && !thread.metadata?.archived) return true;
-    }
-    return false;
-  }
-  /** Drops every inert edge touching this agent, in both directions and across owners. Live edges were refused by closeProtection. */
-  private async releaseInertDependencies(id: string, graph: Thread[]): Promise<Result<void>> {
-    const api = this.directory ?? this;
-    const thread = this.get(id); if (!thread) return bad("not_found", "Thread not found");
-    if (thread.dependencies?.length) {
-      const released = await this.dropDependencies(id, thread.dependencies); if (!released.ok) return released;
-    }
-    for (const dependent of graph.filter(peer => peer.id !== id && peer.dependencies?.includes(id))) {
-      const released = await api.control({ action: "dependencyRelease", threadId: dependent.id, dependsOn: id });
-      if (!released.ok && released.error.code !== "not_found") return released;
-    }
-    // A reservation is stale when a fresh read of its dependent shows no edge to this agent. Reads are fresh, not the
-    // snapshot, so a dependency registered after the snapshot still fences the close.
-    const reservations = (this.get(id)?.metadata?.peerDependents as string[] | undefined) ?? [];
-    const stale: string[] = [];
-    for (const dependentId of reservations) {
-      const found = this.get(dependentId) ? good({ threads: [this.get(dependentId)!] }) : await api.list({ id: dependentId, limit: 1 });
+      if (this.get(target)) continue;
+      const found = await (this.directory ?? this).list({ id: target, limit: 1 });
       if (!found.ok) return found;
-      const dependent = found.value.threads[0];
-      if (!dependent || dependent.metadata?.archived || !dependent.dependencies?.includes(id)) stale.push(dependentId);
-    }
-    if (stale.length) {
-      const kept = ((this.get(id)?.metadata?.peerDependents as string[] | undefined) ?? []).filter(dependentId => !stale.includes(dependentId));
-      this.sql("UPDATE thread SET metadata=json_set(metadata,'$.peerDependents',json(?)) WHERE id=?").run(JSON.stringify(kept), id);
-      this.changed(id);
+      if (!found.value.threads.some(peer => peer.id === target)) return bad("not_found", `Dependency ${target} is not accessible`);
     }
     return good(undefined);
   }
-  /** Removes targets from this agent's outgoing dependencies through the durable release phase, valid while held or archived. */
-  private async dropDependencies(id: string, targets: string[]): Promise<Result<void>> {
-    if (this.dependencyOperations.has(id) || this.dependencyRegistering.has(id)) return bad("conflict", "A dependency update is already in progress");
-    const previous = this.get(id)?.dependencies ?? [];
-    const desired = previous.filter(target => !targets.includes(target));
-    if (desired.length === previous.length) return good(undefined);
-    this.sql("UPDATE thread SET metadata=json_set(metadata,'$.dependencyUpdate',json(?)) WHERE id=?").run(JSON.stringify({ previous, desired, phase: "release" }), id);
-    return this.recoverDependencies(id);
+  private replaceDependencies(id: string, desired: string[], after?: Record<string, number>): void {
+    const current = this.get(id)!;
+    const update = current.metadata?.dependencyUpdate as { previous: string[]; desired: string[]; after?: Record<string, number> } | undefined;
+    const previous = [...new Set([...(current.dependencies ?? []), ...(update?.previous ?? []), ...(update?.desired ?? [])])];
+    const cursors = Object.fromEntries(desired.map(target => [target, after?.[target] ?? update?.after?.[target] ?? (current.metadata?.peerResultAfter as Record<string, number> | undefined)?.[target] ?? 0]));
+    this.sql("UPDATE thread SET metadata=json_set(metadata,'$.peerDependencies',json(?),'$.peerResultAfter',json(?),'$.dependencyUpdate',json(?)) WHERE id=?")
+      .run(JSON.stringify(desired), JSON.stringify(cursors), JSON.stringify({ previous, desired, after: cursors }), id);
+    this.changed(id);
   }
-  /** Archive settled background work after its last dependency protection is released. */
+  /** Completed results remain in durable receipts; subscribers do not keep the producer open. */
   private async archiveSettledBackground(id: string): Promise<void> {
     const thread = this.get(id);
     const settledWork = this.sql(`SELECT 1 FROM thread_execution WHERE thread_id=? AND ended_at IS NOT NULL
       UNION ALL SELECT 1 FROM thread_work WHERE thread_id=? AND status='done' LIMIT 1`).get(id, id);
     if (!thread || !settledWork || thread.metadata?.foreground === true || thread.metadata?.watchList
       || thread.metadata?.archived || this.hasAutoArchiveWork(thread)) return;
-    const protection = await this.closeProtection(id);
     const latest = this.get(id);
-    if (!protection.ok || !latest || this.suspended || this.closed || latest.metadata?.foreground === true
+    if (!latest || this.suspended || this.closed || latest.metadata?.foreground === true
       || latest.metadata?.watchList || latest.metadata?.archived || this.hasAutoArchiveWork(latest)) return;
     this.sql("UPDATE thread SET held=0,metadata=json_set(metadata,'$.archived',json('true'),'$.archivedAt',?) WHERE id=?").run(new Date().toISOString(), id);
     this.changed(id);
@@ -1042,61 +1006,33 @@ export class ThreadService implements ThreadApi {
     const completed = () => this.archiveBackgroundAfterCurrentOperation(id);
     void current.then(completed, completed);
   }
-  /** At the end of a turn, dependencies whose result has been delivered and is no longer awaited are released. */
-  private async pruneSettledDependencies(id: string): Promise<void> {
-    const thread = this.get(id);
-    if (!thread?.dependencies?.length || thread.metadata?.dependencyUpdate || this.dependencyOperations.has(id) || this.dependencyRegistering.has(id) || this.waitRegistering.has(id)) return;
-    const graph = await this.dependencyGraph([id]); if (!graph.ok || this.suspended || this.closed) return;
-    const byId = new Map(graph.value.map(peer => [peer.id, peer]));
-    const current = this.get(id); if (!current) return;
-    const settled = (current.dependencies ?? []).filter(target => !liveDependency(current, target, byId.get(target)));
-    if (settled.length) await this.dropDependencies(id, settled);
-  }
-  private async updateDependencies(id: string, desired: string[]): Promise<Result<void>> {
-    if (!Array.isArray(desired) || desired.length > 100 || desired.some(target => typeof target !== "string" || !target.trim() || target === id) || new Set(desired).size !== desired.length)
-      return bad("invalid_request", "Dependencies require up to 100 unique accessible peers, excluding self");
-    if (this.dependencyOperations.has(id) || this.dependencyRegistering.has(id)) return bad("conflict", "A dependency update is already in progress");
+  private async updateDependencies(id: string, desired: string[], after?: Record<string, number>): Promise<Result<void>> {
+    const valid = await this.validateDependencies(id, desired); if (!valid.ok) return valid;
+    if (this.closed || this.suspended) return bad("unavailable", "Subscription registration remains with its owner during handoff");
     const current = this.get(id)!;
     if (current.held || current.metadata?.archived || this.halts.has(id)) return bad("conflict", "A closing or archived agent cannot change dependencies");
-    const previous = current.dependencies ?? [];
-    this.sql("UPDATE thread SET metadata=json_set(metadata,'$.peerDependencies',json(?),'$.dependencyUpdate',json(?)) WHERE id=?")
-      .run(JSON.stringify([...new Set([...previous, ...desired])]), JSON.stringify({ previous, desired, phase: "claim" }), id);
-    this.changed(id);
-    this.dependencyRegistering.add(id);
-    try {
-      const valid = await this.validateDependencies(id, desired);
-      if (this.closed || this.suspended) return bad("unavailable", "Dependency registration remains with its owner during handoff");
-      if (!valid.ok) {
-        this.sql("UPDATE thread SET metadata=json_set(json_remove(metadata,'$.dependencyUpdate'),'$.peerDependencies',json(?)) WHERE id=?").run(JSON.stringify(previous), id);
-        this.changed(id);
-        return valid;
-      }
-      return await this.recoverDependencies(id);
-    } finally { this.dependencyRegistering.delete(id); }
+    this.replaceDependencies(id, desired, after);
+    return this.recoverDependencies(id);
   }
   private recoverDependencies(id: string): Promise<Result<void>> {
     const existing = this.dependencyOperations.get(id); if (existing) return existing;
     const operation = (async (): Promise<Result<void>> => {
-      const update = this.get(id)?.metadata?.dependencyUpdate as { previous: string[]; desired: string[]; phase: "claim" | "release" } | undefined;
-      if (!update) return good(undefined);
-      const api = this.directory ?? this;
-      if (update.phase === "claim") {
-        const valid = await this.validateDependencies(id, update.desired); if (!valid.ok) return valid;
-        for (const threadId of update.desired) {
-          const claimed = await api.control({ action: "dependencyClaim", threadId, dependentId: id, active: true });
-          if (!claimed.ok) return claimed;
+      while (!this.closed && !this.suspended) {
+        const update = this.get(id)?.metadata?.dependencyUpdate as { previous: string[]; desired: string[]; after?: Record<string, number> } | undefined;
+        if (!update) return good(undefined);
+        for (const threadId of [...new Set([...update.previous, ...update.desired])]) {
+          const active = update.desired.includes(threadId);
+          const api = this.get(threadId) ? this : this.directory ?? this;
+          const result = await api.control({ action: "resultSubscribe", threadId, dependentId: id, active, after: update.after?.[threadId] ?? (this.get(id)?.metadata?.peerResultAfter as Record<string, number> | undefined)?.[threadId] ?? 0 });
+          if (!result.ok && !(result.error.code === "not_found" && !active)) return result;
         }
-        if (this.closed || this.suspended) return bad("unavailable", "Dependency registration remains with its owner during handoff");
-        this.sql("UPDATE thread SET metadata=json_set(metadata,'$.dependencyUpdate.phase','release') WHERE id=?").run(id);
+        if (this.closed || this.suspended) break;
+        if (digest(this.get(id)?.metadata?.dependencyUpdate) !== digest(update)) continue;
+        this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.dependencyUpdate','$.dependencyError') WHERE id=?").run(id);
+        this.changed(id);
+        return good(undefined);
       }
-      for (const threadId of update.previous.filter(target => !update.desired.includes(target))) {
-        const released = await api.control({ action: "dependencyClaim", threadId, dependentId: id, active: false });
-        if (!released.ok) return released;
-      }
-      if (this.closed || this.suspended) return bad("unavailable", "Dependency release remains with its owner during handoff");
-      this.sql("UPDATE thread SET metadata=json_set(json_remove(metadata,'$.dependencyUpdate','$.dependencyError'),'$.peerDependencies',json(?),'$.peerDependencyVersion',1) WHERE id=?").run(JSON.stringify(update.desired), id);
-      this.changed(id);
-      return good(undefined);
+      return bad("unavailable", "Subscriptions remain with their owner during handoff");
     })();
     this.dependencyOperations.set(id, operation);
     void operation.finally(() => { if (this.dependencyOperations.get(id) === operation) this.dependencyOperations.delete(id); }).catch(() => {});
@@ -1123,20 +1059,16 @@ export class ThreadService implements ThreadApi {
         dependency = parsed.value;
         const ids = dependency.kind === "agents" ? dependency.threadIds : dependency.kind === "message" ? [dependency.fromThreadId] : [];
         const valid = await this.validateDependencies(thread.id, ids); if (!valid.ok) return valid;
-        if (dependency.kind === "message") {
-          const found = await (this.directory ?? this).list({ id: dependency.fromThreadId, limit: 1 });
-          if (!found.ok) return found;
-          if (!found.value.threads.length) return bad("not_found", "Wait collaborator is not accessible");
-        }
       }
       const current = this.get(thread.id)!;
       if (input.action === "set" && (current.held || current.metadata?.archived)) return bad("unavailable", "Thread was stopped while registering its wait");
       const ids = dependency?.kind === "agents" ? dependency.threadIds : dependency?.kind === "message" ? [dependency.fromThreadId] : [];
-      const updated = await this.updateDependencies(thread.id, input.action === "clear" ? [] : [...new Set([...(current.dependencies ?? []), ...ids])]);
+      const updated = await this.updateDependencies(thread.id, input.action === "clear" ? [] : [...new Set([...(current.dependencies ?? []), ...ids])], dependency?.kind === "agents" ? dependency.after : undefined);
       if (!updated.ok) return updated;
       let settlement: ThreadSettlement | null = null;
       if (dependency?.kind === "agents") {
-        const settled = await (this.directory ?? this).await({ parentId: thread.id, threadIds: dependency.threadIds, after: dependency.after, timeoutMs: 0, currentAssignment: true });
+        const api = dependency.threadIds.every(id => this.get(id)) ? this : this.directory ?? this;
+        const settled = await api.await({ parentId: thread.id, threadIds: dependency.threadIds, after: dependency.after, timeoutMs: 0, currentAssignment: true });
         if (!settled.ok) return settled;
         settlement = settled.value.settlement;
       }
@@ -1230,16 +1162,22 @@ export class ThreadService implements ThreadApi {
   }
   private recordRequest(id: string, value: unknown, kind: string, target: string): void { this.sql("INSERT INTO thread_request(id,hash,kind,target) VALUES(?,?,?,?)").run(id, digest(value), kind, target); }
   private insertMessage(id: string, input: SendThread, settings: ThreadSettings, front = false, senderName?: string, waitResult?: WaitResultEvidence): ThreadMessage {
-    const wait = this.get(input.threadId)?.metadata?.agentWait;
+    const current = this.get(input.threadId);
+    const wait = current?.metadata?.agentWait;
     const dependency = validateWaitDependency(wait);
     let resumed = dependency.ok && resumesDependency(dependency.value, { senderId: input.senderId ?? null, source: input.source ?? "explicit" });
-    if (resumed && dependency.ok && dependency.value.kind === "agents" && input.source === "notification") {
+    if (input.source === "notification" && input.senderId) {
       const executionId = resultExecutionId(id, input.threadId);
-      if (waitResult) resumed = digest(wait) === digest(waitResult.wait) && waitResult.settlement?.executionId === executionId;
-      else {
-        const result = executionId && this.sql("SELECT * FROM thread_execution WHERE id=? AND thread_id=? AND ended_at IS NOT NULL").get(executionId, input.senderId!) as Json | undefined;
-        resumed = !!result && result.settlement_seq > (dependency.value.after[input.senderId!] ?? 0) && this.currentAssignmentResult(result);
+      const cursor = dependency.ok && dependency.value.kind === "agents" ? dependency.value.after[input.senderId] ?? 0
+        : (current?.metadata?.peerResultAfter as Record<string, number> | undefined)?.[input.senderId] ?? 0;
+      const result = waitResult ? waitResult.settlement
+        : executionId && this.sql("SELECT * FROM thread_execution WHERE id=? AND thread_id=? AND ended_at IS NOT NULL").get(executionId, input.senderId) as Json | undefined;
+      const currentResult = !!result && (waitResult ? waitResult.settlement?.executionId === executionId
+        : this.currentAssignmentResult(result as Json)) && (result.outcome === "cancelled" || (waitResult ? result.seq : (result as Json).settlement_seq) > cursor);
+      if (currentResult && current?.dependencies?.includes(input.senderId)) {
+        this.replaceDependencies(input.threadId, current.dependencies.filter(target => target !== input.senderId));
       }
+      if (dependency.ok && dependency.value.kind === "agents") resumed = resumed && currentResult && (!waitResult || digest(wait) === digest(waitResult.wait));
     }
     // Untyped persisted waits retain their original child-result routing until the next input or scheduled recovery.
     const priorChildResult = wait && typeof wait === "object" && !("kind" in wait) && "threadIds" in wait
@@ -1271,7 +1209,7 @@ export class ThreadService implements ThreadApi {
       if (input.parentId && !parent) return bad("not_found", "Parent thread is not accessible to this service");
       if (input.ephemeral !== undefined && typeof input.ephemeral !== "boolean") return bad("invalid_request", "ephemeral must be a boolean");
       if (input.ephemeral && !input.message) return bad("invalid_request", "Ephemeral subagents need an initial assignment");
-      if (input.metadata && ["agentWait", "peerDependencies", "peerDependents", "dependencyUpdate", "peerDependencyVersion", "dependencyError", "agentName", "cancellationRequest"].some(key => key in input.metadata!)) return bad("invalid_request", "Waits, dependencies and agent names are owned by the thread service");
+      if (input.metadata && ["agentWait", "peerDependencies", "peerResultAfter", "peerDependents", "peerSubscriberAfter", "dependencyUpdate", "peerDependencyVersion", "dependencyError", "agentName", "cancellationRequest", "cancellationSettled"].some(key => key in input.metadata!)) return bad("invalid_request", "Waits, dependencies and agent names are owned by the thread service");
       if (input.metadata && ("foreground" in input.metadata || "attentionSummary" in input.metadata)) return bad("invalid_request", "Use attention instead of setting attention metadata");
       if (input.metadata && "ephemeral" in input.metadata) return bad("invalid_request", "Set ephemeral on the spawn request, not in metadata");
       if (input.metadata && "autoArchiveViewedAt" in input.metadata) return bad("invalid_request", "Use view control instead of setting auto-archive metadata");
@@ -1297,6 +1235,7 @@ export class ThreadService implements ThreadApi {
       if (!validSandboxBoundary(metadata)) return bad("invalid_request", "Sandbox threads require raw context and cannot carry an execution override or mode");
       if (metadata.raw !== undefined && metadata.raw !== true) return bad("invalid_request", "Thread metadata raw must be true when present");
       if (metadata.raw === true && (metadata.context !== undefined || metadata.execution === "root-repair")) return bad("invalid_request", "Raw threads carry no isolated context and cannot perform root repair");
+      if (metadata.telephoneContext !== undefined && (!isTelephoneContext(metadata.telephoneContext) || metadata.raw !== true || metadata.sandbox !== undefined || metadata.meetingId != null || metadata.room !== undefined)) return bad("invalid_request", "Telephone threads require a valid fixed raw boundary");
       if (input.admission !== undefined && !["force", "background"].includes(input.admission)) return bad("invalid_request", "Invalid admission policy");
       const admission = threadMode(metadata.mode)?.admission ?? (input.parentId ? "force" : input.admission ?? "force");
       const id = input.id ?? randomUUID();
@@ -1543,10 +1482,12 @@ export class ThreadService implements ThreadApi {
         if (this.get(thread.id)?.metadata?.archived || this.halts.has(thread.id)) return bad("conflict", "Recipient closed during sender lookup");
       }
       let waitResult: WaitResultEvidence | undefined;
-      const wait = this.get(thread.id)?.waitingOnAgents;
-      if (wait?.kind === "agents" && input.source === "notification" && input.senderId && wait.threadIds.includes(input.senderId)
+      const recipient = this.get(thread.id)!;
+      const wait = recipient.waitingOnAgents;
+      if (input.source === "notification" && input.senderId && (recipient.dependencies?.includes(input.senderId) || wait?.kind === "agents" && wait.threadIds.includes(input.senderId))
         && !this.get(input.senderId) && resultExecutionId(input.requestId, thread.id)) {
-        const current = await (this.directory ?? this).await({ parentId: thread.id, threadIds: [input.senderId], after: wait.after, timeoutMs: 0, currentAssignment: true });
+        const after = wait?.kind === "agents" ? wait.after : { [input.senderId]: (recipient.metadata?.peerResultAfter as Record<string, number> | undefined)?.[input.senderId] ?? 0 };
+        const current = await (this.directory ?? this).await({ parentId: thread.id, threadIds: [input.senderId], after, timeoutMs: 0, currentAssignment: true });
         if (!current.ok) return current;
         waitResult = { wait, settlement: current.value.settlement };
         const accepted = this.request(input.requestId, input, "send"); if (!accepted.ok) return accepted;
@@ -1659,12 +1600,11 @@ export class ThreadService implements ThreadApi {
     if (patch.metadata && "autoArchiveViewedAt" in patch.metadata && patch.metadata.autoArchiveViewedAt !== thread.metadata?.autoArchiveViewedAt) return bad("conflict", "Use view control instead of changing metadata.autoArchiveViewedAt");
     if (patch.title !== undefined && options.titleSource === "agent" && thread.metadata?.titleSource === "manual") return bad("conflict", "The person named this thread; their title stays until they rename it again");
     if (patch.metadata && "archived" in patch.metadata && patch.archived === undefined) return bad("invalid_request", "Use the explicit archived control instead of changing metadata.archived");
-    for (const key of ["agentWait", "peerDependencies", "peerDependents", "dependencyUpdate", "peerDependencyVersion", "dependencyError", "agentName", "cancellationRequest", "foreground", "attentionSummary", "context", "execution", "raw", "sandbox", "sandboxProfile", "sandboxGateway", "nativeHistoryRequired", "runnerReference", "ephemeral"] as const) if (patch.metadata && key in patch.metadata && digest(patch.metadata[key] ?? null) !== digest(thread.metadata?.[key] ?? null)) return bad("conflict", `Thread ${key} is immutable`);
+    for (const key of ["agentWait", "peerDependencies", "peerResultAfter", "peerDependents", "peerSubscriberAfter", "dependencyUpdate", "peerDependencyVersion", "dependencyError", "agentName", "cancellationRequest", "cancellationSettled", "foreground", "attentionSummary", "context", "execution", "raw", "telephoneContext", "sandbox", "sandboxProfile", "sandboxGateway", "nativeHistoryRequired", "runnerReference", "ephemeral"] as const) if (patch.metadata && key in patch.metadata && digest(patch.metadata[key] ?? null) !== digest(thread.metadata?.[key] ?? null)) return bad("conflict", `Thread ${key} is immutable`);
     if (patch.metadata && "taskDescription" in patch.metadata && (typeof patch.metadata.taskDescription !== "string" || !patch.metadata.taskDescription.trim() || patch.metadata.taskDescription.length > 240)) return bad("invalid_request", "Task description must be a nonempty sentence of at most 240 characters");
     if (patch.metadata && "mode" in patch.metadata && !isThreadModeName(patch.metadata.mode)) return bad("invalid_request", "A thread mode must be declared in modes.ts");
     if (!validSandboxBoundary({ ...thread.metadata, ...patch.metadata })) return bad("conflict", "Sandbox execution boundary is immutable");
     const admission = patch.metadata && "mode" in patch.metadata ? threadMode(patch.metadata.mode)!.admission : thread.admission;
-    if (patch.archived && this.localDependencyProtection(id)) return { ok: false, error: { code: "dependency_conflict", message: "Resolve or release this agent's dependency before archiving either endpoint", dependencies: this.dependencyEdges(this.snapshot(), id) } };
     if (patch.archived && (this.execution(id) || this.runtimes.get(id)?.busy || thread.state === "running")) return bad("conflict", "Stop this thread before archiving it, or use control(update)");
     // Archiving an archived thread is a no-op rather than a fresh archivedAt: a
     // subtree cascade reaches the same thread from more than one owner.
@@ -1715,7 +1655,7 @@ export class ThreadService implements ThreadApi {
   }
   private hasAutoArchiveWork(thread: Thread): boolean {
     const runtime = this.runtimes.get(thread.id);
-    return !!(thread.metadata?.startupFailure || thread.metadata?.incompleteResult || thread.metadata?.agentWait || this.localDependencyProtection(thread.id) || thread.wakeSchedule || thread.state !== "idle" || thread.pendingMessages > 0
+    return !!(thread.metadata?.startupFailure || thread.metadata?.incompleteResult || thread.metadata?.agentWait || thread.dependencies?.length || thread.wakeSchedule || thread.state !== "idle" || thread.pendingMessages > 0
       || this.sql("SELECT 1 FROM thread_question WHERE thread_id=? AND accepted_at IS NULL LIMIT 1").get(thread.id)
       || this.execution(thread.id) || (!runtime && thread.metadata?.runnerReference) || runtime?.busy || runtime?.commandRunning
       || this.opening.has(thread.id) || this.operations.has(thread.id) || this.halts.has(thread.id) || this.waitRegistering.has(thread.id));
@@ -1723,24 +1663,26 @@ export class ThreadService implements ThreadApi {
   async control(input: ThreadControl): Promise<Result<Thread>> {
     if (this.closed || this.suspended) return bad("unavailable", "Thread controller is suspended");
     if (!this.get(input.threadId)) return bad("not_found", "Thread not found");
-    if (input.action === "dependencyClaim") {
-      if (typeof input.dependentId !== "string" || !input.dependentId.trim() || input.dependentId === input.threadId || typeof input.active !== "boolean") return bad("invalid_request", "Invalid dependency endpoint reservation");
+    if (input.action === "resultSubscribe") {
+      if (typeof input.dependentId !== "string" || !input.dependentId.trim() || input.dependentId === input.threadId || typeof input.active !== "boolean" || input.after !== undefined && (!Number.isSafeInteger(input.after) || input.after < 0)) return bad("invalid_request", "Invalid result subscription");
       const current = this.get(input.threadId)!;
-      if (input.active && (current.held || current.metadata?.archived || this.halts.has(current.id))) return bad("conflict", "Dependency endpoint is closing or archived");
       const incoming = current.metadata?.peerDependents as string[] | undefined ?? [];
       const dependents = input.active ? [...new Set([...incoming, input.dependentId])] : incoming.filter(id => id !== input.dependentId);
-      this.sql("UPDATE thread SET metadata=json_set(metadata,'$.peerDependents',json(?)) WHERE id=?").run(JSON.stringify(dependents), current.id);
+      const cursors = { ...(current.metadata?.peerSubscriberAfter as Record<string, number> | undefined) };
+      if (input.active) cursors[input.dependentId] = input.after ?? 0;
+      else delete cursors[input.dependentId];
+      this.sql("UPDATE thread SET metadata=json_set(metadata,'$.peerDependents',json(?),'$.peerSubscriberAfter',json(?)) WHERE id=?").run(JSON.stringify(dependents), JSON.stringify(cursors), current.id);
+      if (input.active && !current.held && current.state === "idle" && !current.pendingMessages) {
+        const settlement = this.latestSettlement(current.id);
+        const result = settlement && this.sql("SELECT * FROM thread_execution WHERE id=?").get(settlement.executionId) as Json | undefined;
+        if (settlement && result && this.currentAssignmentResult(result)) {
+          this.queueResult(current, input.dependentId, settlement.executionId, settlement.workId, settlement.outcome, settlement.finalMessage, settlement.error);
+        } else if (current.metadata?.archived) {
+          this.queueResult(current, input.dependentId, `closed:${current.id}:${current.revision}`, undefined, "cancelled", null);
+        }
+      }
       this.changed(current.id);
-      if (!input.active && !dependents.length) void this.archiveSettledBackground(current.id);
-      return good(this.get(current.id)!);
-    }
-    if (input.action === "dependencyRelease") {
-      if (typeof input.dependsOn !== "string" || !input.dependsOn.trim() || input.dependsOn === input.threadId) return bad("invalid_request", "Invalid dependency release");
-      const current = this.get(input.threadId)!;
-      if (!(current.dependencies ?? []).includes(input.dependsOn)) return good(current);
-      if (!current.held && !current.metadata?.archived && waitsOn(current, input.dependsOn))
-        return { ok: false, error: { code: "dependency_conflict", message: "The dependent agent is waiting on this result", dependencies: [{ threadId: current.id, dependsOn: input.dependsOn }] } };
-      const released = await this.dropDependencies(current.id, [input.dependsOn]); if (!released.ok) return released;
+      void this.routeNotifications();
       return good(this.get(current.id)!);
     }
     if (input.action === "dependencies") {
@@ -1776,14 +1718,7 @@ export class ThreadService implements ThreadApi {
     if (input.action === "close" || input.action === "stop" || input.action === "cancel") {
       const id = input.threadId;
       if (input.action !== "cancel" && this.get(id)?.metadata?.archived && !this.execution(id) && !this.pending(id).length && !this.runtimes.get(id)?.busy) return good(this.get(id)!);
-      if (input.action !== "cancel") {
-        const protection = await this.closeProtection(id); if (!protection.ok) return protection;
-        if (this.closed || this.suspended) return bad("unavailable", "Close remains with its owner during handoff");
-        const released = await this.releaseInertDependencies(id, protection.value); if (!released.ok) return released;
-        if (this.closed || this.suspended) return bad("unavailable", "Close remains with its owner during handoff");
-        if (this.localDependencyProtection(id)) return { ok: false, error: { code: "dependency_conflict", message: "A dependency endpoint reservation protects this agent. Its dependent must resolve or release it first.", dependencies: [...this.dependencyEdges(this.snapshot(), id), ...((this.get(id)?.metadata?.peerDependents as string[] | undefined) ?? []).map(threadId => ({ threadId, dependsOn: id }))] } };
-      }
-      this.sql("UPDATE thread SET held=1,metadata=json_set(metadata,'$.cancellationRequest',?) WHERE id=?").run(input.action === "cancel" ? "cancel" : "close", id);
+      this.sql("UPDATE thread SET held=1,metadata=json_set(json_remove(metadata,'$.cancellationSettled'),'$.cancellationRequest',?) WHERE id=?").run(input.action === "cancel" ? "cancel" : "close", id);
       this.changed(id);
       const halted = await this.halt(id); if (!halted.ok) return halted;
       return good(this.get(id)!);
@@ -1802,8 +1737,6 @@ export class ThreadService implements ThreadApi {
       if (current.metadata?.archived) return good(current);
       const viewedAt = this.autoArchiveViewedAt(current);
       if (viewedAt === undefined || viewedAt >= input.inactiveBefore) return good(current);
-      const protection = await this.closeProtection(input.threadId); if (!protection.ok) return good(this.get(input.threadId)!);
-      const released = await this.releaseInertDependencies(input.threadId, protection.value); if (!released.ok) return good(this.get(input.threadId)!);
       const latest = this.get(input.threadId)!;
       if (latest.updatedAt >= input.inactiveBefore || (this.autoArchiveViewedAt(latest) ?? Infinity) >= input.inactiveBefore || this.hasAutoArchiveWork(latest)) return good(latest);
       return this.update(input.threadId, { archived: true });
@@ -1892,16 +1825,38 @@ export class ThreadService implements ThreadApi {
     }
     return bad("invalid_request", "Unknown thread control action");
   }
+  private finishIdleCancellation(id: string): void {
+    const thread = this.get(id)!;
+    if (thread.metadata?.cancellationSettled) return;
+    const executionId = `cancel:${id}:${thread.revision}`;
+    const assignments = this.sql(`SELECT w.id,w.sender_id FROM thread_work w WHERE w.thread_id=? AND w.sender_id IS NOT NULL AND w.sender_id!=? AND w.source='explicit'
+      AND NOT EXISTS(SELECT 1 FROM thread_assignment_reply r WHERE r.work_id=w.id)`).all(id, id) as Array<{ id: string; sender_id: string }>;
+    const recipients = [...new Set([...assignments.map(work => work.sender_id), ...((thread.metadata?.peerDependents as string[] | undefined) ?? [])])];
+    const now = Date.now();
+    this.transaction(() => {
+      this.sql(`INSERT INTO thread_execution(id,thread_id,work_id,settings,created_at,ended_at,outcome,final_message,settlement_seq)
+        VALUES(?,?,?,?,?,?,'cancelled','null',(SELECT COALESCE(MAX(settlement_seq),0)+1 FROM thread_execution))`).run(executionId, id, executionId, JSON.stringify(thread.settings), now, now);
+      for (const work of assignments) this.sql("INSERT INTO thread_assignment_reply(work_id,execution_id) VALUES(?,?)").run(work.id, executionId);
+      for (const recipient of recipients) this.queueResult(thread, recipient, executionId, undefined, "cancelled", null);
+      this.dischargeSubscribers(id, recipients);
+      this.sql("UPDATE thread SET metadata=json_set(metadata,'$.cancellationSettled',json('true')) WHERE id=?").run(id);
+    });
+    const settlement = this.latestSettlement(id)!;
+    for (const listener of this.listeners) listener({ threadId: id, event: { type: "thread_settled", ...settlement, workIds: [] } });
+    void this.routeNotifications();
+  }
   private completeCancellation(id: string): void {
     const request = this.get(id)?.metadata?.cancellationRequest;
     if (request !== "close" && request !== "cancel") return;
     this.transaction(() => {
       this.sql("UPDATE thread_work SET status='done',outcome='cancelled' WHERE thread_id=? AND status!='done'").run(id);
       this.sql("DELETE FROM thread_wake WHERE thread_id=?").run(id);
-      this.sql("UPDATE thread SET held=0,state='idle',metadata=json_remove(metadata,'$.cancellationRequest','$.archiveInterruption','$.watchStopped','$.agentWait','$.admissionWait','$.providerWait') WHERE id=?").run(id);
+      this.replaceDependencies(id, []);
+      this.sql("UPDATE thread SET held=0,state='idle',metadata=json_remove(metadata,'$.cancellationRequest','$.cancellationSettled','$.archiveInterruption','$.watchStopped','$.agentWait','$.admissionWait','$.providerWait') WHERE id=?").run(id);
       if (request === "close") this.sql("UPDATE thread SET metadata=json_set(metadata,'$.archived',json('true'),'$.archivedAt',?) WHERE id=?").run(new Date().toISOString(), id);
     });
     this.changed(id);
+    void this.recoverDependencies(id);
   }
   private halt(id: string): Promise<Result<Thread>> {
     const current = this.halts.get(id); if (current) return current;
@@ -1931,7 +1886,9 @@ export class ThreadService implements ThreadApi {
         }
         const retainedExecution = this.execution(id);
         if (retainedExecution) this.capacityLedger?.retain(id, retainedExecution.id, retainedExecution.work_id, "work");
-        await this.finish(id, runtime, runtime?.outcome ?? "cancelled", runtime?.finalMessage ?? null);
+        const cancelling = this.get(id)?.metadata?.cancellationRequest;
+        if ((cancelling === "close" || cancelling === "cancel") && !this.execution(id)) this.finishIdleCancellation(id);
+        else await this.finish(id, runtime, cancelling === "close" || cancelling === "cancel" ? "cancelled" : runtime?.outcome ?? "cancelled", cancelling ? null : runtime?.finalMessage ?? null);
         await this.releaseCapacity(id);
         if (runtime) await this.retire(id, runtime);
         if (this.suspended || this.closed) return bad("unavailable", "Halt remains with the thread owner during handoff");
@@ -1954,7 +1911,7 @@ export class ThreadService implements ThreadApi {
     if (!this.get(id)) return bad("not_found", "Thread not found");
     if (this.get(id)?.metadata?.archived) return bad("unavailable", "Restore this archived thread before using its native session");
     if (["prompt", "steer", "follow_up", "abort", "abort_bash", "abort_retry", "clear_queue", "set_model", "set_thinking_level", "set_speed", "set_session_name", "cycle_model", "cycle_thinking_level"].includes(command.type)) return bad("invalid_request", "Use thread messaging or control(settings/update) so the durable owner records this change");
-    const durable = ["fork", "clone", "compact", "new_session", "switch_session", "navigate_tree", "bash", "cycle_model", "cycle_thinking_level", "export_html"].includes(command.type);
+    const durable = ["native_operation", "fork", "clone", "compact", "new_session", "switch_session", "navigate_tree", "bash", "cycle_model", "cycle_thinking_level", "export_html"].includes(command.type);
     const observing = ["get_state", "get_context", "get_messages", "get_session_stats", "get_available_models", "get_available_thinking_levels", "get_commands", "get_fork_messages", "set_session_name", "extension_ui_response"].includes(command.type);
     if (!observing && !command.id) return bad("invalid_request", "Executing commands require a stable command.id for capacity custody");
     const commandExecution = `command:${id}:${command.id}`;
@@ -2010,7 +1967,7 @@ export class ThreadService implements ThreadApi {
       } catch (error) {
         if (!observing && error instanceof RunnerStartupError && !this.get(id)?.metadata?.runnerReference) await this.releaseCapacity(id, commandExecution);
         const uncertain = /uncertain|indeterminate|unconfirmed.outcome/i.test(errorText(error));
-        const failure = bad(uncertain ? "conflict" : "unavailable", `${command.id ?? command.type}: ${errorText(error)}`);
+        const failure = bad(error instanceof NativeRejection ? error.code : uncertain ? "conflict" : "unavailable", `${command.id ?? command.type}: ${errorText(error)}`);
         if (!this.suspended && !this.closed) {
           if (receipt && error instanceof NativeRejection) this.sql("UPDATE thread_request SET response=? WHERE id=?").run(JSON.stringify(failure), command.id!);
           this.sql("UPDATE thread SET metadata=json_set(metadata,'$.commandError',?) WHERE id=?").run(failure.ok ? "" : failure.error.message, id); this.changed(id);
@@ -2137,7 +2094,7 @@ export class ThreadService implements ThreadApi {
     if (!session) return Promise.reject(new Error("Pi session is not initialized"));
     const id = command.id ?? `${runtime.epoch}:${++runtime.commandNumber}`;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { runtime.waiters.delete(id); reject(new AcknowledgementTimeout(`Pi ${command.type} acknowledgement timed out; accepted work remains in custody`)); }, command.type === "compact" ? 240_000 : 30_000);
+      const timer = command.type === "native_operation" ? undefined : setTimeout(() => { runtime.waiters.delete(id); reject(new AcknowledgementTimeout(`Pi ${command.type} acknowledgement timed out; accepted work remains in custody`)); }, command.type === "compact" ? 240_000 : 30_000);
       runtime.waiters.set(id, { resolve, reject, timer });
       void session.command({ ...command, id }).catch(error => { const waiter = runtime.waiters.get(id); if (waiter) { clearTimeout(waiter.timer); runtime.waiters.delete(id); reject(error); } });
     });
@@ -2160,7 +2117,15 @@ export class ThreadService implements ThreadApi {
       this.wake(id);
     }
   }
-  private async attach(id: string, recoverMissing = false): Promise<Runtime | undefined> {
+  private attach(id: string, recoverMissing = false): Promise<Runtime | undefined> {
+    const attaching = this.attaching.get(id); if (attaching) return attaching;
+    const opening = this.opening.get(id); if (opening) return opening;
+    const existing = this.runtimes.get(id); if (existing) return Promise.resolve(existing);
+    const operation = this.attachOwned(id, recoverMissing).finally(() => this.attaching.delete(id));
+    this.attaching.set(id, operation);
+    return operation;
+  }
+  private async attachOwned(id: string, recoverMissing: boolean): Promise<Runtime | undefined> {
     const thread = this.get(id)!;
     if (thread.metadata?.runnerReference) this.phase(id, "recovering", "Reattaching retained runtime socket");
     if (thread.metadata?.runnerReference && !this.options.attachSession) throw new Error("Native runner attachment is not configured");
@@ -2171,18 +2136,28 @@ export class ThreadService implements ThreadApi {
       const session = recoverMissing
         ? await this.options.recoverSession!(id, output, exit)
         : await this.options.attachSession?.(thread.metadata?.runnerReference as Parameters<AttachPiSession>[0], output, exit);
-      if (session) { runtime.session = session; return runtime; }
+      if (session) {
+        runtime.session = session;
+        const state = await this.rpc(runtime, { type: "get_state" });
+        this.adoptReference(id, state);
+        runtime.busy = this.busy(state); runtime.finalMessage = state.lastAssistantMessage;
+        return runtime;
+      }
       if (!this.closed && !this.suspended) this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.runnerReference') WHERE id=?").run(id);
       this.runtimes.delete(id); return undefined;
-    } catch (error) { this.runtimes.delete(id); throw error; }
+    } catch (error) {
+      if (!runtime.session && this.runtimes.get(id) === runtime) this.runtimes.delete(id);
+      throw error;
+    }
   }
   private environmentKey(thread: Thread, extraEnv: Record<string, string | undefined>): string {
-    return digest([import.meta.url, thread.cwd, thread.metadata?.context, thread.metadata?.raw, thread.metadata?.sandbox,
+    return digest([import.meta.url, thread.cwd, thread.metadata?.context, thread.metadata?.raw, thread.metadata?.telephoneContext, thread.metadata?.sandbox,
       thread.metadata?.execution, sandboxPolicy(thread.metadata ?? {}), thread.role, thread.metadata?.watchList, thread.metadata?.mode,
       this.options.environment?.(thread), extraEnv]);
   }
   private open(id: string, settings: ThreadSettings, recovering: boolean, extraEnv: Record<string, string | undefined> = {}): Promise<Runtime> {
     const opening = this.opening.get(id); if (opening) return opening;
+    const attaching = this.attaching.get(id); if (attaching) return attaching.then(runtime => runtime ?? this.open(id, settings, recovering, extraEnv));
     const existing = this.runtimes.get(id); if (existing) return Promise.resolve(existing);
     const operation = this.openOwned(id, settings, recovering, extraEnv).finally(() => this.opening.delete(id));
     this.opening.set(id, operation); return operation;
@@ -2238,6 +2213,8 @@ export class ThreadService implements ThreadApi {
     const context = thread.metadata?.context;
     if (context !== undefined && (!isRunContext(context) || thread.metadata?.execution === "root-repair")) throw new Error("Invalid recorded isolated execution boundary");
     const raw = thread.metadata?.raw === true;
+    const telephone = thread.metadata?.telephoneContext;
+    if (telephone !== undefined && (!raw || !isTelephoneContext(telephone))) throw new Error("Invalid recorded telephone boundary");
     const sandbox = thread.metadata?.sandbox === true;
     if (!validSandboxBoundary(thread.metadata ?? {})) throw new Error("Invalid recorded sandbox boundary");
     if (sandbox && thread.cwd !== join(this.options.sessionsDir, "sandboxes", id)) throw new Error("Sandbox workspace does not match its thread owner");
@@ -2260,7 +2237,7 @@ export class ThreadService implements ThreadApi {
       this.phase(id, recovering ? "recovering" : "starting", recovering ? "Reopening retained native session" : "Starting native session");
       if (recoveredExecution) this.capacityLedger?.entered(id, recoveredExecution.id);
       runtime.session = await this.options.openSession({ threadId: id, cwd: thread.cwd, sessionFile: thread.sessionFile,
-        args: ["--provider", provider!, "--model", model.join("/"), "--thinking", settings.thinkingLevel, "--name", thread.title, ...(raw ? [RAW_ARGUMENT] : []), ...(sandbox ? [SANDBOX_ARGUMENT, SANDBOX_POLICY_ARGUMENT, JSON.stringify(sandboxPolicy(thread.metadata ?? {}))] : []), ...(context ? ["--orchestrator-context", JSON.stringify(context)] : [])], env, threads: this.directory ?? this },
+        args: ["--provider", provider!, "--model", model.join("/"), "--thinking", settings.thinkingLevel, "--name", thread.title, ...(raw ? [RAW_ARGUMENT] : []), ...(telephone ? [TELEPHONE_CONTEXT_ARGUMENT, JSON.stringify(telephone)] : []), ...(sandbox ? [SANDBOX_ARGUMENT, SANDBOX_POLICY_ARGUMENT, JSON.stringify(sandboxPolicy(thread.metadata ?? {}))] : []), ...(context ? ["--orchestrator-context", JSON.stringify(context)] : [])], env, threads: this.directory ?? this },
         event => this.output(id, runtime, event), code => this.exited(id, runtime, code));
       const state = await this.rpc(runtime, { type: "get_state" }); this.adoptReference(id, state);
       if (env.PI_THREAD_RUNNER_REFERENCE && state.threadSessionKey !== env.PI_THREAD_SESSION_KEY) runtime.environmentKey = undefined;
@@ -2309,12 +2286,6 @@ export class ThreadService implements ThreadApi {
     const projection = this.projections.get(id) ?? { live: { text: "", thinking: "", isThinking: false, tools: [] }, activity: createExecutionActivity() };
     this.projections.set(id, projection);
     observeExecutionActivity(projection.activity, event);
-    if (event.type === "context_update" && event.context) {
-      projection.context = event.context as Json;
-      const text = (message: Json) => (message.content ?? []).filter((part: Json) => part.type === "text").map((part: Json) => part.text).join("");
-      const final = runtime.finalMessage, finalText = final && text(final);
-      if (finalText && projection.context.messages?.some((message: Json) => message.role === "assistant" && text(message) === finalText)) { projection.live.text = ""; projection.live.thinking = ""; }
-    }
     if (event.type === "message_start" && (event.message as Json)?.role === "assistant") { projection.live.text = ""; projection.live.thinking = ""; }
     if (event.type === "message_update") {
       const update = event.assistantMessageEvent as Json;
@@ -2343,7 +2314,7 @@ export class ThreadService implements ThreadApi {
     }
     if (event.type === "response") {
       const waiter = runtime.waiters.get(String(event.id)), inputReceipt = inputCommandReceipt(event.id);
-      if (waiter) { clearTimeout(waiter.timer); runtime.waiters.delete(String(event.id)); event.success === false ? waiter.reject(new NativeRejection(String(event.error ?? "Pi command rejected"))) : waiter.resolve(event.data ?? {}); }
+      if (waiter) { clearTimeout(waiter.timer); runtime.waiters.delete(String(event.id)); event.success === false ? waiter.reject(new NativeRejection(String(event.error ?? "Pi command rejected"), event.errorCode === "oversized" || event.errorCode === "invalid_request" ? event.errorCode : "unavailable")) : waiter.resolve(event.data ?? {}); }
       else if (inputReceipt) {
         const [executionId, workId] = inputReceipt;
         if (this.execution(id)?.id === executionId && !this.row(id)?.held && !this.halts.has(id)) {
@@ -2399,6 +2370,14 @@ export class ThreadService implements ThreadApi {
   private async drain(id: string): Promise<void> {
     if (this.suspended || this.closed) return;
     const thread = this.get(id); if (!thread || thread.metadata?.archived || this.row(id)?.held || this.halts.has(id) || this.closed) return;
+    const env = this.options.environment?.(thread);
+    if (env && [env.PI_MODEL_DELIVERY_TIMEZONE, env.PI_PERSON_TIMEZONE_FILE, env.PI_PERSON_SETTINGS_DATA, env.PI_REMOTE_DATA].some(value => value !== undefined)) {
+      const timezone = readMessageDeliveryTimezone(env);
+      if (!timezone.ok) {
+        this.admissionWait(id, { code: timezone.error.code === "invalid" ? "invalid_request" : "unavailable", message: `Owner timezone authority is not ready: ${timezone.error.message}` });
+        return;
+      }
+    }
     if (!await this.recoverUnassignedCapacity(id)) return;
     const admissionWait = thread.metadata?.admissionWait as Json | undefined;
     if (Number(admissionWait?.retryAt) > Date.now()) return;
@@ -2566,22 +2545,45 @@ export class ThreadService implements ThreadApi {
     else await this.releaseUnenteredCapacity(id, execution.id);
     this.changed(id);
   }
+  private queueResult(thread: Thread, recipient: string, executionId: string, workId: string | undefined, outcome: WorkOutcome, finalMessage: unknown, error?: string): boolean {
+    const receipt = `thread-result:${executionId}:${recipient}`;
+    if (this.sql("SELECT 1 FROM thread_work WHERE id=?").get(receipt)) return true;
+    const cursor = (this.get(thread.id)?.metadata?.peerSubscriberAfter as Record<string, number> | undefined)?.[recipient];
+    const settlement = this.sql("SELECT settlement_seq FROM thread_execution WHERE id=?").get(executionId) as { settlement_seq: number } | undefined;
+    if (outcome !== "cancelled" && cursor !== undefined && settlement && settlement.settlement_seq <= cursor) return false;
+    this.insertMessage(receipt, {
+      requestId: receipt, threadId: recipient, senderId: thread.id,
+      text: serializeThreadNotification({ type: "thread_idle", title: thread.title, outcome, finalMessage, ...(error ? { error } : {}) }),
+      delivery: "steer", source: "notification", replyTo: workId,
+    }, this.get(recipient)?.settings ?? thread.settings, false, thread.agentName);
+    if (this.row(recipient)) {
+      if (!this.row(recipient)?.held && !this.get(recipient)?.metadata?.archived) this.sql("UPDATE thread SET state='running' WHERE id=?").run(recipient);
+      this.changed(recipient); this.wake(recipient);
+    }
+    return true;
+  }
+  private dischargeSubscribers(id: string, recipients: string[]): void {
+    const thread = this.get(id)!;
+    const remaining = ((thread.metadata?.peerDependents as string[] | undefined) ?? []).filter(recipient => !recipients.includes(recipient));
+    const cursors = Object.fromEntries(remaining.map(recipient => [recipient, (thread.metadata?.peerSubscriberAfter as Record<string, number> | undefined)?.[recipient] ?? 0]));
+    this.sql("UPDATE thread SET metadata=json_set(metadata,'$.peerDependents',json(?),'$.peerSubscriberAfter',json(?)) WHERE id=?").run(JSON.stringify(remaining), JSON.stringify(cursors), id);
+  }
   private async finish(id: string, runtime: Runtime | undefined, outcome: WorkOutcome, finalMessage: Json | null, error?: string): Promise<void> {
     if (this.suspended || this.closed) return;
+    const cancellation = this.get(id)?.metadata?.cancellationRequest;
+    if (cancellation === "close" || cancellation === "cancel") { outcome = "cancelled"; finalMessage = null; error = undefined; }
     const failure=error??finalMessage?.errorMessage??"";
     const execution = this.execution(id); if (!execution || runtime && runtime.executionId !== execution.id) return;
     if(outcome==="failed"&&!this.row(id)?.held&&(isTransientFailure(failure)||failure.startsWith(POOLED_ACCOUNT_WAIT))){
       await this.waitForProvider(id,runtime,execution,failure);return;
     }
     this.phase(id, "finishing", "Saving turn receipts and notifying dependents");
-    await this.pruneSettledDependencies(id);
-    if (this.suspended || this.closed) return;
     if (runtime && outcome === "complete") {
       const state = await this.rpc(runtime, { type: "get_state" });
       if (this.busy(state) || this.execution(id)?.id !== execution.id) return;
     }
     const thread = this.get(id)!;
-    const assignmentPending = !!(thread.metadata?.agentWait || thread.dependencies?.some(target => liveDependency(thread, target, this.get(target) ?? "unknown")) || thread.wakeSchedule
+    const assignmentPending = outcome !== "cancelled" && !!(thread.metadata?.agentWait || thread.dependencies?.length || thread.wakeSchedule
       || this.sql("SELECT 1 FROM thread_question WHERE thread_id=? AND accepted_at IS NULL LIMIT 1").get(id));
     const incompleteResult = outcome === "complete" && !assignmentPending
       && !(finalMessage?.role === "assistant" && Array.isArray(finalMessage.content)
@@ -2591,8 +2593,8 @@ export class ThreadService implements ThreadApi {
       error = "Native turn ended without a final result or a durable dependency wait";
     }
     const assignments = assignmentPending ? [] : this.sql(`SELECT w.id,w.sender_id FROM thread_work w WHERE w.thread_id=? AND w.sender_id IS NOT NULL AND w.sender_id!=? AND w.source='explicit'
-      AND (w.status='done' OR w.execution_id=?) AND NOT EXISTS(SELECT 1 FROM thread_assignment_reply r WHERE r.work_id=w.id)`).all(id, id, execution.id) as Array<{ id: string; sender_id: string }>;
-    const recipients = assignmentPending ? [] : [...new Set([...assignments.map(work => work.sender_id), ...((thread.metadata?.peerDependents as string[] | undefined) ?? []), ...this.snapshot().filter(peer => peer.dependencies?.includes(id)).map(peer => peer.id)])];
+      AND (w.status='done' OR w.execution_id=? OR ?) AND NOT EXISTS(SELECT 1 FROM thread_assignment_reply r WHERE r.work_id=w.id)`).all(id, id, execution.id, outcome === "cancelled" ? 1 : 0) as Array<{ id: string; sender_id: string }>;
+    const recipients = assignmentPending ? [] : [...new Set([...assignments.map(work => work.sender_id), ...((thread.metadata?.peerDependents as string[] | undefined) ?? [])])];
     this.capacityLedger?.retain(id, execution.id, execution.work_id, "work");
     let workIds: string[] = [];
     this.transaction(() => {
@@ -2605,13 +2607,9 @@ export class ThreadService implements ThreadApi {
       if (incompleteResult) this.sql("UPDATE thread SET metadata=json_set(metadata,'$.incompleteResult',json(?)) WHERE id=?").run(JSON.stringify({ executionId: execution.id, error }), id);
       this.sql("UPDATE thread SET state=CASE WHEN held=1 THEN 'idle' WHEN EXISTS(SELECT 1 FROM thread_work w WHERE w.thread_id=thread.id AND w.status!='done') THEN 'running' ELSE 'idle' END,revision=revision+1,updated_at=? WHERE id=?").run(Date.now(), id);
       for (const work of assignments) this.sql("INSERT INTO thread_assignment_reply(work_id,execution_id) VALUES(?,?)").run(work.id, execution.id);
-      for (const recipient of recipients) {
-        const receipt = `thread-result:${execution.id}:${recipient}`;
-        if (!this.sql("SELECT 1 FROM thread_work WHERE id=?").get(receipt)) this.insertMessage(receipt, {
-          requestId: receipt, threadId: recipient, senderId: id, text: serializeThreadNotification({ type: "thread_idle", title: thread.title, outcome, finalMessage, ...(error ? { error } : {}) }),
-          delivery: "steer", source: "notification", replyTo: execution.work_id,
-        }, this.get(recipient)?.settings ?? thread.settings, false, thread.agentName);
-      }
+      const delivered = recipients.filter(recipient => this.queueResult(thread, recipient, execution.id, execution.work_id, outcome, finalMessage, error));
+      if (!assignmentPending) this.dischargeSubscribers(id, delivered);
+      if (cancellation === "close" || cancellation === "cancel") this.sql("UPDATE thread SET metadata=json_set(metadata,'$.cancellationSettled',json('true')) WHERE id=?").run(id);
     });
     if (runtime) { runtime.executionId = undefined; runtime.busy = false; }
     if (runtime?.lease) { const lease = runtime.lease; runtime.lease = undefined; await lease.release(); }
@@ -2626,7 +2624,7 @@ export class ThreadService implements ThreadApi {
     const settled = this.sql("SELECT settlement_seq,ended_at FROM thread_execution WHERE id=?").get(execution.id) as Json;
     for (const listener of this.listeners) listener({ threadId: id, event: { type: "thread_settled", seq: settled.settlement_seq, executionId: execution.id, workId: execution.work_id, workIds, outcome, ...(assignmentPending ? { assignmentPending: true } : {}), time: settled.ended_at, finalMessage, ...(error ? { error } : {}) } });
     if (runtime) await this.park(id, runtime);
-    if (!assignmentPending && !this.localDependencyProtection(id)) this.archiveBackgroundAfterCurrentOperation(id);
+    if (!assignmentPending) this.archiveBackgroundAfterCurrentOperation(id);
   }
   private async park(id: string, runtime: Runtime): Promise<void> {
     if (this.suspended || this.halts.has(id) || !runtime.session || runtime.busy || runtime.commandRunning || runtime.executionId || this.execution(id) || this.runtimes.get(id) !== runtime) return;

@@ -1,0 +1,164 @@
+#!/usr/bin/python3
+"""Gate the existing Root producer without interrupting an accepted request."""
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import pwd
+import re
+import subprocess
+import sys
+import tempfile
+
+JOURNAL = Path('/var/lib/pi-stack/native-history-root-boundary.json')
+UNIT = 'pi-kenan-root.service'
+
+
+def activation_module():
+    loader = importlib.machinery.SourceFileLoader('root_activation', str(Path(__file__).with_name('one-kenan-activate')))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def atomic(record):
+    JOURNAL.parent.mkdir(parents=True, mode=0o755, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix='.root-native-boundary-', dir=JOURNAL.parent)
+    try:
+        with os.fdopen(descriptor, 'w') as out:
+            os.fchmod(out.fileno(), 0o600)
+            json.dump(record, out)
+            out.write('\n')
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(temporary, JOURNAL)
+        descriptor = os.open(JOURNAL.parent, os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def escaped_native_count(host):
+    user = host.command('systemctl', 'show', UNIT, '-p', 'User', '--value')
+    uid = pwd.getpwnam(user).pw_uid
+    count = 0
+    pattern = re.compile(r'(?:runner-host\.(?:js|ts)|native-(?:host|guardian)\.mjs|(?:shared-)?runtime-host\.(?:mjs|ts)|pi-coding-agent/dist/(?:bundle/)?cli\.js)$')
+    for directory in Path('/proc').iterdir():
+        if not directory.name.isdigit():
+            continue
+        try:
+            if directory.stat().st_uid != uid:
+                continue
+            args = (directory / 'cmdline').read_bytes().decode(errors='replace').split('\0')
+            if any(pattern.search(argument) for argument in args):
+                count += 1
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+    return count
+
+
+def transition(host, candidate, *, probe=False, restore=False):
+    pid = host.command('systemctl', 'show', UNIT, '-p', 'MainPID', '--value')
+    active = host.command('systemctl', 'show', UNIT, '-p', 'ActiveState', '--value')
+    record = json.loads(JOURNAL.read_text()) if JOURNAL.exists() else None
+    if record and (record.get('version') != 1 or record.get('phase') not in ('gate-pending', 'gated', 'restored')):
+        raise RuntimeError('Root native boundary journal is invalid')
+    if record and record['phase'] in ('gate-pending', 'gated') and record['candidate'] != candidate:
+        raise RuntimeError('Another candidate owns the Root native boundary')
+    if active in ('inactive', 'failed') and pid == '0':
+        if restore and record and record['phase'] in ('gate-pending', 'gated'):
+            atomic({**record, 'phase': 'restored', 'reason': 'old-producer-exited'})
+        native = escaped_native_count(host)
+        return {'ready': native == 0, 'state': 'inactive' if native == 0 else 'inactive-native-retained', 'unit': UNIT, 'escapedNativeProcesses': native}
+    if active != 'active' or not re.fullmatch(r'[1-9][0-9]*', pid):
+        return {'ready': False, 'state': 'lifecycle-unsettled', 'unit': UNIT}
+    health = host.health('root')
+    source = health.get('releaseCommit')
+    if health.get('ok') is not True or health.get('releaseProtocol') != 1 or not isinstance(source, str) or not re.fullmatch(r'[a-f0-9]{40}', source):
+        raise RuntimeError('Existing Root producer lacks the inspected release protocol/source identity')
+    if restore:
+        if not record or record['phase'] == 'restored':
+            return {'ready': True, 'state': 'no-owned-gate', 'unit': UNIT}
+        if record['pid'] != pid or record['source'] != source:
+            atomic({**record, 'phase': 'restored', 'reason': 'old-generation-ended'})
+            return {'ready': True, 'state': 'old-generation-ended', 'unit': UNIT}
+        status, body = host.http('root', '/v1/admin/release', 'DELETE')
+        if status != 200 or body != {'ok': True, 'quiescing': False}:
+            raise RuntimeError('Owned Root native boundary could not be restored')
+        atomic({**record, 'phase': 'restored'})
+        return {'ready': True, 'state': 'restored', 'unit': UNIT}
+    if not probe:
+        # Journal ownership precedes the atomic producer gate. A lost POST reply
+        # retains that ownership for retry/restore; it never becomes a blind retry.
+        if record and record['phase'] in ('gate-pending', 'gated') and (record['pid'] != pid or record['source'] != source):
+            raise RuntimeError('Owned Root producer generation changed; restore the saved boundary before retry')
+        atomic({'version': 1, 'phase': 'gate-pending', 'candidate': candidate, 'pid': pid, 'source': source})
+        status, body = host.http('root', '/v1/admin/release', 'POST')
+        if status == 409:
+            # This protocol's busy response guarantees it did not establish a gate.
+            atomic({'version': 1, 'phase': 'restored', 'candidate': candidate, 'pid': pid, 'source': source, 'reason': 'busy-no-gate'})
+            return {'ready': False, 'state': 'busy', 'unit': UNIT}
+        if status != 200 or body != {'ok': True, 'quiescing': True}:
+            raise RuntimeError('Root native boundary gate response is unavailable; ownership retained')
+        atomic({'version': 1, 'phase': 'gated', 'candidate': candidate, 'pid': pid, 'source': source})
+    evidence = dict(host.idle(pid), escapedNativeProcesses=escaped_native_count(host))
+    # Protocol 1 gates active executors and the consent poller atomically.
+    # Durable unanswered consents and idle HTTP pool sockets are not native
+    # writers; keep them intact, rather than waiting for or cancelling them.
+    retained = any(evidence[field] for field in ('childProcesses', 'escapedNativeProcesses'))
+    counter_keys = set(health) & {'activeExecutions', 'consentActive'}
+    if probe and counter_keys:
+        if counter_keys != {'activeExecutions', 'consentActive'} or type(health['activeExecutions']) is not int or health['activeExecutions'] < 0 or type(health['consentActive']) is not bool:
+            raise RuntimeError('Root readonly executor counters are invalid')
+        retained = retained or health['activeExecutions'] != 0 or health['consentActive']
+    if retained:
+        return {'ready': False, 'state': 'writers-retained', 'unit': UNIT, 'evidence': evidence}
+    if host.command('systemctl', 'show', UNIT, '-p', 'MainPID', '--value') != pid:
+        return {'ready': False, 'state': 'generation-changed', 'unit': UNIT}
+    return {'ready': True, 'state': 'probe-atomic-gate-required' if probe else 'gated-idle', 'unit': UNIT, 'pid': pid, 'source': source, 'evidence': evidence,
+            'admissionGated': not probe, 'requiresAtomicGate': probe,
+            'executorState': 'readonly-counters' if probe and counter_keys else 'unobservable-readonly' if probe else 'atomically-quiesced'}
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('host')
+    parser.add_argument('candidate')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--probe', action='store_true')
+    mode.add_argument('--restore', action='store_true')
+    args = parser.parse_args()
+    if os.geteuid() != 0 or not re.fullmatch(r'[a-f0-9]{40}', args.candidate):
+        raise RuntimeError('Root native history boundary needs administrator and exact candidate SHA')
+    module = activation_module()
+    declaration = module.public_config(args.host)
+    if declaration.get('oneKenan') is False:
+        result = {'ready': True, 'state': 'not-enabled'}
+    elif declaration.get('oneKenan') is True:
+        host = module.Host(module.public_config('/etc/pi-stack/one-kenan.json'), args.candidate)
+        try:
+            result = transition(host, args.candidate, probe=args.probe, restore=args.restore)
+        except module.Deferred:
+            result = {'ready': False, 'state': 'generation-unsettled', 'unit': UNIT}
+    else:
+        raise RuntimeError('Root product authority is not explicitly declared')
+    print(json.dumps(result))
+    if not result['ready']:
+        print('native history boundary waiting: ' + result['state'], file=sys.stderr)
+        return 75
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except (RuntimeError, OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        print('Root native history boundary failed: ' + str(error), file=sys.stderr)
+        sys.exit(1)

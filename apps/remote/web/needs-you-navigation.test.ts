@@ -4,7 +4,7 @@ import { formatRoute, parseRoute, routeThreadId, TABS } from "./src/app/routes";
 import { prioritizeQuestion } from "./src/features/conversation/question-drafts";
 
 test("one Attention destination replaces the three entrances and retains existing links", () => {
-  expect(TABS).toEqual(["chats", "attention", "agents", "files", "machine"]);
+  expect(TABS).toEqual(["chats", "attention", "agents", "files", "machine", "settings"]);
   expect(parseRoute(formatRoute({ tab: "attention" }))).toEqual({ tab: "attention" });
   expect(routeThreadId({ tab: "attention" })).toBeNull();
   for (const hash of ["#/needs-you", "#/notifications", "#/calendar"]) expect(parseRoute(hash)).toEqual({ tab: "attention" });

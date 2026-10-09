@@ -36,18 +36,6 @@ public final class NativeStateTest {
         assertThrows(IllegalArgumentException.class, () -> NativeState.Touch.require(999));
     }
 
-    @Test public void finishBeforeConnectionCannotResumeRecordingWhenTheSocketOpens() {
-        NativeState.WritePhase finishing = NativeState.WritePhase.BUFFERING.finish();
-        assertEquals(NativeState.WritePhase.FINISHING_CONNECTING, finishing);
-        assertTrue(finishing.busy());
-        assertTrue(finishing.connecting);
-        assertFalse(finishing.recording);
-        assertEquals(NativeState.WritePhase.FINISHING, finishing.connected());
-        assertEquals(NativeState.WritePhase.RECORDING, NativeState.WritePhase.BUFFERING.connected());
-        assertEquals(NativeState.WritePhase.FINISHING, NativeState.WritePhase.RECORDING.finish());
-        assertThrows(IllegalStateException.class, () -> NativeState.WritePhase.IDLE.finish());
-    }
-
     @Test public void phoneReadyIsAnAcknowledgementNotAnUnknownCommand() {
         assertEquals(NativeState.PhoneFrame.READY, NativeState.require(NativeState.PhoneFrame.class, "ready"));
         assertFalse(NativeState.parse(NativeState.PhoneFrame.class, "result").isPresent());

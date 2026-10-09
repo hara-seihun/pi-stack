@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { appendFileSync, cpSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -19,16 +19,12 @@ cpSync(dirname(originalBase), dirname(base), { recursive: true });
 cpSync(join(dirname(dirname(originalBase)), "pi-agent-core"), join(modules, "@earendil-works/pi-agent-core"), { recursive: true });
 symlinkSync(dirname(dirname(dirname(originalBase))), join(directory, "node_modules"));
 if (!installedProof) patchBashSpillCopies(modules);
-const chunks = join(base, "bundle/chunks");
-const bundlePath = readdirSync(chunks).map(name => join(chunks, name)).find(path => path.endsWith(".js") && readFileSync(path, "utf8").includes("async function executeBashWithOperations("));
-assert.ok(bundlePath, "bundled shell executor exists");
-const patchedBundle = readFileSync(bundlePath, "utf8");
+const executorPath = join(base, "core/bash-executor.js");
+const patchedExecutor = readFileSync(executorPath, "utf8");
 if (!installedProof) {
   patchBashSpillCopies(modules);
-  assert.equal(readFileSync(bundlePath, "utf8"), patchedBundle, "patch is idempotent");
+  assert.equal(readFileSync(executorPath, "utf8"), patchedExecutor, "patch is idempotent");
 }
-// Export private entrypoints for the proof without replacing their implementation.
-appendFileSync(bundlePath, "\nexport { executeBashWithOperations, OutputAccumulator, bashExecutionToText, createBashTool as createHarnessBashTool, executeShellWithCapture };\n");
 const load = path => import(pathToFileURL(path).href);
 const sdk = {
   ...await load(join(base, "core/tools/bash.js")),
@@ -38,9 +34,7 @@ const sdk = {
   ...await load(join(base, "core/tools/output-accumulator.js")),
   ...await load(join(base, "modes/interactive/components/bash-execution.js")),
 };
-const bundle = await load(bundlePath);
 sdk.initTheme("dark");
-bundle.initTheme("dark");
 const { truncateTail } = await load(join(base, "core/tools/truncate.js"));
 const harnessBase = join(modules, "@earendil-works/pi-agent-core/dist/harness");
 const harnessSdk = {
@@ -59,7 +53,7 @@ const cases = [
 ];
 
 {
-  for (const [name, api] of [["SDK", sdk], ["bundled CLI", bundle]]) {
+  for (const [name, api] of [["SDK", sdk]]) {
     test(`${name}: oversized shell output stays in memory`, async () => {
       for (const fixture of cases) {
         const ops = api.createLocalBashOperations();
@@ -160,7 +154,7 @@ const cases = [
       assert.deepEqual(spillFiles(), startFiles);
     });
   }
-  for (const [name, api] of [["SDK harness", harnessSdk], ["bundled CLI harness", bundle]]) {
+  for (const [name, api] of [["SDK harness", harnessSdk]]) {
     test(`${name}: native environment shell capture never requests a spill`, async () => {
       const env = new NodeExecutionEnv({ cwd: directory });
       let tempFiles = 0;
@@ -188,8 +182,8 @@ const cases = [
       assert.deepEqual(spillFiles(), startFiles);
     });
   }
-  test("both installed source forms have valid syntax and no spill implementation", () => {
-    for (const path of [join(base, "core/bash-executor.js"), join(base, "core/tools/output-accumulator.js"), bundlePath]) {
+  test("managed SDK sources have valid syntax and no spill implementation", () => {
+    for (const path of [join(base, "core/bash-executor.js"), join(base, "core/tools/output-accumulator.js")]) {
       const source = readFileSync(path, "utf8");
       assert.doesNotMatch(source, /pi-bash-\$\{|defaultTempFilePath|ensureTempFile|closeTempFile|snapshot\.fullOutputPath/);
       const result = spawnSync(process.execPath, ["--check", path], { encoding: "utf8", timeout: 5000 });
@@ -203,10 +197,11 @@ const cases = [
       .replace("    const decoder = new TextDecoder();", "    const changedDecoder = new TextDecoder();");
     writeFileSync(executorPath, changed);
     try {
-      const bundleBefore = readFileSync(bundlePath, "utf8");
+      const accumulatorPath = join(base, "core/tools/output-accumulator.js");
+      const accumulatorBefore = readFileSync(accumulatorPath, "utf8");
       assert.throws(() => patchBashSpillCopies(modules), /Pinned Pi shell output section changed/);
       assert.equal(readFileSync(executorPath, "utf8"), changed);
-      assert.equal(readFileSync(bundlePath, "utf8"), bundleBefore);
+      assert.equal(readFileSync(accumulatorPath, "utf8"), accumulatorBefore);
     } finally { writeFileSync(executorPath, patched); }
   });
 }

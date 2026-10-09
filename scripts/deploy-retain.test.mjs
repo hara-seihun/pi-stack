@@ -86,6 +86,27 @@ test("retention keeps the selected release, the newest others, and every release
   }
 });
 
+test('first-unlock source manifests pin exact old modules until their custody is released', () => {
+  const f = fixture();
+  try {
+    const legacySource = 'a'.repeat(40), candidate = 'b'.repeat(40);
+    const legacyRemote = join(f.releases, 'remote', commit('remote', 0));
+    const legacyOrchestrator = join(f.releases, 'orchestrator', commit('orchestrator', 0));
+    for (const path of [legacyRemote, legacyOrchestrator]) {
+      writeFileSync(join(path, '.pi-stack-commit'), legacySource);
+      const at = Date.now() / 1000 - 86400; utimesSync(join(path, '.pi-stack-commit'), at, at);
+    }
+    const custody = join(dirname(f.releases), '.pi-stack-maintenance/native-history', candidate);
+    mkdirSync(custody, { recursive: true });
+    writeFileSync(join(custody, 'legacy.json'), JSON.stringify({ version: 1, candidate, legacySource, legacyRemote, legacyOrchestrator }));
+    const result = f.run(); assert.equal(result.status, 0, result.stderr);
+    assert.ok(existsSync(legacyRemote)); assert.ok(existsSync(legacyOrchestrator));
+    writeFileSync(join(custody, 'legacy.json'), '{broken');
+    const refused = f.run(); assert.notEqual(refused.status, 0); assert.match(refused.stderr, /nothing removed/);
+    assert.ok(existsSync(legacyRemote)); assert.ok(existsSync(legacyOrchestrator));
+  } finally { f.close(); }
+});
+
 function retiredLedger(f, states) {
   const result = spawnSync('python3', ['-c', `import sqlite3,sys,json
 with sqlite3.connect(sys.argv[1]) as db:

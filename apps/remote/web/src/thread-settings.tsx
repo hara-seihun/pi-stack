@@ -39,13 +39,16 @@ export function optimisticThreadSettings(settings: ThreadSettings, body: Record<
 export function SettingsFields({ session, settings, saving, onUpdate }: { session: Session; settings: ThreadSettings; saving: string; onUpdate: UpdateSettings }) {
   const disabled = Boolean(saving || session.archivedAt);
   const modelGroups = groupedModels(settings.models, model => ({ id: model.id, label: model.name || model.id }));
+  const selected = settings.model;
+  const selectedModel = selected ? `${selected.provider}\0${selected.id}` : "";
+  const selectedAvailable = selected !== null && settings.models.some(model => model.provider === selected.provider && model.id === selected.id);
   return <>
     {session.archivedAt && <p className="setting-unavailable">Restore this thread to change its settings.</p>}
     <section className="setting-card">
       <div className="setting-heading"><div><h3>Model</h3><p>Used for the next execution. Changing it does not interrupt current work.</p></div>{saving === "model" && <span className="setting-saving">Saving</span>}</div>
       {settings.effectiveModel && <p className="setting-unavailable">{settings.waiting === "retry" ? "Retry pending on" : settings.waiting ? `Waiting for ${settings.waiting} capacity on` : "Current work uses"} {settings.effectiveModel}.</p>}
       {settings.canRetryWaiting && settings.effectiveModel !== `${settings.model?.provider}/${settings.model?.id}` && <button type="button" disabled={disabled} onClick={() => onUpdate("retry", { retryWaiting: 1 })}>Switch waiting work to selected model</button>}
-      <div className="setting-select"><select aria-label="Model" value={`${settings.model?.provider}\0${settings.model?.id}`} disabled={disabled} onChange={event => { const [modelProvider, modelId] = event.target.value.split("\0"); onUpdate("model", { modelProvider, modelId }); }}>{modelGroups.map(group => <optgroup key={group.id} label={[group.title, group.description].filter(Boolean).join(" · ")}>{group.models.map(model => {
+      <div className="setting-select"><select aria-label="Model" value={selectedModel} disabled={disabled} onChange={event => { const [modelProvider, modelId] = event.target.value.split("\0"); onUpdate("model", { modelProvider, modelId }); }}>{!settings.model && <option value="" disabled>Not set — choose a model</option>}{settings.model && !selectedAvailable && <option value={selectedModel} disabled>{settings.model.id} · Unavailable</option>}{modelGroups.map(group => <optgroup key={group.id} label={[group.title, group.description].filter(Boolean).join(" · ")}>{group.models.map(model => {
         const icon = modelDisplayIcon(model.id, model.name || model.id, "");
         return <option key={`${model.provider}:${model.id}`} value={`${model.provider}\0${model.id}`}>{icon && `${icon} `}{model.name || model.id} · {model.provider}</option>;
       })}</optgroup>)}</select><span aria-hidden="true">⌄</span></div>

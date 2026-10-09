@@ -1,8 +1,0 @@
-{
-  "repository": "nvidia/nemotron-speech-streaming-en-0.6b",
-  "revision": "ebe59e5a817142986528bbbee5dba8db7b38ed50",
-  "files": {
-    "config.json": "dffe850bc79ad2b0f8117804502b24d2c4a445aafbed4c1e40f8d78e0cb44065",
-    "model.safetensors": "bddd8a7300826efd19cf7e01f1c7db8402bed6786fc4c7739632894f69c71473"
-  }
-}

@@ -1,0 +1,149 @@
+[
+  {
+    "caseId": "app-empty",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/app-empty-fixed.png",
+    "judgment": "Original PNG viewed at 1440×1000. Desktop empty inbox initially hid its guidance; owning shell CSS was corrected. Fresh navigation now shows No current chats and create/reopen guidance beneath the available + control, separate from Choose a chat in the detail pane.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/app-empty.png"
+    ]
+  },
+  {
+    "caseId": "app-loading",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/app-loading.png",
+    "judgment": "Original PNG viewed at 1440×1000 after fresh navigation, before reconnect grace expires. Connecting to your chats and its source-wait explanation are visible with the top readiness indicator; unresolved source is no longer represented as an empty chat list."
+  },
+  {
+    "caseId": "app-failure",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/app-failure.png",
+    "judgment": "Original PNG viewed at 1440×1000 after the owning 15-second reconnect grace, using a 20-second condition wait. Chats unavailable, connection-loss explanation and Reconnect remain visible and distinct from the unselected detail pane."
+  },
+  {
+    "caseId": "app-waiting-close",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/app-waiting-close-restored-idle.png",
+    "judgment": "Original PNGs viewed at 1440×1000. Actual Close removes only the parent from Chats; Synthetic active worker stays Thinking in Agents. Owning fixture directory route and lifecycle validation were corrected, rejecting invalid archive combinations. Ctrl+z restores the parent in Quiet/Idle, not Waiting: cancelled work is not resumed. Independent Close and navigation controls remain available.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/app-waiting-close-child-survives.png",
+      "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/app-waiting-close.png"
+    ]
+  },
+  {
+    "caseId": "app-close-failure",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/app-close-failure.png",
+    "judgment": "Original PNG viewed at 1440×1000 after clicking actual Close and waiting for DismissibleError. Failed-close message wraps beside an intact dismissal control; original waiting parent remains in the active list rather than falsely disappearing."
+  },
+  {
+    "caseId": "app-undo-failure",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/app-undo-failure-final.png",
+    "judgment": "Original PNG viewed at 1440×1000 after Close, empty-list condition, Ctrl+z, mounted-toast condition and 400 ms animation settlement. Failed restore leaves the parent closed, now with visible empty-list guidance; error title, explanation, Retry Undo and dismiss remain fully inside the viewport. Captured within the production three-second duration.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/app-undo-failure.png"
+    ]
+  },
+  {
+    "caseId": "error-plain",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/error-plain.png",
+    "judgment": "Original PNG viewed at 1440×1000. Retained-draft explanation and error are readable; dismissal has separate space. Clicked Dismiss error and observed removal of the error without a delivery retry."
+  },
+  {
+    "caseId": "error-long",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/error-long.png",
+    "judgment": "Original PNG viewed at 1440×1000. Mixed Japanese/Arabic text and the long unbroken token wrap inside the content column without widening the page or squeezing dismissal. Clicked Dismiss error and observed its removal."
+  },
+  {
+    "caseId": "error-pending",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/error-pending.png",
+    "judgment": "Original PNG viewed at 1440×1000 after actual dismissal click. Original delivery error remains; Dismissing and one request are visible. Disabled dismissal prevents a second pending operation while preserving its layout space."
+  },
+  {
+    "caseId": "error-failed",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/error-failed-final.png",
+    "judgment": "Original PNG viewed at 1440×1000 after actual dismissal click and failure condition. Original delivery error is retained above the wrapped dismissal failure. Owning flex correction leaves the full-size dismissal button intact beside the long multilingual failure, allowing another attempt.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/error-failed.png"
+    ]
+  },
+  {
+    "caseId": "error-renewed",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/error-renewed.png",
+    "judgment": "Original PNG viewed at 1440×1000. Clicked dismissal and observed successful removal; clicked New error occurrence and observed the same error return with an enabled dismissal control. One previous dismissal request remains visible; renewed occurrence is not suppressed by the prior dismissal."
+  },
+  {
+    "caseId": "readiness-ready",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/readiness-ready.png",
+    "judgment": "Original PNG viewed at 1440×1000. Ready state has no top request indicator; centered Screen ready and Load again are legible and separated."
+  },
+  {
+    "caseId": "readiness-loading",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/readiness-loading.png",
+    "judgment": "Original PNGs viewed at 1440×1000. Owned load shows the top readiness bar and centered loading explanation with Finish loading. Clicked Finish loading: Screen ready replaces loading and the request indicator is absent, proving release of the owned load.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/readiness-loading-finished.png"
+    ]
+  },
+  {
+    "caseId": "toast-update",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/toast-update.png",
+    "judgment": "Original PNG viewed at 1440×1000 after actual Show notice click, mounted condition and 400 ms animation settlement. Bottom-centered notice, delivery deadline, Open chat and dismiss fit inside the viewport. Clicked Open chat after animation settlement and observed Action received. Fixture holds 30 seconds; production duration is unchanged."
+  },
+  {
+    "caseId": "toast-undo-error",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/toast-undo-error.png",
+    "judgment": "Original PNG viewed at 1440×1000 after Show notice, mounted condition and 400 ms animation settlement. Error icon/border, unavailable-environment explanation, Retry Undo and dismiss are visible without clipping. Clicked Retry Undo and observed Action received. Fixture explicitly holds 30 seconds."
+  },
+  {
+    "caseId": "toast-long",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/toast-long.png",
+    "judgment": "Original PNGs viewed at 1440×1000 after Show notice, mounted condition and 400 ms animation settlement. Owning correction bounds multilingual content to a scrollable area; Retry Undo and dismiss remain visible outside it. Native container scroll moved scrollTop above zero and exposed lower description; actual Retry Undo produced Action received. Fresh notice was dismissed by actual Close toast, with visible-toast absence confirmed. Fixture explicitly holds 30 seconds.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/envelope/desktop/toast-long-scrolled.png"
+    ]
+  }
+]

@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+source "$root/deploy/lib"
+pi_stack_enter_deployment "$0" "$root" "$@"
+base=${PI_STACK_MEET_RECOGNITION_URL:-ws://127.0.0.1:8797/}
+unit=pi-stack-meet-recognition.service
+old_unit=pi-stack-write.service
+case ${1:---activate} in
+  --check)
+    [[ $(systemctl show "$unit" -p LoadState --value) == loaded ]] || {
+      echo 'Install the host pi-stack-meet-recognition.service declaration before deploying local meeting recognition.' >&2
+      exit 66
+    }
+    ;;
+  --activate)
+    [[ $base =~ ^ws://127\.0\.0\.1:([0-9]+)/$ ]] || { echo "Invalid Meet recognition endpoint: $base" >&2; exit 64; }
+    port=${BASH_REMATCH[1]}
+    (( port > 0 && port < 65536 )) || { echo 'Invalid Meet recognition port' >&2; exit 64; }
+    runtime=${PI_STACK_MEET_RECOGNITION_DEST:-/srv/pi/meet-recognition}
+    [[ -f "$runtime/ready" && -x "$runtime/venv/bin/python" && -f "$runtime/server.py" && -f "$runtime/model/ready" ]] || {
+      echo 'Meet recognition candidate is not prepared and selected' >&2; exit 66;
+    }
+    [[ $(systemctl show "$unit" -p LoadState --value) == loaded ]] || { echo 'Meet recognition declaration is unavailable' >&2; exit 66; }
+    previous_active=$(systemctl show "$unit" -p ActiveState --value)
+    previous_enabled=$(systemctl show "$unit" -p UnitFileState --value)
+    case $previous_active in active|inactive|failed) ;; *) echo 'Meet recognition lifecycle transition is in progress' >&2; exit 75;; esac
+    case $previous_enabled in enabled|disabled) ;; *) echo 'Meet recognition enablement state is unsupported' >&2; exit 66;; esac
+    old_loaded=$(systemctl show "$old_unit" -p LoadState --value)
+    old_active=inactive
+    old_enabled=disabled
+    case $old_loaded in
+      not-found) ;;
+      loaded)
+        old_active=$(systemctl show "$old_unit" -p ActiveState --value)
+        old_enabled=$(systemctl show "$old_unit" -p UnitFileState --value)
+        case $old_active in active|inactive) ;; *) echo 'Previous speech engine is not in a settled healthy state' >&2; exit 75;; esac
+        case $old_enabled in enabled|disabled|static) ;; *) echo 'Previous speech engine enablement state is unsupported' >&2; exit 66;; esac
+        ;;
+      *) echo 'Previous speech engine declaration is not in a known state' >&2; exit 66;;
+    esac
+    # Load and exercise the selected decoder before displacing the same-port owner.
+    timeout --signal=TERM --kill-after=1s 12s "$runtime/venv/bin/python" - preflight "$runtime" <<'PY'
+import sys
+from pathlib import Path
+root = Path(sys.argv[2])
+sys.path.insert(0, str(root))
+import numpy as np
+from nemotron import Nemotron
+stream = Nemotron(root / 'model', 4).create_stream()
+stream.accept(np.zeros(1600, dtype=np.float32))
+result = stream.finish(9600)
+assert isinstance(result, dict) and isinstance(result['text'], str)
+PY
+    changed=0
+    rollback() {
+      status=$?
+      trap - EXIT
+      if (( status != 0 && changed )); then
+        echo 'Meet recognition takeover failed; restoring speech service lifecycle' >&2
+        pi_stack_as_root systemctl stop "$unit" || status=1
+        if [[ $previous_enabled == disabled ]]; then pi_stack_as_root systemctl disable "$unit" || status=1; fi
+        if [[ $old_loaded == loaded ]]; then
+          if [[ $old_enabled == enabled ]]; then pi_stack_as_root systemctl enable "$old_unit" || status=1; fi
+          if [[ $old_active == active ]]; then pi_stack_as_root systemctl start "$old_unit" || status=1; fi
+        fi
+        if [[ $previous_active == active ]]; then pi_stack_as_root systemctl start "$unit" || status=1; fi
+      fi
+      exit "$status"
+    }
+    trap rollback EXIT
+    changed=1
+    if [[ $old_loaded == loaded && $old_active == active ]]; then pi_stack_as_root systemctl stop "$old_unit"; fi
+    pi_stack_as_root systemctl enable "$unit"
+    if [[ $previous_active == failed ]]; then pi_stack_as_root systemctl reset-failed "$unit"; fi
+    pi_stack_as_root systemctl restart "$unit"
+    timeout --signal=TERM --kill-after=1s 14s "$runtime/venv/bin/python" - endpoint "$base" <<'PY'
+import asyncio, json, sys, time
+from websockets.asyncio.client import connect
+
+async def ready():
+    deadline = time.monotonic() + 12
+    while True:
+        try:
+            async with connect(sys.argv[2], open_timeout=1, close_timeout=1) as socket:
+                await socket.send(json.dumps({'type': 'start', 'turn': 'deployment-preflight'}))
+                await socket.send(bytes(3200))
+                partial = json.loads(await asyncio.wait_for(socket.recv(), 3))
+                assert partial['type'] == 'partial'
+                await socket.send(json.dumps({'type': 'finish'}))
+                final = json.loads(await asyncio.wait_for(socket.recv(), 3))
+                assert final['type'] == 'final' and isinstance(final['text'], str)
+                return
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise
+            await asyncio.sleep(0.1)
+asyncio.run(ready())
+PY
+    systemctl is-active --quiet "$unit"
+    if [[ $old_loaded == loaded && $old_enabled == enabled ]]; then pi_stack_as_root systemctl disable "$old_unit"; fi
+    trap - EXIT
+    echo 'Meet recognition takeover accepted; previous speech unit retained inactive for host retirement'
+    ;;
+  *) echo 'usage: deploy/meet-recognition-service [--check|--activate]' >&2; exit 64 ;;
+esac

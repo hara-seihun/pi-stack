@@ -76,17 +76,6 @@ export class InlineImages {
     if (accepted) this.schedule();
   }
 
-  acceptContext(sessionId: string, document: string) {
-    if (!document.includes("<pi-remote-image")) return;
-    const context = JSON.parse(document);
-    for (const message of context.messages ?? []) {
-      if (message.role !== "assistant") continue;
-      const text = typeof message.content === "string" ? message.content : Array.isArray(message.content)
-        ? message.content.filter((part: any) => part.type === "text").map((part: any) => part.text ?? "").join("") : "";
-      this.accept(sessionId, hash(text), text);
-    }
-  }
-
   async start() {
     await mkdir(this.root, { recursive: true, mode: 0o700 });
     for (const row of this.rows()) {

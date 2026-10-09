@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Read-only proof for the first global-capacity cutover, after gated selection.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 source "$root/deploy/lib"
@@ -8,49 +7,37 @@ expected=$1
 [[ $expected =~ ^[0-9a-f]{40}$ ]] || exit 64
 [[ $# == 1 ]] || export PI_STACK_HOST_FILE=$2
 runtime=${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}
-[[ -f $runtime/.pi-stack-commit && $(<"$runtime/.pi-stack-commit") == "$expected" ]] || { echo 'Direct agent runtime selection is not the gated target' >&2; exit 75; }
-for launcher in stack-pi.mjs stack-agent.mjs; do
-  [[ -x $runtime/$launcher ]] || { echo "Mandatory launcher is missing: $runtime/$launcher" >&2; exit 75; }
+[[ -f $runtime/.pi-stack-commit && $(<"$runtime/.pi-stack-commit") == "$expected" ]] || { echo 'Managed agent runtime selection is not the target' >&2; exit 75; }
+for launcher in stack-pi.mjs; do
+  [[ -x $runtime/$launcher ]] || { echo "Managed launcher is missing: $runtime/$launcher" >&2; exit 75; }
 done
-[[ -f $runtime/standalone-agent.mjs ]] || { echo 'Mandatory direct SDK guard is missing' >&2; exit 75; }
-node --input-type=module -e 'const guard=await import(process.argv[1]); if(typeof guard.requireStandaloneAgent!=="function"||typeof guard.abortAndSettleStandaloneSession!=="function")process.exit(75)' "file://$runtime/standalone-agent.mjs"
+[[ -f $runtime/managed-agent.mjs && -f $runtime/capacity/native-session.js ]] || { echo 'Native ThreadService owner is missing' >&2; exit 75; }
+grep -q 'PiStack native ThreadService owner' "$runtime/node_modules/@earendil-works/pi-coding-agent/dist/main.js" || { echo 'Native CLI has no ThreadService owner' >&2; exit 75; }
+node --input-type=module -e 'const owner=await import(process.argv[1]); if(typeof owner.createManagedAgentSession!=="function")process.exit(75)' "file://$runtime/managed-agent.mjs"
 selected=$(readlink -f "$runtime/stack-pi.mjs")
 users=$(pi_stack_users)
-[[ -n $users ]] || { echo 'Direct ingress census contains no configured accounts' >&2; exit 75; }
-count=0
+[[ -n $users ]] || { echo 'Managed ingress has no configured accounts' >&2; exit 75; }
 while IFS= read -r user; do
   home=$(pi_stack_home "$user")
   [[ -n $home && -d $home ]] || { echo "Configured account home is unavailable: $user" >&2; exit 75; }
-  actual=$(readlink -f "$home/.local/bin/pi")
-  [[ $actual == "$selected" ]] || { echo "Account $user still selects an unguarded Pi launcher" >&2; exit 75; }
-  count=$((count+1))
+  [[ $(readlink -f "$home/.local/bin/pi") == "$selected" ]] || { echo "Account $user has no managed Pi launcher" >&2; exit 75; }
 done <<<"$users"
 load=$(systemctl show pi-kenan-root.service -p LoadState --value)
-root_state=absent
-root_pid=0
 case $load in
   not-found) ;;
   loaded|masked)
-    root_state=$(systemctl show pi-kenan-root.service -p ActiveState --value)
-    case $root_state in
+    state=$(systemctl show pi-kenan-root.service -p ActiveState --value)
+    case $state in
       active)
         config=${PI_KENAN_CONFIG:-/etc/pi-stack/one-kenan.json}
         port=$(pi_stack_as_root jq -er '.rootPort | select(type=="number" and .>0 and .<65536)' "$config")
         health=$(pi_stack_as_root curl -fsS --max-time 5 "http://127.0.0.1:$port/v1/health")
-        jq -e --arg expected "$expected" '.releaseCommit==$expected and .releaseProtocol==1' <<<"$health" >/dev/null || { echo 'Root still runs a pre-gate in-process SDK factory' >&2; exit 75; }
-        root_pid=$(systemctl show pi-kenan-root.service -p MainPID --value)
-        [[ $root_pid =~ ^[1-9][0-9]*$ ]] || { echo 'Active root has no proven process identity' >&2; exit 75; }
+        jq -e --arg expected "$expected" '.releaseCommit==$expected and .releaseProtocol==1' <<<"$health" >/dev/null || { echo 'Root is not the selected managed release' >&2; exit 75; }
         ;;
       inactive|failed) ;;
-      *) echo "Root controller transition is unsettled: $root_state" >&2; exit 75;;
+      *) echo "Root controller transition is unsettled: $state" >&2; exit 75;;
     esac
     ;;
-  *) echo "Unknown root controller custody: $load" >&2; exit 75;;
+  *) echo "Unknown root controller state: $load" >&2; exit 75;;
 esac
-custody=${PI_CAPACITY_DIRECT_CUSTODY_RECEIPT:?Set the absolute retained direct-process custody receipt from the barrier owner}
-if ! processes=$(pi_stack_as_root node "$root/deploy/direct-agent-processes.mjs" "$custody" "$root_pid"); then
-  printf '%s\n' "$processes" >&2
-  echo 'Unmatched direct agent processes retain cutover custody' >&2
-  exit 75
-fi
-jq -nc --arg commit "$expected" --arg root "$root_state" --argjson accounts "$count" --argjson processes "$processes" '{cli:"gated",sdk:"gated",root:"idle-gated",oldProcesses:$processes.oldProcesses,evidence:{version:1,releaseCommit:$commit,accounts:$accounts,rootState:$root,processCensus:$processes}}'
+jq -nc --arg commit "$expected" '{cli:"managed",sdk:"managed",root:"idle-managed",evidence:{releaseCommit:$commit}}'

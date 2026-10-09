@@ -1,0 +1,45 @@
+# Native history publication boundary
+
+Owner: `deploy/native-history-boundary`, `deploy/native-history-coordinator.mjs`, and `deploy/native-history-bridge.mjs`. The first-unlock owner is `apps/remote/server/native-history-startup.mjs`. The explicit data transform is [native history migration](native-history-migration.md).
+
+Publication invokes the frozen candidate before selecting app/web or runtime artifacts. The command extracts exact Git blobs into `/srv/pi/.pi-stack-maintenance/native-history/CANDIDATE/source`, verifies their Git object identities, and performs one bounded transition. `--probe` observes without changing maintenance. Exit 75 is durable busy custody, not permission to cancel errands. Publication retains the attempt and resumes it when its owners are ready.
+
+## Old-generation maintenance
+
+The coordinator stages small entry wrappers pointing to the **immutable selected** Remote and Orchestrator releases. Their commit markers and all decoder/runtime dependencies remain those of the selected source. These wrappers are a transient maintenance generation, not the candidate application. HUP replaces the supervisor child through its existing launcher; the launcher and its mounted encrypted folder remain alive. Inventory includes every registered active `pi-orchestrator@USER`, deduplicating the administrator fleet. Ledger authority comes from the running namespace's `PI_ORCHESTRATOR_LEDGER`, then the owning registry's exact ledger field, then the inspected old CLI's HOME path. Every owning ledger is fenced even while another owner's provider remains busy. Before adopting a fleet controller, its owner-local ledger fence refuses new completion rows and waits for accepted tool-free provider requests to finish: the old daemon's ordinary shutdown would abort them. The fleet then uses its native detach/recovery boundary. Its maintenance generation pauses future lane/manifest admission and also requires the old completion pool/reconcile operation to settle before closure. Rooms use the same old Remote decoder through `rooms-main.ts`. The Remote maintenance entry keeps the immutable old resource identity while accepting only its source-verified staged capture-package alias. Both names resolve the same package and capture extension; unrelated package identities are rejected.
+
+Inside each owning UID and namespace, the bridge loads the selected source's `ThreadService` and transport. Its durable SQLite fence closes admission of new external roots. Already accepted work, child assignments, collaborator completion receipts, and answers to admitted questions continue through the old owner. Future scheduled wakes stay in their existing schedule rows until the candidate resumes them. Cross-ledger children/completion replies resolve bounded public parent ancestry through the owning directory; recorded request retries stay with the old receipt/hash validator. A restored pre-migration attempt removes only its own fence.
+
+Readiness requires all admitted work and native executions settled, no pending owner operations, an acknowledged empty output spool, and a complete old-runner ownership census. Unknown native owners are an explicit custody repair, not absence. The bridge uses the old controller to attach and decode retained events; the candidate never consumes those frames. Repeated probes share one retained attachment. A positive native `get_state` reconciles idle/busy before work can resume; missing state or a competing command preserves custody instead of manufacturing idle.
+
+After all Remote/fleet/rooms owners are ready, the fixed Root boundary closes Root admission atomically and proves absence of its native writers. Pending consent/session records remain intact. Then each old thread controller closes its idle native sessions while the old capture listener still serves shutdown hooks. Every old runner receives retirement and must remove its control socket. The old supervisor's existing release path closes its other resources and databases. Only its final exit boundary invokes the private migration as the owning user.
+
+The migrator snapshots captured records and native preimages, promotes missing thinking, and retires captured tables atomically. The bridge writes `native-history-readiness.json` only after success. Its restart-safe `native-history-maintenance.json` records immutable source identity and the current phase. A migrated maintenance child holds its launcher namespace until candidate activation. No unit stop is used to destroy FUSE custody.
+
+## Host prerequisites
+
+A host may explicitly declare `nativeHistoryPrerequisites` as an absolute root-owned executable. After private migrations and the actual Root gate, but before recording readiness, the coordinator invokes it with `HOST_FILE CANDIDATE_SHA`. It must be idempotent, return a candidate-bound JSON receipt with `ready:true` and `applicationStarted:false`, and never start candidate consumers. Its `prerequisites-pending` phase retains publication custody across retries. This is the seam for selecting already-staged host runtime prerequisites after the old native generation is gone.
+
+## Locked first unlock
+
+The new launcher runs the owner-local gate after mounting the folder and before creating a supervisor. Fresh/native databases do not require a data transform. An old schema needs positive writer absence and acknowledged output; a readiness receipt cannot override either condition. Current runner custody is identified by `status.historySource = native-jsonl-v1`.
+
+If an old producer is still present, the gate can select only the source-bound `legacy.json` recorded by this publication. The owning bootstrap runs that selected old decoder with the same admission fence. Its service-owned maintenance check lets accepted work settle, closes old native owners, and migrates before advancing the existing launcher to the candidate. Missing/corrupt mapped sources remain preserving errors; they do not select another history.
+
+The Orchestrator's [`cli.ts`](../packages/orchestrator/src/cli.ts) has its own first-start gate before daemon/native initialization, including inactive registered fleets. [`native-history-startup.ts`](../packages/orchestrator/src/native-history-startup.ts) inspects native protocol identities and retained output sizes without decoding frames. Current native custody passes normally. Old producers/output require the same candidate-bound immutable old source bridge, run under the actual owning UID; absent/unavailable source leaves queued work intact and returns a retryable startup error. Fleet maintenance acknowledges old daemon resource closure, then advances through the existing unit's restart boundary. Remote supervisor facts still belong to the separate owner-local migration.
+
+## Interruption and restoration
+
+State lives outside the model session. A pre-migration terminal failure/cancellation may `--restore` the owned admission fences and transient selected pointers. Restoration records `restoring` and restores the selected old-source pointers before collecting every owner's acknowledgement; it never restarts fleets or aborts accepted provider requests. Partial restoration cannot advance or masquerade as an ordinary busy wait. A failed owner may restore its identity-bound fences through `native-history-closed-owner.mjs` only under its actual UID after proving its original unit closed with an empty cgroup. `nativeHistoryCustodyUnit` explicitly names an already-existing retained private namespace on hosts that have one. Without that namespace, the existing declared credential/launcher owner must run the hook privately before starting its old supervisor. An active old owner without a maintenance socket can supply only a readonly already-restored receipt and absent-fence proof. A restored owner keeps that receipt across restart and does not reinstall its maintenance fence. Candidate pointers are never reverted by this operation. Once migration has crossed the schema boundary, the old capture source cannot be restarted; the publication retains repair custody until a candidate/descendant acquires serving custody. A checked serving native candidate allows the earlier boundary to release its custody without reenabling an old decoder.
+
+Private snapshots/preimages and readiness receipts belong to the person's backup coverage. The source-only `legacy.json` contains immutable module paths, never credentials or conversation bodies. `deploy/retain` pins both source releases and their linked dependencies while this first-unlock custody exists; remove the manifest only after every registered owner's migration has been acknowledged, not merely after the active host cohort deploys. The host coordinator receives only bounded maintenance counts/proofs from owner-local sockets reached through the retained mount namespace.
+
+Focused contracts:
+
+```sh
+node --test scripts/native-history-boundary.test.mjs \
+  scripts/native-history-attachment.test.mjs \
+  apps/remote/server/native-history-startup.test.mjs \
+  scripts/migrate-native-history.test.mjs \
+  scripts/native-history-fleet-startup.test.mjs
+```

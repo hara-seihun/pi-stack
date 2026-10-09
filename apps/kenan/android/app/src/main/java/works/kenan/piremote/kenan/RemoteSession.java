@@ -12,6 +12,12 @@ final class RemoteSession {
     }
 
     private Identity current;
+    private final java.util.Set<Runnable> observers = new java.util.LinkedHashSet<>();
+
+    synchronized Runnable observe(Runnable observer) {
+        observers.add(observer);
+        return () -> { synchronized (RemoteSession.this) { observers.remove(observer); } };
+    }
 
     synchronized Identity current() { return current; }
 
@@ -23,6 +29,7 @@ final class RemoteSession {
         if (current == null && session.isBlank()) return false;
         if (current != null && current.user.equals(user) && current.session.equals(session)) return false;
         current = session.isBlank() ? null : new Identity(user, session);
+        for (Runnable observer : java.util.List.copyOf(observers)) observer.run();
         return true;
     }
 

@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { readPersonTimezone, writePersonSetting, type SettingsResult } from "pi-orchestrator/api";
 import { actionJournal, journalWarning, type ActionJournal } from "kenan-memory/journal";
 import { chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -154,14 +155,25 @@ export function calendarICS(events: CalendarEvent[]): string {
 
 export class CalendarStore {
   private db: Database;
+  readonly timezoneMigration: SettingsResult<void>;
   private timer?: ReturnType<typeof setInterval>;
   private refreshing?: Promise<void>;
   private controller = new AbortController();
-  constructor(directory: string, private readonly user: string, private readonly feedBase = "", private readonly journal: Pick<ActionJournal, "begin" | "finish"> = actionJournal) {
+  constructor(private readonly directory: string, private readonly user: string, private readonly feedBase = "", private readonly journal: Pick<ActionJournal, "begin" | "finish"> = actionJournal) {
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const path = join(directory, "calendar.sqlite3");
     this.db = new Database(path, { create: true }); chmodSync(path, 0o600);
     this.db.exec("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, body TEXT NOT NULL); CREATE TABLE IF NOT EXISTS subscriptions(id TEXT PRIMARY KEY, body TEXT NOT NULL, ics TEXT); CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS delete_undo(token TEXT PRIMARY KEY, before TEXT NOT NULL, after TEXT, expires INTEGER NOT NULL)");
+    const previous = this.db.query("SELECT value FROM settings WHERE key='zone'").get() as { value: string } | null;
+    if (previous?.value) {
+      const current = readPersonTimezone(directory);
+      if (!current.ok) this.timezoneMigration = current;
+      else if (current.value === null || current.value.source === "client-observed") {
+        const migrated = writePersonSetting(directory, "person.timezone", { zone: previous.value, source: "configured" });
+        this.timezoneMigration = migrated.ok ? { ok: true, value: undefined } : migrated;
+        if (migrated.ok) this.db.query("DELETE FROM settings WHERE key='zone'").run();
+      } else { this.db.query("DELETE FROM settings WHERE key='zone'").run(); this.timezoneMigration = { ok: true, value: undefined }; }
+    } else { this.db.query("DELETE FROM settings WHERE key='zone'").run(); this.timezoneMigration = { ok: true, value: undefined }; }
   }
   start() { void this.refresh(); this.timer = setInterval(() => void this.refresh(), 15 * 60 * 1000); this.timer.unref(); }
   async close() { if (this.timer) clearInterval(this.timer); this.controller.abort(); await this.refreshing; this.db.close(); }
@@ -182,7 +194,9 @@ export class CalendarStore {
       try { events.push(...importedEvents(row.ics, subscription, from, to)); }
       catch { subscription.error = "Calendar could not be expanded in this date range"; }
     }
-    return { events: events.sort((a, b) => a.start.localeCompare(b.start)), subscriptions, zone: this.setting("zone", "") };
+    const timezone = readPersonTimezone(this.directory);
+    const result = { events: events.sort((a, b) => a.start.localeCompare(b.start)), subscriptions };
+    return timezone.ok ? { ...result, zone: timezone.value?.zone ?? "" } : { ...result, zone: "", settingsError: timezone.error.message };
   }
   refresh(): Promise<void> {
     if (this.refreshing) return this.refreshing;
@@ -222,7 +236,8 @@ export class CalendarStore {
       const from = calendarTime(url.searchParams.get("from") ?? new Date().toISOString(), "UTC");
       const to = calendarTime(url.searchParams.get("to") ?? new Date(Date.now() + 180 * 86400000).toISOString(), "UTC");
       if (!from.ok || !to.ok || Date.parse(to.value) <= Date.parse(from.value) || Date.parse(to.value) - Date.parse(from.value) > 2 * 366 * 86400000) return fail("Use a valid date range of at most two years");
-      return Response.json(this.snapshot(from.value, to.value));
+      const snapshot = this.snapshot(from.value, to.value);
+      return snapshot.settingsError ? fail(snapshot.settingsError, 503) : Response.json(snapshot);
     }
     let warning: string | undefined;
     const reply = (body: unknown) => Response.json(body, { headers: warning ? { "x-kenan-journal-warning": "Calendar write succeeded; journal outcome pending. Do not repeat the write." } : {} });
@@ -284,7 +299,11 @@ export class CalendarStore {
       const parsed = calendarEvent(input, previous); if (!parsed.ok) return fail(parsed.error);
       mutate("update", parsed.value, () => save(parsed.value)); return reply(parsed.value);
     }
-    if (path === "/settings" && req.method === "PUT") { if (!object(input) || typeof input.zone !== "string" || !validZone(input.zone)) return fail("Invalid time zone"); this.putSetting("zone", input.zone); return Response.json({ zone: input.zone }); }
+    if (path === "/settings" && req.method === "PUT") {
+      if (!object(input) || typeof input.zone !== "string" || !validZone(input.zone)) return fail("Invalid time zone");
+      const saved = writePersonSetting(this.directory, "person.timezone", { zone: input.zone, source: "configured" });
+      return saved.ok ? Response.json({ zone: saved.value.timezone!.zone }) : fail(saved.error.message, saved.error.code === "unavailable" ? 503 : 400);
+    }
     if (path === "/feed" && ["GET", "POST"].includes(req.method)) {
       if (req.method === "POST") this.putSetting("feed", randomBytes(32).toString("hex"));
       const token = this.setting("feed", randomBytes(32).toString("hex"));
@@ -294,7 +313,11 @@ export class CalendarStore {
       if (!object(input) || typeof input.name !== "string" || !input.name.trim() || input.name.length > 200 || typeof input.url !== "string" || input.url.length > 8000) return fail("Subscription name and HTTP(S) URL are required");
       let source: URL; try { source = new URL(input.url.replace(/^webcal:/, "https:")); } catch { return fail("Invalid subscription URL"); }
       if (!["https:", "http:"].includes(source.protocol) || source.username || source.password) return fail("Use HTTP(S) without embedded user/password");
-      const zone = typeof input.zone === "string" ? input.zone : this.setting("zone", "") || "UTC"; if (!validZone(zone)) return fail("Invalid time zone");
+      const timezone = readPersonTimezone(this.directory);
+      if (!timezone.ok) return fail(timezone.error.message, 503);
+      const zone = typeof input.zone === "string" ? input.zone : timezone.value?.zone;
+      if (!zone) return fail("Choose a timezone in Settings before subscribing to floating calendar times");
+      if (!validZone(zone)) return fail("Invalid time zone");
       const s: CalendarSubscription = { id: crypto.randomUUID(), name: input.name.trim(), url: source.href, zone, refreshed: null, error: null };
       this.saveSubscription(s, ""); await this.refresh(); return Response.json(this.subscriptions().find(item => item.id === s.id));
     }

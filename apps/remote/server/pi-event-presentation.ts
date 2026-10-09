@@ -15,7 +15,7 @@ const presentation = {
   bash_execution_update: "observe", user_bash: "observe",
   response: "project", extension_ui_request: "project", extension_error: "project",
   owner_execution_phase: "observe", model_request_start: "observe",
-  context_update: "project", session_changed: "observe", conversation_replaced: "observe",
+  session_changed: "observe",
   command_settled: "observe", runner_attached: "observe",
   thread_settled: "project", thread_error: "project", thread_message_inserted: "project",
 } satisfies Record<RuntimeEventType, "project" | "observe">;

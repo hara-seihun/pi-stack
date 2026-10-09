@@ -13,7 +13,7 @@
   min-width: 0;
 }
 
-.machine-card { min-width: 0; }
+.machine-card { min-width: 0; overflow-wrap: anywhere; }
 .machine-card h2 {
   margin: 0 0 var(--space-3);
   color: var(--muted);
@@ -83,7 +83,7 @@
   gap: var(--space-3);
   color: var(--muted);
   font-size: var(--text-xs);
-  white-space: nowrap;
+  flex-wrap: wrap;
 }
 .machine-plan-spent {
   display: flex;
@@ -109,7 +109,7 @@
   font-weight: 650;
   text-align: left;
 }
-.machine-plan-detail { display: grid; gap: var(--space-4); }
+.machine-plan-detail { min-width: 0; display: grid; gap: var(--space-4); overflow-wrap: anywhere; }
 .machine-plan-detail > header { display: grid; gap: var(--space-1); }
 .machine-plan-detail > header > strong { font-size: var(--text-lg); font-variant-numeric: tabular-nums; }
 .machine-plan-detail > header > span { color: var(--muted); font-size: var(--text-sm); }
@@ -126,7 +126,7 @@
   justify-content: space-between;
   gap: var(--space-2) var(--space-4);
 }
-.machine-account > header > div { min-width: 0; display: grid; gap: 2px; }
+.machine-account > header > div { min-width: 0; max-width: 100%; display: grid; gap: 2px; }
 .machine-account > header small { overflow-wrap: anywhere; }
 .machine-account > header > span { font-variant-numeric: tabular-nums; }
 .machine-account > p { margin: var(--space-3) 0 0; color: var(--muted); font-size: var(--text-sm); }
@@ -168,17 +168,8 @@
 .machine-person-bar { cursor: default; }
 .machine-person-bar::before { content: none; }
 
-.machine-governor {
-  min-width: 0;
-  min-height: var(--touch);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  padding: var(--space-1) 0;
-}
-.machine-governor button,
 .machine-action,
+.machine-card > button,
 .machine-app-detail button,
 .machine-errors button {
   min-height: var(--touch);
@@ -189,11 +180,6 @@
   color: var(--text);
   font-weight: 600;
 }
-.machine-governor button {
-  min-width: 140px;
-  font-variant-numeric: tabular-nums;
-}
-
 .machine-actions { display: grid; gap: var(--space-1); }
 .machine-models { margin-top: var(--space-3); }
 .machine-models .machine-action > span { min-width: 0; overflow-wrap: anywhere; }
@@ -239,7 +225,11 @@
   justify-content: space-between;
   gap: var(--space-2);
   font-family: inherit;
+  overflow: visible;
+  flex-wrap: wrap;
 }
+.machine-app-detail dd > span { min-width: 0; flex-basis: 100%; overflow-wrap: anywhere; }
+.machine-app-detail dd > button, .machine-errors button { flex-shrink: 0; }
 
 .machine-errors { margin: 0; padding: 0; list-style: none; }
 .machine-errors li {
@@ -249,7 +239,7 @@
   gap: var(--space-3);
   padding: var(--space-2) 0;
 }
-.machine-errors span { display: grid; gap: var(--space-1); }
+.machine-errors span { min-width: 0; display: grid; gap: var(--space-1); overflow-wrap: anywhere; }
 .machine-errors strong { font-size: var(--text-sm); }
 
 .phone-control { overflow-wrap: anywhere; }

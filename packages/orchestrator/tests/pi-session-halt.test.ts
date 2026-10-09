@@ -46,7 +46,7 @@ async function fixture(prepare?: (session: AgentSession) => void, extension?: st
     args.push("--extension", path);
   }
   const waiters = new Set<() => void>();
-  const options = { cwd, args, env: { PI_CODING_AGENT_DIR: join(cwd, "agent"), PI_OFFLINE: "1", ...env }, threadId: "halt-fixture", sessionFile: join(cwd, "native.jsonl") };
+  const options = { cwd, args, env: { PI_CODING_AGENT_DIR: join(cwd, "agent"), PI_OFFLINE: "1", PI_MODEL_DELIVERY_TIMEZONE: "null", ...env }, threadId: "halt-fixture", sessionFile: join(cwd, "native.jsonl") };
   const output = (event: PiEvent) => { events.push(event); for (const notify of waiters) notify(); };
   let session = await openPiSession(options, output, () => {});
   cleanups.push(async () => { await session.command({ type: "abort", id: "cleanup" }); await session.close(); rmSync(cwd, { recursive: true, force: true }); });
@@ -91,28 +91,100 @@ it.each([
   { remote: false, raw: false },
   { remote: true, raw: false },
   { remote: true, raw: true },
-])("captures the request and finished reply with correct ownership: $remote / raw=$raw", async ({ remote, raw }) => {
+])("previews current model context only on demand: $remote / raw=$raw", async ({ remote, raw }) => {
   const f = await fixture(undefined, undefined, remote
     ? { PI_REMOTE_SESSION_ID: "mirror-owner", PI_REMOTE_SERVER_URL: "http://127.0.0.1:1" }
     : { PI_REMOTE_SESSION_ID: "", PI_REMOTE_SERVER_URL: "" }, raw);
   const answer = f.message([{ type: "text", text: "done" }], "stop");
   answer.usage = { ...answer.usage, input: 12_000, output: 37, cacheRead: 2_000, cacheWrite: 300, totalTokens: 14_337 };
-  f.native.agent.streamFunction = () => f.reply(answer);
+  let sent: any[] = [];
+  f.native.agent.streamFunction = (_model, context) => { sent = JSON.parse(JSON.stringify(context.messages)); return f.reply(answer); };
   expect(await f.command("prompt", { workId: "capture", message: "capture" })).toMatchObject({ success: true });
   await f.waitFor(event => event.type === "agent_settled");
-  const contextOwner = remote && !raw ? "remote-mirror" : "runner";
-  const request = { role: "user", content: [{ type: "text", text: "capture" }] };
-  const updates = f.events.filter(event => event.type === "context_update");
-  expect(updates).toMatchObject([
-    { contextOwner, context: { tools: expect.any(Array), messages: [request] } },
-    { contextOwner, context: { tools: expect.any(Array), messages: [request, answer] } },
-    { contextOwner, context: { tools: expect.any(Array), messages: [request, answer], contextModel: answer.model,
-      contextUsage: { tokens: 14_337, contextWindow: f.native.model!.contextWindow, percent: 14_337 / f.native.model!.contextWindow * 100 } } },
-  ]);
-  expect((updates[1]!.context as any).contextUsage).toEqual((updates[0]!.context as any).contextUsage);
-  expect((updates[2]!.context as any).contextUsage).toEqual(f.native.getContextUsage());
-  if (raw) for (const update of updates) expect(update.context).toMatchObject({ systemPrompt: "", tools: [] });
-  expect(f.events.indexOf(updates[2]!)).toBeLessThan(f.events.findIndex(event => event.type === "agent_settled"));
+  expect(f.events.some(event => event.type === "context_update")).toBe(false);
+  const beforeInspection = readFileSync(f.native.sessionFile!, "utf8");
+  const context = (await f.command("get_context")).data as any;
+  expect(context).toMatchObject({ source: "runtime", tools: expect.any(Array), contextModel: answer.model,
+    contextUsage: { tokens: 14_337, contextWindow: f.native.model!.contextWindow, percent: 14_337 / f.native.model!.contextWindow * 100 } });
+  expect(JSON.parse(JSON.stringify(context.messages.filter((message: any) => message.role === "user")))).toEqual(sent.filter(message => message.role === "user"));
+  expect(context.messages.at(-1)).toEqual(answer);
+  expect(readFileSync(f.native.sessionFile!, "utf8")).toBe(beforeInspection);
+  if (raw) {
+    expect(context.tools).toEqual([]);
+    expect(context.systemPrompt).toMatch(/^\[Model delivery:[^\n]*\]\n$/);
+    expect(JSON.parse(JSON.stringify(context.messages.slice(0, -1)))).toEqual(sent);
+  }
+}, 3000);
+
+it("previews an active forced system request without reentering admission or starting another provider call", async () => {
+  const f = await fixture(undefined, `export default pi => {
+    pi.on("before_agent_start", () => ({systemPrompt:"active approved instructions"}));
+    pi.on("context_with_system", event => ({messages:event.messages.map(message => message.role === "user" ? {...message,content:[{type:"text",text:"projected input"}]} : message)}));
+  }`);
+  const stream = createAssistantMessageEventStream(), started = deferred();
+  cleanups.push(async () => stream.end(f.message([], "aborted")));
+  let sent: any[] = [];
+  const provider = vi.fn((_model: unknown, context: { messages: any[] }) => { sent = JSON.parse(JSON.stringify(context.messages)); started.resolve(); return stream; });
+  f.native.agent.streamFunction = provider;
+  await f.command("prompt", { workId: "active-preview", message: "raw input" });
+  await started.promise;
+  const before = readFileSync(f.native.sessionFile!, "utf8"), leaf = f.native.sessionManager.getLeafId();
+  const current = await f.command("get_context");
+  expect(current).toMatchObject({ success: true, data: { systemPrompt: expect.stringContaining("active approved instructions") } });
+  expect(JSON.parse(JSON.stringify((current.data as any).messages))).toEqual(sent);
+  expect(readFileSync(f.native.sessionFile!, "utf8")).toBe(before);
+  expect(f.native.sessionManager.getLeafId()).toBe(leaf);
+  expect(provider).toHaveBeenCalledOnce();
+  expect(f.events.filter(event => event.type === "agent_start")).toHaveLength(1);
+  stream.push({ type: "done", reason: "stop", message: f.message([], "stop") }); stream.end();
+  await f.waitFor(event => event.type === "agent_settled");
+}, 3000);
+
+it("rejects oversized current context before emitting the payload", async () => {
+  const f = await fixture();
+  f.native.agent.state.messages = [{ role: "user", content: "x".repeat(8 * 1024 * 1024), timestamp: Date.now() }];
+  expect(await f.command("get_context")).toMatchObject({ success: false, errorCode: "oversized" });
+  expect(f.events.at(-1)?.data).toBeUndefined();
+  f.native.agent.state.messages = [];
+}, 3000);
+
+it.each(["missing", "empty", "authoritative", "redacted"])("persists streamed thinking in native JSONL when final thinking is %s", async final => {
+  const f = await fixture();
+  const partial = f.message([{ type: "thinking", thinking: "streamed reasoning" }], "stop");
+  const answer = f.message(final === "missing" ? [{ type: "text", text: "done" }]
+    : [{ type: "thinking", thinking: final === "empty" || final === "redacted" ? "" : "final reasoning", thinkingSignature: "signature", ...(final === "redacted" ? { redacted: true } : {}) }, { type: "text", text: "done" }], "stop");
+  f.native.agent.streamFunction = () => {
+    const stream = createAssistantMessageEventStream();
+    stream.push({ type: "start", partial });
+    stream.push({ type: "thinking_delta", contentIndex: 0, delta: "streamed reasoning", partial });
+    stream.push({ type: "done", reason: "stop", message: answer });
+    stream.end();
+    return stream;
+  };
+  await f.command("prompt", { workId: "thinking", message: "think" });
+  await f.waitFor(event => event.type === "agent_settled");
+  const entries = readFileSync(f.native.sessionFile!, "utf8").trim().split("\n").map(line => JSON.parse(line));
+  const message = entries.reverse().find(entry => entry.type === "message" && entry.message.role === "assistant").message;
+  expect(message.content[0]).toMatchObject({ type: "thinking", thinking: final === "authoritative" ? "final reasoning" : final === "redacted" ? "" : "streamed reasoning" });
+  if (final !== "missing") expect(message.content[0].thinkingSignature).toBe("signature");
+  expect(f.events.some(event => event.type === "context_update")).toBe(false);
+}, 3000);
+
+it("persists a selected older branch across native cold open", async () => {
+  const f = await fixture();
+  await f.command("prompt", { workId: "branch-first", message: "first branch" });
+  await f.waitFor(event => event.type === "agent_settled" && (event.workIds as string[])?.includes("branch-first"));
+  const target = f.native.sessionManager.getBranch().find(entry => entry.type === "message" && entry.message.role === "assistant")!;
+  await f.command("prompt", { workId: "branch-second", message: "abandoned branch" });
+  await f.waitFor(event => event.type === "agent_settled" && (event.workIds as string[])?.includes("branch-second"));
+  await f.native.navigateTree(target.id, { summarize: false });
+  const pinned = f.native.sessionManager.getBranch().at(-1)!;
+  expect(pinned).toMatchObject({ type: "custom", customType: "thread_branch", parentId: target.id, data: { selectedLeafId: target.id } });
+  await f.reopen();
+  const current = (await f.command("get_context")).data as any;
+  expect(current.messages.some((message: any) => JSON.stringify(message.content).includes("abandoned branch"))).toBe(false);
+  expect(f.native.sessionManager.getLeafId()).toBe(pinned.id);
+  expect(f.native.sessionManager.getEntries().some(entry => entry.type === "message" && entry.message.role === "user" && JSON.stringify(entry.message.content).includes("abandoned branch"))).toBe(true);
 }, 3000);
 
 it("reconnect state preserves observed streaming phase and production timestamps", async () => {
@@ -209,7 +281,7 @@ it("starts a fresh observed request after tools and after a native provider retr
   expect(f.events.filter(event => event.type === "model_request_start")).toHaveLength(2);
   const end = f.events.findIndex(event => event.type === "tool_execution_end");
   expect(f.events.findIndex((event, index) => index > end && event.type === "model_request_start")).toBeGreaterThan(end);
-  expect(next.body.messages.at(-1)).toMatchObject({ role: "tool", content: "tool result" });
+  expect(next.body.messages.at(-1)).toMatchObject({ role: "tool", content: expect.stringMatching(/^\[Model delivery: [^\n]+\]\n\s*tool result$/) });
   expect(await f.command("get_state")).toMatchObject({ data: { live: { activity: "waiting_for_model", tools: [] } } });
   next.response.writeHead(503, { "content-type": "application/json" });
   next.response.end(JSON.stringify({ error: { message: "Service unavailable", type: "server_error" } }));
@@ -263,14 +335,14 @@ it("sandbox exposes exactly four tools without instructions, discovered extensio
   expect(await f.command("prompt", { workId: "sandbox-context", message: "hello" })).toMatchObject({ success: true });
   await f.waitFor(event => event.type === "agent_settled");
   const context = (await f.command("get_context")).data as { systemPrompt: string; tools: { name: string; description: string }[] };
-  expect(context.systemPrompt).toBe("");
+  expect(context.systemPrompt).toMatch(/^\[Model delivery:[^\n]*\]\n$/);
   expect(context.tools.map(tool => tool.name).sort()).toEqual(["bash", "edit", "read", "write"]);
   expect(context.tools.every(tool => tool.description.includes("Confined test implementation."))).toBe(true);
   expect(await f.command("bash", { command: "id" })).toMatchObject({ success: false });
   expect(await f.command("switch_session", { sessionPath: "/etc/passwd" })).toMatchObject({ success: false });
 }, 3000);
 
-it("captures tool results before the next request without duplicating completed messages", async () => {
+it("reads native tool results without duplicating messages or emitting context snapshots", async () => {
   const f = await fixture(undefined, `export default pi => {
     pi.registerTool({ name: "fixture_result", label: "Fixture", description: "Fixture result",
       parameters: { type: "object", properties: {} },
@@ -293,19 +365,16 @@ it("captures tool results before the next request without duplicating completed 
   const result = { role: "toolResult", toolCallId: "result", toolName: "fixture_result", isError: false,
     content: [{ type: "text", text: "tool output" }] };
   expect(requests).toBe(2);
-  const updates = f.events.filter(event => event.type === "context_update");
-  expect(updates).toMatchObject([
-    { context: { messages: [user] } },
-    { context: { messages: [user, call] } },
-    { context: { messages: [user, call, result] } },
-    { context: { messages: [user, call, result], contextUsage: nextRequestUsage } },
-    { context: { messages: [user, call, result], contextUsage: nextRequestUsage } },
-    { context: { messages: [user, call, result, answer], contextUsage: nextRequestUsage } },
-    { context: { messages: [user, call, result, answer], contextModel: answer.model, contextUsage: f.native.getContextUsage() } },
-  ]);
+  expect(f.events.some(event => event.type === "context_update")).toBe(false);
+  const context = (await f.command("get_context")).data as any;
+  expect(f.native.messages.filter((message: any) => message.role !== "system")).toMatchObject([user, call, result, answer]);
+  const projected = context.messages.filter((message: any) => message.role !== "system");
+  expect(projected.map((message: any) => message.role)).toEqual(["user", "assistant", "toolResult", "assistant"]);
+  expect(projected[2]).toMatchObject({ toolCallId: "result", toolName: "fixture_result", isError: false });
+  expect(projected[2].content.at(-1)).toEqual({ type: "text", text: "tool output" });
+  expect(projected[3]).toEqual(answer);
   expect(nextRequestUsage?.tokens).toBeGreaterThanOrEqual(10_020);
-  expect((updates[6]!.context as any).contextUsage.tokens).toBe(11_030);
-  expect(f.events.indexOf(updates[6]!)).toBeLessThan(f.events.findIndex(event => event.type === "agent_settled"));
+  expect(context.contextUsage.tokens).toBe(11_030);
 }, 3000);
 
 it("applies validated speed changes to this session's provider requests", async () => {
@@ -531,7 +600,7 @@ it("runs steers stranded by a terminal error instead of leaving the execution op
   first.end();
   const settled = await f.waitFor(event => event.type === "agent_settled");
   expect(settled.workIds).toEqual(["root", "steer-1", "steer-2", "steer-3"]);
-  expect(requests.at(-1)?.slice(-3)).toEqual(["steer 1", "steer 2", "steer 3"]);
+  expect(requests.at(-1)?.slice(-3)).toEqual([1, 2, 3].map(number => expect.stringMatching(new RegExp(`^\\[Model delivery: [^\\n]+\\]\\nsteer ${number}$`))));
   expect(await f.command("get_state")).toMatchObject({ data: { isStreaming: false, pendingMessageCount: 0 } });
 }, 3000);
 

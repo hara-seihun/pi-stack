@@ -47,7 +47,7 @@ it("real Pi settlement and disposal admit a second bounded lane cycle and preser
     };
   };
   serviceOptions.admit = async () => ({ ok: true, value: { release() {} } });
-  serviceOptions.environment = () => ({ PI_CODING_AGENT_DIR: join(root, "agent"), PI_OFFLINE: "1" });
+  serviceOptions.environment = () => ({ PI_CODING_AGENT_DIR: join(root, "agent"), PI_OFFLINE: "1", PI_MODEL_DELIVERY_TIMEZONE: "null" });
   const open: OpenPiSession = async (options, output, exit) => {
     opens++;
     // Transport identity is synthetic; native state, history, settlement and disposal are real Pi.

@@ -142,8 +142,10 @@ test("the stack doctor diagnoses native sources before probe dependencies and cl
   const root = mkdtempSync(join(tmpdir(), "pi-browser-doctor-"));
   try {
     const runtime = release(root, "0.36.0");
-    const guard = join(root, "standalone-agent.mjs");
-    buildSync({ entryPoints: [fileURLToPath(new URL("../../../orchestrator/src/standalone-agent.ts", import.meta.url))], bundle: true, platform: "node", format: "esm", outfile: guard });
+    const owner = join(root, "native-owner.mjs"), fixture = join(root, "managed-fixture.mjs");
+    buildSync({ entryPoints: [fileURLToPath(new URL("../../../orchestrator/src/threads/native-session.ts", import.meta.url))], bundle: true, platform: "node", format: "esm", packages: "external", alias: { "pi-orchestrator/history": fileURLToPath(new URL("../../../orchestrator/src/threads/history.mjs", import.meta.url)) }, outfile: owner });
+    symlinkSync(fileURLToPath(new URL("../../../../node_modules", import.meta.url)), join(root, "node_modules"));
+    writeFileSync(fixture, `import { createManagedAgentSession as create } from './native-owner.mjs'; export const createManagedAgentSession = (factory, options) => create(factory, {...options,capacity:{mode:'unmanaged'}});`);
     const scope = join(runtime, "node_modules/@earendil-works");
     mkdirSync(scope);
     symlinkSync(dirname(dirname(fileURLToPath(runtimeEntry))), join(scope, "pi-coding-agent"));
@@ -155,7 +157,7 @@ test("the stack doctor diagnoses native sources before probe dependencies and cl
       writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages }));
       const result = spawnSync(process.execPath, [fileURLToPath(new URL("../../browser-doctor.mjs", import.meta.url))], {
         cwd: root, encoding: "utf8", timeout: 10000,
-        env: { ...process.env, HOME: root, TMPDIR: temporary, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1", PI_STACK_RUNTIME_DEST: runtime, PI_STACK_STANDALONE_AGENT_MODULE: guard },
+        env: { ...process.env, HOME: root, TMPDIR: temporary, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1", PI_STACK_RUNTIME_DEST: runtime, PI_STACK_NATIVE_SESSION_MODULE: fixture },
       });
       assert.equal(result.status, 1, result.stderr);
       assert.match(result.stderr, /restore exactly one browser entrypoint with the host's pi-stack-release command, not pi install npm/);

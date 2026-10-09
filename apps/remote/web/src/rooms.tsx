@@ -79,7 +79,7 @@ export function RoomCreator({ people, onCreated, onRefresh }: {
   return <section className="room-creator" aria-label="Create room">
     {failure && <p role="alert">{failure}</p>}
     <form onSubmit={event => { event.preventDefault(); void create(); }}>
-      <input aria-label="Room name" placeholder="Room name" maxLength={120} value={title} disabled={pending || !!receipt} onChange={event => setTitle(event.target.value)} />
+      <input className="room-name" aria-label="Room name" placeholder="Room name" maxLength={120} value={title} disabled={pending || !!receipt} onChange={event => setTitle(event.target.value)} />
       {!receipt && <MemberPicker people={people.filter(person => person.user !== window.PiRemotePerson.get())} selected={members} onChange={setMembers} />}
       <button disabled={pending || !title.trim()}>{pending ? "Creating…" : receipt ? "Retry creation" : "Create room"}</button>
     </form>
@@ -225,9 +225,9 @@ export function RoomConversation({ id, people, onBack, onRefresh, showBack = tru
   const question = snapshot?.questions?.[0];
   const action = running && !text.trim() ? "stop" : "send";
   return <section className="conversation-screen room-conversation" aria-label={snapshot?.room.title ?? "Room"}>
-    <ConversationHeader title={snapshot?.room.title ?? "Opening room…"} showIdentity={showIdentity} onBack={showBack ? onBack : null} onOpenInspector={() => setDetails(value => !value)}
+    <ConversationHeader title={snapshot?.room.title ?? (error ? "Room unavailable" : "Opening room…")} showIdentity={showIdentity} onBack={showBack ? onBack : null} onOpenInspector={() => setDetails(value => !value)}
       subtitle={snapshot ? [...snapshot.room.members.map(member => member.displayName), "Kenan"].join(", ") : undefined}
-      status={snapshot ? <StatusIcon status={roomThreadStatus(snapshot)} /> : <span className="conversation-syncing" role="status" aria-label="Loading room status" title="Loading room status"><span className="conversation-syncing-spinner" aria-hidden="true" /></span>}
+      status={snapshot ? <StatusIcon status={roomThreadStatus(snapshot)} /> : error ? <span role="status" aria-label="Room unavailable">!</span> : <span className="conversation-syncing" role="status" aria-label="Loading room status" title="Loading room status"><span className="conversation-syncing-spinner" aria-hidden="true" /></span>}
       trailing={running && (question || text.trim()) ? <button type="button" className="header-action" disabled={pending} onClick={() => void stop()}>Stop thread</button> : null} />
     {details && <section className="room-details" aria-label="Conversation details">
       <div className="room-details-heading"><strong>People</strong><button type="button" className="header-chip" disabled={!snapshot || running || pending} onClick={() => setAdding(value => !value)}>Add people</button></div>

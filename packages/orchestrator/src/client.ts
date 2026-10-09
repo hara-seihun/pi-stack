@@ -110,8 +110,6 @@ export class OrchestratorClient{
   private readonly store:Store;
   constructor(options:OrchestratorClientOptions){this.store=Store.open(options.ledgerPath);}
   accounts(provider?:string){return this.store.accounts().filter((account)=>!provider||account.provider===provider);}
-  boost(provider:string):number{return Number(this.store.control(`boost:${provider}`)??"1");}
-  setBoost(provider:string,multiplier:number):void{this.store.setControl(`boost:${provider}`,String(multiplier));}
   plans(definitions:readonly PlanDefinition[]=ORCHESTRATOR_CATALOG.plans,now=Date.now()):PlanUsageSnapshot{return planUsage(this.store,definitions,now);}
   /** What the ledger's own owner spent of each plan's subscriptions in the last day and week. */
   ownUsage(now=Date.now()):PersonalUsage{return personalUsage(this.store,null,now);}

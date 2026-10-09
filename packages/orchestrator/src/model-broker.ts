@@ -23,7 +23,7 @@ import { isRejectedTokenError } from "./provider-errors.js";
 import { BROKER_ROUTES, validateBrokerBody, type BrokerFamily } from "./model-broker-contract.js";
 import { anthropicMeterReadings } from "./extension/usage-logger.js";
 import { forwardVoiceRequest } from "./voice-broker.js";
-import { attachWriteBroker } from "./write-broker.js";
+import { attachMeetRecognitionBroker } from "./meet-recognition-broker.js";
 
 export interface BrokerListener {
   principal: string;
@@ -363,7 +363,7 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
             active.add(work);
             void work.finally(() => active.delete(work));
           });
-          attachWriteBroker(server, shutdown.signal, () => {
+          attachMeetRecognitionBroker(server, shutdown.signal, () => {
             const count = inflight.get(listener.principal) ?? 0;
             if (count >= listener.maxInFlight) return false;
             inflight.set(listener.principal, count + 1);

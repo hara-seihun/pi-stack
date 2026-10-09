@@ -1,0 +1,49 @@
+#!/usr/bin/python3
+"""Finish only a candidate-owned Root handoff after its source is selected."""
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+
+def activation_required(record, candidate):
+    if not isinstance(record, dict) or record.get('version') != 1 or record.get('phase') not in ('gate-pending', 'gated', 'restored'):
+        raise RuntimeError('Invalid Root native history handoff journal')
+    if record['phase'] == 'restored':
+        return False
+    if record.get('candidate') != candidate or record['phase'] != 'gated':
+        raise RuntimeError('Unresolved different or unconfirmed Root native history handoff')
+    return True
+
+
+def main():
+    if os.geteuid() != 0 or len(sys.argv) != 3 or not re.fullmatch(r'[a-f0-9]{40}', sys.argv[2]):
+        raise RuntimeError('usage: native-history-root-activate HOST_FILE CANDIDATE_SHA (root)')
+    host, candidate = sys.argv[1:]
+    directory = Path(__file__).parent
+    journal = Path('/var/lib/pi-stack/native-history-root-boundary.json')
+    if not journal.exists() or not activation_required(json.loads(journal.read_text()), candidate):
+        print(json.dumps({'ready': True, 'state': 'no-candidate-root-handoff'}))
+        return 0
+    source = Path('/srv/pi/pi-remote/.pi-stack-commit').read_text().strip()
+    if source != candidate:
+        raise RuntimeError('Candidate source is not selected; Root native history handoff remains gated')
+    # The owning activator gates idle work, drains memory, then replaces Root and
+    # rooms. It never stops encrypted custody or cancels an accepted request.
+    result = subprocess.run(['python3', str(directory / 'one-kenan-activate'), 'activate', '--host', host, '--expected', candidate], timeout=45)
+    if result.returncode:
+        if result.returncode == 75:
+            print('native history boundary waiting: Root consumer activation', file=sys.stderr)
+        return result.returncode
+    result = subprocess.run(['python3', str(directory / 'native-history-root-boundary'), host, candidate, '--restore'], timeout=15)
+    return result.returncode
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except (RuntimeError, OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        print('Root native history activation failed: ' + str(error), file=sys.stderr)
+        sys.exit(1)

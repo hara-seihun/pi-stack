@@ -13,7 +13,7 @@ function fixture(counts = [4, 3]) {
   let initialized = false, entries = [];
   const receipts = Object.fromEntries(plan.hosts.map(host => [host.id, { version: 1, barrierId, host: host.id, releaseCommit: commit,
     oldControllers: [], owners: owners.filter(owner => owner.host === host.id).map(owner => ({ ownerId: owner.id, state: "gated", coverage: "complete", unavailableSources: [] })),
-    directIngress: { cli: "gated", sdk: "gated", root: "idle-gated", oldProcesses: [], evidence: { releaseCommit: commit, processCensus: { retainedProcesses: [] } } } }]));
+    directIngress: { cli: "managed", sdk: "managed", root: "idle-managed", evidence: { releaseCommit: commit } } }]));
   const censuses = Object.fromEntries(plan.hosts.map((host, hostIndex) => [host.id, { version: 1, barrierId,
     hosts: [{ host: host.id, capturedAt: new Date().toISOString(), owners: owners.filter(owner => owner.host === host.id).map(owner => owner.id) }],
     entries: Array.from({ length: counts[hostIndex] }, (_, index) => ({ ownerId: owners.find(owner => owner.host === host.id).id,
@@ -47,10 +47,11 @@ test("both failclosed host barriers precede census/seed; native work survives an
   assert.ok(f.trace.indexOf("seed") < f.trace.indexOf("alpha:doctors"));
 });
 
-test("busy old root, old direct producers or missing locked-owner coverage keep cutover uninitialized", async () => {
+test("busy root, unmanaged launchers or missing locked-owner coverage keep cutover uninitialized", async () => {
   for (const damage of [
     receipt => { receipt.directIngress.root = "busy"; },
-    receipt => { receipt.directIngress.oldProcesses.push({ pid: 123, processStart: "10" }); },
+    receipt => { receipt.directIngress.sdk = "unmanaged"; },
+    receipt => { receipt.directIngress.evidence.releaseCommit = "b".repeat(40); },
     receipt => { receipt.oldControllers.push(123); },
     receipt => { receipt.owners[0].coverage = "unavailable"; receipt.owners[0].unavailableSources = ["/locked/threads.sqlite3"]; },
     receipt => { receipt.owners.pop(); },
@@ -71,12 +72,14 @@ test("101 executions hold the barrier without truncating census or initializing 
   assert.equal(f.opened.size, 0);
 });
 
-test("retained direct-process exemptions must have the same owner/agent/execution custody in the seed census", async () => {
+test("private root ThreadService execution shares the initial bounded census", async () => {
   const f = fixture();
-  f.receipts.alpha.directIngress.evidence.processCensus.retainedProcesses.push({ pid: 123, ownerId: "a-person", agentId: "legacy", executionId: "legacy-execution" });
+  f.censuses.alpha.entries.push({ ownerId: "a-person", agentId: "root-request", executionId: "root-execution", source: "/private/root-sessions/request-uuid/threads.sqlite3", uncertain: true });
   await advanceBootstrap(f.plan, f.ledger, f.deps);
-  await assert.rejects(advanceBootstrap(f.plan, f.ledger, f.deps), /retained direct process 123 missing/);
-  assert.equal(f.initialized, false);
+  await advanceBootstrap(f.plan, f.ledger, f.deps);
+  await advanceBootstrap(f.plan, f.ledger, f.deps);
+  assert.equal(f.deps.snapshot().active, 8);
+  assert.ok(f.ledger.census.entries.some(entry => entry.agentId === "root-request"));
 });
 
 test("seed receipt lost after commit resumes by custody reconciliation, not another initialization", async () => {

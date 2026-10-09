@@ -251,23 +251,17 @@ test("header and query changes never inherit an already-unlocked owner's identit
   expect((await request("/v1/sessions", owner, "kenan")).status).toBe(200);
 });
 
-test("file editing uses the existing person-bound router authorization for reads and saves", async () => {
+test("editor launch is person-bound and unavailable without explicit provisioning", async () => {
   const sybil = await token("sybil");
   const before = remoteCalls;
-  for (const method of ["GET", "PUT"]) {
-    for (const prefix of ["", "/v1/remotes/lab"]) {
-      const url = `${base}${prefix}/v1/files/edit?path=%2Ftmp%2Ffixture.md`;
-      const init = method === "PUT" ? { method, body: JSON.stringify({ path: "/tmp/fixture.md", content: "attempt", revision: "a".repeat(64) }) } : { method };
-      expect((await fetch(url, { ...init, headers: { "x-pi-remote-user": "kenan", "content-type": "application/json" } })).status).toBe(423);
-      expect((await fetch(url, { ...init, headers: { "x-pi-remote-user": "kenan", "x-pi-remote-session": sybil, "content-type": "application/json" } })).status).toBe(403);
-    }
+  for (const method of ["GET", "POST"]) {
+    expect((await fetch(`${base}/v1/editor`, { method })).status).toBe(423);
+    expect((await fetch(`${base}/v1/editor`, { method, headers: { "x-pi-remote-user": "kenan", "x-pi-remote-session": sybil } })).status).toBe(403);
+    const response = await fetch(`${base}/v1/editor`, { method, headers: { "x-pi-remote-session": sybil } });
+    expect(response.status).toBe(503);
+    expect((await response.json()).code).toBe("editor_unconfigured");
   }
   expect(remoteCalls).toBe(before);
-  const allowed = await fetch(`${base}/v1/files/edit`, { method: "PUT", headers: {
-    "x-pi-remote-session": sybil, "content-type": "application/json",
-  }, body: JSON.stringify({ path: "/tmp/fixture.md", content: "permitted", revision: "a".repeat(64) }) });
-  expect(allowed.status).toBe(200);
-  expect((await allowed.json()).user).toBe("sybil");
 });
 
 test("each person's discovery is policy controlled; open guests receive no remote authority", async () => {

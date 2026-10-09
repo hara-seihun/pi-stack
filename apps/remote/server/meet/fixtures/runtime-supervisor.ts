@@ -20,33 +20,31 @@ const request = async (path: string, method = "GET", body?: unknown) => {
   if (!result || !result.ok) throw new Error(`Gateway fixture failed: ${result?.status} ${await result?.text()}`);
   return result.json();
 };
+const open = () => gateway.openExternal(input.id, "thread", `http://person.example/v1/meet/${input.id}`, true);
 let result: unknown;
 if (input.mode === "seed") {
-  const host = await request("", "POST", { requestId: input.id, sessionId: "thread", name: "Host" });
-  const guest = await request(`/${input.id}/join`, "POST", { name: "Guest" });
+  const host = await open();
+  const camera = await request(`/${input.id}/join`, "POST", { name: "Sara" });
   const hostQuery = `?participant=${host.participant.id}`;
-  const signalBody = { to: guest.participant.id, signal: { description: { type: "offer", sdp: "v=0\r\n" } }, requestId: input.signalId };
-  await request(`/${input.id}/signal${hostQuery}`, "POST", signalBody);
-  await request(`/${input.id}/signal${hostQuery}`, "POST", signalBody);
-  await request(`/${input.id}/voice${hostQuery}`, "POST", { muted: false });
-  await request(`/${input.id}/voice${hostQuery}`, "POST", { muted: true });
-  await request(`/${input.id}/voice${hostQuery}`, "POST", { muted: false });
-  await request(`/${input.id}/transcript/assistant${hostQuery}`, "POST", { id: "voice-turn", text: "Meetings survive the front door.", final: true, startedAt: Date.now() });
-  result = { host, guest, signalBody };
+  for (const muted of [false, true, false]) await request(`/${input.id}/voice${hostQuery}`, "POST", { muted });
+  await request(`/${input.id}/transcript/assistant${hostQuery}`, "POST", { id: "voice-turn", text: "Meetings survive the front door.", final: true, startedAt: 1 });
+  await request(`/${input.id}/transcript/turn${hostQuery}`, "POST", { id: "platform-turn", speakerId: "recall:42", speaker: "Sara", text: "Kenan, keep the browser open.", startedAt: 2 });
+  const uploaded = await gateway.handle(new Request(`http://person.example/v1/meet/${input.id}/frame?participant=${camera.participant.id}`, {
+    method: "PUT", headers: { "content-type": "image/jpeg" }, body: new Uint8Array([255, 216, 255, 217]),
+  }));
+  if (!uploaded?.ok) throw new Error("Camera upload failed");
+  result = { host, camera };
 } else if (input.mode === "inspect") {
   const room = await request(`/${input.id}`);
-  const poll = await request(`/${input.id}/poll?participant=${input.guestId}`);
-  await request(`/${input.id}/signal?participant=${input.hostId}`, "POST", input.signalBody);
-  const repeated = await request(`/${input.id}/poll?participant=${input.guestId}`);
-  const duplicateCreate = await request("", "POST", { requestId: input.id, sessionId: "thread", name: "Host" });
-  const mismatch = await gateway.handle(new Request(`http://person.example/v1/meet/${input.id}/signal?participant=${input.hostId}`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...input.signalBody, signal: { candidate: { candidate: "different" } } }) }));
-  result = { room, poll, repeated, duplicateCreate, mismatchStatus: mismatch!.status, live: gateway.isLive(input.id), meetings: gateway.transcripts.meetings(), turns: gateway.transcripts.read(input.id) };
+  const poll = await request(`/${input.id}/poll?participant=${input.hostId}`);
+  const duplicateOpen = await open();
+  result = { room, poll, duplicateOpen, capture: await gateway.captureDelegation(input.id), live: gateway.isLive(input.id),
+    meetings: gateway.transcripts.meetings(), turns: gateway.transcripts.read(input.id) };
 } else if (input.mode === "leave") {
-  await request(`/${input.id}/leave?participant=${input.hostId}`, "POST");
+  await gateway.stopExternal(input.id);
   result = { live: gateway.isLive(input.id), meetings: gateway.transcripts.meetings() };
 } else if (input.mode === "create") {
-  result = await request("", "POST", { requestId: input.id, sessionId: "thread", name: "Host" });
+  result = await open();
 } else throw new Error("Unknown fixture mode");
 console.log(JSON.stringify({ supervisorPid: process.pid, workerPid: gateway.runtime.pid, instance: gateway.runtime.instance, result }));
 db.close();

@@ -91,6 +91,20 @@ it("one hard100 gate covers parallel owners, foreground/background and arbitrary
   await until(() => shared.status().active === 100 && shared.status().queued === 25);
 });
 
+it("closing an idle result waiter publishes cancellation without inventing native capacity custody", async () => {
+  const shared = authority(), f = fixture(client(shared, "host-a/alice"));
+  unwrap(await f.service.spawn({ id: "waiter", requestId: "waiter", cwd: f.root }));
+  unwrap(await f.service.spawn({ id: "producer", requestId: "producer", cwd: f.root }));
+  unwrap(await f.service.agentWait({ action: "set", kind: "message", requestId: "wait", threadId: "waiter", fromThreadId: "producer", reason: "Need result" }));
+  unwrap(await f.service.control({ action: "close", threadId: "producer" }));
+  expect(f.service.latestSettlement("producer")?.outcome).toBe("cancelled");
+  expect(f.service.get("waiter")?.dependencies).toEqual([]);
+  expect(f.service.pending("waiter")).toHaveLength(1);
+  expect(f.sessions.size).toBe(0);
+  expect(shared.status()).toMatchObject({ active: 0, queued: 0 });
+  expect((f.service as any).db.prepare("SELECT count(*) n FROM thread_capacity").get().n).toBe(0);
+});
+
 it("lost cancellation confirmation and restart retain one stable agent's capacity custody", async () => {
   const shared = authority(), f = fixture(client(shared, "host-a/alice"));
   unwrap(await f.service.spawn({ id: "retained", requestId: "work", cwd: f.root, message: "work" })); unwrap(await f.service.start());
