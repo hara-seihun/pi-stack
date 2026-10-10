@@ -132,7 +132,7 @@ it("real native end-turn, same-thread restart wake and shared browser/Android st
     };
   };
   owner = createOwner();
-  const watch = new WatchList({ databasePath: join(root, "threads.sqlite"), threads: owner, placement: () => ({ ok: true, value: { cwd: root } }), intervalMs: 14400000, onError: () => {} });
+  const watch = new WatchList({ databasePath: join(root, "threads.sqlite"), threads: owner, placement: () => ({ ok: true, value: { cwd: root } }), intervalMs: 14400000, onError: () => {}, checkOutcome: id => owner.watchCheckOutcome(id) });
   owner.setWatchList(watch);
   try {
     const created = unwrap(await owner.spawn({ requestId: "self", id: "self", cwd: root, settings: { model: "anthropic/claude-sonnet-4-5", thinkingLevel: "off" } }));

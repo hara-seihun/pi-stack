@@ -25,7 +25,7 @@ function fixture(nativeNotReady = true) {
   cleanup.push(() => owner.close());
   const options: WatchListOptions = { databasePath: join(root, "threads.sqlite"), threads: owner, intervalMs: 14_400_000,
     placement: destination => ({ ok: true, value: { cwd: root, metadata: { profileId: destination } } }),
-    onError: vi.fn(), recoveryEvidence: id => owner.watchRecoveryEvidence(id) };
+    onError: vi.fn(), checkOutcome: id => owner.watchCheckOutcome(id) };
   const watch = new WatchList(options); owner.setWatchList(watch);
   let current = watch;
   cleanup.push(() => current.close());
@@ -37,49 +37,54 @@ function fixture(nativeNotReady = true) {
   return { owner, watch, options, add, replace, allow: () => { available = true; } };
 }
 
-it("recovers a proven unlanded failed wake once with fresh current items and configured settings, preserving failed history", async () => {
+it("records a failed startup on its items and checks them again at their next due time with fresh current items, preserving failed history", async () => {
   const { owner, watch, add, replace, allow } = fixture();
   await owner.start(); const item = await add(); const now = Date.now(); value(await watch.tick(now));
   const original = value(await owner.list()).threads[0]!;
   await until(() => owner.latestSettlement(original.id) !== null);
   const failed = owner.latestSettlement(original.id);
-  expect(owner.watchRecoveryEvidence(original.id)).toEqual({ ok: true, value: "unlanded" });
+  expect(owner.watchCheckOutcome(original.id)).toMatchObject({ ok: true, value: { status: "failed", error: expect.stringContaining("Model not found") } });
   allow(); const changed = await replace({ settings: value(watchSettings("openai-codex/gpt-6.1-sol")) });
-  const request = { action: "checkNow" as const, requestId: "recover-once", threadId: "agent" };
-  const receipt = value(await changed.watch(request));
-  expect(await changed.watch(request)).toEqual({ ok: true, value: receipt });
-  expect(await changed.watch({ ...request, threadId: "other" })).toMatchObject({ ok: false, error: { code: "conflict" } });
+  // Not yet due: the failure is recorded, nothing is replayed early, even by an explicit check-now.
+  value(await changed.watch({ action: "checkNow", requestId: "early", threadId: "agent" }));
+  expect(value(await owner.list()).threads).toHaveLength(1);
+  expect(value(await changed.watch({ action: "list", threadId: "agent" }))).toMatchObject({ items: [{ id: item.id, lastCheck: { threadId: original.id, status: "failed", error: expect.stringContaining("Model not found") } }] });
+  value(await changed.tick(now + 14_400_000));
   const checks = value(await owner.list()).threads;
   expect(checks).toHaveLength(2);
   const current = checks.find(thread => thread.id !== original.id)!;
   expect(current.settings).toEqual({ model: "openai-codex/gpt-6.1-sol", thinkingLevel: "high", speed: "standard" });
   expect(owner.pending(current.id)[0]!.text).toContain("Current fixture check");
-  expect(owner.pending(current.id)[0]!.text).not.toContain("unknown startup ownership");
+  expect(owner.pending(current.id)[0]!.text).toContain('"status": "failed"');
   expect(owner.latestSettlement(original.id)).toEqual(failed);
-  expect(value(await changed.watch({ action: "list", threadId: "agent" }))).toMatchObject({ items: [{ id: item.id, lastThreadId: current.id }] });
-  value(await changed.tick(Date.now() + 30_000));
-  expect(value(await owner.list()).threads).toHaveLength(2);
-  value(await changed.watch({ ...request, requestId: "while-pending" }));
-  expect(value(await owner.list()).threads).toHaveLength(2);
+  expect(value(await changed.watch({ action: "list", threadId: "agent" }))).toMatchObject({ items: [{ id: item.id, lastCheck: { threadId: current.id, status: "scheduled" } }] });
 });
 
-it.each(["stop", "archive", "questions", "retimed", "removed"] as const)("recovery preserves %s instead of reviving its failed wake", async action => {
-  const { owner, watch, add } = fixture(); await owner.start(); const item = await add(); value(await watch.tick(Date.now()));
-  const original = value(await owner.list()).threads[0]!; await until(() => owner.latestSettlement(original.id) !== null);
+it.each(["stop", "archive", "questions"] as const)("a previous check's %s never stops the item's next due check", async action => {
+  const { owner, watch, add, allow } = fixture(); allow(); await owner.start(); const item = await add(); const now = Date.now(); value(await watch.tick(now));
+  const original = value(await owner.list()).threads[0]!;
   if (action === "stop") value(await owner.control({ threadId: original.id, action: "stop", descendants: false }));
   if (action === "archive") value(await owner.control({ threadId: original.id, action: "update", archived: true }));
-  if (action === "questions") value(await owner.ask({ threadId: original.id, requestId: "decision", questions: [{ question: "Make a commitment?" }] }));
-  if (action === "retimed") value(await watch.watch({ action: "update", threadId: "agent", requestId: "retime", id: item.id, patch: { nextDueAt: Date.now() + 86_400_000 } }));
-  if (action === "removed") value(await watch.watch({ action: "remove", threadId: "agent", requestId: "remove", id: item.id }));
-  expect(value(await watch.watch({ action: "checkNow", requestId: "recovery", threadId: "agent" }))).toMatchObject({ scheduledThreadIds: [] });
-  expect(value(await owner.list()).threads).toHaveLength(1);
+  if (action === "questions") {
+    value(await owner.control({ threadId: original.id, action: "cancel" }));
+    value(await owner.ask({ threadId: original.id, requestId: "decision", questions: [{ question: "Make a commitment?" }] }));
+  }
+  value(await watch.tick(now + 14_400_000));
+  const threads = value(await owner.list()).threads;
+  expect(threads).toHaveLength(2);
+  const next = threads.find(thread => thread.id !== original.id)!;
+  expect(owner.pending(next.id)[0]!.text).toContain("Current fixture check");
+  if (action === "questions") expect(owner.pending(next.id)[0]!.text).toContain("Make a commitment?");
+  expect(value(await watch.watch({ action: "list", threadId: "agent" }))).toMatchObject({ items: [{ id: item.id, lastCheck: { threadId: next.id, status: "scheduled" } }] });
 });
 
-it("does not infer absence of side effects from a terminal failure without native readiness evidence", async () => {
-  const { owner, watch, add } = fixture(false); await owner.start(); await add(); value(await watch.tick(Date.now()));
+it.each(["retimed", "removed"] as const)("check-now respects a %s item", async action => {
+  const { owner, watch, add } = fixture(); await owner.start(); const item = await add(); value(await watch.tick(Date.now()));
   const original = value(await owner.list()).threads[0]!; await until(() => owner.latestSettlement(original.id) !== null);
-  expect(owner.watchRecoveryEvidence(original.id)).toEqual({ ok: true, value: "uncertain" });
-  expect(value(await watch.watch({ action: "checkNow", requestId: "manual", threadId: "agent" }))).toEqual({ scheduledThreadIds: [], deferred: [{ threadId: original.id, reason: "uncertain" }] });
+  if (action === "retimed") value(await watch.watch({ action: "update", threadId: "agent", requestId: "retime", id: item.id, patch: { nextDueAt: Date.now() + 86_400_000 } }));
+  if (action === "removed") value(await watch.watch({ action: "remove", threadId: "agent", requestId: "remove", id: item.id }));
+  expect(value(await watch.watch({ action: "checkNow", requestId: "recovery", threadId: "agent" }))).toEqual({ scheduledThreadIds: [] });
+  expect(value(await owner.list()).threads).toHaveLength(1);
 });
 
 it("explicit check-now admits unrelated due current items before the interval floor without duplicating pending checks", async () => {
@@ -107,7 +112,7 @@ it("keeps unaccepted delivery failures durable, backs off across reload, and let
   expect(await restored.tick(30_100)).toMatchObject({ ok: false }); expect(spawn).toHaveBeenCalledTimes(2);
   expect(await restored.tick(60_100)).toMatchObject({ ok: false }); expect(spawn).toHaveBeenCalledTimes(3);
   expect(spawn.mock.calls[2]![0]).toEqual(failed);
-  expect(value(await restored.watch({ action: "list", threadId: "agent" }))).toMatchObject({ items: expect.arrayContaining([expect.objectContaining({ what: "Personal item", lastThreadId: failed.id })]) });
+  expect(value(await restored.watch({ action: "list", threadId: "agent" }))).toMatchObject({ items: expect.arrayContaining([expect.objectContaining({ what: "Personal item", lastCheck: { threadId: failed.id, status: "scheduled" } })]) });
 });
 
 it("does not spin on permanent delivery or placement configuration errors or block another destination", async () => {
@@ -120,17 +125,6 @@ it("does not spin on permanent delivery or placement configuration errors or blo
   expect(value(await owner.list()).threads).toHaveLength(1);
   expect(await routed.tick(1e8)).toMatchObject({ ok: false }); expect(placement).toHaveBeenCalledTimes(2);
   expect(value(await routed.watch({ action: "list", threadId: "agent" }))).toMatchObject({ items: expect.arrayContaining([expect.objectContaining({ what: "Personal item", nextDueAt: 100 })]) });
-});
-
-it("a pre-readiness failure while reopening accepted work does not prove that earlier work was unlanded", async () => {
-  const { owner, options } = fixture();
-  const placement = value(options.placement("home"));
-  value(owner.importThread({ id: "retained", title: "Retained watch", cwd: placement.cwd, sessionFile: join(placement.cwd, "retained.jsonl"),
-    settings: value(watchSettings(undefined)), metadata: { watchList: true } }));
-  value(owner.importMessage({ id: "accepted", threadId: "retained", text: "earlier work", state: "dispatched", executionId: "retained-execution" }));
-  await owner.start(); await until(() => owner.latestSettlement("retained") !== null);
-  expect(owner.latestSettlement("retained")).toMatchObject({ executionId: "retained-execution", workId: "accepted", outcome: "failed" });
-  expect(owner.watchRecoveryEvidence("retained")).toEqual({ ok: true, value: "uncertain" });
 });
 
 it("permanent spawn configuration errors retain delivery custody without another automatic spawn", async () => {

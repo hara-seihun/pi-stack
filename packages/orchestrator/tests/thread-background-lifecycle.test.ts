@@ -70,9 +70,9 @@ it("archives completed background threads without consuming their transcript or 
   expect(f.service.latestSettlement("background")?.finalMessage).toMatchObject({ content: [{ text: "Finished result" }] });
 });
 
-it("leaves foreground and persistent watch threads in the live directory", async () => {
+it("leaves foreground threads in the live directory and archives settled watch checks, including incomplete ones", async () => {
   const f = fixture(); await f.service.start();
-  for (const id of ["foreground", "watch"]) {
+  for (const [id, text] of [["foreground", "foreground"], ["watch", "watch"], ["watch-blank", ""]] as const) {
     const result = await f.service.spawn({ id, requestId: id, cwd: f.root, message: "finish" });
     if (!result.ok) throw new Error(result.error.message);
     if (id === "foreground") {
@@ -84,10 +84,15 @@ it("leaves foreground and persistent watch threads in the live directory", async
       db.close();
     }
     await until(() => !!f.sessions.get(id)?.active);
-    f.sessions.get(id)!.settle(id);
-    await until(() => f.service.get(id)?.state === "idle");
-    expect(f.service.get(id)?.metadata?.archived).not.toBe(true);
+    f.sessions.get(id)!.settle(text);
+    if (id === "foreground") {
+      await until(() => f.service.get(id)?.state === "idle");
+      expect(f.service.get(id)?.metadata?.archived).not.toBe(true);
+    } else await until(() => f.service.get(id)?.metadata?.archived === true);
   }
+  expect(f.service.latestSettlement("watch-blank")).toMatchObject({ outcome: "failed", error: expect.stringContaining("without a final result") });
+  expect(f.service.watchCheckOutcome("watch-blank")).toMatchObject({ ok: true, value: { status: "failed" } });
+  expect(f.service.watchCheckOutcome("watch")).toMatchObject({ ok: true, value: { status: "complete" } });
 });
 
 it("backfills previously completed background work on restart", async () => {
