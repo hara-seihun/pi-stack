@@ -174,7 +174,7 @@ const websocket = {
       send(call, { type: "session.instructions.append", event_id: randomUUID(), delegation_id: null, content: "The telephone connection is now live. Deliver the approved opening and listen." }); return;
     }
     if (m.type === "audio-proof" && Number.isSafeInteger(m.bytes) && m.bytes > 0) { call.outputBytes += m.bytes; call.resolveAudio(); return; }
-    if (m.type === "error") { void finish(call, "failed", "Media transport failed"); return; }
+    if (m.type === "error") { log(call.id, "media-error", { error: typeof m.error === "string" ? m.error.slice(0, 1000) : null }); void finish(call, "failed", "Media transport failed"); return; }
     if (m.type !== "live-event" || typeof m.event?.type !== "string") { void finish(call, "failed", "Unknown media control"); return; }
     const e = m.event;
     if (typeof e.event_id === "string") { if (call.seen.has(e.event_id)) return; call.seen.add(e.event_id); }
