@@ -22,11 +22,10 @@ import { spawnSync } from "node:child_process";
 import { policy, canResumeRebootedIntegration, stallReason, runnable, observeQueueProgress, queueStallReason, progressBudgetExhausted, repairId, repairUnit, repairPrompt } from "./publication-control.mjs";
 import { loadPublicationConfig } from "./publication-config.mjs";
 import { hostWaitKind, rollForwardHosts, mergeHostLanes, readHostLane, runHostLane, runHostLaneRecovery, reconcileHostLaneObservation, resetHostLaneForRepair, hostLaneInputPath, hostLaneLockPath } from "./publication-hosts.mjs";
-import { sourceOnlyQueued, freezeSourceBundle, sourceBundleMembers, resolveSourceBundle } from "./publication-bundle.mjs";
+import { sourceOnlyQueued, sourceBundleMembers, resolveSourceBundle } from "./publication-bundle.mjs";
 import { publicationJournalEnabled, beginPublication, finishPublication } from "./action-journal.mjs";
 import { repairSourceRef, sourceContinuation, canResumeCheckedRequest, failureSignature } from "./publication-continuation.mjs";
 import { publicationTimings, recordCommandTiming } from './publication-timings.mjs';
-import { buildHostPreflight, parseHostPreflight, nativePreflightResult } from './publication-preflight.mjs';
 
 const config = loadPublicationConfig();
 const { repositoryUrl, canonicalRepository, stateRoot, installedCommand, userUnitRoot, targets, alertInbox } = config;
@@ -43,6 +42,7 @@ const contractRoot = join(stateRoot, "contracts");
 const checkout = process.env.PI_STACK_PUBLICATION_CHECKOUT ?? join(stateRoot, "repository");
 const hostLaneRoot = join(stateRoot, 'host-lanes');
 const immutableRoot = join(stateRoot, 'integrations');
+const postServingRoot = join(stateRoot, 'post-serving');
 
 const issueAcknowledgementsPath = join(stateRoot, "issue-acknowledgements.json");
 const issueAlertPath = join(alertInbox, "pi-stack-publication-issues.md");
@@ -200,7 +200,19 @@ function migrateRequestOnRead(request) {
 function readRequest(requestId) {
   const path = requestPath(requestId);
   if (!existsSync(path)) throw new Error(`unknown publication request ${requestId}`);
-  return mergeHostLanes(migrateRequestOnRead(JSON.parse(readFileSync(path, "utf8"))), hostLaneRoot, targets);
+  const request = mergeHostLanes(migrateRequestOnRead(JSON.parse(readFileSync(path, "utf8"))), hostLaneRoot, targets);
+  if (request.integrationSha) {
+    request.postServing = Object.fromEntries(targets.flatMap(target => {
+      const postPath = postServingPath(request, target.id);
+      return existsSync(postPath) ? [[target.id, JSON.parse(readFileSync(postPath, 'utf8'))]] : [];
+    }));
+    const native = request.postServing.gmktec?.results?.androidTests;
+    if (native?.status === 'passed' && native.identity?.revision === request.integrationSha) {
+      request.nativeChecks = { status: 'passed', revision: request.integrationSha, identity: native.identity,
+        command: 'npm run android:test --workspace=kenan', at: native.at };
+    }
+  }
+  return request;
 }
 
 function writeRequest(request) {
@@ -242,7 +254,7 @@ function retainOwnerSource(sourceRoot, sourceSha) {
 function installFrom(sourceRoot, activate = true) {
   const commandSource = join(sourceRoot, "deploy/publication");
   const unitNames = ["pi-stack-publication.service", "pi-stack-publication.timer", "pi-stack-publication.path",
-    "pi-stack-publication-watchdog.service", "pi-stack-publication-watchdog.timer", "pi-stack-publication-repair@.service", "pi-stack-publication-host@.service", "pi-stack-publication-notices.service"];
+    "pi-stack-publication-watchdog.service", "pi-stack-publication-watchdog.timer", "pi-stack-publication-repair@.service", "pi-stack-publication-host@.service", "pi-stack-publication-post@.service", "pi-stack-publication-notices.service"];
   const modules = ["publication-control.mjs", "publication-config.mjs", "publication-hosts.mjs", "publication-bundle.mjs", "publication-continuation.mjs", "publication-timings.mjs", "publication-preflight.mjs", "action-journal.mjs", "release-checkout", "meeting-census", "phone-census", "native-prerequisites"];
   for (const path of [commandSource, ...modules.map(name => join(sourceRoot, "deploy", name)), ...unitNames.map(name => join(sourceRoot, "deploy/systemd", name))]) {
     if (!existsSync(path)) throw new Error(`publication installation source is missing: ${path}`);
@@ -607,6 +619,7 @@ function noticeBody(request) {
     request.resolvedBy ? `Resolved by: ${request.resolvedBy}` : undefined,
     `Step: ${request.step}`,
     `Status: ${request.status}`,
+    request.postServing && Object.keys(request.postServing).length ? `Post-serving diagnostics (selection unchanged): ${Object.entries(request.postServing).map(([host, receipt]) => `${host} ${receipt.status}${receipt.failures?.length ? `: ${compact(receipt.failures.join('; '))}` : ''}`).join('; ')}` : undefined,
     request.hosts ? `Hosts: ${targets.map(target => {
       const host = request.hosts[target.id];
       return `${target.id} ${host?.status ?? "pending"}${host?.status === "waiting" ? ` (${host.waiting.kind})` : ""}`;
@@ -699,8 +712,11 @@ function noticeKey(request) {
       const host = request.hosts?.[target.id];
       return [target.id, host?.status ?? "pending", host?.integrationSha ?? null, host?.waiting?.kind ?? null, host?.failure?.message ?? null];
     }))}` : request.status;
+  const diagnostics = Object.entries(request.postServing ?? {}).filter(([, receipt]) => ['passed', 'failed'].includes(receipt.status))
+    .map(([host, receipt]) => [host, receipt.status, receipt.finishedAt]);
+  const key = diagnostics.length ? `${state}:post:${JSON.stringify(diagnostics)}` : state;
   const existing = request.report?.key;
-  return existing === state || existing?.startsWith(`${state}:`) ? existing : state;
+  return existing === key || !diagnostics.length && existing?.startsWith(`${state}:`) ? existing : key;
 }
 
 function deriveIssues() {
@@ -798,6 +814,11 @@ function noticeProjection(request, index) {
 }
 
 function reconcileNotices() {
+  for (const request of allRequests().filter(request => request.integrationSha && request.publicationOwnerSha)) {
+    launchPostServing(request);
+    const persisted = JSON.parse(readFileSync(requestPath(request.requestId), 'utf8'));
+    if (request.sourceSelection?.status === 'pinned' && JSON.stringify(persisted.postServing ?? {}) !== JSON.stringify(request.postServing ?? {})) writeRequest(request);
+  }
   const index = reconcileIssueAlert();
   const candidates = allRequests().filter(request => {
     const projection = noticeProjection(request, index);
@@ -860,31 +881,17 @@ export function integrateSourceBundle(request, logPath) {
     const fetchedSource = runCapture("git", ["-C", checkout, "rev-parse", `refs/pi-stack-publication/${source.requestId}/source^{commit}`]);
     if (fetchedSource !== source.sourceSha) return { ok: false, status: 1, stderr: `source ref moved from ${source.sourceSha} to ${fetchedSource}` };
   }
-  const baseSha = runCapture("git", ["-C", checkout, "rev-parse", "refs/remotes/origin/main^{commit}"]);
-  result = runLogged(request, "create-integration", "git", ["-C", checkout, "checkout", "--quiet", "-B", "pi-stack-publication", baseSha], 30, logPath);
-  if (!result.ok) return result;
-  for (const source of members.sources) {
-    const contained = commandResult("git", ["--no-replace-objects", "-C", checkout, "merge-base", "--is-ancestor", source.sourceSha, "HEAD"]);
-    if (contained.status === 0) continue;
-    if (contained.status !== 1) return contained;
-    result = runLogged(request, "merge-source", "git", [
-      "-C", checkout, "-c", `user.name=${config.mergeAuthor.name}`, "-c", `user.email=${config.mergeAuthor.email}`,
-      "merge", "--no-ff", "--no-edit", "-m", `Integrate Pi Stack publication ${source.requestId}\n\nPi-Stack-Source: ${source.sourceSha}`, source.sourceSha,
-    ], 60, logPath);
-    if (!result.ok) return result;
-  }
+  const selectedSha = request.repairSources?.at(-1)?.sourceSha ?? request.sourceSha;
+  const baseSha = request.sourceSha;
   for (const source of request.repairSources ?? []) {
     if (source.sourceRef !== repairSourceRef(request.requestId, source.sourceSha)) return { ok: false, status: 1, stderr: 'Invalid retained repair source' };
     result = runLogged(request, 'fetch-repair-source', 'git', ['-C', checkout, 'fetch', '--quiet', '--no-tags', 'origin', `${source.sourceRef}:refs/pi-stack-publication/${request.requestId}/repair-${source.sourceSha}`], 45, logPath);
     if (!result.ok) return result;
     const fetched = runCapture('git', ['-C', checkout, 'rev-parse', `refs/pi-stack-publication/${request.requestId}/repair-${source.sourceSha}^{commit}`]);
     if (fetched !== source.sourceSha) return { ok: false, status: 1, stderr: 'Retained repair source ref changed' };
-    const contained = commandResult('git', ['-C', checkout, 'merge-base', '--is-ancestor', source.sourceSha, 'HEAD']);
-    if (contained.status === 0) continue;
-    if (contained.status !== 1) return contained;
-    result = runLogged(request, 'merge-repair-source', 'git', ['-C', checkout, '-c', `user.name=${config.mergeAuthor.name}`, '-c', `user.email=${config.mergeAuthor.email}`, 'merge', '--no-ff', '--no-edit', source.sourceSha], 45, logPath);
-    if (!result.ok) return result;
   }
+  result = runLogged(request, 'select-submitted-source', 'git', ['-C', checkout, 'checkout', '--quiet', '--detach', selectedSha], 30, logPath);
+  if (!result.ok) return result;
   for (const source of [...members.sources, ...(request.repairSources ?? [])]) {
     const proof = commandResult("git", ["--no-replace-objects", "-C", checkout, "merge-base", "--is-ancestor", source.sourceSha, "HEAD"]);
     if (!proof.ok) return { ...proof, stderr: `combined integration omits ${source.requestId}: ${source.sourceSha}` };
@@ -896,11 +903,8 @@ function createIntegration(request, logPath) {
   let result = integrateSourceBundle(request, logPath);
   if (!result.ok) return result;
   const { baseSha } = result;
-  if (request.ownerRepairSourceSha && !commandResult("git", ["-C", checkout, "merge-base", "--is-ancestor", request.ownerRepairSourceSha, "HEAD"]).ok) {
-    const retained = checked("git", ["-C", checkout, "rev-parse", `${ownerSourceRef}^{commit}`]);
-    if (retained !== request.ownerRepairSourceSha) throw new Error("Owner repair source changed; fresh bound evidence required");
-    result = runLogged(request, "merge-bound-owner-repair", "git", ["-C", checkout, "-c", `user.name=${config.mergeAuthor.name}`, "-c", `user.email=${config.mergeAuthor.email}`, "merge", "--no-ff", "--no-edit", "-m", `Repair publication owner for ${request.requestId} within existing publication`, retained], 60, logPath);
-    if (!result.ok) return result;
+  if (request.ownerRepairSourceSha && !commandResult('git', ['-C', checkout, 'merge-base', '--is-ancestor', request.ownerRepairSourceSha, 'HEAD']).ok) {
+    return { ok: false, status: 1, stderr: 'Submitted source omits its bound owner repair; submit the corrected immutable source in this request' };
   }
   const integrationSha = runCapture("git", ["-C", checkout, "rev-parse", "HEAD^{commit}"]);
   checkOwnerSource(checkout, integrationSha);
@@ -914,38 +918,9 @@ function createIntegration(request, logPath) {
     ? JSON.parse(runCapture("bun", [join(checkout, "deploy/android-update"), "plan", requestRoot], { timeoutSeconds: 30, cwd: checkout }))
     : { kind: "native" };
   if (!["native", "web"].includes(androidPlan.kind) || androidPlan.identity && androidPlan.identity.revision !== integrationSha) throw new Error("Invalid Android artifact build plan");
-  const androidChecks = androidPlan.kind === "native" ? "npm run android:test --workspace=kenan"
-    : "node --test apps/kenan/release-info.test.mjs && bun test apps/kenan/connect-adb.test.ts";
-  const checksCommand = `npm run check && ${androidChecks}`;
-  request.checks = { status: "running", command: checksCommand, androidPlan, log: logPath };
-  writeRequest(request);
-  result = runLogged(
-    request,
-    "checks",
-    "bash",
-    ["-c", 'set -euo pipefail\nsource deploy/lib\npi_stack_prepare_dependencies "$PWD"\nnpm run check'],
-    900,
-    logPath,
-    { cwd: checkout, env: { ...process.env, PI_STACK_CHECK_CACHE_DIR: join(stateRoot, 'check-cache') } },
-  );
-  if (!result.ok) return result;
-  result = runLogged(request, 'android-checks', 'bash', ['-c', `set -euo pipefail\n${androidChecks}`], 180, logPath, { cwd: checkout });
-  if (!result.ok) return result;
-  if (androidPlan.kind === 'native') {
-    request.nativeChecks = { status: 'passed', revision: integrationSha, identity: androidPlan.identity,
-      command: 'npm run android:test --workspace=kenan', at: new Date().toISOString() };
-    writeRequest(request);
-  }
-  request.baseSha = baseSha;
-  request.integrationSha = integrationSha;
-  request.checks = {
-    status: "passed",
-    command: checksCommand,
-    androidPlan,
-    at: new Date().toISOString(),
-    log: logPath,
-  };
-  request.step = "checks-passed";
+  request.sourceSelection = { status: 'pinned', sourceSha: integrationSha, at: new Date().toISOString() };
+  request.checks = { status: 'deferred', phase: 'post-serving', androidPlan, log: logPath };
+  request.step = 'source-pinned';
   writeRequest(request);
   return { ok: true, status: 0, stdout: "", stderr: "" };
 }
@@ -975,7 +950,10 @@ function prepareAndroidArtifact(request, logPath) {
       result = runLogged(request, "build-android-update", "bash", ["-c", 'set -euo pipefail\nsource deploy/lib\npi_stack_prepare_dependencies "$PWD"\nnpm run android:build --workspace=kenan'], 180, logPath, { cwd: checkout });
       if (!result.ok) throw new Error(`Android update build exited ${result.status}`);
     }
-  } else if (plan.kind !== "web") throw new Error("Unknown checked Android build plan");
+  } else if (plan.kind === 'web') {
+    result = runLogged(request, 'build-web-update', 'bash', ['-c', 'set -euo pipefail\nsource deploy/lib\npi_stack_prepare_dependencies "$PWD"\nnode scripts/build-workspace.mjs remote'], 180, logPath, { cwd: checkout });
+    if (!result.ok) throw new Error(`Web update build exited ${result.status}`);
+  } else throw new Error('Unknown Android build plan');
   if (existsSync(directory) && !existsSync(join(directory, `${request.integrationSha}.web.zip`))) rmSync(directory, { recursive: true, force: true });
   const args = plan?.kind === "web" ? ["prepare-web", directory, plan.nativeDirectory] : ["prepare", directory];
   result = runLogged(request, "prepare-android-update", join(checkout, "deploy/android-update"), args, 60, logPath);
@@ -1036,31 +1014,18 @@ function publishAndroidArtifact(request, logPath, selectedTargets = targets) {
 }
 
 export function publishIntegration(request, logPath) {
-  const refresh = step => runLogged(request, step, "git", ["-C", checkout, "fetch", "--quiet", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"], 60, logPath);
-  const main = () => runCapture("git", ["-C", checkout, "rev-parse", "refs/remotes/origin/main^{commit}"]);
-  const moved = remoteMain => ({ ok: false, kind: "main-moved", remoteMain });
-  let fetch = refresh("refresh-integration-base");
-  if (!fetch.ok) return fetch;
-  let remoteMain = main();
-  if (remoteMain !== request.integrationSha) {
-    if (remoteMain !== request.baseSha) return moved(remoteMain);
-    const result = runLogged(request, "integrate-main", "git", ["-C", checkout, "push", "--quiet", "origin", `${request.integrationSha}:refs/heads/main`], 60, logPath);
-    const pushProgress = request.progress;
-    fetch = refresh("confirm-integrated-main");
-    if (!fetch.ok) return fetch;
-    remoteMain = main();
-    if (remoteMain !== request.integrationSha) {
-      if (remoteMain !== request.baseSha) return moved(remoteMain);
-      request.step = "integrate-main";
-      request.progress = pushProgress;
-      writeRequest(request);
-      return result.ok ? { ok: false, status: 1, stderr: "main did not retain the pushed integration" } : result;
-    }
-  }
+  const ref = `refs/heads/pi-stack-publications/${request.requestId}-delivery-${request.integrationSha}`;
+  const retained = runLogged(request, 'retain-submitted-delivery', 'git', ['-C', checkout, 'push', '--quiet', 'origin', `${request.integrationSha}:${ref}`], 60, logPath);
+  if (!retained.ok) return retained;
+  request.deliverySource = { sourceSha: request.integrationSha, sourceRef: ref };
+  // main is a source index. Contention there cannot invalidate this delivery.
+  const indexed = runLogged(request, 'index-submitted-main', 'git', ['-C', checkout, 'push', '--quiet', 'origin', `${request.integrationSha}:refs/heads/main`], 15, logPath);
+  request.mainPublication = indexed.ok ? { status: 'advanced', sourceSha: request.integrationSha }
+    : { status: 'not-advanced', sourceSha: request.integrationSha, message: indexed.stderr.trim() || `exit ${indexed.status}` };
   request.integratedAt = new Date().toISOString();
-  request.step = "integrated";
+  request.step = 'integrated';
   writeRequest(request);
-  return { ok: true, status: 0, stdout: "", stderr: "" };
+  return { ok: true, status: 0, stdout: '', stderr: '' };
 }
 
 export const publicationReservationScript = readFileSync(join(dirname(self), "release-checkout"), "utf8") + String.raw`
@@ -1124,7 +1089,7 @@ export function deployTarget(request, target, logPath) {
   const fd = openSync(logPath, "a", 0o600);
   const start = fstatSync(fd).size;
   closeSync(fd);
-  const env = [`PI_STACK_PUBLICATION_REQUEST=${request.requestId}`, ...(meetingOverride(request.requestId) ? ["PI_STACK_ALLOW_LIVE_MEETING_RESTART=1"] : [])];
+  const env = [`PI_STACK_PUBLICATION_REQUEST=${request.requestId}`, `PI_STACK_RELEASE_MODE=${target.sshHost ? 'minimal' : 'immediate'}`,  ...(meetingOverride(request.requestId) ? ["PI_STACK_ALLOW_LIVE_MEETING_RESTART=1"] : [])];
   const result = target.sshHost
     ? runLogged(request, `deploy-${target.id}`, "ssh", ["-o", "BatchMode=yes", target.sshHost, "env", ...env, target.releaseCommand, request.integrationSha], 420, logPath)
     : runLogged(request, `deploy-${target.id}`, "env", [...env, target.releaseCommand, request.integrationSha], 420, logPath);
@@ -1353,26 +1318,6 @@ export function refreshNativeSourceWait(request) {
   if (result.status === 75) request.nextAttemptAt = new Date(Date.now() + policy.blockedRetryMs).toISOString();
   writeRequest(request);
   return result.ok;
-}
-
-export function requeueMovedIntegration(request, remoteMain, logPath) {
-  const ref = `refs/pi-stack-publication/${request.requestId}/integrations/${request.integrationSha}`;
-  const retained = runLogged(request, "retain-moved-integration", "git", ["-C", checkout, "update-ref", ref, request.integrationSha], 30, logPath);
-  if (!retained.ok) throw new Error(`Could not retain checked integration ${request.integrationSha}`);
-  for (const target of targets) {
-    restoreCustody(request, target.id, target.sshHost);
-    restoreMaintenance(request, target.id, target.sshHost);
-    restoreReservation(request, target);
-  }
-  const fields = ["baseSha", "integrationSha", "checks", "android", "hosts", "integratedAt", "releaseAncestry", "contractGate"];
-  const integration = Object.fromEntries(fields.filter(key => request[key] !== undefined).map(key => [key, request[key]]));
-  (request.mainMovements ??= []).push({ ...integration, ref, remoteMain, attempt: request.attempt, log: logPath,
-    at: new Date().toISOString(), bootstrap: structuredClone(request.bootstrap), maintenance: structuredClone(request.maintenance) });
-  for (const key of fields) delete request[key];
-  request.status = "queued";
-  request.step = "main-moved-recheck-required";
-  writeRequest(request);
-  appendLog(logPath, `[${new Date().toISOString()}] main moved to ${remoteMain}; retained ${ref}; queued a fresh integration and full checks\n`);
 }
 
 export const hostProofScript = String.raw`
@@ -2038,40 +1983,10 @@ function deliverHost(request, target, logPath, previous) {
     throw new Error(`${target.id} reservation exited ${result.status}`);
   }
   try {
-    const probeInput = { requestId: request.requestId, integrationSha: request.integrationSha, hostId: target.id,
-      releaseRepository: target.releaseRepository, hostConfig: target.hostConfig,
-      meetings: meetingOverride(request.requestId) ? 'override' : request.meetingRuntimeProtocol === 'meet-runtime-v1' ? 'restart-blockers' : 'all', runtimeCensusScript };
-    const built = buildHostPreflight(probeInput);
-    if (!built.ok) throw new Error(`${built.error.kind}: ${built.error.message}`);
-    // Retain candidate Git before the read-only probe; source selection is untouched.
     runHostScript('set -euo pipefail\ngit -C "$1" fetch --quiet --no-tags origin "$2"\n', target.sshHost, [target.releaseRepository, request.integrationSha], 45);
-    const observation = parseHostPreflight({ ok: true, stdout: runHostScript(built.value.script, target.sshHost, built.value.args, 60) }, probeInput);
-    if (!observation.ok) throw new Error(`${observation.error.kind}: ${observation.error.message}`);
-    const { census, meetings, native: nativeObservation } = observation.value;
+    const selectedCommit = runHostScript('set -euo pipefail\nif [[ -f /srv/pi/pi-remote/.pi-stack-commit ]]; then read -r commit < /srv/pi/pi-remote/.pi-stack-commit; printf "%s" "$commit"; fi\n', target.sshHost, [], 5).trim() || null;
+    const census = { selectedCommit };
     retainSelectedSource(census, target.sshHost);
-    if (!request.executorHandoffs?.[target.id] && census.selectedCommit && commandResult("git", ["-C", checkout, "merge-base", "--is-ancestor", request.integrationSha, census.selectedCommit]).ok) {
-      if (census.selectedCommit !== request.integrationSha && !allRequests().some(candidate => candidate.integrationSha === census.selectedCommit && candidate.checks?.status === "passed")) throw new Error(`${target.id} selected descendant has no passing publication checks`);
-      if (census.selectedCommit === request.integrationSha) publishAndroidArtifact(request, logPath, [target]);
-      const proof = verifyTarget(target, census.selectedCommit);
-      const android = currentAndroidProof(target, census.selectedCommit);
-      const path = join(proofRoot, request.requestId, `${target.id}.json`);
-      atomicWrite(path, `${JSON.stringify({ ...proof, requestedIntegrationSha: request.integrationSha, android }, null, 2)}\n`);
-      releaseNativeHistory(request, target);
-      return { status: "passed", integrationSha: census.selectedCommit, proof: path, sha256: sha256(path), android, superseded: census.selectedCommit !== request.integrationSha };
-    }
-    const ancestry = inspectReleaseAncestry(census, request.integrationSha, target.sshHost);
-    const ancestryPath = join(proofRoot, request.requestId, `${target.id}-release-ancestry.json`);
-    atomicWrite(ancestryPath, `${JSON.stringify(ancestry, null, 2)}\n`);
-    if (!ancestry.ok) throw new Error(`${target.id} integration omits selected or checkout source; repair the source ancestry`);
-    if (!meetingOverride(request.requestId)) {
-      if (meetings.status !== 0) throw new Error(`Meeting census unavailable: ${meetings.stderr}`);
-      const rooms = meetings.stdout.trim();
-      if (rooms) return hostWait(request, target, "live-meeting", logPath, `${target.id} has live meetings; other hosts roll forward while this host waits.`, previous);
-    }
-    const classified = nativePreflightResult(nativeObservation, target.id);
-    if (!classified.ok) throw Object.assign(new Error(classified.error.message), { probeFailure: classified.error });
-    const native = classified.value;
-    if (!native.ok) return hostWait(request, target, "native-source", logPath, `${target.id} needs a newer native source; other hosts continue.`, previous);
     // The wrapper prepares all immutable artifacts while old listeners serve.
     // Only deploy/host may advance the boundary, after that preparation proof.
     const history = nativeHistoryBoundaryTarget(request, target, "validate", logPath);
@@ -2102,10 +2017,10 @@ function deliverHost(request, target, logPath, previous) {
     }
     if (request.executorHandoffs?.[target.id]) { delete request.executorHandoffs[target.id]; writeRequest(request); }
     if (!deployed.ok) throw new Error(`${target.id} release wrapper exited ${deployed.status}`);
-    const proof = verifyTarget(target, request.integrationSha);
-    const android = currentAndroidProof(target, request.integrationSha);
+    const proof = servingReceipt(target, request.integrationSha);
+    const android = request.android?.hosts?.[target.id];
     const path = join(proofRoot, request.requestId, `${target.id}.json`);
-    atomicWrite(path, `${JSON.stringify({ ...proof, android }, null, 2)}\n`);
+    atomicWrite(path, `${JSON.stringify({ ...proof, ...(android ? { android } : {}) }, null, 2)}\n`);
     releaseCustody(request, target.id);
     releaseNativeHistory(request, target);
     return { status: "passed", integrationSha: request.integrationSha, proof: path, sha256: sha256(path), android };
@@ -2114,6 +2029,139 @@ function deliverHost(request, target, logPath, previous) {
     restoreMaintenance(request, target.id, target.sshHost);
     restoreReservation(request, target);
   }
+}
+
+export function servingReceipt(target, expected) {
+  // The host command already recovered failed starts. This is source custody, not qualification.
+  const markers = JSON.parse(runHostScript(String.raw`
+set -euo pipefail
+remote=$(< /srv/pi/pi-remote/.pi-stack-commit)
+orchestrator=$(< /srv/pi/pi-orchestrator/.pi-stack-commit)
+jq -n --arg remote "$remote" --arg orchestrator "$orchestrator" '{remoteCommit:$remote,orchestratorCommit:$orchestrator}'
+`, target.sshHost, [], 5));
+  if (markers.remoteCommit !== expected || markers.orchestratorCommit !== expected) throw new Error('Host command did not select submitted source');
+  return { host: target.id, integrationSha: expected, ...markers, environmentId: target.environmentId,
+    servingAt: new Date().toISOString(), acceptance: { kind: 'service-start', releaseMode: target.sshHost ? 'minimal' : 'immediate' } };
+}
+
+function postServingPath(request, hostId) {
+  return join(postServingRoot, request.requestId, request.integrationSha, `${hostId}.json`);
+}
+
+export function launchPostServing(request) {
+  if (isCancelled(request) || request.sourceSelection?.status !== 'pinned') return;
+  for (const target of targets.filter(target => request.hosts?.[target.id]?.status === 'passed')) {
+    if (!readHostLane(hostLaneRoot, request.requestId, request.integrationSha, target.id)) continue;
+    const path = postServingPath(request, target.id);
+    const receipt = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : null;
+    if (receipt && ['passed', 'failed'].includes(receipt.status)) continue;
+    const unit = `pi-stack-publication-post@${request.requestId}--${request.integrationSha}--${target.id}.service`;
+    if (serviceBusy(unit)) continue;
+    const launched = commandResult('systemctl', ['--user', 'start', '--no-block', unit], { timeoutSeconds: 5 });
+    if (!launched.ok) {
+      atomicWrite(path, JSON.stringify({ status: 'launch-failed', requestId: request.requestId, integrationSha: request.integrationSha,
+        hostId: target.id, message: launched.stderr || `exit ${launched.status}`, at: new Date().toISOString() }));
+      postServingAlert(request, target.id, `Post-serving worker could not start: ${launched.stderr || launched.status}`);
+    }
+  }
+}
+
+function postServingAlert(request, hostId, message) {
+  atomicWrite(join(alertInbox, `pi-stack-post-${request.requestId}-${hostId}.md`),
+    `# Pi Stack post-serving diagnostics\n\nRepository: ${repositoryUrl}\nSource: ${request.integrationSha}\nHost: ${hostId}\nServing selection is unchanged.\n${message}\nReceipt: ${postServingPath(request, hostId)}\n`);
+}
+
+function postRun(instance) {
+  const [requestId, integrationSha, hostId, extra] = instance.split('--');
+  validateRequestId(requestId); validateSha(integrationSha);
+  if (extra !== undefined || !targets.some(target => target.id === hostId)) throw new Error('Invalid post-serving instance');
+  const inputPath = hostLaneInputPath(hostLaneRoot, requestId, integrationSha, hostId);
+  const input = JSON.parse(readFileSync(inputPath, 'utf8'));
+  const ownerSha = input.request.publicationOwnerSha;
+  validateSha(ownerSha);
+  const path = postServingPath(input.request, hostId);
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const result = spawnSync('flock', ['--nonblock', '--conflict-exit-code', '75', '--close', `${path}.lock`, process.execPath,
+    join(immutableRoot, ownerSha, 'deploy/publication'), '_post-run', inputPath], {
+    stdio: 'inherit', env: { ...process.env, PI_STACK_PUBLICATION_CHECKOUT: join(immutableRoot, integrationSha) },
+  });
+  if (result.status !== 0 && result.status !== 75) throw new Error(`Post-serving worker exited ${result.status}`);
+}
+
+export function executePostServing(inputPath) {
+  const input = JSON.parse(readFileSync(inputPath, 'utf8'));
+  const request = input.request;
+  const target = targets.find(target => target.id === input.hostId);
+  if (!target) throw new Error('Unknown post-serving host');
+  const lane = readHostLane(hostLaneRoot, request.requestId, request.integrationSha, target.id);
+  if (lane?.state !== 'passed') throw new Error('Post-serving work requires this host serving receipt');
+  const path = postServingPath(request, target.id);
+  const prior = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : null;
+  if (prior && ['passed', 'failed'].includes(prior.status)) return;
+  const log = join(logRoot, request.requestId, `post-${request.integrationSha}-${target.id}.log`);
+  mkdirSync(dirname(log), { recursive: true, mode: 0o700 });
+  const receipt = { requestId: request.requestId, integrationSha: request.integrationSha, hostId: target.id,
+    status: 'running', attempt: (prior?.attempt ?? 0) + 1, startedAt: new Date().toISOString(), log, results: {} };
+  activeRequest = request;
+  activeLog = log;
+  activeLaneCheckpoint = local => {
+    receipt.step = local.step;
+    receipt.progress = local.progress;
+    atomicWrite(path, JSON.stringify(receipt));
+  };
+  atomicWrite(path, JSON.stringify(receipt));
+  const failures = [];
+  if (receipt.attempt > policy.maxAttempts) failures.push('Post-serving worker restart budget exhausted');
+  else {
+    if (!target.sshHost) {
+      const checks = runLogged(request, 'post-serving-checks', 'bash', ['-c', 'set -euo pipefail\nsource deploy/lib\npi_stack_prepare_dependencies "$PWD"\nnpm run check'], 900, log,
+        { cwd: checkout, env: { ...process.env, PI_STACK_CHECK_CACHE_DIR: join(stateRoot, 'check-cache') } });
+      receipt.results.checks = { status: checks.ok ? 'passed' : 'failed', exitCode: checks.status };
+      if (!checks.ok) failures.push(`Full source checks exited ${checks.status}`);
+      const android = runLogged(request, 'post-serving-android-tests', 'npm', ['run', 'android:test', '--workspace=kenan'], 180, log, { cwd: checkout });
+      receipt.results.androidTests = { status: android.ok ? 'passed' : 'failed', exitCode: android.status, at: new Date().toISOString(),
+        ...(request.checks?.androidPlan?.kind === 'native' ? { identity: request.checks.androidPlan.identity } : {}) };
+      if (!android.ok) failures.push(`Android tests exited ${android.status}`);
+    }
+    for (const [name, operation] of [['hostProof', () => verifyTarget(target, request.integrationSha)],
+      ['androidProof', () => currentAndroidProof(target, request.integrationSha)],
+      ['doctors', () => JSON.parse(runHostScript(String.raw`
+set -euo pipefail
+expected=$1 control=$2 host_config=$3
+selected=$(< /srv/pi/pi-remote/.pi-stack-commit)
+if [[ $selected != "$expected" ]]; then
+  jq -n --arg selected "$selected" '{status:"superseded",selectedSha:$selected}'
+  exit 0
+fi
+user=$(jq -er '.fleetUser' "$host_config")
+"$control/deploy/runtime-doctors" browser "$control" "$user" "$control" >&2 &
+browser=$!
+"$control/deploy/runtime-doctors" model "$control" "$user" "$control" >&2 &
+model=$!
+failed=0
+wait "$browser" || failed=1
+wait "$model" || failed=1
+(( failed == 0 )) || exit 1
+jq -n '{status:"passed"}'
+`, target.sshHost, [request.integrationSha, target.releaseRepository, target.hostConfig], 150))]]) {
+      try {
+        const selected = runHostScript('set -euo pipefail\nread -r selected < /srv/pi/pi-remote/.pi-stack-commit\nprintf "%s" "$selected"\n', target.sshHost, [], 5).trim();
+        if (!/^[a-f0-9]{40}$/.test(selected)) throw new Error('Post-serving source observation is invalid');
+        receipt.results[name] = selected !== request.integrationSha ? { status: 'superseded', selectedSha: selected }
+          : { status: 'passed', proof: operation() };
+      } catch (error) { const message = error instanceof Error ? error.message : String(error); receipt.results[name] = { status: 'failed', message }; failures.push(`${name}: ${message}`); }
+    }
+  }
+  activeRequest = undefined;
+  activeLog = undefined;
+  activeLaneCheckpoint = undefined;
+  receipt.status = failures.length ? 'failed' : 'passed';
+  receipt.finishedAt = new Date().toISOString();
+  receipt.failures = failures;
+  atomicWrite(path, JSON.stringify(receipt));
+  if (failures.length) postServingAlert(request, target.id, failures.join('\n'));
+  else rmSync(join(alertInbox, `pi-stack-post-${request.requestId}-${target.id}.md`), { force: true });
+  atomicWrite(join(stateRoot, 'wake'), new Date().toISOString());
 }
 
 function hostUnit(request, target) {
@@ -2261,13 +2309,7 @@ export function processRequest(request) {
     let result = prepareCheckout(request, logPath);
     if (!result.ok) throw new Error(result.stderr.trim() || `checkout preparation exited ${result.status}`);
 
-    const remoteMain = runCapture("git", ["-C", checkout, "rev-parse", "refs/remotes/origin/main^{commit}"]);
-    if (resumeAfterReboot && remoteMain !== request.integrationSha && remoteMain !== request.baseSha) {
-      requeueMovedIntegration(request, remoteMain, logPath);
-      return;
-    }
-    const reusableIntegration = request.integrationSha && request.checks?.status === "passed"
-      && (request.integratedAt || remoteMain === request.integrationSha || remoteMain === request.baseSha)
+    const reusableIntegration = request.integrationSha && (request.sourceSelection?.status === 'pinned' || request.checks?.status === 'passed')
       && commandResult("git", ["-C", checkout, "cat-file", "-e", `${request.integrationSha}^{commit}`]).ok;
     if (!reusableIntegration) {
       delete request.integrationSha;
@@ -2291,10 +2333,6 @@ export function processRequest(request) {
     const requestProofRoot = join(proofRoot, request.requestId);
     if (!request.integratedAt) {
       result = publishIntegration(request, logPath);
-      if (result.kind === "main-moved") {
-        requeueMovedIntegration(request, result.remoteMain, logPath);
-        return;
-      }
       if (!result.ok) throw new Error(result.stderr.trim() || `main integration exited ${result.status}`);
     }
     request.step = "roll-forward-hosts";
@@ -2311,6 +2349,7 @@ export function processRequest(request) {
       save: writeRequest,
     });
     checkCancellation(request);
+    launchPostServing(request);
     if (outcome.status === "failed") throw new Error(outcome.hosts.map(id => `${id}: ${request.hosts[id].failure.message}`).join("; "));
     if (outcome.status === "waiting") {
       request.status = "queued";
@@ -2486,6 +2525,7 @@ function watchdog() {
   ensureState();
   const activatedAt = existsSync(repairPolicyPath) ? JSON.parse(readFileSync(repairPolicyPath, "utf8")).activatedAt : new Date().toISOString();
   for (const request of allRequests()) {
+    if (request.integrationSha && request.publicationOwnerSha) launchPostServing(request);
     for (const target of targets) {
       const delivery = request.hostDelivery?.[target.id];
       if (!delivery || !['running', 'recovering'].includes(delivery.state)) continue;
@@ -2781,7 +2821,7 @@ export function refreshHostWaits(request) {
     const host = request.hosts[target.id];
     if (!host) { ready = true; continue; }
     if (host.status === "passed") continue;
-    if (host.status === "failed") continue;
+    if (host.status === "failed") { ready = true; continue; }
     if (host.status !== "waiting") throw new Error(`Unknown delivery state for ${target.id}: ${host.status}`);
     try {
       let available;
@@ -2887,12 +2927,8 @@ function bindBundleFollowers(owner) {
 }
 
 export function freezeQueuedSources(request) {
-  if (!sourceOnlyQueued(request) || meetingOverride(request.requestId)) return;
-  const frozen = freezeSourceBundle(request, allRequests(), candidate => runnable(candidate) && !isCancelled(candidate) && !meetingOverride(candidate.requestId));
-  if (!frozen.ok) throw new Error(`${frozen.error.kind}: ${frozen.error.detail}`);
-  request.sourceBundle = frozen.bundle;
-  writeRequest(request);
-  bindBundleFollowers(request);
+  // A submission is already the writer's combined immutable source, not a merge invitation.
+  if (request.sourceBundle) bindBundleFollowers(request);
 }
 
 export function reconcileSourceBundles() {
@@ -2992,6 +3028,8 @@ function locked(name, operation, args = [], optional = false, admissionSeconds =
 
 function main() {
   const [operation, ...args] = process.argv.slice(2);
+  if (operation === 'post-run' && args.length === 1) return postRun(args[0]);
+  if (operation === '_post-run' && args.length === 1) return executePostServing(args[0]);
   if (operation === 'host-run' && args.length === 1) return hostRun(args[0]);
   if (operation === '_host-run' && args.length === 1) return executeHostLane(args[0]);
   if (operation === '_host-abort' && args.length === 2) return executeHostLane(...args);

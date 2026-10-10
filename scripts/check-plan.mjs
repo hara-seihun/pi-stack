@@ -66,7 +66,7 @@ export function checkPolicy(name, job) {
   if (['orchestrator shared RPC', 'orchestrator tool schemas'].includes(name)) return { kind: 'run', reason: 'idempotent dependency/generated-input reconciliation' };
   if (name.startsWith('publication ')) {
     const suite = name.slice('publication '.length);
-    if (!['config', 'transport', 'roots', 'core', 'gate', 'bundle', 'source', 'progress', 'proof', 'telephone', 'continuation', 'preflight', 'host lanes'].includes(suite)) throw new Error(`No declared check inputs for ${name}`);
+    if (!['config', 'transport', 'roots', 'core', 'gate', 'bundle', 'source', 'progress', 'proof', 'telephone', 'continuation', 'preflight', 'host lanes', 'post'].includes(suite)) throw new Error(`No declared check inputs for ${name}`);
     return { kind: 'memo', inputs: suite === 'continuation' ? ['deploy/publication-continuation.mjs', 'deploy/publication-timings.mjs'] : suite === 'host lanes' ? ['deploy/publication-hosts.mjs'] : ['deploy', 'config', 'scripts/publication-fixture.mjs', 'apps/meet-recognition'], completeScope: true };
   }
   if (name.startsWith('orchestrator test: ') || name.startsWith('remote test: ') || name.startsWith('runtime test: ') || name.startsWith('memory test: ') || name.startsWith('root test: ')) {

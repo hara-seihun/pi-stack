@@ -43,9 +43,10 @@ export function resolveSourceBundle(request, owner) {
   if (owner.sourceBundle?.id !== binding.bundleId || !members.sources.some(source => JSON.stringify(source) === JSON.stringify(member(request)))) {
     return error("bundle-binding-mismatch", request.requestId);
   }
-  if (owner.checks?.status === "passed" && owner.integratedAt && sha.test(owner.integrationSha) && sha.test(owner.baseSha)) {
+  if ((owner.sourceSelection?.status === 'pinned' || owner.checks?.status === "passed") && owner.integratedAt && sha.test(owner.integrationSha) && sha.test(owner.baseSha)) {
     const evidence = { baseSha: owner.baseSha, integrationSha: owner.integrationSha, integratedAt: owner.integratedAt,
-      checks: structuredClone(owner.checks), bundleEvidence: { ownerRequestId: owner.requestId, bundleId: binding.bundleId, integrationSha: owner.integrationSha } };
+      checks: structuredClone(owner.checks), sourceSelection: structuredClone(owner.sourceSelection), deliverySource: structuredClone(owner.deliverySource),
+      bundleEvidence: { ownerRequestId: owner.requestId, bundleId: binding.bundleId, integrationSha: owner.integrationSha } };
     if (owner.android) evidence.android = { ...structuredClone(owner.android), status: "prepared", hosts: {} };
     return { ok: true, state: "ready", evidence };
   }

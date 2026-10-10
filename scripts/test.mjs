@@ -25,7 +25,7 @@ const jobs = [
       `--test-name-pattern=^host deployment activates Pi Remote and reconciles daemons with guest ${guest}$`,
       "scripts/deploy-lock.test.mjs"],
   ]),
-  ...["config", "transport", "roots", "core", "gate", "bundle", "source", "progress", "proof", "continuation", "preflight"].map(suite => [
+  ...["config", "transport", "roots", "core", "gate", "bundle", "source", "progress", "proof", "continuation", "preflight", "post"].map(suite => [
     `publication ${suite}`, "node", ["--test", ...(suite === 'continuation' ? ['scripts/publication-continuation.test.mjs', 'scripts/publication-timings.test.mjs'] : [suite === "core" ? "scripts/publication.test.mjs" : `scripts/publication-${suite}.test.mjs`])],
     { timeoutMs: 55_000 },
   ]),

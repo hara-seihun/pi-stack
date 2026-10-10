@@ -22,6 +22,7 @@ export function sourceContinuation(request, repair, source) {
   value.integrationHistory = [...(value.integrationHistory ?? []), {
     attempt: value.attempt, integrationSha: value.integrationSha, checks: value.checks, android: value.android,
     hosts: value.hosts, finalProof: value.finalProof, failure: value.failure, sourceBundleOwner: value.sourceBundleOwner,
+    sourceSelection: value.sourceSelection, deliverySource: value.deliverySource, postServing: value.postServing,
   }];
   value.repairSources = [...(value.repairSources ?? []), { ...source, repairId: repair.id }];
   value.continuedRepair = { repairId: repair.id, sourceSha: source.sourceSha, at };
@@ -29,13 +30,13 @@ export function sourceContinuation(request, repair, source) {
   value.step = 'queued-after-source-repair';
   value.nextAttemptAt = at;
   for (const key of ['integrationSha', 'baseSha', 'checks', 'android', 'hosts', 'integratedAt', 'finalProof', 'failure',
-    'waiting', 'blockedSince', 'progress', 'bundleEvidence', 'sourceBundleOwner']) delete value[key];
+    'waiting', 'blockedSince', 'progress', 'bundleEvidence', 'sourceBundleOwner', 'sourceSelection', 'deliverySource', 'postServing', 'mainPublication']) delete value[key];
   value.attemptLimit = (value.attempt ?? 0) + 1;
   return { ok: true, value, changed: true };
 }
 
 export function canResumeCheckedRequest(request) {
-  return request.status === 'running' && request.checks?.status === 'passed' && sha(request.integrationSha)
+  return request.status === 'running' && (request.sourceSelection?.status === 'pinned' || request.checks?.status === 'passed') && sha(request.integrationSha)
     && !request.recoveryInProgress
     && !Object.values(request.nativeHistory?.hosts ?? {}).some(host => ['repair-required', 'resume-required'].includes(host.state));
 }
