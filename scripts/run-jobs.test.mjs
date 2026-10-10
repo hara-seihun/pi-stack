@@ -111,21 +111,28 @@ test("publication partitions deployment checks without dropping or repeating con
 
 test("publication fixture files run exactly once as separately bounded jobs", async () => {
   const suites = checkJobs.filter(([name]) => name.startsWith("publication "));
-  const expected = ["config", "transport", "roots", "", "gate", "bundle", "source", "progress", "proof"]
+  const expected = ["config", "transport", "roots", "", "gate", "bundle", "source", "progress", "proof", "hosts"]
     .map(suite => `scripts/publication${suite ? `-${suite}` : ""}.test.mjs`);
-  assert.deepEqual(suites.flatMap(([, , args]) => args.filter(arg => arg.endsWith(".test.mjs"))), expected);
+  assert.deepEqual(suites.map(([, , args]) => args.filter(arg => arg.endsWith(".test.mjs"))), expected.map(file => [file]));
   assert.ok(suites.every(job => job[3].timeoutMs === 55_000));
+  const contracts = expected.flatMap(file => file === "scripts/publication-hosts.test.mjs"
+    ? ["live-telephone fixture", "telephone phone-census fixture"].map(name => ({ file, name, marker: `${file}:${name}` }))
+    : [{ file, name: "fixture", marker: file }]);
   const root = mkdtempSync(join(tmpdir(), "pi-publication-check-plan-"));
   try {
-    for (const file of expected) writeFileSync(join(root, file.split("/").at(-1)),
-      `import test from 'node:test'; test('fixture', () => console.log(${JSON.stringify(`CONTRACT:${file}`)}));`);
+    for (const file of expected) {
+      const fixtures = contracts.filter(contract => contract.file === file);
+      if (file === "scripts/publication-hosts.test.mjs") fixtures.push({ file, name: "unselected host fixture", marker: "UNSELECTED_HOST_CONTRACT" });
+      writeFileSync(join(root, file.split("/").at(-1)), `import test from 'node:test';\n${fixtures.map(({ name, marker }) =>
+        `test(${JSON.stringify(name)}, () => console.log(${JSON.stringify(`CONTRACT:${marker}`)}));`).join("\n")}\n`);
+    }
     let output = "";
     const results = await runJobs(suites.map(([name, command, args, options]) => [name, command,
       args.map(arg => arg.endsWith(".test.mjs") ? join(root, arg.split("/").at(-1)) : arg), options]), {
       concurrency: 2, write(text) { output += text; },
     });
     assert.deepEqual(results.map(result => result.code), suites.map(() => 0), output);
-    assert.deepEqual([...output.matchAll(/CONTRACT:([^\n\r]+)/g)].map(match => match[1]).sort(), expected.sort(), output);
+    assert.deepEqual([...output.matchAll(/CONTRACT:([^\n\r]+)/g)].map(match => match[1]).sort(), contracts.map(({ marker }) => marker).sort(), output);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
