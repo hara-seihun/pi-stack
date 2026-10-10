@@ -1,19 +1,46 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { publicationConfig } from "./publication-fixture.mjs";
+import { ownerScopes, sourceKeys } from '../deploy/source-scopes.mjs';
 
 const configRoot = mkdtempSync(join(tmpdir(), "publication-proof-config-"));
 process.env.PI_STACK_PUBLICATION_CONFIG = publicationConfig(configRoot);
 process.on("exit", () => rmSync(configRoot, { recursive: true, force: true }));
 const { hostProofScript } = await import("../deploy/publication");
-const revision = "a".repeat(40);
 function fixture(t, environment) {
   const root = mkdtempSync(join(tmpdir(), "publication-proof-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
+  const repository = join(root, 'source');
+  mkdirSync(join(repository, 'deploy'), { recursive: true });
+  mkdirSync(join(repository, 'apps/remote/server'), { recursive: true });
+  for (const name of ['host-plan.mjs', 'source-scopes.mjs', 'prepared-components.mjs']) copyFileSync(resolve('deploy', name), join(repository, 'deploy', name));
+  const git = (...args) => {
+    const result = spawnSync('git', ['-C', repository, ...args], { encoding: 'utf8', timeout: 3000 });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  git('init', '--quiet');
+  git('config', 'user.name', 'Host proof fixture');
+  git('config', 'user.email', 'proof@example.invalid');
+  git('config', 'commit.gpgsign', 'false');
+  git('config', 'core.hooksPath', '/dev/null');
+  writeFileSync(join(repository, 'apps/remote/server/fixture.ts'), 'export const version = 1;\n');
+  git('add', '.'); git('commit', '--quiet', '-m', 'stale owner source');
+  const stale = git('rev-parse', 'HEAD');
+  writeFileSync(join(repository, 'apps/remote/server/fixture.ts'), 'export const version = 2;\n');
+  git('commit', '--quiet', '-am', 'running owner source');
+  const equivalent = git('rev-parse', 'HEAD');
+  writeFileSync(join(repository, 'README.md'), 'Documentation-only candidate\n');
+  git('add', '.'); git('commit', '--quiet', '-m', 'unrelated source advances');
+  const revision = git('rev-parse', 'HEAD');
+  const keys = sourceKeys(repository, revision, { remote: ownerScopes.remote, voice: ownerScopes.voice });
+  const planPath = join(root, '.pi-stack-release-plan.json');
+  writeFileSync(planPath, JSON.stringify({ protocol: 'pi-host-plan-v1', state: 'accepted', candidate: revision,
+    owners: Object.fromEntries(Object.entries(keys).map(([owner, candidateKey]) => [owner, { candidateKey }])) }));
   const trace = join(root, "trace");
   const hostConfig = join(root, "host.json");
   writeFileSync(hostConfig, JSON.stringify({ fleetUser: "kenan" }));
@@ -54,7 +81,7 @@ esac
   function run(overrides = {}, requiredUnits = []) {
     writeFileSync(trace, "");
     const result = spawnSync("bash", ["-s", "--", revision, environment, environment, hostConfig,
-      "http://127.0.0.1:8796/status", resolve("deploy/check-services"), ...requiredUnits], {
+      "http://127.0.0.1:8796/status", resolve("deploy/check-services"), repository, ...requiredUnits], {
       input: script, encoding: "utf8", timeout: 3000,
       env: { ...process.env, PATH: `${root}:${process.env.PATH}`, TRACE: trace,
         ROUTER: JSON.stringify(router), HEALTH: JSON.stringify(health), VOICE: JSON.stringify({ releaseCommit: revision }),
@@ -62,12 +89,12 @@ esac
     });
     return { ...result, trace: readFileSync(trace, "utf8") };
   }
-  return { run, router, health, root };
+  return { run, router, health, root, repository, revision, equivalent, stale, planPath };
 }
 
 for (const environment of ["local", "converge"]) {
   test(`${environment}: publication proves unlocked people without opening locked Kenan`, t => {
-    const { run, router } = fixture(t, environment);
+    const { run, router, revision } = fixture(t, environment);
     let result = run();
     assert.equal(result.status, 0, result.stderr);
     const proof = JSON.parse(result.stdout);
@@ -108,8 +135,46 @@ for (const environment of ["local", "converge"]) {
     assert.equal(required.stdout, "");
   });
 
+  test(`${environment}: publication accepts unchanged running source with explicit equivalence evidence`, t => {
+    const { run, health, revision, equivalent } = fixture(t, environment);
+    const result = run({ HEALTH: JSON.stringify({ ...health, releaseCommit: equivalent }), VOICE: JSON.stringify({ releaseCommit: equivalent }) });
+    assert.equal(result.status, 0, result.stderr);
+    const proof = JSON.parse(result.stdout);
+    assert.equal(proof.integrationSha, revision);
+    assert.equal(proof.remoteCommit, revision);
+    assert.equal(proof.orchestratorCommit, revision);
+    assert.equal(proof.voiceCommit, equivalent, 'proof retains actual running source rather than pretending it restarted');
+    assert.equal(proof.supervisors[0].health.releaseCommit, equivalent);
+    assert.deepEqual(proof.runtimeEquivalence.map(item => [item.ok, item.value.owner, item.value.runningCommit, item.value.candidate, item.value.equivalent]),
+      [[true, 'voice', equivalent, revision, true], [true, 'remote', equivalent, revision, true]]);
+    assert.ok(proof.runtimeEquivalence.every(item => /^[a-f0-9]{64}$/.test(item.value.sourceKey)));
+    assert.doesNotMatch(result.trace, /\b(start|restart|unlock)\b/);
+  });
+
+  test(`${environment}: changed running source or forged host-plan identity never yields success proof`, t => {
+    const { run, health, stale, equivalent, planPath } = fixture(t, environment);
+    for (const overrides of [
+      { HEALTH: JSON.stringify({ ...health, releaseCommit: stale }) },
+      { VOICE: JSON.stringify({ releaseCommit: stale }) },
+    ]) {
+      const result = run(overrides);
+      assert.notEqual(result.status, 0);
+      assert.equal(result.stdout, '');
+    }
+    const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+    plan.owners.voice.candidateKey = 'f'.repeat(64);
+    writeFileSync(planPath, JSON.stringify(plan));
+    const forged = run({ VOICE: JSON.stringify({ releaseCommit: equivalent }) });
+    assert.notEqual(forged.status, 0);
+    assert.equal(forged.stdout, '');
+    rmSync(planPath);
+    const absent = run({ HEALTH: JSON.stringify({ ...health, releaseCommit: equivalent }) });
+    assert.notEqual(absent.status, 0, 'source equivalence cannot be inferred without its host plan');
+    assert.equal(absent.stdout, '');
+  });
+
   test(`${environment}: publication rejects missing services, bad health and stale releases`, t => {
-    const { run, router, health, root } = fixture(t, environment);
+    const { run, router, health, root, revision } = fixture(t, environment);
     const cases = [
       { INACTIVE: "pi-remote@sybil.service" },
       { INACTIVE: "pi-orchestrator@kenan.service" },
