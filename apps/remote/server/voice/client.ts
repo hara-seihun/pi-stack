@@ -23,7 +23,7 @@ export class VoiceClient {
 
   status() { return this.request<{ enabled: boolean; model: string; voice: string }>("/status"); }
   negotiate(threadId: string, sdp: string, instructions: string) {
-    return this.request<VoiceConnection>("/sessions", "POST", { threadId, sdp, instructions });
+    return this.request<VoiceConnection>("/sessions", "POST", { threadId, sdp, instructions, delegation: "client" });
   }
   heartbeat(threadId: string, voiceId: string, seconds: number, finalized: boolean) {
     return this.request(`/sessions/${encodeURIComponent(voiceId)}`, "PATCH", { threadId, seconds, finalized });

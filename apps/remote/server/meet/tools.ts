@@ -48,8 +48,9 @@ export function registerMeetTools(pi: ExtensionAPI) {
   pi.registerTool({
     name: "meet_share_screen",
     label: "Share meeting screen",
-    description: "Share your meeting browser with everyone, optionally opening a URL. Control it with agent_browser using the returned connect arguments.",
+    description: "Share only the meeting's shared browser, and only when someone explicitly asks to share a screen. The external camera always shows the Liminal logo, never work or a dashboard. Control the requested browser with agent_browser using the returned connect arguments.",
     parameters: Type.Object({
+      requested: Type.Literal(true, { description: "Someone explicitly requested screen sharing in this meeting." }),
       url: Type.Optional(Type.String({ description: "HTTP or HTTPS page to show." })),
       watch: Type.Optional(Type.Union([Type.String({ description: "Absolute local source directory for automatic page reloads. Apps with hot reload need no watcher." }), Type.Null()])),
     }),

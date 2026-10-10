@@ -22,7 +22,7 @@ const offer = "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\n";
 describe("Voice API broker", () => {
   test("creates a client-delegated WebRTC session without provider credential data in the result", async () => {
     const run = broker(Response.json({ session: { id: "live-session", client_secret: "provider-private" }, transport: { sdp: "answer" } }));
-    expect(await run.value.negotiate(offer, "instructions")).toEqual({ ok: true, value: {
+    expect(await run.value.negotiate(offer, "instructions", "client")).toEqual({ ok: true, value: {
       session: { id: "live-session" }, transport: { type: "webrtc", sdp: "answer" },
     } });
     const body = JSON.parse(String(run.network.mock.calls[0]![1]!.body));
@@ -31,15 +31,24 @@ describe("Voice API broker", () => {
     expect(body.session.store).toBe(false);
   });
 
+  test("telephone sessions expose no tools or client delegation", async () => {
+    const run = broker(Response.json({ session: { id: "phone" }, transport: { sdp: "answer" } }));
+    expect((await run.value.negotiate(offer, "thick approved brief", "none")).ok).toBe(true);
+    const body = JSON.parse(String(run.network.mock.calls[0]![1]!.body));
+    expect(body.session.delegation).toBeUndefined();
+    expect(body.session.tools).toBeUndefined();
+    expect(body.session.instructions).toBe("thick approved brief");
+  });
+
   test("refuses malformed SDP without calling OpenAI", async () => {
     const run = broker(new Response("unused"));
-    expect(await run.value.negotiate("not SDP", "instructions")).toMatchObject({ ok: false, status: 400 });
+    expect(await run.value.negotiate("not SDP", "instructions", "client")).toMatchObject({ ok: false, status: 400 });
     expect(run.network).not.toHaveBeenCalled();
   });
 
   test("keeps provider failures bounded and treats an already-closed session as closed", async () => {
     const run = broker(new Response("provider-private-detail", { status: 429 }));
-    expect(await run.value.negotiate(offer, "instructions")).toEqual({ ok: false, status: 429, error: "OpenAI Live session creation failed (HTTP 429)" });
+    expect(await run.value.negotiate(offer, "instructions", "client")).toEqual({ ok: false, status: 429, error: "OpenAI Live session creation failed (HTTP 429)" });
     run.network.mockResolvedValue(new Response(null, { status: 404 }));
     expect(await run.value.close("live-session")).toEqual({ ok: true, value: { closed: true } });
   });

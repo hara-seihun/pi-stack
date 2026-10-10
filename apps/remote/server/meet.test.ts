@@ -36,7 +36,7 @@ test("external host loss during shared-browser startup disposes the candidate", 
     const host = server.openExternal(crypto.randomUUID(), "thread", "http://localhost/v1/meet", true);
     const root = `/${host.room.id}`;
     const query = `?participant=${host.participant.id}`;
-    const opening = server.handle(request(`${root}/browser${query}`, "POST", {}));
+    const opening = server.handle(request(`${root}/browser${query}`, "POST", { requested: true }));
     await new Promise<void>(resolve => queueMicrotask(resolve));
     server.stopExternal(host.room.id);
     ready({ ok: true, value: browser });

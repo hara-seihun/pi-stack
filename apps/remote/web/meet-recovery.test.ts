@@ -1,5 +1,4 @@
 import { afterAll, expect, mock, test } from "bun:test";
-import type { MeetThreadState } from "../server/meet/protocol";
 
 mock.module("./src/meet/pcm.worklet.js?raw", () => ({ default: "" }));
 const replaced = new Map<string, PropertyDescriptor | undefined>();
@@ -75,25 +74,24 @@ provide("Image", class { naturalWidth = 64; naturalHeight = 64; async decode() {
 provide("MediaStream", Stream);
 provide("AudioContext", FakeAudioContext);
 provide("AudioWorkletNode", Worklet);
-provide("__MEET_AVATAR__", "data:image/png;base64,AA==");
+provide("__MEET_LOGO__", "data:image/svg+xml;base64,AA==");
 
 const { startMeetAdapter, MeetAdapterStartError } = await import("./src/meet/adapter");
-const { meetThreadStatus } = await import("./src/meet/media");
+const { logoStream } = await import("./src/meet/media");
 const { VoiceSession } = await import("./src/voice");
 
-const thread = (patch: Partial<MeetThreadState> = {}): MeetThreadState => ({
-  id: "thread", name: "Thread", state: "idle", lifecycle: { kind: "idle" }, held: false, activity: "idle", tools: [], output: "", events: [], ...patch,
-});
-
-test("meeting thread labels consume canonical lifecycle and preserve archived task completion", () => {
-  expect(meetThreadStatus(thread({ held: true }))).toMatchObject({ label: "Idle" });
-  expect(meetThreadStatus(thread({ lifecycle: { kind: "archived" }, finished: true }))).toMatchObject({ label: "Done", attention: false });
-  for (const phase of ["thinking", "compacting", "waiting_on_tool"] as const) {
-    expect(meetThreadStatus(thread({ lifecycle: { kind: "working", phase, since: 1 }, state: "idle", activity: "idle" }))).toMatchObject({ label: "Working", busy: true });
-  }
-  expect(meetThreadStatus(thread({ lifecycle: { kind: "working", phase: "responding", since: 1 } }))).toMatchObject({ label: "Typing" });
-  expect(meetThreadStatus(thread({ lifecycle: { kind: "working", phase: "waiting_on_tool", since: 1, detail: "bash, web search, agent browser" }, tools: ["bash", "web_search", "agent_browser"] }))).toMatchObject({ label: "Working", title: "bash, web search, agent browser" });
-  expect(meetThreadStatus(thread({ lifecycle: { kind: "waiting", target: "job", reason: "Build receipt", since: 1 }, state: "running" }))).toMatchObject({ busy: false, title: "Build receipt" });
+test("external camera draws only the logo, without thread state or work text", async () => {
+  const calls: string[] = [];
+  const drawing = { fillStyle: "", fillRect() { calls.push("background"); }, drawImage() { calls.push("logo"); } };
+  const previous = document;
+  provide("document", { createElement: () => ({ width: 0, height: 0, getContext: () => drawing, captureStream: () => new Stream([new Track("video")]) }) });
+  try {
+    const logo = await logoStream("data:image/svg+xml;base64,AA==");
+    expect(calls).toEqual(["background", "logo"]);
+    expect(drawing.fillStyle).toBe("#181822");
+    logo.close();
+    expect(logo.stream.getVideoTracks()[0].readyState).toBe("ended");
+  } finally { provide("document", previous); }
 });
 
 test("failed startup stops capture and retains its unfinished PCM until recovery closes", async () => {

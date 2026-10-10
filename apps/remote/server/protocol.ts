@@ -3,7 +3,7 @@
 // imports the same file, so a field renamed on one side fails to compile on
 // the other instead of silently reading undefined at runtime.
 
-import type { AgentWait, ThreadWakeSchedule, ExecutionPhase, ThreadState, ThreadLifecycle, Delivery as ThreadDelivery, ThreadInputState } from "pi-orchestrator/api";
+import type { AgentWait, ThreadWakeSchedule, ExecutionPhase, ThreadState, ThreadLifecycle, ThreadInputState } from "pi-orchestrator/api";
 import type { ReconcileFrame } from "../shared/reconcile.js";
 export type ChatId = `ai:${string}` | `room:${string}`;
 export type FileBrowserEntry = { name: string; path: string; kind: "directory" | "file" | "other" };
@@ -25,7 +25,7 @@ export interface EnvironmentEndpoint {
 
 export type Activity = "idle" | "awaiting" | "status_error" | ExecutionPhase;
 
-export interface IdleNotification { seq: number; sessionId: string; name: string; time: string; kind?: "idle" | "question" | "attention"; body?: string }
+export interface IdleNotification { seq: number; sessionId: string; name: string; time: string; kind?: "idle" | "question" | "attention"; body?: string; manager?: boolean }
 export interface IdleNotificationFeed { cursor: number; notifications: IdleNotification[]; policy?: import("pi-orchestrator/api").ManagerNotificationPolicy }
 export type HistoryNotification = IdleNotification & { questionId?: string } &
   ({ status: "needs-you" | "history" } | { status: "unavailable"; error: string });
@@ -38,13 +38,11 @@ export type QuestionsResource =
 export interface QueuedMessage {
   id: string;
   text: string;
-  delivery: ThreadDelivery;
+  delivery: "pending" | "queue" | "steer" | "hardSteer";
   /** Where the message is: waiting for its turn, or taken by the runtime and
    * not yet in the agent's context. The client words it. */
   state: "queued" | "dispatched";
   acknowledgement?: "pending" | "unconfirmed";
-  canSteer: boolean;
-  canHardSteer: boolean;
   canCancel: boolean;
   createdAt: string;
 }
@@ -231,32 +229,6 @@ export interface Bootstrap {
   environmentId: string;
   home: string;
   threadStarts: ThreadStart[];
-  /** Text-to-speech engines this host configures; null when it reads nothing aloud. */
-  speech: SpeechCatalog | null;
-}
-
-/** `GET /v1/speech`. Voices come from `GET /v1/speech/engines/:engineId/voices`. */
-export interface SpeechCatalog {
-  engines: Array<{ id: string; name: string; defaultVoice: string | null }>;
-}
-
-export interface SpeechVoice {
-  id: string;
-  name: string;
-  description?: string;
-}
-
-/** `POST /v1/speech/utterances` with `{ text, engine?, voice? }` registers a
- * text; `GET /v1/speech/utterances/:utteranceId/audio` streams it as Ogg/Opus
- * while the engine speaks, and the status route explains a playback failure. */
-export interface SpeechUtterance {
-  id: string;
-  engine: string;
-  voice: string;
-  characters: number;
-  segmentCount: number;
-  state: "ready" | "speaking" | "spoken" | "failed";
-  error: string | null;
 }
 
 export type PeopleUsagePeriod = "day" | "week";
