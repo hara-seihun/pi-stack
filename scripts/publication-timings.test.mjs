@@ -1,7 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { publicationTimings } from '../deploy/publication-timings.mjs';
+import { publicationTimings, recordCommandTiming } from '../deploy/publication-timings.mjs';
 const at = ms => new Date(ms).toISOString();
+test('phase timing accumulates commands instead of replacing a long check with its report', () => {
+  const request = {};
+  recordCommandTiming(request, { step: 'checks', command: 'npm', startedAt: at(1000), completedAt: at(6000) });
+  recordCommandTiming(request, { step: 'checks', command: 'curl', startedAt: at(6100), completedAt: at(6200) });
+  assert.equal(request.stageTimings.checks.elapsedMs, 5100);
+  assert.equal(request.stageTimings.checks.commands, 2);
+  assert.equal(request.commandTimings.length, 2);
+});
 test('serving time requires passing host proof and keeps recovery latency', () => {
   const request = { requestId: 'r', sourceSha: 's', queuedAt: at(1000), integratedAt: at(1500), status: 'published', hosts: { a: { status: 'passed' }, b: { status: 'passed' } }, hostDelivery: { a: { startedAt: at(1800) }, b: { startedAt: at(1800) } }, integrationHistory: [{ failure: { at: at(500) }, integrationSha: 'old' }] };
   const result = publicationTimings(request, { a: { verifiedAt: at(2000) }, b: { verifiedAt: at(2200) } });
