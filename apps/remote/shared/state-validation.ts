@@ -72,6 +72,19 @@ export function validateLifecycle(value: unknown): void {
   }
 }
 
+export function validateInputState(value: unknown): void {
+  const input = stateObject(value, "Input receipt");
+  for (const key of ["id", "threadId"] as const) if (!stateString(input[key], `Input ${key}`).trim()) throw new Error(`Input ${key}: empty identity`);
+  requireState(input.state, { queued: true, dispatched: true, done: true }, "Input state");
+  requireState(input.priority, { human: true, manager: true, normal: true }, "Input priority");
+  requireState(input.delivery, { queue: true, steer: true, hardSteer: true }, "Input delivery");
+  requireState(input.source, { explicit: true, notification: true }, "Input source");
+  if (!Number.isFinite(input.createdAt)) throw new Error("Input createdAt: invalid timestamp");
+  for (const key of ["insertedAt", "landedAt"] as const) if (input[key] != null && !Number.isFinite(input[key])) throw new Error(`Input ${key}: invalid timestamp`);
+  if (input.outcome !== undefined) requireState(input.outcome, { complete: true, failed: true, cancelled: true }, "Input outcome");
+  if (input.error !== undefined) stateString(input.error, "Input error");
+}
+
 export function validateSession(value: unknown): asserts value is Session {
   validateThreadObservation(value);
   validateLifecycle(stateObject(value, "Session").lifecycle);
@@ -87,6 +100,12 @@ export function validateSession(value: unknown): asserts value is Session {
     requireState(message.delivery, { queue: true, steer: true, hardSteer: true } satisfies Record<Session["queuedMessages"][number]["delivery"], true>, "Queued message delivery");
     if (message.acknowledgement !== undefined) requireState(message.acknowledgement, { pending: true, unconfirmed: true }, "Message acknowledgement");
   });
+  if (row.inputs !== undefined) stateArray(row.inputs, "Input receipts").forEach(validateInputState);
+  if (row.contextSelection !== undefined) {
+    const context = stateObject(row.contextSelection, "Context selection");
+    requireState(context.mode, { all: true, manual: true }, "Context selection mode");
+    stateArray(context.files, "Context files").forEach(file => stateString(file, "Context file"));
+  }
   if (row.waitingOnAgents !== undefined) {
     const wait = stateObject(row.waitingOnAgents, "Dependency wait");
     if (!Object.hasOwn(wait, "kind")) {
@@ -110,6 +129,12 @@ export function validateSession(value: unknown): asserts value is Session {
 export function validateTranscriptHead(value: unknown): void {
   const head = stateObject(value, "Transcript head");
   requireState(head.kind, TRANSCRIPT_KINDS, "Transcript kind");
+  if (head.sourceKey !== undefined && !stateString(head.sourceKey, "Transcript source identity").trim()) throw new Error("Transcript source identity: empty");
+  if (head.inputId !== undefined) stateString(head.inputId, "Transcript input identity");
+  if (head.inputState !== undefined) {
+    validateInputState(head.inputState);
+    if (stateObject(head.inputState, "Transcript input receipt").id !== head.inputId) throw new Error("Transcript input receipt identity mismatch");
+  }
   if (head.monoVisibility !== undefined) requireState(head.monoVisibility, { hidden: true, visible: true }, "Mono transcript visibility");
   if (head.textTruncated !== undefined && (head.textTruncated !== true || !["user", "assistant", "notice"].includes(String(head.kind))))
     throw new Error("Transcript text preview: invalid marker");
@@ -123,7 +148,10 @@ export function validateStreamSnapshot(resource: string, value: unknown): assert
   switch (type) {
     case "state": case "workers": stateArray(snapshot.sessions, `${type} sessions`).forEach(validateSession); return;
     case "transcript": stateArray(snapshot.items, "Transcript items").forEach(validateTranscriptHead); return;
-    case "live": stateString(snapshot.text, "Live text"); return;
+    case "live":
+      stateString(snapshot.text, "Live text");
+      if (snapshot.messageTimestamp != null && !Number.isFinite(snapshot.messageTimestamp)) throw new Error("Live message identity: invalid timestamp");
+      return;
     case "images": {
       const images = stateObject(snapshot.snapshot, "Image snapshot");
       stateArray(images.images, "Inline images").forEach(value => {

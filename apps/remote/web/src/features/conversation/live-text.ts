@@ -1,11 +1,13 @@
-// Live answer and thinking text stay outside app state so only the open
-// conversation re-renders for stream frames.
+import type { ContextEntry } from "../../types";
 
-export interface LiveText { text: string; thinking: string }
-
-const EMPTY: LiveText = { text: "", thinking: "" };
-
+export interface LiveText { text: string; thinking: string; messageTimestamp: number | null }
+const EMPTY: LiveText = { text: "", thinking: "", messageTimestamp: null };
 export type LiveTextStore = ReturnType<typeof createLiveText>;
+
+export function visibleLiveText(live: LiveText, entries: readonly ContextEntry[]): LiveText {
+  return live.messageTimestamp !== null && entries.some(entry => entry.kind === "assistant" && entry.messageTimestamp === live.messageTimestamp)
+    ? EMPTY : live;
+}
 
 export function createLiveText() {
   let value = EMPTY;
@@ -20,11 +22,11 @@ export function createLiveText() {
       return () => { listeners.delete(listener); };
     },
     snapshot: () => value,
-    apply(frame: { text: string; thinking?: string }) {
-      const next = { text: frame.text, thinking: frame.thinking ?? "" };
-      if (next.text !== value.text || next.thinking !== value.thinking) publish(next);
+    apply(frame: { text: string; thinking?: string; messageTimestamp?: number | null }) {
+      const next = { text: frame.text, thinking: frame.thinking ?? "", messageTimestamp: frame.messageTimestamp ?? null };
+      if (next.text !== value.text || next.thinking !== value.thinking || next.messageTimestamp !== value.messageTimestamp) publish(next);
     },
     reset() { if (value !== EMPTY) publish(EMPTY); },
-    clearThinking() { if (value.thinking) publish({ text: value.text, thinking: "" }); },
+    clearThinking() { if (value.thinking) publish({ ...value, thinking: "" }); },
   };
 }

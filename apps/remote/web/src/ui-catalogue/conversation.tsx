@@ -70,6 +70,16 @@ function entry(kind: ContextEntry["kind"], text: string, key: string): ContextEn
   return { key, signature: key, kind, text, label: kind, time: epoch, messageTimestamp: epoch };
 }
 const messages = [entry("user", `Please review this. ${unicode}`, "user"), entry("assistant", markdown, "answer")];
+const receiptBase = { threadId: "catalogue-session", senderId: null, source: "explicit" as const, delivery: "steer" as const, priority: "human" as const, createdAt: epoch };
+const receiptEntries: ContextEntry[] = [
+  { state: "queued" as const },
+  { state: "dispatched" as const, insertedAt: null, landedAt: null },
+  { state: "dispatched" as const, insertedAt: epoch + 1, landedAt: null },
+  { state: "dispatched" as const, insertedAt: epoch + 1, landedAt: epoch + 2 },
+  { state: "done" as const, outcome: "complete" as const },
+  { state: "done" as const, outcome: "failed" as const, error: "Synthetic provider refusal" },
+  { state: "done" as const, outcome: "cancelled" as const },
+].map((state, index) => ({ ...entry("user", `Identical words; independent input ${index + 1}.`, `receipt:${index}`), inputId: `input-${index}`, inputState: { ...receiptBase, ...state, id: `input-${index}` }, seq: index }));
 const toolEntries: ContextEntry[] = [
   entry("system", "You are Kenan. Use the explicit valid state contract.", "system"),
   entry("tool", '{"name":"read","description":"Read an existing file"}', "schema"),
@@ -79,18 +89,19 @@ const toolEntries: ContextEntry[] = [
   entry("notice", "The requested operation failed. Your draft is retained.", "notice"),
 ];
 function Frame({ children }: { children: ReactNode }) { return <div style={{ padding: 16, minWidth: 0 }}>{children}</div>; }
-function ScreenFixture({ mode }: { mode: "empty" | "history" | "working" | "held" | "offline" | "syncing" | "expanded" | "slash" | "errors" | "reply" | "long-header" }) {
+function ScreenFixture({ mode }: { mode: "empty" | "history" | "working" | "held" | "offline" | "syncing" | "expanded" | "slash" | "errors" | "reply" | "long-header" | "receipts" }) {
   const [prompt, setPrompt] = useState(mode === "working" ? `Follow up: ${unicode}` : mode === "slash" ? "/" : "");
   const [reply, setReply] = useState<ReplyTarget | null>(mode === "reply" ? { identity: { id: "pi/catalogue-session/original", timestamp: epoch, sender: { id: "person", name: "A very long original sender name" } }, text: prose } : null);
   const drawing = useChatDrawing("ai:catalogue-session", async () => ({ ok: true }));
   const busy = mode === "working";
   const current = session({
-    ...(busy ? { observation: { kind: "running", phase: "thinking" } as const } : {}),
+    ...(busy || mode === "receipts" ? { observation: { kind: "running", phase: "thinking" } as const } : {}),
+    ...(mode === "receipts" ? { manager: true, contextSelection: { mode: "all" as const, files: ["AGENTS.md", "machine/README.md", "notes.md"] }, queuedMessages: [queueMessage("input-0", "steer", "queued")] } : {}),
     ...(mode === "held" ? { observation: { kind: "held" } as const, queuedMessages: [queueMessage("held", "queue", "queued")] } : {}),
     ...(mode === "long-header" ? { name: `${unicode} ${longToken}`, model: `provider/${longToken}`, contextUsage: { tokens: 180000, contextWindow: 200000, percent: 90 } } : {}),
   });
-  return <div style={{ height: "100dvh" }}><ConversationScreen session={current} ancestors={mode === "long-header" ? [session({ id: "parent", agentName: unicode })] : []}
-    entries={mode === "empty" ? [] : mode === "expanded" ? [...messages.slice(0, 1), ...toolEntries, ...messages.slice(1)] : messages}
+  return <div style={{ height: "100dvh" }}><ConversationScreen session={current} mono={mode === "receipts" ? { hintSeen: true, onClassic: noop, onHintSeen: noop, saving: false } : undefined} ancestors={mode === "long-header" ? [session({ id: "parent", agentName: unicode })] : []}
+    entries={mode === "receipts" ? receiptEntries : mode === "empty" ? [] : mode === "expanded" ? [...messages.slice(0, 1), ...toolEntries, ...messages.slice(1)] : messages}
     liveText={busy ? "Streaming **response** with an unfinished list:\n- first item\n- " : ""} liveThinking={busy ? "Inspecting the available states…" : ""} thinkingActive={busy}
     autoCollapse={mode !== "expanded"} images={null} offline={mode === "offline" ? "Connection lost" : ""} syncing={mode === "syncing"} pending={false}
     home="/home/catalogue" prompt={prompt} attachments={[]} slashCommands={[{ name: "kelana", description: prose, source: "skill" }, { name: "software-engineering", description: "Valid states and explicit errors", source: "skill" }]}
@@ -199,7 +210,7 @@ function ui(id: string, component: string, contract: string, render: () => React
 }
 export const conversationCases: UiCase[] = [
   ...(["root", "empty", "many", "loading", "failure"] as const).map(mode => ui(`picker-${mode}`, "ChatPicker", "Root and archived empty/many/loading/failure; model/context and agent navigation via real controls", () => <PickerFixture mode={mode} />)),
-  ...(["empty", "history", "working", "held", "offline", "syncing", "expanded", "slash", "errors", "reply", "long-header"] as const).map(mode => ui(`screen-${mode}`, "ConversationScreen", `Valid session and ${mode} conversation composition`, () => <ScreenFixture mode={mode} />, "composition")),
+  ...(["empty", "history", "working", "held", "offline", "syncing", "expanded", "slash", "errors", "reply", "long-header", "receipts"] as const).map(mode => ui(`screen-${mode}`, "ConversationScreen", `Valid session and ${mode} conversation composition`, () => <ScreenFixture mode={mode} />, "composition")),
   ...(["empty", "long", "uploading", "many", "readonly", "stop", "resume", "hidden"] as const).map(mode => ui(`composer-${mode}`, "Composer", `${mode} prompt, attachment and action state`, () => <ComposerFixture mode={mode} />, mode === "long" || mode === "many" ? "content-boundary" : "finite-variant")),
   ui("status-matrix", "StatusPill / StatusIcon", "All Activity variants plus held, cancellation, error, unread, archived, offline and 1/2/many tools; every fixture validates", () => <StatusMatrix />),
   ...(["empty", "variants", "held", "pending", "long"] as const).map(mode => ui(`queue-${mode}`, "QueueSheet", "All deliveries and queued/dispatched acknowledgement variants; held and pending action availability", () => <QueueFixture mode={mode} />)),

@@ -51,7 +51,7 @@ import { observeArtifactActions, recordFeatureUsage, resetFeatureCollection } fr
 import { Inbox } from "./features/chats/Inbox";
 import { ConversationScreen, type Delivery } from "./features/conversation/ConversationScreen";
 import { ItemBodies, ItemBodiesContext } from "./features/conversation/item-bodies";
-import { createLiveText, type LiveTextStore } from "./features/conversation/live-text";
+import { createLiveText, visibleLiveText, type LiveTextStore } from "./features/conversation/live-text";
 import { ThreadDirectoryProvider, type ThreadDirectory } from "./features/conversation/thread-chips";
 import { ThreadDiscovery } from "./thread-discovery";
 import { entriesFromHeads, WAITING_ENTRY } from "./features/conversation/transcript-entries";
@@ -166,7 +166,7 @@ export default function App() {
  * nothing above it: not the inbox, not the worker tree, not the tab badges.
  */
 const LiveConversation = memo(function LiveConversation({ live, ...props }: { live: LiveTextStore } & Omit<Parameters<typeof ConversationScreen>[0], "liveText" | "liveThinking" | "thinkingActive">) {
-  const { text, thinking } = useSyncExternalStore(live.subscribe, live.snapshot, live.snapshot);
+  const { text, thinking } = visibleLiveText(useSyncExternalStore(live.subscribe, live.snapshot, live.snapshot), props.entries);
   return <ConversationScreen {...props} liveText={text} liveThinking={thinking} thinkingActive={props.session.activity === "thinking" || !!thinking} />;
 });
 
@@ -1178,9 +1178,12 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const visibleAttachments = state.attachments.filter((file) => file.sessionId === aiId);
   const contextEntries = useMemo(() => {
     if (state.transcript === null) return [];
-    const heads = mono ? monoTranscript(state.transcript.items) : state.transcript.items;
+    const inputs = new Map(selected?.inputs?.map(input => [input.id, input]));
+    const source = state.transcript.items.map(head => head.kind === "user" && head.inputId && inputs.has(head.inputId)
+      ? { ...head, inputState: inputs.get(head.inputId) } : head);
+    const heads = mono ? monoTranscript(source) : source;
     return heads.length ? entriesFromHeads(heads) : mono ? [] : [WAITING_ENTRY];
-  }, [state.transcript, mono]);
+  }, [state.transcript, mono, selected?.inputs]);
   const bodies = useMemo(() => aiId ? new ItemBodies(aiId, undefined, cache) : null, [aiId, cache]);
   // The newest head of a window, and of every update, carries its body when it
   // is small. Taking it here is what lets the step a person opens first render
@@ -1306,7 +1309,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
         {!mono && selected && (panel === "inspector" || panel === "settings") && <Suspense fallback={null}><InspectorSheet key={selected.id} session={selected} sessions={knownSessions} open pending={pending} onClose={closePanel} onOpenThread={session => openThreadFromPanel(session.id)} onOpenThreadId={openThreadFromPanel} onArchive={() => { closePanel(); requestCloseChat({ id: `ai:${selected.id}`, kind: "ai", title: selected.name, name: agentName(selected), icon: "", label: "", session: selected }); }} onRestore={() => void selectThread(selected.id)} onBackground={() => {
           void api(API.sessionPlacement.method, API.sessionPlacement.path({ sessionId: selected.id }), { foreground: false }).then(() => { panelPushed.current = false; navigate({ tab: "chats", chat: null, panel: null }); kick(); }, cause => setControlError({ sessionId: selected.id, message: String(cause) }));
         }} debug={debugTools} /></Suspense>}
-        {!mono && selected && panel === "queue" && <Suspense fallback={null}><QueueSheet open messages={selected.queuedMessages} held={selected.held} pending={pending} onClose={closePanel} onAction={(message, action) => void queueAction(message, action)} /></Suspense>}
+        {selected && panel === "queue" && <Suspense fallback={null}><QueueSheet open messages={selected.queuedMessages} held={selected.held} pending={pending} onClose={closePanel} onAction={(message, action) => void queueAction(message, action)} /></Suspense>}
         {pasteSessionId && <Suspense fallback={null}><PasteTextDialog name={pasteName} content={pasteContent} onNameChange={setPasteName} onContentChange={setPasteContent} onAttach={file => uploadFile(file, pasteSessionId)} onClose={() => setPasteSessionId(null)} /></Suspense>}
       </>} />
   </NotificationProvider></ClientCacheContext.Provider>;

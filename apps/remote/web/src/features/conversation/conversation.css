@@ -18,6 +18,11 @@
 .conversation-meta { color: var(--muted); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .conversation-agent-meta { display: inline-flex; align-items: center; gap: var(--space-2); min-width: 0; max-width: 100%; overflow: hidden; color: var(--muted); font-size: var(--text-xs); }
 .conversation-agent-model { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.manager-context-selection { position: relative; color: var(--muted); font-size: 11px; font-weight: normal; }
+.manager-context-selection summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; padding: 0 6px; white-space: nowrap; }
+.manager-context-files { position: absolute; z-index: 20; top: 100%; left: 0; width: min(320px, 80vw); max-height: 50vh; overflow: auto; padding: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; font-size: 12px; }
+.manager-context-files ul { margin: 0; padding-left: 18px; }
+.manager-context-files li { overflow-wrap: anywhere; margin: 8px 0; }
 .context-tokens { flex: 0 0 auto; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .context-tokens-detail { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 .ancestry { flex: 0 0 auto; display: flex; align-items: center; gap: var(--space-1); padding: 0 var(--space-3) var(--space-1); overflow-x: auto; font-size: var(--text-xs); white-space: nowrap; scrollbar-width: none; }

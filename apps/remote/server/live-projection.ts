@@ -22,6 +22,7 @@ export interface LiveProjection extends ExecutionActivity {
   compacting: boolean;
   retrying: boolean;
   liveText: string;
+  messageTimestamp: number | null;
   liveThinking: string;
   thinkingBlockStart: number;
   thinkingActive: boolean;
@@ -31,7 +32,7 @@ export interface LiveProjection extends ExecutionActivity {
 
 export function createLiveProjection(sessionId: string): LiveProjection {
   return { ...createExecutionActivity(), sessionId, compacting: false, retrying: false,
-    liveText: "", liveThinking: "", thinkingBlockStart: 0, thinkingActive: false,
+    liveText: "", messageTimestamp: null, liveThinking: "", thinkingBlockStart: 0, thinkingActive: false,
     toolProgress: new Map(), activeTools: new Map() };
 }
 
@@ -40,6 +41,7 @@ export function restoreLiveProjection(live: LiveProjection, snapshot: Record<str
   live.compacting = live.activity === "compacting";
   live.retrying = live.activity === "retrying";
   if (typeof snapshot.text === "string") live.liveText = snapshot.text;
+  live.messageTimestamp = typeof snapshot.messageTimestamp === "number" ? snapshot.messageTimestamp : null;
   if (typeof snapshot.thinking === "string") live.liveThinking = snapshot.thinking;
   live.thinkingActive = live.activity === "thinking";
   live.thinkingBlockStart = 0;
@@ -62,6 +64,7 @@ export function settleLiveProjection(live: LiveProjection): void {
   live.activeTools.clear();
   for (const [id, tool] of live.toolProgress) if (!tool.result) live.toolProgress.delete(id);
   live.liveText = "";
+  live.messageTimestamp = null;
   live.liveThinking = "";
   live.thinkingBlockStart = 0;
 }

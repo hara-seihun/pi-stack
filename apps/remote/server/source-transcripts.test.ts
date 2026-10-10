@@ -38,6 +38,19 @@ function fixture(records: SourceRecord[]) {
 const user = (seq: number, entryId: string, text: string): SourceRecord =>
   ({ seq, count: 1, entryId, message: { role: "user", timestamp: seq + 1, content: text }, results: [] });
 
+test("content hashes never substitute for native message/block identity and live calls share the durable call key", async () => {
+  const source = fixture([user(0, "user-a", "identical"), user(1, "user-b", "identical"),
+    { seq: 2, count: 1, entryId: "live:call-1", message: { role: "assistant", content: [{ type: "toolCall", id: "call-1", name: "read", arguments: {} }] }, results: [] }]);
+  const transcripts = new SourceTranscripts(database(), source.read, project, imageUrl);
+  const page = value(await transcripts.page("thread", undefined, 3));
+  expect(page.items[0]!.id).toBe(page.items[1]!.id);
+  expect(page.items.map(head => head.sourceKey)).toEqual(["user-a:0", "user-b:0", "call:call-1"]);
+  const durable = fixture([{ seq: 8, count: 1, entryId: "native-assistant", message: sourcePageMessage(), results: [] }]);
+  const landed = value(await new SourceTranscripts(database(), durable.read, project, imageUrl).page("thread", undefined, 1));
+  expect(landed.items[0]!.sourceKey).toBe(page.items[2]!.sourceKey);
+  function sourcePageMessage() { return { role: "assistant", content: [{ type: "toolCall", id: "call-1", name: "read", arguments: {} }] }; }
+});
+
 test("cold pages preserve global item offsets and tool pairing outside the selected message window", async () => {
   const toolResult = { role: "toolResult", toolCallId: "cross-page", timestamp: 30, content: [{ type: "text", text: "Exact separate source result" }] };
   const record: SourceRecord = { seq: 3, count: 3, entryId: "assistant", message: { role: "assistant", timestamp: 20, content: [

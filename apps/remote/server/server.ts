@@ -1002,11 +1002,11 @@ function queuedMessagesFor(id: string): QueuedMessage[] {
   return pendingMessages(id).filter(message => !message.landedAt).map(message => {
     // A message the runtime has taken cannot be edited, steered or removed;
     // one still waiting can be all three, whether or not the thread is held.
-    const waiting = (message.state ?? "queued") === "queued";
+    const waiting = message.state === "queued";
     return {
       id: message.id, text: decodeMessageReply(message.text).text, delivery: message.delivery,
       state: waiting ? "queued" as const : "dispatched" as const,
-      ...(!waiting && message.insertedAt === null ? { acknowledgement: acknowledgement?.overdue ? "unconfirmed" as const : "pending" as const } : {}),
+      ...(!waiting && message.insertedAt == null ? { acknowledgement: acknowledgement?.overdue ? "unconfirmed" as const : "pending" as const } : {}),
       canSteer: waiting && message.delivery === "queue",
       canHardSteer: waiting,
       canCancel: waiting,
@@ -1042,7 +1042,9 @@ function publicSession(row: any,
     revision: row.revision,
     idleUnread: notificationUnread(db, currentNotificationPolicy(), row.id, Boolean(row.idle_unread)),
     humanAttention: currentNotificationPolicy()?.view === "classic" || notificationUnread(db, currentNotificationPolicy(), row.id, Boolean(row.idle_unread)),
-    queuedMessages: queued ? queuedMessagesFor(row.id) : [], archivedAt: row.archived_at,
+    queuedMessages: queued ? queuedMessagesFor(row.id) : [],
+    ...(queued ? { inputs: threads.get(row.id) ? threads.inputStates(row.id) : peerInspections.get(row.id)?.inputs } : {}),
+    archivedAt: row.archived_at,
   };
 }
 
@@ -1100,7 +1102,7 @@ function pushBootstrap(): void {
 function sendState(stream: ClientStream): void {
   const selected = stream.subscription.session;
   const sessions = streamSessions(stateSnapshot.sessions, selected).map(session => session.id === selected
-    ? { ...session, queuedMessages: queuedMessagesFor(selected) } : session);
+    ? { ...session, queuedMessages: queuedMessagesFor(selected), inputs: threads.get(selected) ? threads.inputStates(selected) : peerInspections.get(selected)?.inputs } : session);
   stream.publish({ type: "state", sessions, archivedTotal: stateSnapshot.archivedTotal, ownerErrors: stateSnapshot.ownerErrors });
   if (stream.subscription.workers) stream.publish({ type: "workers", sessions: fleetSessions(stateSnapshot.sessions) });
 }
@@ -1158,7 +1160,7 @@ function sendLive(stream: ClientStream): void {
   const sessionId = stream.subscription.session;
   if (!sessionId) return;
   const runtime = liveProjections.get(sessionId);
-  stream.publish({ type: "live", sessionId, text: runtime?.liveText ?? "",
+  stream.publish({ type: "live", sessionId, text: runtime?.liveText ?? "", messageTimestamp: runtime?.messageTimestamp ?? null,
     ...(stream.subscription.thinking ? { thinking: runtime?.liveThinking ?? "" } : {}) });
 }
 
@@ -1379,7 +1381,13 @@ function handlePiEvent(sessionId: string, event: any) {
   // supervisor: delivery can arrive in bursts, which made a whole response
   // look like it streamed in a few hundred milliseconds (over 1000 tok/s).
   const eventAt = typeof event.emittedAt === "number" ? event.emittedAt : Date.now();
-  if (event.type === "message_start" && event.message?.role === "assistant") responseTiming.start(sessionId, eventAt);
+  if (event.type === "message_start" && event.message?.role === "assistant") {
+    rt.liveText = "";
+    rt.liveThinking = "";
+    rt.messageTimestamp = typeof event.message.timestamp === "number" ? event.message.timestamp : null;
+    responseTiming.start(sessionId, eventAt);
+    signalLiveSync();
+  }
   if (event.type === "message_update" && ["text_delta", "thinking_delta"].includes(String(event.assistantMessageEvent?.type)))
     responseTiming.firstToken(sessionId, eventAt);
 
@@ -1413,6 +1421,7 @@ function handlePiEvent(sessionId: string, event: any) {
       inlineImages.accept(sessionId, sha256(text), text);
       recordResponseMetrics(sessionId, responseTiming.finish(sessionId, event.message, eventAt), messageFinalizationKey(event.message));
       rt.liveText = "";
+      rt.messageTimestamp = null;
       rt.liveThinking = "";
       rt.thinkingBlockStart = 0;
       signalTranscript(sessionId);

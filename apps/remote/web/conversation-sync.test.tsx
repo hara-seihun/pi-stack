@@ -193,6 +193,32 @@ test("disconnect preserves last observed execution state instead of manufacturin
 });
 
 
+test("automatic manager context shows only owner-selected names and no manual deselection", () => {
+  const automatic = { ...session, manager: true, contextSelection: { mode: "all" as const, files: ["AGENTS.md", "notes.md"] } };
+  const html = render({ session: automatic });
+  expect(html).toContain("All context · 2 files");
+  expect(html).toContain("Selected automatically");
+  expect(html).toContain("AGENTS.md");
+  expect(html).not.toContain('type="checkbox"');
+  expect(render({ session: { ...automatic, contextSelection: undefined } })).not.toContain("All context");
+  expect(render({ session: { ...automatic, contextSelection: { mode: "manual", files: [] } } })).not.toContain("All context");
+});
+
+test("canonical manager always has Send, never a stop control, while ordinary worker controls remain unchanged", () => {
+  for (const phase of ["thinking", "responding", "waiting_on_tool"] as const) {
+    const working: Session = { ...session, manager: true, state: "running", activity: phase, lifecycle: { kind: "working", phase, since: 1 } };
+    for (const prompt of ["", "New instruction"]) for (const mono of [undefined, { hintSeen: true, saving: false, onClassic() {}, onHintSeen() {} }]) {
+      const html = render({ session: working, prompt, mono });
+      expect(html).toContain('aria-label="Send message"');
+      expect(html).not.toContain('aria-label="Cancel current work"');
+      expect(html).not.toContain('aria-label="Cancel request"');
+      expect(html).not.toContain("Change delivery");
+      expect(html).toContain('id="prompt"');
+    }
+    expect(render({ session: { ...working, manager: false } })).toContain('aria-label="Cancel current work"');
+  }
+});
+
 test("conversation headers use only the mutable topic title, leaving stable agent identity unchanged", () => {
   for (const [name, agentName] of [["Thread titles", "Saihiramei Teheitain"], ["Nebulani reference", "Nozanoshinei Lomekein"]]) {
     const named = { ...session, name, agentName };

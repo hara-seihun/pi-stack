@@ -28,6 +28,8 @@ export interface ContextEntry {
   bodyLoaded?: boolean;
   argumentsTruncated?: boolean;
   messageTimestamp?: number;
+  inputId?: string;
+  inputState?: import("../../../../packages/orchestrator/src/threads/contracts").ThreadInputState;
   identity?: import("../../server/message-protocol").MessageIdentity;
   reactions?: import("../../server/message-protocol").MessageReaction[];
   reply?: import("../../server/message-protocol").MessageReply;

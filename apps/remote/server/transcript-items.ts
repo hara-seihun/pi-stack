@@ -190,10 +190,12 @@ function visitTranscriptItems(context: any, accept: (item: DerivedItem) => void,
   };
 
   const attachIdentity = (message: any, from: number) => {
-    if (!message.identity?.id) return;
+    if (!message.identity?.id && !message.inputId) return;
     for (let i = items.length - 1; i >= from; i--) {
       const head = items[i]!.head;
       if (head.kind !== "user" && head.kind !== "assistant") continue;
+      if (message.inputId) { head.inputId = message.inputId; head.inputState = message.inputState; }
+      if (!message.identity?.id) break;
       head.identity = message.identity;
       head.reactions = message.reactions ?? [];
       if (message.reply) head.reply = message.reply;

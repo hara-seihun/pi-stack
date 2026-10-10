@@ -12,6 +12,7 @@ import { AgentDisclosure, AgentRoute, copyOutgoingMessage, outgoingAgentMessage,
 import { AGENT_NAME } from "../../../../server/agent-identity";
 import { useItemBody } from "./item-bodies";
 import { completeMessageEntry, loadMessageEntry } from "./message-body";
+import { InputStatus } from "./input-status";
 import { ThreadChips, threadIdsOf } from "./thread-chips";
 import { appendLiveThinking, buildStableTranscript, emptyAssistantEntry, visibleKind, type TranscriptItem } from "./transcript-model";
 import { VirtualTranscript } from "./VirtualTranscript";
@@ -144,6 +145,7 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, autoCollapse
     renderMarkdown={source => <Markdown source={source} sessionId={sessionId} streaming={entry.streaming} assistant={entry.kind === "assistant"} />}
     menu={entry.kind === "user" && !presented.agentSender && Number(entry.messageTimestamp) > 0 ? [{ label: "Edit and resend from here", onSelect: edit }] : []}
   />
+    {entry.kind === "user" && entry.inputId && <InputStatus inputId={entry.inputId} input={entry.inputState} />}
     {partial && <footer className="message-expansion">
       <button type="button" className="message-expand-action" disabled={body.loading} onClick={() => { setExpanded(true); void body.load(); }}>
         {body.loading ? "Loading full message…" : body.error ? "Retry loading full message" : "Load more"}
@@ -152,7 +154,7 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, autoCollapse
     </footer>}
     {(body.error || loaded && !loaded.ok || actionError) && <p className="step-loading step-failed" role="status">{actionError || body.error || loaded && !loaded.ok && loaded.error.message}</p>}
   </>;
-  return <div data-transcript-seq={entry.seq}>{sender
+  return <div data-transcript-seq={entry.seq} data-transcript-source={entry.key}>{sender
     ? <AgentDisclosure route={route} open={open} onOpen={setOpen}>{content}</AgentDisclosure>
     : content}</div>;
 }, (before, after) => before.entry.signature === after.entry.signature && before.sessionId === after.sessionId && before.autoCollapse === after.autoCollapse && before.mono === after.mono && before.onEdit === after.onEdit && before.onReply === after.onReply);

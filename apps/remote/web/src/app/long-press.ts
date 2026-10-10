@@ -46,7 +46,7 @@ export function useLongPress(onLongPress?: () => void) {
   return {
     onPointerDown(event: PointerEvent<HTMLElement>) {
       if (!callback.current || event.button !== 0 || !event.isPrimary) return;
-      const control = (event.target as Element).closest("button, a, input, textarea, select");
+      const control = (event.target as Element).closest("button, a, input, textarea, select, summary, [role=button]");
       if (control && control !== event.currentTarget) return;
       gesture.current!.start(event.pointerId, event.clientX, event.clientY);
       event.currentTarget.setPointerCapture?.(event.pointerId);
