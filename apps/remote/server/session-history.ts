@@ -16,8 +16,12 @@ export function registerSessionHistory(pi: ExtensionAPI): void {
   let contract: ReaderContract | undefined;
   pi.on("before_agent_start", async (event, ctx) => {
     if (!contract) {
-      const result = await pi.exec("read-thread", ["--contract"], { timeout: 5_000, signal: ctx.signal });
-      if (result.code !== 0 || result.killed) throw new Error(`read-thread contract failed: ${result.stderr || result.stdout || result.code}`);
+      const result = await pi.exec("read-thread", ["--contract"], { timeout: 20_000, signal: ctx.signal });
+      if (result.killed) {
+        const reason = ctx.signal?.aborted ? "session cancelled" : "20-second startup deadline exceeded";
+        throw new Error(`read-thread contract failed: ${reason} (process killed, exit ${result.code})`);
+      }
+      if (result.code !== 0) throw new Error(`read-thread contract failed: ${result.stderr || result.stdout || result.code}`);
       const parsed = JSON.parse(result.stdout);
       if (!parsed || parsed.command !== "read-thread" || typeof parsed.historyMarker !== "string" || parsed.version !== 1) {
         throw new Error("read-thread returned an invalid history contract");
