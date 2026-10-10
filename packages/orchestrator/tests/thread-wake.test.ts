@@ -195,6 +195,82 @@ it("recovers a stored timer after controller restart and does not duplicate a de
   expect(restarted.service.pending("self")).toHaveLength(0);
 });
 
+it.each([
+  { kind: "agents" as const, threadIds: ["peer"] },
+  { kind: "job" as const, jobId: "external-job" },
+  { kind: "deployment" as const, publicationId: "PUB-release" },
+  { kind: "message" as const, fromThreadId: "peer" },
+])("overdue recovery wakes resume a $kind waiter after restart without duplicating input or retaining wait-owned peers", async dependency => {
+  const first = fixture();
+  for (const id of ["self", "peer", "explicit"]) await spawn(first, id);
+  unwrap(await first.service.control({ action: "dependencies", threadId: "self", threadIds: ["explicit"] }));
+  unwrap(await schedule(first, "self"));
+  unwrap(await first.service.agentWait({ requestId: "wait", action: "set", threadId: "self", ...dependency }));
+  expect(first.service.get("self")?.state).toBe("waiting");
+  unwrap(await first.service.close());
+  const recovered = fixture(first.root);
+  unwrap(await recovered.service.start());
+  await until(() => recovered.sessions.some(s => s.commands.some(c => c.type === "prompt")));
+  const queued = recovered.service.pending("self");
+  expect(queued).toHaveLength(1);
+  expect(queued[0]).toMatchObject({ source: "notification", senderId: "self" });
+  expect(recovered.service.get("self")).toMatchObject({ state: "running", dependencies: ["explicit"] });
+  expect(recovered.service.get("self")?.waitingOnAgents).toBeUndefined();
+  await until(() => !recovered.service.get("self")?.metadata?.dependencyUpdate);
+  expect(recovered.service.get("peer")?.metadata?.peerDependents ?? []).toEqual([]);
+  expect(recovered.service.get("explicit")?.metadata?.peerDependents).toEqual(["self"]);
+  const receipt = recovered.service.get("self")!.wakeSchedule!.lastMessageId;
+  recovered.service.reconcile(); recovered.service.reconcile();
+  expect(recovered.service.pending("self")).toHaveLength(1);
+  recovered.sessions[0]!.settle();
+  await until(() => recovered.service.latestSettlement("self")?.workId === receipt);
+  await boundary(); unwrap(await recovered.service.close());
+  const restarted = fixture(first.root); unwrap(await restarted.service.start());
+  restarted.service.reconcile(); await boundary();
+  expect(restarted.sessions).toHaveLength(0);
+  expect(restarted.service.get("self")!.wakeSchedule!.lastMessageId).toBe(receipt);
+});
+
+it("enqueues a recovery wake behind unrelated queued input even during admission, coalescing across restart", async () => {
+  let now = 100000, entered = false, release!: () => void;
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const refuse = { ok: false as const, error: { code: "unavailable" as const, message: "Capacity unavailable" } };
+  const f = fixture(undefined, { admit: async () => { entered = true; await gate; return refuse; } });
+  await spawn(f, "self");
+  unwrap(await f.service.send({ requestId: "unrelated", threadId: "self", text: "Publication report" }));
+  unwrap(await f.service.start()); await until(() => entered);
+  unwrap(await schedule(f, "self"));
+  f.service.reconcile();
+  const receipt = f.service.get("self")!.wakeSchedule!.lastMessageId;
+  expect(receipt).toMatch(/^thread-wake:/);
+  expect(f.service.pending("self").map(w => w.id)).toEqual(["unrelated", receipt]);
+  now += 600000; f.service.reconcile(); f.service.reconcile();
+  expect(f.service.pending("self")).toHaveLength(2);
+  release(); await boundary(); await boundary(); unwrap(await f.service.close());
+  const recovered = fixture(f.root, { admit: async () => refuse });
+  unwrap(await recovered.service.start()); recovered.service.reconcile(); await boundary();
+  expect(recovered.service.pending("self").map(w => w.id)).toEqual(["unrelated", receipt]);
+  expect(recovered.service.get("self")!.wakeSchedule!.lastMessageId).toBe(receipt);
+});
+
+it("an overdue waiter wake coalesces behind its active execution and delivers after settlement", async () => {
+  const f = fixture(); await spawn(f, "self");
+  unwrap(await f.service.send({ requestId: "work", threadId: "self", text: "Start work" }));
+  unwrap(await f.service.start());
+  await until(() => f.sessions[0]?.commands.some(c => c.type === "prompt") === true);
+  unwrap(await schedule(f, "self"));
+  unwrap(await f.service.agentWait({ requestId: "wait", action: "set", kind: "job", threadId: "self", jobId: "job" }));
+  f.service.reconcile(); f.service.reconcile();
+  expect(f.service.get("self")!.wakeSchedule!.lastMessageId).toBeUndefined();
+  f.sessions[0]!.settle();
+  await until(() => f.service.get("self")?.state === "waiting");
+  await boundary(); f.service.reconcile();
+  await until(() => f.sessions.flatMap(s => s.commands).some(c => typeof c.workId === "string" && c.workId.startsWith("thread-wake:")));
+  expect(f.service.pending("self")).toHaveLength(1);
+  expect(f.service.get("self")?.waitingOnAgents).toBeUndefined();
+});
+
 it.each([true, false])("dependency settlement resumes a durable waiter through the existing cross-owner result route (legacy=%s)", async legacy => {
   const parent = fixture(), child = fixture(undefined, { workersOnly: true });
   const directory = new ThreadDirectory({ id: "person", api: parent.service }, [{ id: "fleet", api: child.service }]);

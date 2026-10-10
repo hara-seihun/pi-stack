@@ -287,9 +287,7 @@ asynchronous descendants do not inherit an expired deadline indefinitely.
 
 `thread_wake` owns a recovery schedule on the same existing agent, not a new
 agent. It accepts set/list/cancel with a reason, `cadenceMs` (at least 60 seconds)
-and optional epoch-ms `nextDueAt`. The reason is the text of the wake message, the instruction the agent reads when the check lands. Due events coalesce while busy; archived agents
-do not wake. Stable receipt identity and SQLite transactions prevent repeated
-inputs after restart. Cancel removes future and unstarted wake work, not tools
+and optional epoch-ms `nextDueAt`. The reason is the text of the wake message, the instruction the agent reads when the check lands. Due events coalesce during active execution or while a previous wake remains unfinished. Unrelated queued input, including stalled admission, does not suppress a recovery wake. Held and archived agents do not wake. Delivery resumes a dependency wait and releases its wait-owned peer subscriptions, retaining explicit subscriptions. Stable receipt identity and SQLite transactions prevent repeated inputs after restart. Cancel removes future and unstarted wake work, not tools
 already executing. External job/publication waits should register recovery
 before suspending and cancel it when the dependency resolves.
 

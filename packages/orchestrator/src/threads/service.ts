@@ -1372,12 +1372,12 @@ export class ThreadService implements ThreadApi {
   private deliverScheduledWakes(): void {
     const now = Date.now();
     const due = this.sql(`SELECT s.thread_id,s.generation,s.data FROM thread_wake s JOIN thread t ON t.id=s.thread_id
-      WHERE json_extract(s.data,'$.nextDueAt')<=? AND t.state='idle' AND t.held=0
+      WHERE json_extract(s.data,'$.nextDueAt')<=? AND t.held=0
       AND json_extract(t.metadata,'$.archived') IS NOT 1
       AND NOT EXISTS(SELECT 1 FROM thread_execution e WHERE e.thread_id=t.id AND e.ended_at IS NULL)
-      AND NOT EXISTS(SELECT 1 FROM thread_work w WHERE w.thread_id=t.id AND w.status!='done')`).all(now) as Json[];
+      AND NOT EXISTS(SELECT 1 FROM thread_work w WHERE w.thread_id=t.id AND w.status!='done' AND w.id LIKE 'thread-wake:%')`).all(now) as Json[];
     for (const row of due) {
-      if (this.operations.has(row.thread_id) || this.halts.has(row.thread_id) || this.opening.has(row.thread_id)) continue;
+      if (this.halts.has(row.thread_id)) continue;
       const thread = this.get(row.thread_id)!;
       const schedule = JSON.parse(row.data) as import("./contracts.js").ThreadWakeSchedule;
       if (thread.metadata?.manager === true && thread.lastUserMessageAt !== undefined && now - thread.lastUserMessageAt < 15 * 60_000) continue;
@@ -1385,6 +1385,8 @@ export class ThreadService implements ThreadApi {
       this.transaction(() => {
         this.insertMessage(receipt, { requestId: receipt, threadId: thread.id, senderId: thread.id, source: "notification", delivery: "steer",
           text: `Scheduled wake check for this existing thread: ${schedule.reason}\nRead current dependency evidence. Continue useful work, cancel thread_wake when resolved, or return to thread_wait without polling.\n\n${BACKGROUND_ATTENTION_POLICY}` }, thread.settings);
+        const explicit = this.dependencyOwners(thread).explicit;
+        this.replaceDependencies(thread.id, explicit, undefined, { explicit, wait: [] });
         this.sql("UPDATE thread SET state='running',metadata=json_remove(metadata,'$.agentWait') WHERE id=?").run(thread.id);
         this.sql("UPDATE thread_wake SET data=? WHERE thread_id=?").run(JSON.stringify({ ...schedule, nextDueAt: now + schedule.cadenceMs, lastMessageId: receipt }), thread.id);
       });
