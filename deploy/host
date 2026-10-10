@@ -139,7 +139,7 @@ fi
 restore_recognition() {
   local status=$? candidate="$recognition_base.rollback.$$" restore_failed=0
   trap - EXIT TERM INT HUP
-  if (( status != 0 && recognition_started )); then
+  if (( status != 0 && recognition_started )) && ! { [[ $release_mode != qualified ]] && [[ -f $recognition_transition ]] && jq -e --arg commit "$(git -C "$root" rev-parse HEAD)" '.phase == "accepted" and .commit == $commit' "$recognition_transition" >/dev/null; }; then
     if [[ -n $recognition_pid ]]; then
       kill "$recognition_pid" 2>/dev/null || true
       wait "$recognition_pid" 2>/dev/null || true
@@ -176,6 +176,7 @@ restore_recognition() {
   if (( recognition_journal_owner )); then
     if (( status == 0 )); then recognition_journal accepted || status=1
     elif (( restore_failed )); then recognition_journal rollback_failed || status=1
+    elif [[ $release_mode != qualified ]] && jq -e '.phase == "accepted"' "$recognition_transition" >/dev/null; then :
     else recognition_journal rolled_back || status=1; fi
   fi
   # Join bounded proof jobs before releasing deployment custody.
@@ -531,6 +532,7 @@ activate_daemons() {
   return "$failed"
 }
 activation_failed=0
+remote_activation_failed=0
 if [[ ${PI_STACK_FORCE_ROLLBACK:-0} != 1 ]]; then
   if (( recognition )); then
     recognition_started=1
@@ -538,15 +540,15 @@ if [[ ${PI_STACK_FORCE_ROLLBACK:-0} != 1 ]]; then
     recognition_pid=$!
   fi
 if owner_changed remote || owner_changed router; then
-  activate_remote "$expected" || activation_failed=1
+  activate_remote "$expected" || { activation_failed=1; remote_activation_failed=1; }
 elif ! remote_matches_release "$expected"; then
   # Publication can finish before a deployment is interrupted. Reconcile a
   # selected release whose supervisors never received the activation handoff.
-  activate_remote "$expected" || activation_failed=1
+  activate_remote "$expected" || { activation_failed=1; remote_activation_failed=1; }
 fi
 
 if (( activation_failed == 0 )); then
-  router_proof=$(pi_stack_as_root curl -fsS --max-time 2 "$router_base/v1/router-health") || activation_failed=1
+  router_proof=$(pi_stack_as_root curl -fsS --max-time 2 "$router_base/v1/router-health") || { activation_failed=1; remote_activation_failed=1; }
   if (( activation_failed == 0 )); then
     supervisor_units=()
     mapfile -t supervisor_units < <(jq -r '.people[] | select(.unlocked) | "pi-remote@" + .user + ".service"' <<<"$router_proof")
@@ -593,7 +595,9 @@ elif jq -e '.oneKenan == true' "$PI_STACK_HOST_FILE" >/dev/null && { owner_chang
   fi
 fi
 if (( recognition )); then
-  wait "$recognition_pid" || activation_failed=1
+  if wait "$recognition_pid"; then
+    if [[ $release_mode != qualified ]]; then recognition_journal accepted || activation_failed=1; fi
+  else activation_failed=1; fi
 fi
 if [[ -n ${daemon_activation_pid:-} ]]; then wait "$daemon_activation_pid" || activation_failed=1; fi
 
@@ -602,7 +606,7 @@ fi
 # person out of the app goes back to the previous Pi Remote release on the
 # spot, and the deployment fails loudly instead of quietly.
 smoke_failed=0
-if [[ ${PI_STACK_FORCE_ROLLBACK:-0} == 1 ]] || (( activation_failed )); then
+if [[ ${PI_STACK_FORCE_ROLLBACK:-0} == 1 ]] || (( remote_activation_failed )) || { [[ $release_mode == qualified ]] && (( activation_failed )); }; then
   smoke_failed=1
 elif [[ $release_mode == qualified ]] && ! "$root/deploy/smoke"; then
   smoke_failed=1
@@ -634,6 +638,10 @@ if (( smoke_failed )); then
     fi
     echo "Pi stack $expected is not accepted on this host" >&2
     exit 1
+fi
+if (( activation_failed )); then
+  echo "Pi stack $expected Remote is serving; another owner requires repair (retained forward selection)" >&2
+  exit 1
 fi
 if (( recognition )); then
   "$root/deploy/meet-recognition" --retain || echo 'Meet recognition retention failed; retained store needs collection' >&2
