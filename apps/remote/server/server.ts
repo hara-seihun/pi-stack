@@ -91,7 +91,7 @@ import { ensureExternalMeetingThread } from "./meet/threads";
 import { liveDevInstructions } from "./skills";
 import { configuredThreadDestinations, defaultThreadDestinations, recentThreadModels, threadModelOptions, type ThreadDestination } from "./thread-model-defaults";
 import { contextFilesPrompt, listContextFiles, selectContextFiles, watchContextFiles, type ContextFileSources } from "./thread-context-files";
-import { reconcileThreadContextSelection, type ThreadContextSelection } from "./manager-context-selection";
+import { reconcileThreadContextSelection, storedThreadContextSelection, type ThreadContextSelection } from "./manager-context-selection";
 import { API } from "./api";
 import { SettingsService, type OwnedSettingAdapter } from "./settings-store";
 import { machineActionDefinition, modelAvailabilityDefinition } from "../shared/settings";
@@ -1039,7 +1039,7 @@ function publicSession(row: any,
     origin,
     watchList: row.metadata?.watchList === true,
     manager: row.metadata?.manager === true,
-    contextSelection: effectiveThreadContextSelection(row.id),
+    contextSelection: threads.get(row.id) ? effectiveThreadContextSelection(row.id) : storedThreadContextSelection(row.metadata),
     foreground: typeof row.metadata?.foreground === "boolean" ? row.metadata.foreground : origin === "person" && !row.parentId && !row.metadata?.watchList,
     agentName: typeof row.metadata?.agentName === "string" ? row.metadata.agentName : liveThread(row.id)?.agentName,
     dependencies: row.metadata?.peerDependencies,
