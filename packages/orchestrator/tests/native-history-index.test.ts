@@ -245,7 +245,7 @@ it("hides the entire quiet manager wake turn without changing the native source 
   expect(native.read(manager.messages[2]!)).toMatchObject({ ok: false, error: { code: "invalid-descriptor" } });
 });
 
-it("reclassifies a wake turn after native append while preserving branch-local visibility and fencing old readers", () => {
+it("reclassifies a wake turn after native append while preserving earlier readable snapshots", () => {
   const path = source([
     message("wake", null, "user", wakeText("explicit")),
     message("thinking", "wake", "assistant", [{ type: "thinking", thinking: "reason" }]),
@@ -260,7 +260,7 @@ it("reclassifies a wake turn after native append while preserving branch-local v
   expect(reported.source.generation).toBe(quiet.source.generation);
   expect(reported.source.revision).not.toBe(quiet.source.revision);
   expect(index(path, "quiet", managerVisibility).messages.map(record => record.monoVisibility)).toEqual(["hidden", "hidden", "hidden"]);
-  expect(quiet.read(quiet.messages[0]!)).toMatchObject({ ok: false, error: { code: "stale-source" } });
+  expect(quiet.read(quiet.messages[0]!)).toMatchObject({ ok: true, value: { id: "wake" } });
   appendFileSync(path, JSON.stringify(message("new-wake", "report", "user", wakeText())) + "\n"
     + JSON.stringify(message("error", "new-wake", "assistant", [], { errorMessage: "An error is not human-facing text" })) + "\n");
   expect(index(path, undefined, managerVisibility).messages.map(record => record.monoVisibility)).toEqual(["hidden", "visible", "visible", "hidden", "hidden"]);
@@ -333,7 +333,7 @@ it("exposes every native active-path descriptor and reads nonmessage records wit
   expect(next.source.generation).toBe(history.source.generation);
   expect(next.entries.map(record => record.id)).toEqual(["model", "receipt", "words", "setting", "new-receipt"]);
   expect(next.entries.at(-1)).toMatchObject({ customType: "thread_input" });
-  expect(history.read(history.entries[0]!)).toMatchObject({ ok: false, error: { code: "stale-source" } });
+  expect(history.read(history.entries[0]!)).toEqual({ ok: true, value: entries[1] });
 });
 
 it("memoizes unchanged full snapshots per leaf without reconstructing branches or reader closures", () => {
@@ -355,7 +355,7 @@ it("memoizes unchanged full snapshots per leaf without reconstructing branches o
   expect(next).not.toBe(current);
   expect(next.source.generation).toBe(current.source.generation);
   expect(index(path, "old")).not.toBe(old);
-  expect(current.read(current.entries[0]!)).toMatchObject({ ok: false, error: { code: "stale-source" } });
+  expect(current.read(current.entries[0]!)).toMatchObject({ ok: true, value: { id: "root" } });
 });
 
 it("bounds per-file memoized leaf snapshots with access-LRU eviction", () => {
@@ -379,7 +379,7 @@ it("charges retained branch snapshot arrays and descriptor ownership sets to the
   expect(refreshed.entries.length).toBe(30_000);
 });
 
-it("reuses unchanged metadata, parses only appended records and fences old readers", () => {
+it("reuses unchanged metadata, parses only appended records and preserves old prefix readers", () => {
   const path = source([message("a", null, "user", "A")]);
   const first = index(path);
   expect(index(path).messages[0]).toBe(first.messages[0]);
@@ -390,7 +390,7 @@ it("reuses unchanged metadata, parses only appended records and fences old reade
   expect(next.source.generation).toBe(first.source.generation);
   expect(next.source.revision).not.toBe(first.source.revision);
   expect(next.messages[0]).toBe(first.messages[0]);
-  expect(first.read(first.messages[0]!)).toMatchObject({ ok: false, error: { code: "stale-source" } });
+  expect(first.read(first.messages[0]!)).toMatchObject({ ok: true, value: { id: "a" } });
   expect(next.read(next.messages[1]!)).toMatchObject({ ok: true, value: { id: "b" } });
 });
 

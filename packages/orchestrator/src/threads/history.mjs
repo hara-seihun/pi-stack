@@ -312,16 +312,15 @@ function branchRecords(cache, path, leafId, managerWakeVisibility, inputOrigins)
     entries: Object.freeze(entries.map(record => messageById.get(record.id) ?? record)) });
 }
 
-function readIndexedRecord(source, descriptors, descriptor) {
+function readIndexedRecord(source, proof, descriptors, descriptor) {
   if (!descriptors.has(descriptor)) return failure("invalid-descriptor", source.path, "Record descriptor does not belong to this history snapshot");
   if (descriptor.length > MAX_HISTORY_RECORD_BYTES) return failure("oversized-record", source.path, `Session record exceeds ${MAX_HISTORY_RECORD_BYTES} bytes`, { line: descriptor.line, offset: descriptor.offset, limit: MAX_HISTORY_RECORD_BYTES });
   return withSource(source.path, fd => {
-    if (stamp(fstatSync(fd, { bigint: true })) !== source.revision) return failure("stale-source", source.path, "Session revision changed; refresh the history index");
+    const before = verifyPrefix(fd, source.path, proof);
+    if (!before.ok) return before;
     const record = readRecordAt(fd, source, descriptor);
-    if (stamp(fstatSync(fd, { bigint: true })) !== source.revision || stamp(statSync(source.path, { bigint: true })) !== source.revision) {
-      return failure("stale-source", source.path, "Session record changed during reading");
-    }
-    return record;
+    const after = verifyPrefix(fd, source.path, proof);
+    return after.ok ? record : after;
   });
 }
 
@@ -461,11 +460,12 @@ export function indexedThreadHistory(path, leafId, options) {
     }
     const source = Object.freeze({ kind: "native-jsonl", path, generation: cache.generation, revision, size, leafId: branch.value.leafId });
     const descriptors = new Set(branch.value.entries);
+    const proof = { stat: cache.stat, revision: cache.revision, size: cache.size, digest: cache.digest };
     const presentationRevision = createHash("sha256").update(snapshotKey).digest("hex");
     const value = Object.freeze({ source, presentationRevision, entries: branch.value.entries, messages: branch.value.messages,
-      read: descriptor => readIndexedRecord(source, descriptors, descriptor) });
+      read: descriptor => readIndexedRecord(source, proof, descriptors, descriptor) });
     snapshotDescriptors.set(value, descriptors);
-    snapshotProofs.set(value, { stat: cache.stat, revision: cache.revision, size: cache.size, digest: cache.digest });
+    snapshotProofs.set(value, proof);
     cache.snapshots.set(snapshotKey, { value, bytes });
     cache.metadataBytes += bytes; indexedMetadataBytes += bytes;
     trimIndexCache();
