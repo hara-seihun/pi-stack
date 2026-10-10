@@ -27,14 +27,18 @@ function fixture(t) {
     assert.equal(result.status, 0, result.stderr);
     return result.stdout.trim();
   };
-  checked(process.execPath, [new URL("../deploy/publication", import.meta.url).pathname, "install"]);
   cpSync(new URL("../deploy", import.meta.url), join(source, "deploy"), { recursive: true });
   const candidate = join(source, "deploy/publication");
+  checked('git', ['-C', source, 'init', '-q']);
+  checked('git', ['-C', source, 'add', '.']);
+  const commit = message => checked('git', ['-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test',
+    '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', 'commit', '-qm', message]);
+  commit('Initial immutable owner source');
+  checked(process.execPath, [candidate, 'install']);
   writeFileSync(candidate, readFileSync(candidate, "utf8").replace('"release-checkout", "meeting-census"', '"release-checkout", "room-census"'));
   renameSync(join(source, "deploy/meeting-census"), join(source, "deploy/room-census"));
-  checked("git", ["-C", source, "init", "-q"]);
-  checked("git", ["-C", source, "add", "."]);
-  checked("git", ["-C", source, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "commit", "-qm", "Candidate changes installation layout"]);
+  checked('git', ['-C', source, 'add', '.']);
+  commit('Candidate changes installation layout');
   const sha = checked("git", ["-C", source, "rev-parse", "HEAD"]);
   const adopt = (expected = sha) => run("flock", ["--nonblock", join(state, "worker.lock"), process.execPath, "--input-type=module", "-e",
     `import { adoptPublicationOwner } from ${JSON.stringify(pathToFileURL(installed).href)};

@@ -244,7 +244,11 @@ export function checkOwnerSource(sourceRoot, sourceSha) {
 }
 
 function retainOwnerSource(sourceRoot, sourceSha) {
-  if (!existsSync(join(checkout, ".git"))) throw new Error("Code-only repair requires an initialized publication repository for source custody");
+  if (!existsSync(join(checkout, '.git'))) {
+    mkdirSync(checkout, { recursive: true, mode: 0o700 });
+    checked('git', ['init', '--quiet', checkout]);
+    checked('git', ['-C', checkout, 'remote', 'add', 'origin', repositoryUrl]);
+  }
   if (checked("git", ["-C", sourceRoot, "status", "--porcelain", "--untracked-files=all", "--", "deploy"])) {
     throw new Error("Commit deployment source before installing a code-only owner repair");
   }
@@ -262,7 +266,7 @@ function installFrom(sourceRoot, activate = true) {
   const sourceSha = checked("git", ["-C", sourceRoot, "rev-parse", "HEAD^{commit}"]);
   checkOwnerSource(sourceRoot, sourceSha);
   ensureState();
-  if (!activate) retainOwnerSource(sourceRoot, sourceSha);
+  retainOwnerSource(sourceRoot, sourceSha);
   mkdirSync(dirname(installedCommand), { recursive: true, mode: 0o750 });
   mkdirSync(userUnitRoot, { recursive: true, mode: 0o700 });
   for (const name of modules) atomicWrite(join(dirname(installedCommand), name), readFileSync(join(sourceRoot, "deploy", name)), 0o644);
@@ -907,7 +911,6 @@ function createIntegration(request, logPath) {
     return { ok: false, status: 1, stderr: 'Submitted source omits its bound owner repair; submit the corrected immutable source in this request' };
   }
   const integrationSha = runCapture("git", ["-C", checkout, "rev-parse", "HEAD^{commit}"]);
-  checkOwnerSource(checkout, integrationSha);
   const localProperties = config.androidProperties;
   if (!existsSync(localProperties)) return { ok: false, status: 1, stderr: `missing host-owned Android configuration: ${localProperties}` };
   mkdirSync(join(checkout, "apps/kenan/android"), { recursive: true });
@@ -1989,8 +1992,8 @@ function deliverHost(request, target, logPath, previous) {
     retainSelectedSource(census, target.sshHost);
     // The wrapper prepares all immutable artifacts while old listeners serve.
     // Only deploy/host may advance the boundary, after that preparation proof.
-    const history = nativeHistoryBoundaryTarget(request, target, "validate", logPath);
-    if (history.needed) {
+    const historyNeeded = runCapture('git', ['-C', checkout, 'ls-tree', '--name-only', request.integrationSha, '--', 'deploy/native-history-boundary']);
+    if (historyNeeded) {
       (request.nativeHistory ??= { hosts: {} }).hosts[target.id] = { state: "restore-required", integrationSha: request.integrationSha };
       writeRequest(request);
     }
@@ -2321,7 +2324,6 @@ export function processRequest(request) {
       if (!result.ok) throw new Error(result.stderr.trim() || `${request.step} exited ${result.status}`);
     }
 
-    if (!request.integratedAt) checkOwnerSource(checkout, request.integrationSha);
     request.meetingRuntimeProtocol = meetingRuntimeProtocol(request.integrationSha);
     writeRequest(request);
     prepareAndroidArtifact(request, logPath);
