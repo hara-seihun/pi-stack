@@ -37,6 +37,7 @@ import { resolveThreadSettings } from "./threads/settings.js";
 import type { RunContext } from "./domain.js";
 import { ScheduleService, scheduleHttp } from "./schedule.js";
 import { retireController, type ControllerRetirement } from "./controller-retirement.js";
+import { closeHttpServer } from "./http-shutdown.js";
 
 const HOST=process.env.PI_ORCHESTRATOR_HOST??"127.0.0.1";
 
@@ -146,8 +147,7 @@ export class Daemon {
     this.fleet.detach();
     this.observation.abort(new Error("Fleet controller retiring; execution remains independently owned"));
     this.opener.detach();
-    const listener=new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
-    server.closeAllConnections();
+    const listener=closeHttpServer(server,2_000);
     const detach=async(service:ThreadService)=>{const result=await service.detach();if(!result.ok)throw new Error(result.error.message);};
     const outcome=await retireController([
       {edge:"reconcile",close:()=>this.waitForReconcile()},
@@ -155,7 +155,7 @@ export class Daemon {
       {edge:"threads",close:()=>detach(this.threads)},
       {edge:"schedules",close:()=>this.schedules.close()},
       ...[...this.isolated].map(([id,service])=>({edge:`application:${id}`,close:()=>detach(service)})),
-      {edge:"http-listener",close:()=>listener},
+      {edge:"http-listener",close:async()=>{const result=await listener;if(!result.ok)throw new Error(result.error.message);}},
     ],15_000,event=>{
       const service=event.edge==="threads"?this.threads:event.edge.startsWith("application:")?this.isolated.get(event.edge.slice("application:".length)):undefined;
       console.error(JSON.stringify({version:1,type:"fleet-controller-retirement",...event,...(event.state==="retained"&&service?{pending:service.retirementPending()}: {})}));
