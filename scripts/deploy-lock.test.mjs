@@ -472,6 +472,10 @@ for arg; do
       exit 0;;
     http://127.0.0.1:2460/v1/health)
       printf '%s\\n' "$arg" >> "$DAEMON_HEALTH_TRACE"
+      if [ -n "\${DAEMON_FIRST_NOT_READY:-}" ] && [ ! -e "$DAEMON_FIRST_NOT_READY" ]; then
+        touch "$DAEMON_FIRST_NOT_READY"
+        exit 7
+      fi
       printf '{"releaseCommit":"%s"}\\n' "$(cat "$PI_STACK_ORCHESTRATOR_DEST/.pi-stack-commit")"
       exit 0;;
     http://127.0.0.1:18798/v1/health)
@@ -526,7 +530,7 @@ exit 64
     rmSync(env.VOICE_TRACE, { force: true });
     rmSync(env.PHONE_TRACE, { force: true });
     rmSync(personReadTrace);
-    const first=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:{...env,REQUIRE_ACTIVATION_OVERLAP:"1",REQUIRE_DOCTOR_OVERLAP:"1",BROWSER_DOCTOR_STARTED:join(directory,"browser.started"),MODEL_DOCTOR_STARTED:join(directory,"model.started"),DOCTOR_ACTIVATION_STARTED:join(directory,"doctor.activation.started")},cwd:directory});assert.equal(first.status,0,`${first.stdout}\n${first.stderr}`);
+    const first=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:{...env,DAEMON_FIRST_NOT_READY:join(directory,'daemon-first-not-ready'),REQUIRE_ACTIVATION_OVERLAP:"1",REQUIRE_DOCTOR_OVERLAP:"1",BROWSER_DOCTOR_STARTED:join(directory,"browser.started"),MODEL_DOCTOR_STARTED:join(directory,"model.started"),DOCTOR_ACTIVATION_STARTED:join(directory,"doctor.activation.started")},cwd:directory});assert.equal(first.status,0,`${first.stdout}\n${first.stderr}`);
     assert.equal(existsSync(env.DAEMON_ACTIVATED), true, "smoke joins the independent daemon activation job");
     const preparedOrder = readFileSync(env.PREPARE_TRACE, "utf8").trim().split("\n");
     assert.deepEqual(preparedOrder.slice(0, 2), ["runtime", "orchestrator"], "dependents stage against the prepared runtime");
@@ -555,7 +559,7 @@ exit 64
     assert.equal(readFileSync(activationTrace,"utf8"),"pi-remote@alice.service\n");
     assert.deepEqual(readFileSync(settingsTrace,"utf8").trim().split("\n").sort(),[user,"alice","guest-person"].sort(),"settings reconcile every account, concurrently");
     assert.equal(readFileSync(env.HEALTH_TRACE, "utf8"), "http://127.0.0.1:18798/v1/health\n".repeat(3));
-    assert.equal(readFileSync(env.DAEMON_HEALTH_TRACE, 'utf8'), 'http://127.0.0.1:2460/v1/health\n'.repeat(expectedDaemons.length));
+    assert.equal(readFileSync(env.DAEMON_HEALTH_TRACE, 'utf8'), 'http://127.0.0.1:2460/v1/health\n'.repeat(expectedDaemons.length + 1));
     const acceptedPlan = JSON.parse(readFileSync(join(directory, '.pi-stack-release-plan.json'), 'utf8'));
     assert.equal(acceptedPlan.state, 'accepted');
     assert.deepEqual(acceptedPlan.owners.daemons.acceptance.proof.units.map(item => item.unit).sort(), expectedDaemons);
