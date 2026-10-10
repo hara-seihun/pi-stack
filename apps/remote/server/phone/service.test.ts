@@ -34,7 +34,8 @@ async function fixture(mode: "uncertain" | "cancel" | "connected") {
   } });
   writeFileSync(join(root, "admin"), admin, { mode: 0o600 }); writeFileSync(join(root, "silent"), token, { mode: 0o600 });
   writeFileSync(join(root, "creds"), JSON.stringify({ RETELL_API_KEY: settings.apiKey, RETELL_AGENT_ID: settings.agentId, RETELL_AGENT_VERSION: 0, RETELL_FROM_NUMBER: settings.callerId }), { mode: 0o600 });
-  writeFileSync(join(root, "config"), JSON.stringify({ owner: "synthetic", callingEnabled: true, pstnProvider: "retell-takeover", adminTokenFile: join(root, "admin"), silentTokenFile: join(root, "silent"), retellCredentialFile: join(root, "creds"), publicBaseUrl: "https://phone.example", localPort, publicPort, voiceUrl: `http://127.0.0.1:${mockServer.port}`, dispatcherUrl: `http://127.0.0.1:${mockServer.port}`, chromium: "/synthetic-browser" }));
+  writeFileSync(join(root, "holds.json"), "{}");
+  writeFileSync(join(root, "config"), JSON.stringify({ holdsFile: join(root, "holds.json"), owner: "synthetic", callingEnabled: true, pstnProvider: "retell-takeover", adminTokenFile: join(root, "admin"), silentTokenFile: join(root, "silent"), retellCredentialFile: join(root, "creds"), publicBaseUrl: "https://phone.example", localPort, publicPort, voiceUrl: `http://127.0.0.1:${mockServer.port}`, dispatcherUrl: `http://127.0.0.1:${mockServer.port}`, chromium: "/synthetic-browser" }));
   writeFileSync(join(root, "runner.ts"), `
 import { mock } from 'bun:test';
 const native = fetch;
@@ -70,9 +71,41 @@ await import(${JSON.stringify(new URL("./service.ts", import.meta.url).href)});
   const close = async () => { release(); child.kill("SIGTERM"); const timer = setTimeout(() => child.kill("SIGKILL"), 1500); await child.exited; clearTimeout(timer); mockServer.stop(true); rmSync(root, { recursive: true, force: true }); };
   try { await eventually(async () => { try { if ((await request("/status")).ok) return true; } catch {} if (child.exitCode !== null) throw new Error(await stderr); return undefined; }); }
   catch (e) { await close(); throw e; }
-  return { requests, request, release, close, publicPort, token };
+  return { requests, request, release, close, publicPort, token, hold: (holds: Record<string, string>) => writeFileSync(join(root, "holds.json"), JSON.stringify(holds)) };
 }
 
+test("POST calls refuses held recipients before dispatch and returns the hold reason", async () => {
+  const f = await fixture("connected");
+  try {
+    f.hold({ [brief.to]: "Operator hold pending reconciliation" });
+    const denied = await f.request("/calls", "POST", brief);
+    expect(denied.status).toBe(409);
+    expect(await denied.json()).toMatchObject({ code: "recipient-held", error: "Operator hold pending reconciliation" });
+    expect(f.requests).toHaveLength(0);
+  } finally { await f.close(); }
+});
+test("POST calls reserves recipient before async preparation and refuses a parallel dial", async () => {
+  const f = await fixture("cancel");
+  try {
+    const first = await (await f.request("/calls", "POST", brief)).json();
+    const denied = await f.request("/calls", "POST", { ...brief, requestId: "5208e41f-cafe-4bc5-991f-02dcb8f0f723" });
+    expect(denied.status).toBe(409);
+    expect(await denied.json()).toMatchObject({ code: "recipient-busy", callId: first.id });
+    await f.request(`/calls/${first.id}`, "DELETE");
+  } finally { await f.close(); }
+});
+test("POST calls refuses accepted-contact cooldown even with caller-authored followUpOf", async () => {
+  const f = await fixture("connected");
+  try {
+    const first = await (await f.request("/calls", "POST", brief)).json();
+    await eventually(async () => { const v = await (await f.request(`/calls/${first.id}`)).json(); return v.call.dial_state === "accepted" ? true : undefined; });
+    await f.request(`/calls/${first.id}`, "DELETE");
+    const denied = await f.request("/calls", "POST", { ...brief, requestId: "5208e41f-cafe-4bc5-991f-02dcb8f0f723", followUpOf: first.id });
+    expect(denied.status).toBe(409);
+    expect(await denied.json()).toMatchObject({ code: "recipient-cooldown", callId: first.id });
+    expect(f.requests.filter(r => r.path === "/v2/create-phone-call")).toHaveLength(1);
+  } finally { await f.close(); }
+});
 test("uncertain irreversible dial is retained and an approved identity is never replayed", async () => {
   const f = await fixture("uncertain");
   try {
