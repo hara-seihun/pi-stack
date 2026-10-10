@@ -264,10 +264,27 @@ test("component publication atomically replaces directories and symlinks", () =>
       mkdir -p "$3" "$4"
       printf old > "$4/value"
       printf first > "$3/value"
+      mkdir -p "$3/nested" "$6/dependency"
+      printf '#!/bin/sh\\nexit 0\\n' > "$3/nested/command"
+      chmod 755 "$3/nested/command"
+      printf dependency > "$6/dependency/value"
+      chmod 644 "$6/dependency/value"
+      ln -s "$6/dependency" "$3/node_modules"
       printf '%s\\n' "$5" > "$3/.pi-stack-commit"
       PI_STACK_DEPLOY_NO_SUDO=1 PI_STACK_RELEASES_ROOT="$6" pi_stack_publish_release "$2" "$3" "$4" component
       test -L "$4"
       test "$(cat "$4/value")" = first
+      test "$(stat -c %a "$4/value")" = 444
+      test "$(stat -c %a "$4/nested/command")" = 555
+      test "$(stat -c %a "$4/nested")" = 555
+      test "$(stat -c %a "$(readlink -f "$4")")" = 555
+      test "$(stat -c %a "$6/dependency/value")" = 644
+      "$4/nested/command"
+      if [[ $EUID != 0 ]]; then
+        if printf hotpatch > "$4/value"; then exit 91; fi
+        if touch "$4/added"; then exit 92; fi
+        if rm "$4/nested/command"; then exit 93; fi
+      fi
       printf changed > "$3/value"
       PI_STACK_DEPLOY_NO_SUDO=1 PI_STACK_RELEASES_ROOT="$6" pi_stack_publish_release "$2" "$3" "$4" component
       test "$(cat "$4/value")" = first
@@ -279,6 +296,7 @@ test("component publication atomically replaces directories and symlinks", () =>
     `, "deploy-release-test", helper, repository, stage, destination, commit, releases], { encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr);
   } finally {
+    spawnSync("chmod", ["-R", "u+w", directory]);
     rmSync(directory, { recursive: true, force: true });
   }
 });

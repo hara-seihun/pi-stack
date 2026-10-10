@@ -303,6 +303,11 @@ pi_stack_publish_release() {
       pi_stack_as_root rm -rf "$root_stage"
       return 1
     fi
+    if ! pi_stack_as_root chmod -R a-w "$root_stage"; then
+      pi_stack_as_root chmod -R u+w "$root_stage"
+      pi_stack_as_root rm -rf "$root_stage"
+      return 1
+    fi
     pi_stack_as_root mv -T "$root_stage" "$release"
   fi
   [[ $(pi_stack_as_root cat "$release/.pi-stack-commit") == "$commit" ]] || {
