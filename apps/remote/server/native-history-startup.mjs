@@ -245,7 +245,14 @@ export async function nativeHistoryStartup({ configPath, environment = process.e
   return { ok: true, value: { state: "migrated", readiness: receipt.value, migration: migrated.value } };
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+// Production invokes this through the /srv/pi/pi-remote release pointer. Node's
+// import.meta.url is the resolved release path, so the entry check must compare
+// real paths; a lexical comparison silently skips the gate and exits 0.
+const invokedDirectly = (() => {
+  try { return Boolean(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); }
+  catch { return false; }
+})();
+if (invokedDirectly) {
   const result = process.argv.length !== 2
     ? failure("arguments", "Use PI_REMOTE_CONFIG and the owner's configured PI_REMOTE_DATA; no CLI arguments", 78)
     : await nativeHistoryStartup({ configPath: process.env.PI_REMOTE_CONFIG });

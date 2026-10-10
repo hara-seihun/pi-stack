@@ -254,6 +254,8 @@ dependency_hash=$({
   find packages/kenan-memory/src packages/kenan-root/src -type f -print0 | sort -z | xargs -0 sha256sum
   sha256sum packages/kenan-memory/package.json packages/kenan-memory/tsconfig.json packages/kenan-memory/discretion.md packages/kenan-memory/person.md
   sha256sum packages/kenan-root/package.json packages/kenan-root/tsconfig.json packages/kenan-root/instructions.md
+  # The closure recipe below (bundling aliases, copied sources, links) is part of its identity.
+  sha256sum deploy/runtime
   printf '%s\n' workspace-production-closure-v3-kenan-root-atomic-settings-writes-v1-durable-sessions-v1
 } | sha256sum | cut -d' ' -f1)
 dependency_release="$dependencies_root/$dependency_hash"
