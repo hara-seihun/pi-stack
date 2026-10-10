@@ -118,7 +118,10 @@ export function boundedArguments(value: unknown, limit = ARGUMENT_STRING_LIMIT, 
     if (tool === "edit" && Array.isArray(record.edits)) { record.editCount = record.edits.length; drop("edits"); }
     const said = AGENT_MESSAGE_FIELDS[tool];
     if (said && typeof record[said] === "string") { words = [said, walk(record[said], 0) as string]; delete record[said]; }
-    if (tool.startsWith("thread_")) { drop("message"); drop("text"); }
+    if (tool.startsWith("thread_")) {
+      if (Array.isArray(record.threadIds)) record.threadCount = record.threadIds.length;
+      drop("message"); drop("text");
+    }
     source = record;
   }
   const bounded = walk(source, 0);

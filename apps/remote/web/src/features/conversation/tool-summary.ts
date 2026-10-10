@@ -59,6 +59,37 @@ function threadSubject(args: any) {
     || head(args?.task);
 }
 
+export function managerToolSummary(name: string, args: any, home: string, running: boolean, completeArguments: boolean): string {
+  const tool = String(name).toLowerCase().replace(/^functions\./, "");
+  const path = pathArgument(args);
+  const shownPath = path ? ` ${shortPath(path, home)}` : "";
+  const agentCount = Number.isInteger(args?.threadCount) && args.threadCount >= 0 ? args.threadCount
+    : completeArguments && Array.isArray(args?.threadIds) ? args.threadIds.length : null;
+  const agents = agentCount === null ? "agents" : `${agentCount} ${agentCount === 1 ? "agent" : "agents"}`;
+  switch (tool) {
+    case "bash": case "exec_command": return `${running ? "Running" : "Ran"} bash`;
+    case "read": return `${running ? "Reading" : "Read"}${shownPath}`;
+    case "edit": return `${running ? "Editing" : "Edited"}${shownPath}`;
+    case "write": return `${running ? "Writing" : "Wrote"}${shownPath}`;
+    case "thread_wait":
+      if (args?.action === "clear") return running ? "Clearing the dependency wait" : "Cleared the dependency wait";
+      if (args?.kind === "agents") return `${running ? "Waiting" : "Waited"} for ${agents}`;
+      return `${running ? "Waiting" : "Waited"} for ${args?.kind === "message" ? "an agent message" : args?.kind === "job" ? "a job" : args?.kind === "deployment" ? "a deployment" : "a dependency"}`;
+    case "thread_await": return `${running ? "Waiting" : "Waited"} for ${agents}`;
+    case "thread_spawn": return running ? "Starting an agent" : "Started an agent";
+    case "thread_send": return running ? "Sending an agent message" : "Sent an agent message";
+    case "thread_read": return running ? "Reading an agent conversation" : "Read an agent conversation";
+    case "thread_control": return running ? "Updating an agent" : "Updated an agent";
+    case "thread_title": return running ? "Naming this conversation" : "Named this conversation";
+    case "thread_attention": return running ? "Sending a notification" : "Sent a notification";
+    case "image_generation": return running ? "Generating an image" : "Generated an image";
+    case "agent_browser": return running ? "Browsing" : "Browsed";
+    case "grep": case "find": return `${running ? "Searching" : "Searched"}${shownPath}`;
+    case "ls": return `${running ? "Listing" : "Listed"}${shownPath}`;
+    default: return `Tool: ${tool.replaceAll("_", " ")}`;
+  }
+}
+
 export function toolSummary(name: string, args: any = {}, home = "") {
   const originalName = String(name || "tool");
   const tool = originalName.toLowerCase();

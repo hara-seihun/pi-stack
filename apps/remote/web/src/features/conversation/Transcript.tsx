@@ -18,7 +18,7 @@ import { VirtualTranscript } from "./VirtualTranscript";
 import { useVisualClock } from "../status/visual-clock";
 import { useVisibleHeads } from "./visible-heads";
 import type { VisibleTranscriptRange } from "./transcript-store";
-import { duration, toolSummary } from "./tool-summary";
+import { duration, managerToolSummary, toolSummary } from "./tool-summary";
 import "./transcript.css";
 
 type RenderedTranscriptItem = TranscriptItem | { kind: "step" | "outgoing" | "incoming"; entry: ContextEntry };
@@ -210,15 +210,16 @@ function outcome(entry: ContextEntry): { status: "running" | "error" | "done"; l
   return assertNever(entry.kind, "Transcript outcome");
 }
 
-const ToolStep = memo(function ToolStep({ entry, home, forceExpanded = false }: {
+export const ToolStep = memo(function ToolStep({ entry, home, forceExpanded = false, progressive = false }: {
   entry: ContextEntry;
   home: string;
   forceExpanded?: boolean;
+  progressive?: boolean;
 }) {
   const call = entry.toolCall || {};
   const result = entry.toolResult;
   const state = outcome(entry);
-  const [open, setOpen] = useState(forceExpanded || state.status === "error" || !result);
+  const [open, setOpen] = useState(forceExpanded || !progressive && (state.status === "error" || !result));
   const body = useItemBody(entry.itemId, open, entry.size);
   const full = body.body?.kind === "toolCall" ? body.body : null;
   const args = full ? full.arguments : call.arguments ?? {};
@@ -226,7 +227,9 @@ const ToolStep = memo(function ToolStep({ entry, home, forceExpanded = false }: 
   const timing = entry.time ? duration(result ? Number(result.timestamp || entry.time) - Number(entry.time) : elapsed || 0) : "";
   const previewOutput = full?.result ? "" : result ? result.preview || "" : String(call.partialOutput || "");
   const completeOutput = full?.result ? visibleResult(full.result.content) : [];
-  const summary = toolSummary(call.name, args, home);
+  const summary = progressive
+    ? managerToolSummary(call.name, args, home, !result, !!full || entry.argumentsTruncated !== true)
+    : toolSummary(call.name, args, home);
   const threadIds = threadIdsOf(call.name, args);
   const partial = !full && (entry.argumentsTruncated || (result && result.size > (result.preview || "").length));
   const copy = async () => {
@@ -237,13 +240,15 @@ const ToolStep = memo(function ToolStep({ entry, home, forceExpanded = false }: 
 
   return <details ref={ref} data-transcript-seq={entry.seq} className={`conversation-step tool-step ${state.status}`} open={open} aria-busy={state.status === "running" || undefined} onToggle={event => setOpen(event.currentTarget.open)}>
     <summary>
-      <span className="step-summary">{open ? toolLabel(call.name) : summary}</span>
-      <ThreadChips ids={threadIds} />
+      <span className="step-summary">{progressive || !open ? summary : toolLabel(call.name)}</span>
+      {!progressive && <ThreadChips ids={threadIds} />}
       {timing && <span className="step-duration">{timing}</span>}
-      {entry.responseMetrics && <span className="step-metrics">{formatResponseMetrics(entry.responseMetrics)}</span>}
+      {!progressive && entry.responseMetrics && <span className="step-metrics">{formatResponseMetrics(entry.responseMetrics)}</span>}
       {state.status !== "running" && <span className="step-outcome" data-status={state.status}>{state.label}</span>}
     </summary>
-    <div className="step-detail">
+    {(!progressive || open) && <div className="step-detail">
+      {progressive && <ThreadChips ids={threadIds} />}
+      {progressive && entry.responseMetrics && <span className="step-metrics">{formatResponseMetrics(entry.responseMetrics)}</span>}
       <span className="step-detail-label">Arguments</span>
       <pre className="step-arguments" tabIndex={0} aria-label="Tool arguments">{json(args)}</pre>
       {(previewOutput || completeOutput.length > 0) && <><span className="step-detail-label">Result</span><div className="step-result" tabIndex={0} role="region" aria-label="Tool result">
@@ -255,9 +260,9 @@ const ToolStep = memo(function ToolStep({ entry, home, forceExpanded = false }: 
       {body.loading && partial && <p className="step-loading" role="status">Loading the full call…</p>}
       {body.error && <p className="step-loading step-failed" role="status">{body.error}</p>}
       <div className="step-copy"><CopyButton text={copy} label="Copy tool call" /></div>
-    </div>
+    </div>}
   </details>;
-}, (before, after) => before.entry.signature === after.entry.signature && before.home === after.home && before.forceExpanded === after.forceExpanded);
+}, (before, after) => before.entry.signature === after.entry.signature && before.home === after.home && before.forceExpanded === after.forceExpanded && before.progressive === after.progressive);
 
 function stepLabel(entry: ContextEntry) {
   switch (entry.kind) {
@@ -268,19 +273,21 @@ function stepLabel(entry: ContextEntry) {
   return assertNever(entry.kind, "Transcript step label");
 }
 
-const TextStep = memo(function TextStep({ entry, sessionId, forceExpanded = false, onOpen }: {
+const TextStep = memo(function TextStep({ entry, sessionId, forceExpanded = false, progressive = false, onOpen }: {
   entry: ContextEntry;
   sessionId: string;
   forceExpanded?: boolean;
+  progressive?: boolean;
   onOpen?(open: boolean): void;
 }) {
   const state = outcome(entry);
   const error = state.status === "error";
-  const [open, setOpen] = useState(forceExpanded || error || (entry.streaming === true && !entry.live));
+  const [open, setOpen] = useState(forceExpanded || !progressive && (error || entry.streaming === true && !entry.live));
   const body = useItemBody(entry.itemId, open, entry.size);
   const loaded = body.body && body.body.kind !== "toolCall" ? body.body.text : undefined;
   const source = entry.text ?? loaded ?? "";
-  const preview = (entry.preview ?? source).trim().replace(/\s+/g, " ").slice(0, 120);
+  const rawPreview = (entry.preview ?? source).trim().replace(/\s+/g, " ").slice(0, 120);
+  const preview = progressive && (rawPreview.startsWith("{") || rawPreview.startsWith("[")) ? "" : rawPreview;
   const thinking = entry.kind === "thinking";
   const waiting = !entry.text && loaded === undefined;
   // Leaving the thread, or losing the live step, closes its subscription.
@@ -295,10 +302,11 @@ const TextStep = memo(function TextStep({ entry, sessionId, forceExpanded = fals
   return <details data-transcript-seq={entry.seq} className={`conversation-step text-step ${state.status}${thinking ? " thinking-step" : ""}`} open={open} aria-busy={state.status === "running" || undefined} onToggle={event => toggle(event.currentTarget.open)}>
     <summary>
       <span className="step-summary"><strong>{stepLabel(entry)}</strong>{!open && preview && <span>{preview}</span>}</span>
-      {entry.responseMetrics && <span className="step-metrics">{formatResponseMetrics(entry.responseMetrics)}</span>}
+      {!progressive && entry.responseMetrics && <span className="step-metrics">{formatResponseMetrics(entry.responseMetrics)}</span>}
       {state.status !== "running" && <span className="step-outcome" data-status={state.status}>{state.label}</span>}
     </summary>
-    <div className="step-detail">
+    {(!progressive || open) && <div className="step-detail">
+      {progressive && entry.responseMetrics && <span className="step-metrics">{formatResponseMetrics(entry.responseMetrics)}</span>}
       {waiting && !detail
         ? <p className="step-loading" role="status">{body.error || (entry.live ? "Waiting for the agent's thinking…" : "Loading…")}</p>
         : thinking
@@ -313,21 +321,22 @@ const TextStep = memo(function TextStep({ entry, sessionId, forceExpanded = fals
         const complete = await body.load();
         return complete && complete.kind !== "toolCall" ? complete.text : detail;
       }} label={`Copy ${stepLabel(entry).toLowerCase()}`} /></div>
-    </div>
+    </div>}
   </details>;
-}, (before, after) => before.entry.signature === after.entry.signature && before.sessionId === after.sessionId && before.forceExpanded === after.forceExpanded && before.onOpen === after.onOpen);
+}, (before, after) => before.entry.signature === after.entry.signature && before.sessionId === after.sessionId && before.forceExpanded === after.forceExpanded && before.progressive === after.progressive && before.onOpen === after.onOpen);
 
-function Step({ entry, sessionId, home, forceExpanded = false, onThinkingOpen }: {
+function Step({ entry, sessionId, home, forceExpanded = false, progressive = false, onThinkingOpen }: {
   entry: ContextEntry;
   sessionId: string;
   home: string;
   forceExpanded?: boolean;
+  progressive?: boolean;
   onThinkingOpen?(open: boolean): void;
 }) {
   switch (entry.kind) {
-    case "toolCall": return <ToolStep entry={entry} home={home} forceExpanded={forceExpanded} />;
+    case "toolCall": return <ToolStep entry={entry} home={home} forceExpanded={forceExpanded} progressive={progressive} />;
     case "system": case "tool": case "thinking": case "notice": case "user": case "assistant":
-      return <TextStep entry={entry} sessionId={sessionId} forceExpanded={forceExpanded} onOpen={entry.live ? onThinkingOpen : undefined} />;
+      return <TextStep entry={entry} sessionId={sessionId} forceExpanded={forceExpanded} progressive={progressive} onOpen={entry.live ? onThinkingOpen : undefined} />;
   }
   return assertNever(entry.kind, "Transcript step");
 }
@@ -353,7 +362,7 @@ function workHeading(item: Extract<TranscriptItem, { kind: "work" }>, running: b
   return `Work · ${parts.join(" · ")}`;
 }
 
-function WorkEntry({ entry, sessionId, home, mono, autoCollapse, onThinkingOpen, onEdit, onReply }: {
+export function WorkEntry({ entry, sessionId, home, mono, autoCollapse, onThinkingOpen, onEdit, onReply }: {
   entry: ContextEntry;
   sessionId: string;
   home: string;
@@ -363,9 +372,9 @@ function WorkEntry({ entry, sessionId, home, mono, autoCollapse, onThinkingOpen,
   onEdit(entry: ContextEntry): void;
   onReply(target: ReplyTarget): void;
 }) {
-  if (outgoingAgentMessage(entry)) return <OutgoingEntry entry={entry} sessionId={sessionId} autoCollapse={autoCollapse} />;
-  if (entry.kind === "user" && presentAgentMessage(entry).agentSender) return <MessageEntry entry={entry} sessionId={sessionId} mono={mono} autoCollapse={autoCollapse} onEdit={onEdit} onReply={onReply} />;
-  return <Step entry={entry} sessionId={sessionId} home={home} forceExpanded={!autoCollapse} onThinkingOpen={onThinkingOpen} />;
+  if (outgoingAgentMessage(entry)) return <OutgoingEntry entry={entry} sessionId={sessionId} autoCollapse={mono || autoCollapse} />;
+  if (entry.kind === "user" && presentAgentMessage(entry).agentSender) return <MessageEntry entry={entry} sessionId={sessionId} mono={mono} autoCollapse={mono || autoCollapse} onEdit={onEdit} onReply={onReply} />;
+  return <Step entry={entry} sessionId={sessionId} home={home} forceExpanded={!mono && !autoCollapse} progressive={mono} onThinkingOpen={onThinkingOpen} />;
 }
 
 const WorkCard = memo(function WorkCard({ item, newest, sessionId, home, mono, expanded, onExpanded, onThinkingOpen, onEdit, onReply }: {
@@ -388,7 +397,7 @@ const WorkCard = memo(function WorkCard({ item, newest, sessionId, home, mono, e
       <span>{workHeading(item, running, elapsed, expanded)}</span>
     </button>
     {expanded
-      ? <div className="work-steps"><VirtualTranscript items={item.entries} messageIds={entry => entry.identity ? [entry.identity.id] : []} itemKey={entry => entry.key} render={entry => <WorkEntry entry={entry} sessionId={sessionId} home={home} mono={mono} autoCollapse={false} onThinkingOpen={onThinkingOpen} onEdit={onEdit} onReply={onReply} />} />{item.live && <Step entry={item.live} sessionId={sessionId} home={home} onThinkingOpen={onThinkingOpen} />}</div>
+      ? <div className="work-steps"><VirtualTranscript items={item.entries} messageIds={entry => entry.identity ? [entry.identity.id] : []} itemKey={entry => entry.key} render={entry => <WorkEntry entry={entry} sessionId={sessionId} home={home} mono={mono} autoCollapse={false} onThinkingOpen={onThinkingOpen} onEdit={onEdit} onReply={onReply} />} />{item.live && <Step entry={item.live} sessionId={sessionId} home={home} progressive={mono} onThinkingOpen={onThinkingOpen} />}</div>
       : !mono && <div className="work-latest">{outgoingAgentMessage(item.latest) || item.latest.kind === "user"
         ? <WorkEntry entry={item.latest} sessionId={sessionId} home={home} mono={mono} autoCollapse onThinkingOpen={onThinkingOpen} onEdit={onEdit} onReply={onReply} />
         : <Step entry={item.latest} sessionId={sessionId} home={home} forceExpanded={running && !item.latest.live} onThinkingOpen={onThinkingOpen} />}</div>}
