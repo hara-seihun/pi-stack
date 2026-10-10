@@ -11,6 +11,9 @@ import type { AttachPiSession, OpenPiSession, PiEvent, PiSession, Result, Thread
 import type { CoreConfig, CoreEvent, CoreProjection, CoreScope } from "./contracts.js";
 import type { CoreResult } from "./config.js";
 import { acquireScopeOwnership, type ScopeOwnership } from "./ownership.js";
+import { CoreManagerRelay } from "./manager-relay.js";
+import { CoreManagerNotices } from "./manager-notices.js";
+import { readManagerReplies, type ManagerRepliesInput } from "./manager-replies.js";
 
 export type CoreRuntime = {
   openSession: OpenPiSession;
@@ -20,11 +23,11 @@ export type CoreRuntime = {
   path(logicalPath: string): string;
 };
 export type CoreRuntimeFactory = (scope: CoreScope) => Promise<CoreResult<CoreRuntime>>;
-type ScopeOwner = { scope: CoreScope; threads: ThreadService; runtime: CoreRuntime; ownership: ScopeOwnership; unsubscribe(): void; capability: ReturnType<typeof threadCapability> };
+type ScopeOwner = { scope: CoreScope; threads: ThreadService; runtime: CoreRuntime; ownership: ScopeOwnership; unsubscribe(): void; capability: ReturnType<typeof threadCapability>; metadata: ReturnType<typeof openSqlite>; relay?: CoreManagerRelay; notices?: CoreManagerNotices; directory?: ThreadDirectory };
 type Identity = { principal: Principal; scopeIds: readonly string[]; caller: ThreadCaller };
 const failure = (code: "invalid_request" | "unavailable" | "not_found" | "conflict", message: string): Result<never> => ({ ok: false, error: { code, message } });
 const jsonError = (status: number, message: string) => Response.json(failure(status === 404 ? "not_found" : status === 503 ? "unavailable" : "invalid_request", message), { status });
-const reads = new Set(["list", "archived", "read", "inspect", "questions", "pendingQuestions", "questionEvents", "questionState", "questionOrigin", "managerThread", "managerNotificationPolicy", "managerWorkSummary", "attentionEvents", "settlements", "await"]);
+const reads = new Set(["list", "archived", "read", "inspect", "questions", "pendingQuestions", "questionEvents", "questionState", "questionOrigin", "managerThread", "managerNotificationPolicy", "managerWorkSummary", "managerReplies", "attentionEvents", "settlements", "await"]);
 function operationAction(operation: string): PermissionAction {
   if (reads.has(operation)) return "read";
   if (operation === "spawn") return "dispatch";
@@ -37,7 +40,7 @@ export class CoreService {
   private readonly listeners = new Map<string, Set<(event: CoreEvent) => void>>();
   private readonly db: ReturnType<typeof openSqlite>;
   private readonly cursors = new Map<string, { current: number; ceiling: number }>();
-  private state: "serving" | "draining" | "closed" = "serving";
+  private state: "new" | "adopted" | "serving" | "draining" | "closed" = "new";
   constructor(readonly config: CoreConfig, private readonly runtimeFactory: CoreRuntimeFactory) {
     mkdirSync(dirname(config.statePath), { recursive: true, mode: 0o700 });
     this.db = openSqlite(config.statePath);
@@ -48,26 +51,65 @@ export class CoreService {
     return owner ? { ok: true, value: owner } : { ok: false, error: { code: "unavailable", message: `Scope ${scopeId} has not transferred controller custody` } };
   }
   async start(): Promise<CoreResult<void>> {
+    if (this.state !== "new") return { ok: false, error: { code: "ownership-conflict", message: "Core adoption requires a new controller" } };
+    try {
     for (const scope of this.config.scopes) {
       if (scope.availability.kind === "unavailable") continue;
       const result = await this.adopt(scope);
       if (!result.ok) { await this.close(); return result; }
     }
     for (const owner of this.owners.values()) {
-      const scopes = [...this.owners.values()].filter(candidate => candidate.scope.principalId === owner.scope.principalId);
-      const directory = new ThreadDirectory({ id: owner.scope.manager.kind === "existing" ? "person" : owner.scope.id, api: owner.threads }, scopes.filter(candidate => candidate !== owner).map(candidate => ({ id: candidate.scope.manager.kind === "existing" ? "person" : candidate.scope.id, api: candidate.threads })));
+      const principal = this.config.principals.find(principal => principal.id === owner.scope.principalId)!;
+      const scopes = [...this.owners.values()].filter(candidate => candidate.scope.principalId === owner.scope.principalId && authorize(this.config.policy, { principal, resource: candidate.scope.resource, action: "read", now: Date.now() }).ok);
+      if (owner.scope.managerRouting.kind === "configured") {
+        const routing = owner.scope.managerRouting;
+        owner.relay = new CoreManagerRelay(routing.relay, owner.metadata, async (input, init) => {
+          const tokenPath = owner.scope.environment.PI_CORE_TOKEN_FILE;
+          if (!tokenPath) throw new Error("Manager transport credential is unset");
+          const token = readFileSync(owner.runtime.path(tokenPath), "utf8").trim();
+          const headers = new Headers(init?.headers); headers.set("authorization", `Bearer ${token}`);
+          return fetch(input, { ...init, headers });
+        }, (resource, action) => {
+          const grant = authorize(this.config.policy, { principal, resource, action, now: Date.now() });
+          return grant.ok ? { ok: true, value: undefined } : failure("unavailable", grant.error.message);
+        });
+      }
+      const directory = new ThreadDirectory({ id: owner.scope.manager.kind === "existing" ? "person" : owner.scope.id, api: owner.threads }, scopes.filter(candidate => candidate !== owner).map(candidate => ({ id: candidate.scope.manager.kind === "existing" ? "person" : candidate.scope.id, api: candidate.threads })), owner.relay?.managerOwner, owner.relay?.questionOwner);
+      owner.directory = directory;
       owner.threads.setDirectory(directory);
+      if (owner.scope.managerRouting.kind === "configured") owner.notices = new CoreManagerNotices({ ...owner.scope.managerRouting.notices, scopeId: owner.scope.id, subscribe: listener => owner.threads.subscribe(listener), feedback: message => { if (message) console.error(`Core notices ${owner.scope.id}: ${message}`); } }, owner.metadata, owner.threads, {
+        managerNotificationPolicy: () => directory.managerNotificationPolicy(),
+        send: async input => {
+          const destination = [...this.owners.values()].find(candidate => candidate.threads.get(input.threadId));
+          if (destination) {
+            const grant = authorize(this.config.policy, { principal, resource: destination.scope.resource, action: "write", now: Date.now() });
+            if (!grant.ok) return failure("unavailable", grant.error.message);
+          }
+          return directory.send(input);
+        },
+      });
       if (owner.scope.manager.kind === "existing") owner.threads.setManagerWatchdog(async () => {
         const summary = await directory.managerWorkSummary();
         return summary.ok ? { ok: true, value: { ...summary.value, managerThreadId: owner.scope.manager.kind === "existing" ? owner.scope.manager.threadId : null } } : summary;
       }, message => { if (message) console.error(`Core manager ${owner.scope.id}: ${message}`); });
     }
+    this.state = "adopted";
     return { ok: true, value: undefined };
+    } catch (cause) {
+      const drained = await this.close();
+      return { ok: false, error: { code: "unavailable", message: `Core scope wiring failed: ${cause instanceof Error ? cause.message : String(cause)}${drained.ok ? "" : `; ${drained.error.message}`}` } };
+    }
   }
   async activate(): Promise<CoreResult<void>> {
+    if (this.state !== "adopted") return { ok: false, error: { code: "ownership-conflict", message: "Core activation requires adopted custody" } };
     for (const owner of this.owners.values()) {
       const started = await owner.threads.start();
       if (!started.ok) { await this.close(); return { ok: false, error: { code: "unavailable", message: `${owner.scope.id}: ${started.error.message}` } }; }
+    }
+    this.state = "serving";
+    for (const owner of this.owners.values()) if (owner.notices) {
+      const started = await owner.notices.start();
+      if (!started.ok) continue; // Its durable outbox and subscribed retry retain custody while the peer is offline.
     }
     return { ok: true, value: undefined };
   }
@@ -77,7 +119,8 @@ export class CoreService {
     const runtime = built.value;
     const ownership = acquireScopeOwnership(scope, path => runtime.path(path));
     if (!ownership.ok) { runtime.detach(); return ownership; }
-    let threads: ThreadService | undefined;
+    let threads: ThreadService | undefined, metadata: ReturnType<typeof openSqlite> | undefined;
+    let unsubscribe: (() => void) | undefined;
     try {
       const keyPath = runtime.path(scope.storage.capabilityKeyPath);
       if (!existsSync(keyPath)) throw new Error("Existing capability key is missing; adoption cannot mint a replacement");
@@ -103,18 +146,25 @@ export class CoreService {
             return result;
           } catch (cause) { return failure("unavailable", `Message preparation unavailable: ${cause instanceof Error ? cause.message : String(cause)}`); }
         } } : {}),
-        managerNotificationPolicy: () => ({ ok: true, value: scope.manager.kind === "existing" ? { view: "mono", managerThreadId: scope.manager.threadId } : { view: "classic" } }),
+        managerNotificationPolicy: () => {
+          const relay = this.owners.get(scope.id)?.relay?.managerOwner;
+          return relay ? relay.api.managerNotificationPolicy() : Promise.resolve({ ok: true as const, value: scope.manager.kind === "existing" ? { view: "mono" as const, managerThreadId: scope.manager.threadId } : { view: "classic" as const } });
+        },
       });
       if (scope.manager.kind === "existing") {
         const manager = threads.get(scope.manager.threadId);
         if (!manager || manager.metadata?.manager !== true) throw new Error("Declared manager does not match the existing canonical thread");
       }
-      const unsubscribe = threads.subscribe(event => this.changed(scope.id, event));
-      this.owners.set(scope.id, { scope, threads, runtime, ownership: ownership.value, unsubscribe, capability });
+      unsubscribe = threads.subscribe(event => this.changed(scope.id, event));
+      metadata = openSqlite(runtime.path(scope.storage.databasePath));
+      this.owners.set(scope.id, { scope, threads, runtime, ownership: ownership.value, unsubscribe, capability, metadata });
       this.publish(scope.id, { type: "resync" });
       return { ok: true, value: undefined };
     } catch (cause) {
+      this.owners.delete(scope.id);
+      unsubscribe?.();
       if (threads) await threads.detach();
+      metadata?.close();
       runtime.detach();
       ownership.value.close();
       return { ok: false, error: { code: "unavailable", message: `Scope ${scope.id} adoption failed: ${cause instanceof Error ? cause.message : String(cause)}` } };
@@ -143,7 +193,22 @@ export class CoreService {
     const cursor = ++state.current;
     for (const listener of this.listeners.get(scopeId) ?? []) listener({ cursor, change });
   }
+  authorizeIngress(request: Request): Result<void> {
+    const tokens = [request.headers.get("authorization")?.replace(/^Bearer /, ""), request.headers.get("x-pi-kenan-admin")].filter((value): value is string => !!value);
+    for (const token of tokens) {
+      const digest = createHash("sha256").update(token).digest("hex");
+      const credential = this.config.credentials.find(candidate => candidate.sha256 === digest);
+      if (credential?.routeCeiling.kind !== "root-admin") continue;
+      const path = new URL(request.url).pathname;
+      const allowed = request.method === "GET" && (path === "/v1/admin/root-sessions" || /^\/v1\/admin\/root-sessions\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/transcript$/.test(path))
+        || ["POST", "DELETE"].includes(request.method) && path === "/v1/admin/release";
+      if (!allowed || request.headers.has("x-pi-thread-token")) return failure("invalid_request", "Root admin credential is restricted to its dedicated admin routes");
+    }
+    return { ok: true, value: undefined };
+  }
   private identity(request: Request, scopeId?: string): Result<Identity> {
+    const ingress = this.authorizeIngress(request);
+    if (!ingress.ok) return ingress;
     const bearer = request.headers.get("authorization");
     const token = request.headers.get("x-pi-thread-token");
     const owner = scopeId ? this.owners.get(scopeId) : undefined;
@@ -165,7 +230,7 @@ export class CoreService {
       const source = sources[0]!;
       if (credential && credential.principalId !== source.candidate.scope.principalId) return failure("invalid_request", "Credential and thread capability name different principals");
       const principal = this.config.principals.find(principal => principal.id === source.candidate.scope.principalId)!;
-      return { ok: true, value: { principal, scopeIds: this.config.scopes.filter(scope => authorize(this.config.policy, { principal, resource: scope.resource, action: "read", now: Date.now() }).ok).map(scope => scope.id), caller: { kind: "thread", threadId: source.threadId } } };
+      return { ok: true, value: { principal, scopeIds: this.config.scopes.filter(scope => (!credential || credential.scopeIds.includes(scope.id)) && authorize(this.config.policy, { principal, resource: scope.resource, action: "read", now: Date.now() }).ok).map(scope => scope.id), caller: { kind: "thread", threadId: source.threadId } } };
     }
     if (!credential) return failure("invalid_request", "An authenticated core credential is required");
     const principal = this.config.principals.find(principal => principal.id === credential.principalId)!;
@@ -199,7 +264,7 @@ export class CoreService {
       const settlement = owner.threads.latestSettlement(thread.id);
       if (settlement) settlements[thread.id] = settlement;
     }
-    return { ok: true, value: { cursor: this.cursor(scopeId), threads: [...threads.values()], archivedTotal: owner.threads.archivedCount(), pending, inputs, settlements, live, managerThreadId: owner.scope.manager.kind === "existing" ? owner.scope.manager.threadId : null } };
+    return { ok: true, value: { cursor: this.cursor(scopeId), threads: [...threads.values()], archivedTotal: owner.threads.archivedCount(), pending, inputs, settlements, live, managerThreadId: owner.scope.managerRouting.kind === "configured" && owner.scope.managerRouting.relay.canonicalManager ? owner.scope.managerRouting.relay.canonicalManager.threadId : owner.scope.manager.kind === "existing" ? owner.scope.manager.threadId : null } };
   }
   async request(request: Request): Promise<Response | undefined> {
     const url = new URL(request.url);
@@ -210,11 +275,12 @@ export class CoreService {
     try { scopeId = decodeURIComponent(match[1]!); } catch { return jsonError(400, "Invalid scope identifier"); }
     const scope = this.config.scopes.find(scope => scope.id === scopeId);
     if (!scope) return jsonError(404, "Unknown scope");
-    if (this.state !== "serving") return jsonError(503, "Core controller is draining");
+    if (this.state !== "serving" && this.state !== "adopted") return jsonError(503, "Core controller is not serving");
     const identity = this.identity(request, scopeId);
     if (!identity.ok) return jsonError(401, identity.error.message);
     const route = match[2]!;
     const operation = route.startsWith("thread-owner/") ? route.slice("thread-owner/".length) : route;
+    if (this.state === "adopted" && route !== "projection" && route !== "events" && !reads.has(operation)) return jsonError(503, "Core execution dependencies are not activated");
     const permission = authorize(this.config.policy, { principal: identity.value.principal, resource: scope.resource, action: route === "projection" || route === "events" ? "read" : operationAction(operation), now: Date.now() });
     if (!permission.ok) return jsonError(403, permission.error.message);
     const owner = this.owners.get(scopeId);
@@ -259,21 +325,39 @@ export class CoreService {
       if (identity.value.caller.kind === "thread") return jsonError(403, "Agents use their authenticated thread control API");
       return Response.json(owner.threads.update(input.threadId, input.patch));
     }
+    if (operation === "managerReplies") {
+      if (request.method !== "POST") return jsonError(405, "Use POST");
+      if (identity.value.caller.kind !== "service" || identity.value.principal.id !== scope.principalId) return jsonError(403, "Manager reply delivery requires this scope's authenticated adapter");
+      let input: ManagerRepliesInput;
+      try { input = await request.json() as ManagerRepliesInput; } catch { return jsonError(400, "Expected manager reply cursor"); }
+      if (owner.relay?.managerOwner) return Response.json(await owner.relay.managerReplies(input));
+      const configured = scope.managerRouting.kind === "configured" ? scope.managerRouting.relay.canonicalManager?.threadId : undefined;
+      const managerId = configured ?? (scope.manager.kind === "existing" ? scope.manager.threadId : null);
+      if (!managerId) return jsonError(503, "Canonical manager is unset");
+      const managerOwner = [...this.owners.values()].find(candidate => candidate.scope.principalId === scope.principalId && candidate.scope.manager.kind === "existing" && candidate.scope.manager.threadId === managerId);
+      if (!managerOwner) return jsonError(503, "Canonical manager custody is unavailable");
+      const granted = authorize(this.config.policy, { principal: identity.value.principal, resource: managerOwner.scope.resource, action: "read", now: Date.now() });
+      if (!granted.ok) return jsonError(403, granted.error.message);
+      return Response.json(readManagerReplies(managerOwner.metadata, managerId, input));
+    }
     const resolver = callerResolver({ capability: owner.capability });
     const peers = [...this.owners.values()].filter(candidate => identity.value.scopeIds.includes(candidate.scope.id)
       && authorize(this.config.policy, { principal: identity.value.principal, resource: candidate.scope.resource, action: operationAction(operation), now: Date.now() }).ok);
-    const api: ThreadApi = peers.length > 1 ? new ThreadDirectory({ id: scopeId, api: owner.threads }, peers.filter(candidate => candidate !== owner).map(candidate => ({ id: candidate.scope.id, api: candidate.threads }))) : owner.threads;
+    const relay = identity.value.principal.id === scope.principalId ? owner.relay : undefined;
+    const directory: ThreadApi = new ThreadDirectory({ id: scope.manager.kind === "existing" ? "person" : scopeId, api: owner.threads }, peers.filter(candidate => candidate !== owner).map(candidate => ({ id: candidate.scope.manager.kind === "existing" ? "person" : candidate.scope.id, api: candidate.threads })), relay?.managerOwner, relay?.questionOwner);
+    const api = relay ? new Proxy(directory, { get: (target, key) => key === "managerQuestionCustody" ? (input: Parameters<ThreadApi["managerQuestionCustody"]>[0]) => relay.receive(request, input, identity.value.caller.kind === "service", value => target.managerQuestionCustody(value)) : typeof Reflect.get(target, key) === "function" ? Reflect.get(target, key).bind(target) : Reflect.get(target, key) }) : directory;
     return threadHttp(api, request, `/v1/scopes/${encodeURIComponent(scopeId)}/thread-owner`, (operation, input) => resolver.admit(operation, input, identity.value.caller));
   }
   async close(): Promise<CoreResult<void>> {
     if (this.state === "closed") return { ok: true, value: undefined };
     this.state = "draining";
     for (const owner of this.owners.values()) owner.threads.suspend();
+    await Promise.all([...this.owners.values()].map(owner => owner.notices?.close()));
     const results = await Promise.all([...this.owners.values()].map(async owner => {
       if ("register" in owner.runtime) owner.runtime.detach();
       const detached = await owner.threads.detach();
       if (!detached.ok) return { ok: false as const, error: { code: "unavailable" as const, message: `${owner.scope.id}: ${detached.error.message}` } };
-      owner.unsubscribe(); owner.runtime.detach(); owner.ownership.close();
+      owner.unsubscribe(); owner.metadata.close(); owner.runtime.detach(); owner.ownership.close();
       this.owners.delete(owner.scope.id);
       return { ok: true as const, value: undefined };
     }));

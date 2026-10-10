@@ -3,11 +3,11 @@ import { Database } from "bun:sqlite";
 import { appendFileSync, mkdtempSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CoreImages, parseCoreImagesConfig, type CoreImagesSpec } from "../src/core/images";
-import { InlineImages as Registry } from "../src/core/image-registry";
-import { Store } from "../src/store";
-import type { ThreadServiceEvent } from "../src/threads/service";
-import type { Thread } from "../src/threads/contracts";
+import { CoreImages, parseCoreImagesConfig, type CoreImagesSpec } from "../src/core/images.js";
+import { InlineImages as Registry } from "../src/core/image-registry.js";
+import { Store } from "../src/store.js";
+import type { ThreadServiceEvent } from "../src/threads/service.js";
+import type { Thread } from "../src/threads/contracts.js";
 import { indexedThreadHistory } from "../src/threads/history.mjs";
 
 const cleanups: Array<() => Promise<void>> = [];

@@ -34,8 +34,8 @@ function fixture(input: { spool?: "hold" | "drain"; granted?: boolean; inactive?
   const resource = { id: "person-threads", kind: "thread", owner: "person", privacy: "private", subjects: ["person"], consent: "not-required" } as const;
   const scope: CoreScope = { id: "person", principalId: "person", availability: input.inactive ? { kind: "unavailable", reason: "inactive" } : { kind: "adopt" }, resource,
     storage: { databasePath: join(root, "threads.sqlite"), sessionsDir: root, capabilityKeyPath: join(root, "capability"), adoptionReceiptPath: join(root, "thread-receipt") },
-    custody: { uid: process.getuid!(), gid: process.getgid!(), namespace: { kind: "host" }, dataDir: root, socketDir: root },
-    resources: [{ path: root, kind: "directory" }], environment: {}, manager: { kind: "none" } };
+    custody: { uid: process.getuid!(), gid: process.getgid!(), namespace: { kind: "host" }, retainedRunnerNamespace: { kind: "host" }, dataDir: root, socketDir: root },
+    resources: [{ path: root, kind: "directory" }], environment: {}, manager: { kind: "none" }, managerRouting: { kind: "none" } };
   const principal: Principal = { kind: "person", id: "person", person: "person" };
   const policy: PermissionPolicy = { revision: 1, grants: input.granted === false ? [] : [{ id: "dispatch", principal: "person", resource: { kind: "exact", id: resource.id },
     actions: ["dispatch"], effect: "allow", validFrom: 0, validUntil: null, issuedBy: "person", source: "test grant" }], consents: [] };

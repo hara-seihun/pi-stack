@@ -1,10 +1,11 @@
 import { spawnSync } from "node:child_process";
+import { isDeepStrictEqual } from "node:util";
 import { closeSync, existsSync, openSync, readFileSync, statSync } from "node:fs";
-import type { CoreScope } from "./contracts.js";
+import type { CoreScope, CustodyNamespace } from "./contracts.js";
 import type { CoreResult } from "./config.js";
 
 export type ScopeOwnership = { close(): void };
-export type DatabaseCustody = { id: string; databasePath: string; adoptionReceiptPath: string; uid: number; sessionsDir?: string; requiredTables?: readonly string[] };
+export type DatabaseCustody = { id: string; databasePath: string; adoptionReceiptPath: string; uid: number; sessionsDir?: string; requiredTables?: readonly string[]; namespaces?: { data: CustodyNamespace; retained: CustodyNamespace } };
 type PhysicalOwner = { fd: number; claims: Map<string, readonly string[] | null> };
 const physicalOwners = new Map<string, PhysicalOwner>();
 function claim(key: string, owner: PhysicalOwner, custody: DatabaseCustody): ScopeOwnership {
@@ -33,6 +34,17 @@ export function acquireDatabaseOwnership(custody: DatabaseCustody, path: (logica
       || receipt.databaseIdentity?.dev !== String(identity.dev) || receipt.databaseIdentity?.ino !== String(identity.ino)
       || typeof receipt.previousOwner?.identity !== "string" || !receipt.previousOwner.identity
       || !Number.isFinite(Date.parse(receipt.previousOwner.detachedAt))) return { ok: false, error: { code: "ownership-conflict", message: `Adoption receipt does not bind detached ${custody.id} storage` } };
+    if (custody.namespaces && !isDeepStrictEqual(custody.namespaces.data, custody.namespaces.retained)) {
+      const transfer = receipt.generationTransfer;
+      if (receiptStat.uid !== 0 || transfer?.version !== 1
+        || !isDeepStrictEqual(transfer.target?.namespace, custody.namespaces.data)
+        || !isDeepStrictEqual(transfer.retainedRunnerNamespace, custody.namespaces.retained)
+        || !isDeepStrictEqual(transfer.source?.namespace, custody.namespaces.retained)
+        || !transfer.source?.files || !isDeepStrictEqual(transfer.source.files, transfer.target?.files)
+        || transfer.target?.databaseIdentity?.dev !== String(identity.dev) || transfer.target?.databaseIdentity?.ino !== String(identity.ino)
+        || typeof transfer.registry?.path !== "string" || typeof transfer.registry?.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(transfer.registry.sha256)
+        || typeof transfer.cipherDir !== "string" || !transfer.cipherDir.startsWith("/")) return { ok: false, error: { code: "ownership-conflict", message: `Namespace change for ${custody.id} lacks exact same-cipher generation custody` } };
+    }
     if (custody.requiredTables !== undefined) {
       const tables = custody.requiredTables;
       if (!tables.length || new Set(tables).size !== tables.length || tables.some(table => !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(table))
@@ -61,5 +73,5 @@ export function acquireDatabaseOwnership(custody: DatabaseCustody, path: (logica
   }
 }
 export function acquireScopeOwnership(scope: CoreScope, path: (logicalPath: string) => string): CoreResult<ScopeOwnership> {
-  return acquireDatabaseOwnership({ id: scope.id, ...scope.storage, uid: scope.custody.uid }, path);
+  return acquireDatabaseOwnership({ id: scope.id, ...scope.storage, uid: scope.custody.uid, namespaces: { data: scope.custody.namespace, retained: scope.custody.retainedRunnerNamespace } }, path);
 }
