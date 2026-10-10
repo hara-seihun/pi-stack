@@ -116,7 +116,8 @@ export class RetellTakeover {
     const result = await this.request(`/v2/stop-call/${encodeURIComponent(id)}`, "POST");
     if (result.ok) return { ok: true, value: { stopped: true } };
     const current = await this.get(id);
-    if (current.ok && retellTerminal(current.value.status) && current.value.disconnection_reason !== "call_take_over") return { ok: true, value: { stopped: true } };
+    // After takeover Retell ends its record (reason call_take_over); the PSTN leg lives in the media page's gateway session, which finish() has already closed.
+    if (current.ok && retellTerminal(current.value.status)) return { ok: true, value: { stopped: true } };
     return result;
   }
   async listen(id: string): Promise<Result<ListenSession>> {
