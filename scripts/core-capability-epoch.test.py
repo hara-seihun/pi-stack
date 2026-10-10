@@ -44,7 +44,7 @@ class Epoch(unittest.TestCase):
                             while b'\n' not in raw: raw += connection.recv(4096)
                             value = json.loads(raw); state['commands'].append(value['type'])
                             if value['type'] == 'close': state['threads'] = []
-                            response = {'ok': True, 'pid': 123}
+                            response = {'ok': True, 'pid': os.getpid()}
                             if value['type'] == 'status': response.update(sessions=len(state['threads']), activeSessions=0, threadIds=state['threads'])
                             connection.sendall((json.dumps(response)+'\n').encode())
                 worker = threading.Thread(target=serve); worker.start()

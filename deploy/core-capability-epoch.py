@@ -23,19 +23,23 @@ print(json.dumps({'databaseIdentity':{'dev':str(s.st_dev),'ino':str(s.st_ino)},'
 
 # This program runs in the registered old resource namespace, after its controller detached.
 RELEASE = r'''
-import fcntl,hashlib,json,os,re,socket,sys
+import fcntl,hashlib,json,os,re,socket,struct,sys
 from pathlib import Path
 v=json.loads(sys.argv[1]);base=Path(v['socketDir']);controls=base/'thread-runners';sessions=base/'thread-sockets';key=Path(v['keyPath'])
 if key.exists() or key.is_symlink():raise ValueError('prior capability key exists; preserve that epoch')
 def request(path,value):
+ if path.is_symlink():raise ValueError('native control cannot redirect its registered boundary')
  with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as s:
-  s.settimeout(5);s.connect(str(path));s.sendall((json.dumps(value)+'\n').encode());b=b''
+  s.settimeout(5);s.connect(str(path))
+  pid,uid,gid=struct.unpack('3i',s.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))
+  if uid!=os.getuid():raise ValueError('native control peer belongs to another resource owner')
+  s.sendall((json.dumps(value)+'\n').encode());b=b''
   while b'\n' not in b:
    chunk=s.recv(65536)
    if not chunk or len(b)>1048576:raise ValueError('native control acknowledgement unavailable')
    b+=chunk
   r=json.loads(b.split(b'\n',1)[0])
-  if r.get('ok') is not True:raise ValueError('native control rejected retirement')
+  if r.get('ok') is not True or r.get('pid')!=pid:raise ValueError('native control rejected retirement or changed peer identity')
   return r
 names=set();refs={}
 for item in v['threads']:
