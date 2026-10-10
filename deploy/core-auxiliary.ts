@@ -61,6 +61,25 @@ function cursor(db: Database, key: string, policy: AuxiliaryPlan["scopes"][numbe
   need(hash(source) === policy.sha256 && source.toString().includes(key.split(":")[0]) && /\?\?\s*0\)/.test(source.toString()), "Original cursor default source proof does not match");
   return { value: 0, provenance: "original-source-default", key, sourceSha256: policy.sha256 };
 }
+type NativeSource = { id: string; session_file: string; created_at: number; scopeId: string; sessionRoots: string[] };
+function imageThreadSources(plan: AuxiliaryPlan, scope: AuxiliaryPlan["scopes"][number], own: Array<{ id: string; session_file: string; created_at: number }>): NativeSource[] {
+  const ids = scope.images!.relatedThreadScopeIds;
+  need(Array.isArray(ids) && new Set(ids).size === ids.length && !ids.includes(scope.id), "Image related thread scopes must be explicit and distinct");
+  const result = own.map(row => ({ id: row.id, session_file: row.session_file, created_at: row.created_at, scopeId: scope.id, sessionRoots: scope.sessionRoots }));
+  for (const id of ids) {
+    const source = plan.scopes.find(candidate => candidate.id === id);
+    need(source, "Unregistered related image source");
+    if (source.availability === "unavailable") continue;
+    need(source.threads, "Related image source lacks its database identity");
+    const db = open(source.threads);
+    try {
+      const values = db.query("SELECT id,session_file,created_at FROM thread ORDER BY id").all() as Array<{ id: string; session_file: string; created_at: number }>;
+      result.push(...values.map(row => ({ ...row, scopeId: id, sessionRoots: source.sessionRoots })));
+    } finally { db.close(); }
+  }
+  need(new Set(result.map(row => row.id)).size === result.length, "Image source thread identity overlaps declared owners");
+  return result;
+}
 export function captureAuxiliary(plan: AuxiliaryPlan) {
   need(plan.version === 1 && ["baseline", "detached"].includes(plan.phase) && Array.isArray(plan.scopes), "Invalid auxiliary plan");
   const startedAt = new Date().toISOString();
@@ -123,15 +142,17 @@ export function captureAuxiliary(plan: AuxiliaryPlan) {
       need(!watchStore || scope.duties?.watch?.kind === "existing" && scope.duties.watch.databasePath === watchStore.path, "Original watch custody requires its exact configured existing-store duty owner");
       if (scope.duties) { need(scope.duties.scopeId === scope.id, "Duty scope mismatch"); entries.push(scope.duties); }
       let imageSources: ObjectValue[] | null = null;
+      let imageThreads: NativeSource[] | null = null;
       if (scope.images) {
         need(supervisor && scope.images.scopeId === scope.id && scope.images.databasePath === scope.supervisor!.path, "Image owner must retain exact supervisor database");
         for (const table of ["inline_images", "inline_image_versions", "inline_image_messages"]) need(supervisorTables.has(table), "Original image schema absent");
         registries.push(scope.images);
+        imageThreads = imageThreadSources(plan, scope, threads);
         if (plan.phase === "baseline") {
           liveOwner(scope.liveOwner);
           imageSources = [];
-          for (const thread of threads) {
-            need(scope.sessionRoots.some(root => isAbsolute(root) && (resolve(thread.session_file) === resolve(root) || resolve(thread.session_file).startsWith(resolve(root) + sep))), "Native source escapes registered session roots");
+          for (const thread of imageThreads) {
+            need(thread.sessionRoots.some(root => isAbsolute(root) && (resolve(thread.session_file) === resolve(root) || resolve(thread.session_file).startsWith(resolve(root) + sep))), "Native source escapes registered session roots");
             const indexed = indexedThreadHistory(thread.session_file);
             if (!indexed.ok) {
               if (indexed.error.code === "missing") { imageSources.push({ threadId: thread.id, path: thread.session_file, revision: "unstarted", lastOffset: -1, lastDigest: "" }); continue; }
@@ -145,14 +166,15 @@ export function captureAuxiliary(plan: AuxiliaryPlan) {
           const baseline = prior!.evidence.find((item: ObjectValue) => item.id === scope.id);
           need(baseline && baseline.threads?.path === scope.threads.path && baseline.supervisor?.path === scope.supervisor?.path && Array.isArray(baseline.nativeImageSources), "No original live-ingress image baseline for scope");
           imageSources = [...baseline.nativeImageSources];
-          const initialIds = new Set(baseline.retained.map((row: ObjectValue) => row.id));
-          for (const thread of threads) if (!initialIds.has(thread.id)) {
+          need(Array.isArray(baseline.nativeImageThreads), "Baseline lacks exact related source identities");
+          const initialIds = new Set(baseline.nativeImageThreads.map((row: ObjectValue) => row.id));
+          for (const thread of imageThreads) if (!initialIds.has(thread.id)) {
             need(Number.isFinite(thread.created_at) && thread.created_at >= Date.parse(prior!.startedAt), "New source lacks post-baseline creation evidence");
-            need(scope.sessionRoots.some(root => isAbsolute(root) && resolve(thread.session_file).startsWith(resolve(root) + sep)), "New native source escapes registered roots");
+            need(thread.sessionRoots.some(root => isAbsolute(root) && resolve(thread.session_file).startsWith(resolve(root) + sep)), "New native source escapes registered roots");
             imageSources!.push({ threadId: thread.id, path: thread.session_file, revision: "created-after-baseline", lastOffset: -1, lastDigest: "" });
           }
         }
-      } else need(!supervisorTables.has("inline_images"), "Original image registry requires an explicit owner; cannot disable it");
+      } else need(!supervisorTables.has("inline_images") || plan.scopes.some(candidate => candidate.id !== scope.id && candidate.images?.databasePath === scope.supervisor?.path), "Original image registry requires an explicit owner; cannot disable it");
       let detached: ObjectValue | null = null;
       if (plan.phase === "detached") {
         need(scope.detachedReceiptPath, "Final auxiliary capture requires original owner detachment evidence");
@@ -164,7 +186,7 @@ export function captureAuxiliary(plan: AuxiliaryPlan) {
       scopes.push({ id: scope.id, manager, managerRouting: routing });
       evidence.push({ id: scope.id, state: plan.phase, threads: identity(scope.threads), supervisor: scope.supervisor ? identity(scope.supervisor) : null,
         retained, cursorEvidence, watch, wakes: threadTables.has("thread_wake") ? digestRows(threadDb, "thread_wake") : null,
-        nativeImageSources: imageSources, liveOwner: plan.phase === "baseline" && scope.images ? scope.liveOwner : null, detached, imageTableNames: scope.images ? ["inline_images", "inline_image_versions", "inline_image_messages", "core_image_acceptance", "core_image_sources", "core_image_ingress_errors", "core_image_threads"] : null });
+        nativeImageSources: imageSources, nativeImageThreads: imageThreads, liveOwner: plan.phase === "baseline" && scope.images ? scope.liveOwner : null, detached, imageTableNames: scope.images ? ["inline_images", "inline_image_versions", "inline_image_messages", "core_image_acceptance", "core_image_sources", "core_image_ingress_errors", "core_image_threads"] : null });
       supervisor?.exec("COMMIT"); threadDb.exec("COMMIT");
     } finally { supervisor?.close(); threadDb.close(); }
   }

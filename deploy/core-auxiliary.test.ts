@@ -46,7 +46,7 @@ test("image baseline records bounded native offsets under a live ingress owner",
   const ui = new Database(supervisorPath); ui.exec("CREATE TABLE inline_images(id TEXT); CREATE TABLE inline_image_versions(id TEXT); CREATE TABLE inline_image_messages(id TEXT)"); ui.close();
   const scope = plan.scopes[0]!;
   expect(() => captureAuxiliary(plan)).toThrow("explicit owner");
-  scope.images = { scopeId: scope.id, databasePath: supervisorPath, artifactRoot: join(dir, "images") };
+  scope.images = { scopeId: scope.id, databasePath: supervisorPath, artifactRoot: join(dir, "images"), relatedThreadScopeIds: [] };
   const proc = readFileSync(`/proc/${process.pid}/stat`, "utf8");
   scope.liveOwner = { pid: process.pid, startTicks: proc.slice(proc.lastIndexOf(")") + 2).split(" ")[19]! };
   const result = captureAuxiliary(plan);
@@ -54,6 +54,22 @@ test("image baseline records bounded native offsets under a live ingress owner",
   expect(JSON.stringify(result)).not.toContain("PRIVATE_BODY_NOT_EXPORTED");
   scope.sessionRoots = ["/not-the-owner"];
   expect(() => captureAuxiliary(plan)).toThrow("escapes registered");
+});
+test("one declared image registry captures related fleet sources sharing its Remote projection", () => {
+  const f = fixture(), related = fixture();
+  const scope = f.plan.scopes[0]!, fleet = related.plan.scopes[0]!;
+  const db = new Database(fleet.threads!.path); db.exec("UPDATE thread SET id='fleet-thread',metadata='{}'"); db.close();
+  fleet.id = "fleet:one"; fleet.manager = { kind: "none" }; fleet.managerRouting = { kind: "none" }; fleet.supervisor = scope.supervisor;
+  const ui = new Database(f.supervisorPath); ui.exec("CREATE TABLE inline_images(id TEXT); CREATE TABLE inline_image_versions(id TEXT); CREATE TABLE inline_image_messages(id TEXT)"); ui.close();
+  scope.images = { scopeId: scope.id, databasePath: f.supervisorPath, artifactRoot: join(f.dir, "images"), relatedThreadScopeIds: [fleet.id] };
+  const proc = readFileSync(`/proc/${process.pid}/stat`, "utf8");
+  scope.liveOwner = { pid: process.pid, startTicks: proc.slice(proc.lastIndexOf(")") + 2).split(" ")[19]! };
+  f.plan.scopes.push(fleet);
+  const result = captureAuxiliary(f.plan);
+  expect(result.images).toMatchObject({ kind: "configured", registries: [scope.images] });
+  expect(result.evidence[0]!.nativeImageSources.map((row: any) => row.threadId)).toEqual(["manager", "fleet-thread"]);
+  expect(result.evidence[1]!.nativeImageSources).toBeNull();
+  expect(JSON.stringify(result)).not.toContain("PRIVATE_BODY_NOT_EXPORTED");
 });
 test("accepted watch spool remains in its existing store with metadata-only capture", () => {
   const { plan, supervisorPath } = fixture();
@@ -81,7 +97,7 @@ test("watch custody can share the exact thread database without being attributed
   const scope = plan.scopes[0]!;
   const ui = new Database(supervisorPath);
   ui.exec("CREATE TABLE inline_images(id TEXT); CREATE TABLE inline_image_versions(id TEXT); CREATE TABLE inline_image_messages(id TEXT)");
-  scope.images = { scopeId: scope.id, databasePath: supervisorPath, artifactRoot: join(dir, "images") };
+  scope.images = { scopeId: scope.id, databasePath: supervisorPath, artifactRoot: join(dir, "images"), relatedThreadScopeIds: [] };
   const proc = readFileSync(`/proc/${process.pid}/stat`, "utf8");
   scope.liveOwner = { pid: process.pid, startTicks: proc.slice(proc.lastIndexOf(")") + 2).split(" ")[19]! };
   const threadDb = new Database(scope.threads!.path);

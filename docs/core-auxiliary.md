@@ -18,11 +18,11 @@ Each scope declares:
 
 - `id`, `availability:'available'|'unavailable'`, exact `threads` and optional `supervisor` identities `{path,dev,ino}` (decimal strings), plus registered `sessionRoots`;
 - `manager:{kind:'supervisor'}` to read original `manager_view`, or an explicitly evidenced `none`/`existing` declaration;
-- exact canonical `managerRouting`, `images` registry specification or null, and `duties` entry or null. These are existing authority projections, not values inferred by this collector;
+- exact canonical `managerRouting`, `images` registry specification with explicit `relatedThreadScopeIds` or null, and `duties` entry or null. These are existing authority projections, not values inferred by this collector;
 - `missingCursor:{kind:'reject'}` or `original-zero` with the exact original notification source path/SHA proving its absent-cursor behavior;
 - `detachedReceiptPath:string|null` and `liveOwner:{pid,startTicks}|null`.
 
-Unavailable scopes require explicit retained manager declarations and are untouched. An existing image/watch registry cannot be silently disabled. An existing manager cannot be silently replaced by none. Missing cursors are not assumed zero. The assembler validates complete canonical configurations with the core parser.
+Unavailable scopes require explicit retained manager declarations and are untouched. A registry's explicitly related thread scopes contribute their registered native sources to the same baseline. A fleet scope may borrow Remote supervisor metadata without declaring another image registry when that exact database already has a declared registry owner in the plan. An existing image/watch registry cannot be silently disabled. An existing manager cannot be silently replaced by none. Missing cursors are not assumed zero. The assembler validates complete canonical configurations with the core parser.
 
 ## Two-phase ordering
 
@@ -33,4 +33,4 @@ Unavailable scopes require explicit retained manager declarations and are untouc
 
 A live-owner baseline establishes the old/new source boundary, not proof that every historical tag was accepted. Core checks pre-baseline tags against retained message receipts too; a missing acknowledgement is an explicit historical uncertainty, never silently skipped as completed or replayed. This also covers a native message finalized just before capture whose Remote event had not yet been admitted. Image ingress deduplicates overlap using its retained message/definition receipts. Watch custody may reside in the thread database or supervisor database; the declared duty database must match the actual table owner exactly. Watch spool payloads remain in the original database; exported row IDs/hashes prove conservation without copying their bodies. The capture receipt itself is never a detachment or activation receipt.
 
-Seven disposable tests cover metadata-only capture, missing-value rejection, inactive custody, bounded watermarks, retained watch identities and the baseline-to-detached gap. Run the root-only receipt test against disposable temporary fixtures with `sudo bun test deploy/core-auxiliary.test.ts`.
+Eight disposable tests cover metadata-only capture, missing-value rejection, inactive custody, bounded watermarks, retained watch identities and the baseline-to-detached gap. Run the root-only receipt test against disposable temporary fixtures with `sudo bun test deploy/core-auxiliary.test.ts`.
