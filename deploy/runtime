@@ -249,6 +249,7 @@ dependency_hash=$({
   sha256sum packages/runtime/patch-bash-cancellation.mjs packages/runtime/pi-shell-owner.mjs packages/runtime/pi-shell-owner.py
   sha256sum packages/runtime/stack-pi.mjs packages/runtime/native-host.mjs packages/runtime/native-recovery.mjs packages/runtime/native-guardian.mjs packages/runtime/managed-agent.mjs packages/runtime/patch-managed-cli.mjs
   find packages/orchestrator/src -type f -print0 | sort -z | xargs -0 sha256sum
+  sha256sum packages/runtime/patch-anthropic-tool-schema.mjs packages/runtime/anthropic-tool-schema.js
   sha256sum packages/runtime/patch-claude-oauth.mjs packages/runtime/extensions/claude-oauth/client.json packages/runtime/patch-anthropic-error-content.mjs packages/runtime/patch-anthropic-narration.mjs packages/runtime/patch-summary-recovery.mjs packages/runtime/bounded-summary.js packages/runtime/extensions/codex-compaction/retry.mjs
   find packages/kenan-memory/src packages/kenan-root/src -type f -print0 | sort -z | xargs -0 sha256sum
   sha256sum packages/kenan-memory/package.json packages/kenan-memory/tsconfig.json packages/kenan-memory/discretion.md packages/kenan-memory/person.md
@@ -286,6 +287,7 @@ if [[ ! -x $dependency_release/node_modules/.bin/pi ]]; then
   node "$runtime_source/patch-claude-oauth.mjs" "$stage/node_modules"
   node "$runtime_source/patch-codex-sse.mjs" "$stage/node_modules"
   node "$runtime_source/patch-anthropic-error-content.mjs" "$stage/node_modules"
+  node "$runtime_source/patch-anthropic-tool-schema.mjs" "$stage/node_modules"
   node "$runtime_source/patch-anthropic-narration.mjs" "$stage/node_modules"
   node "$runtime_source/patch-codex-service-recovery.mjs" "$stage/node_modules"
   browser_job="$stage/node_modules/pi-agent-browser-native/dist/extensions/agent-browser/lib/input-modes/job.js"

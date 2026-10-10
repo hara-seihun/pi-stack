@@ -49,7 +49,5 @@ it.each(["anthropic-messages", "openai-responses", "openai-completions"])("%s pr
   expect(Object.keys(projected.properties).sort()).toEqual(["action", "kind", "reason", "threadIds", "after", "jobId", "publicationId", "fromThreadId"].sort());
   expect(JSON.stringify(projected.properties.kind)).toContain("deployment");
   for (const input of inputs) expect(Value.Check(projected, input)).toBe(true);
-  // Non-strict Anthropic drops anyOf; semantic refusal remains the owner's responsibility.
-  if (api === "anthropic-messages") expect(projected.anyOf).toBeUndefined();
-  else for (const input of invalid) expect(Value.Check(projected, input)).toBe(false);
+  for (const input of invalid) expect(Value.Check(projected, input)).toBe(false);
 });
