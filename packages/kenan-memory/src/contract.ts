@@ -4,10 +4,12 @@ export type PersonId = string;
 export type MemoryRole = "person" | "root";
 export type ForgetMode = "delete" | "stop-using";
 export type MemorySetting = { person: PersonId; threadId?: string; roomId?: string };
+/** Provenance names who said it (saidBy) or whom an action served (actedFor); at least one is required. */
+export type MemorySource = ({ saidBy: PersonId; actedFor?: PersonId } | { saidBy?: undefined; actedFor: PersonId }) & { action?: string; externalId?: string };
 export interface MemoryInput {
   text: string;
   about: PersonId[];
-  source: { saidBy?: PersonId; actedFor?: PersonId; action?: string; externalId?: string };
+  source: MemorySource;
   setting: MemorySetting;
   occurredAt?: string;
   obviouslyPrivate: boolean;

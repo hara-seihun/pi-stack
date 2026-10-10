@@ -2,7 +2,8 @@ import { test, expect } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { memoryExtension } from "../src/tools.js";
+import { Value } from "typebox/value";
+import { memoryExtension, memorySourceSchema } from "../src/tools.js";
 import { memoryService } from "../src/service.js";
 import { MemoryStore } from "../src/store.js";
 import { isPrivateMount } from "../src/private-store.js";
@@ -55,4 +56,21 @@ test("production admission requires a real gocryptfs mount, not just a directory
   expect(isPrivateMount("/private", "20 1 0:5 / /private rw - fuse.gocryptfs cipher rw\n")).toBe(true);
   expect(isPrivateMount("/private", "20 1 0:5 / /private rw - ext4 disk rw\n")).toBe(false);
   expect(isPrivateMount("/private", "20 1 0:5 / /another rw - fuse.gocryptfs cipher rw\n")).toBe(false);
+});
+
+test("advertised memory_write schema requires saidBy or actedFor in source, as the service does", async () => {
+  const root = mkdtempSync(join(tmpdir(), "memory-schema-")); const path = join(root, "host.json"); writeFileSync(path, JSON.stringify({ oneKenan: true }));
+  try {
+    const pi = api();
+    memoryExtension({ env: { PI_STACK_HOST_CONFIG: path, PI_THREAD_ID: "t" }, ask: async () => ({}) })(pi as any);
+    const write = pi.tools.find(t => t.name === "memory_write");
+    expect(write.description).toContain("source must include saidBy");
+    const source = write.parameters.properties.source;
+    expect(source).toBe(memorySourceSchema);
+    expect(JSON.parse(JSON.stringify(source)).anyOf.map((branch: any) => branch.required)).toEqual([["saidBy"], ["actedFor"]]);
+    expect(Value.Check(write.parameters, { text: "Emailed the contractor", about: ["alice"], obviouslyPrivate: false, source: { action: "email", externalId: "m-1" } })).toBe(false);
+    expect(Value.Check(write.parameters, { text: "Emailed the contractor", about: ["alice"], obviouslyPrivate: false, source: { actedFor: "alice", action: "email", externalId: "m-1" } })).toBe(true);
+    for (const value of [{}, { saidBy: "" }, { saidBy: " " }]) expect(Value.Check(source, value)).toBe(false);
+    for (const value of [{ saidBy: "alice" }, { saidBy: "alice", actedFor: "bob" }]) expect(Value.Check(source, value)).toBe(true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

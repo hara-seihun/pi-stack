@@ -51,9 +51,17 @@ describe("one shared memory", () => {
     expect(s.disclosures("alice", context).value[0].text).toBe("I emailed the contractor for Alice");
     expect(s.disclosures("bob", context).value).toEqual([]);
   });
-  test("ambiguous forget and malformed provenance rejected", () => {
-    expect(validateRequest({ operation: "forget", ids: ["x"] })).toBeUndefined();
-    expect(validateRequest({ operation: "write", item: { ...item, source: {} } })).toBeUndefined();
+  test("ambiguous forget and malformed provenance rejected with the specific reason", () => {
+    expect(validateRequest({ operation: "forget", ids: ["x"] })).toEqual({ ok: false, reason: 'mode must be "delete" or "stop-using"' });
+    for (const source of [{}, { action: "email", externalId: "message-1" }])
+      expect(validateRequest({ operation: "write", item: { ...item, source } })).toEqual({ ok: false, reason: expect.stringContaining("source needs saidBy or actedFor") });
+    expect(validateRequest({ operation: "write", item: { ...item, source: { saidBy: " " } } })).toEqual({ ok: false, reason: expect.stringContaining("source.saidBy must be a non-blank string") });
+    expect(validateRequest({ operation: "write", item: { ...item, about: [] } })).toEqual({ ok: false, reason: "about must be a non-empty array of at most 100 non-blank strings" });
+    expect(validateRequest({ operation: "write", item: { ...item, occurredAt: "yesterday-ish" } })).toEqual({ ok: false, reason: "occurredAt must be an ISO 8601 date-time string when present" });
+    expect(validateRequest({ operation: "log-disclosure", disclosure: { text: "x", about: ["alice"], to: [], setting: item.setting } })).toEqual({ ok: false, reason: "to must be a non-empty array of at most 100 non-blank strings" });
+  });
+  test("an action record with actedFor validates unchanged", () => {
+    expect(validateRequest({ operation: "write", item })).toEqual({ ok: true, request: { operation: "write", item } });
   });
 });
 
@@ -68,6 +76,8 @@ test("HTTP session proves person; claimed names grant nothing; publisher writes 
   const client = memoryClient({ url, token: mint.value.token });
   expect((await client.request({ operation: "write", item: { ...item, setting: { person: "bob", threadId: "a" } } })).ok).toBe(false);
   expect((await client.request({ operation: "write", item })).ok).toBe(true);
+  expect(await client.request({ operation: "write", item: { ...item, source: { action: "email", externalId: "message-2" } } as unknown as MemoryInput }))
+    .toEqual({ ok: false, error: "invalid-request", message: expect.stringContaining("source needs saidBy or actedFor") });
   expect((await client.request({ operation: "search", query: "", context })).ok).toBe(false);
   expect((await memoryClient({ url }).request({ operation: "write", item })).ok).toBe(false);
   const publisher = memoryClient({ url, token: "publisher" });
