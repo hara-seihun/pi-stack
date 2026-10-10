@@ -12,7 +12,7 @@ from core_namespace import absolute, publish, trusted
 
 
 def plan_at(path):
-    plan = trusted(absolute(path))
+    plan = trusted(absolute(str(path)))
     if plan.get('version') != 1 or not re.fullmatch(r'pi-remote@[a-z0-9_-]+\.service', plan.get('unit', '')) or not re.fullmatch(r'[a-f0-9]{32}', plan.get('invocationId', '')):
         raise ValueError('exact Remote unit invocation required')
     for key in ('wrapper', 'nativeChild'):

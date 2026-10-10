@@ -6,6 +6,7 @@ import re
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 root = Path(__file__).resolve().parents[1]
 import sys
@@ -17,6 +18,11 @@ loader.exec_module(witness)
 
 
 class WitnessTests(unittest.TestCase):
+    def test_canonical_path_object_reaches_plan_validation(self):
+        with patch.object(witness, 'trusted', return_value={'version':1,'unit':'wrong'}):
+            with self.assertRaisesRegex(ValueError,'exact Remote unit invocation'):
+                witness.plan_at(Path('/root/witness.plan.json'))
+
     def test_exact_native_child_positive_exit(self):
         text = 'wait4(-1, {WIFEXITED(s) && WEXITSTATUS(s) == 0}, WNOHANG, NULL) = 417\n'
         self.assertEqual(witness.wait4_exit(text,417), {'kind':'normal','code':0})
