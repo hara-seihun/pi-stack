@@ -80,7 +80,8 @@ function imageThreadSources(plan: AuxiliaryPlan, scope: AuxiliaryPlan["scopes"][
   need(new Set(result.map(row => row.id)).size === result.length, "Image source thread identity overlaps declared owners");
   return result;
 }
-export function captureAuxiliary(plan: AuxiliaryPlan) {
+export type CaptureProgress = { scopeId: string; stage: "scope" | "native-source"; sourceIndex: number; sourceCount: number; threadId: string | null };
+export function captureAuxiliary(plan: AuxiliaryPlan, progress?: (value: CaptureProgress) => void) {
   need(plan.version === 1 && ["baseline", "detached"].includes(plan.phase) && Array.isArray(plan.scopes), "Invalid auxiliary plan");
   const startedAt = new Date().toISOString();
   const prior = plan.phase === "detached" ? (() => {
@@ -92,6 +93,7 @@ export function captureAuxiliary(plan: AuxiliaryPlan) {
   const scopes: ObjectValue[] = [], evidence: ObjectValue[] = [], registries: ObjectValue[] = [], entries: ObjectValue[] = [];
   const seen = new Set<string>();
   for (const scope of plan.scopes) {
+    progress?.({ scopeId: scope.id, stage: "scope", sourceIndex: 0, sourceCount: 0, threadId: null });
     need(scope.id && !seen.has(scope.id), "Duplicate or absent scope identity"); seen.add(scope.id);
     if (scope.availability === "unavailable") {
       need(scope.manager.kind !== "supervisor", "Unavailable scope requires an explicit retained manager declaration");
@@ -151,7 +153,8 @@ export function captureAuxiliary(plan: AuxiliaryPlan) {
         if (plan.phase === "baseline") {
           liveOwner(scope.liveOwner);
           imageSources = [];
-          for (const thread of imageThreads) {
+          for (const [sourceIndex, thread] of imageThreads.entries()) {
+            progress?.({ scopeId: scope.id, stage: "native-source", sourceIndex, sourceCount: imageThreads.length, threadId: thread.id });
             need(thread.sessionRoots.some(root => isAbsolute(root) && (resolve(thread.session_file) === resolve(root) || resolve(thread.session_file).startsWith(resolve(root) + sep))), "Native source escapes registered session roots");
             const indexed = captureNativeHistoryWatermark(thread.session_file);
             if (!indexed.ok) {
@@ -201,12 +204,35 @@ function publish(path: string, value: ObjectValue) {
   const fd = openSync(temp, "r"); try { fsyncSync(fd); } finally { closeSync(fd); }
   renameSync(temp, path);
   const dir = openSync(dirname(path), "r"); try { fsyncSync(dir); } finally { closeSync(dir); }
-  return { path, sha256: hash(text), scopes: value.scopes.length, phase: value.phase };
+  return { path, sha256: hash(text) };
+}
+export function runAuxiliary(planPath: string) {
+  need(process.getuid?.() === 0, "Auxiliary CLI requires root custody");
+  const plan = trusted(planPath) as AuxiliaryPlan;
+  const runPath = `${plan.outputPath}.run.json`, runId = randomUUID();
+  const provenance = { version: 1, runId, pid: process.pid, planPath, planSha256: hash(readFileSync(planPath)), startedAt: new Date().toISOString() };
+  let progress: CaptureProgress | null = null, lastPublished = 0;
+  const record = (state: string, result: ObjectValue = {}) => publish(runPath, { ...provenance, state, progress, updatedAt: new Date().toISOString(), ...result });
+  record("running");
+  try {
+    const captured = captureAuxiliary(plan, value => {
+      progress = value;
+      if (value.stage === "scope" || Date.now() - lastPublished >= 1000) { record("running"); lastPublished = Date.now(); }
+    });
+    const value = { ...publish(plan.outputPath, captured), scopes: captured.scopes.length, phase: captured.phase };
+    record("complete", { output: value });
+    return { ok: true as const, value };
+  } catch (error) {
+    const failure = { code: "auxiliary-capture-unavailable", message: error instanceof Error ? error.message : String(error) };
+    record("failed", { error: failure });
+    return { ok: false as const, error: failure, runPath };
+  }
 }
 if (import.meta.main) {
   try {
-    need(process.getuid?.() === 0 && process.argv.length === 3, "Usage: root bun deploy/core-auxiliary.ts /absolute/protected-plan.json");
-    const plan = trusted(process.argv[2]!) as AuxiliaryPlan;
-    console.log(JSON.stringify({ ok: true, value: publish(plan.outputPath, captureAuxiliary(plan)) }));
+    need(process.argv.length === 3, "Usage: root bun deploy/core-auxiliary.ts /absolute/protected-plan.json");
+    const result = runAuxiliary(process.argv[2]!);
+    console.log(JSON.stringify(result));
+    if (!result.ok) process.exitCode = 75;
   } catch (error) { console.log(JSON.stringify({ ok: false, error: { code: "auxiliary-capture-unavailable", message: error instanceof Error ? error.message : String(error) } })); process.exitCode = 75; }
 }

@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { captureAuxiliary, type AuxiliaryPlan } from "./core-auxiliary";
+import { captureAuxiliary, runAuxiliary, type AuxiliaryPlan } from "./core-auxiliary";
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 function fixture() {
@@ -28,6 +28,21 @@ test("captures exact manager identity/cursors/origins/held state without private
   expect(result.scopes[0]).toMatchObject({ manager: { kind: "existing", threadId: "manager" }, managerRouting: { notices: { notificationOwnerId: "person", adoptedCursors: { settlements: 12, attention: 3, questions: 8 } }, relay: { adoptedOrigins: [{ threadId: "child", environmentId: "other-host" }] } } });
   expect(result.evidence[0]!.retained).toEqual([{ id: "manager", held: true, archived: false, manager: true }]);
   expect(JSON.stringify(result)).not.toContain("PRIVATE_BODY_NOT_EXPORTED");
+});
+test.skipIf(process.getuid?.() !== 0)("CLI persists exact failure context and success without exporting bodies", () => {
+  const { plan, dir, supervisorPath } = fixture();
+  const planPath = join(dir, "plan.json");
+  writeFileSync(planPath, JSON.stringify(plan), { mode: 0o600 });
+  expect(runAuxiliary(planPath).ok).toBe(true);
+  const successful = readFileSync(plan.outputPath, "utf8");
+  expect(JSON.parse(readFileSync(`${plan.outputPath}.run.json`, "utf8")).state).toBe("complete");
+  const ui = new Database(supervisorPath); ui.exec("DELETE FROM metadata WHERE key='thread-attention:person'"); ui.close();
+  expect(runAuxiliary(planPath).ok).toBe(false);
+  const receipt = readFileSync(`${plan.outputPath}.run.json`, "utf8");
+  expect(JSON.parse(receipt)).toMatchObject({ state: "failed", progress: { scopeId: "person:one", stage: "scope" }, error: { code: "auxiliary-capture-unavailable" } });
+  expect(receipt).not.toContain("PRIVATE_BODY_NOT_EXPORTED");
+  expect(readFileSync(plan.outputPath, "utf8")).toBe(successful);
+  expect(statSync(`${plan.outputPath}.run.json`).mode & 0o777).toBe(0o600);
 });
 test("missing cursors and invented no-manager states reject rather than default", () => {
   const { plan, supervisorPath } = fixture();

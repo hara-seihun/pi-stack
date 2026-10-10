@@ -8,7 +8,7 @@ Run in the declared source/common resource namespace:
 sudo bun deploy/core-auxiliary.ts /absolute/root-owned/plan.json
 ```
 
-The plan and output parent are protected root-owned paths. The command prints only a typed result containing output path, SHA-256, scope count and phase. On failure it exits75 with `auxiliary-capture-unavailable`; there is no partial successful output.
+The plan and output parent are protected root-owned paths. The command prints only a typed result containing output path, SHA-256, scope count and phase. On failure it exits75 with `auxiliary-capture-unavailable`; there is no partial successful output. The CLI atomically persists `outputPath.run.json` (root0600) with its run/PID/plan hash, current scope/source identity, and running/failed/complete result. Progress is refreshed at scope transitions and at most once per second during native hashing; it is observation, not a reusable adoption checkpoint. Failure preserves an existing successful output. Inspect the same run after a transport timeout before starting another scan.
 
 ## Explicit plan
 
@@ -33,4 +33,4 @@ Unavailable scopes require explicit retained manager declarations and are untouc
 
 A live-owner baseline establishes the old/new source boundary, not proof that every historical tag was accepted. Historical record bodies remain unexamined; their actual accepted work stays in the existing registry. No historical completion or acknowledgement coverage is inferred from a source watermark. Core verifies the full prefix proof before processing the new bounded suffix; unknown old cursor formats and unreadable new records remain explicit uncertainty, never permission to replay historical generation. Image ingress deduplicates overlap using its retained message/definition receipts. Watch custody may reside in the thread database or supervisor database; the declared duty database must match the actual table owner exactly. Watch spool payloads remain in the original database; exported row IDs/hashes prove conservation without copying their bodies. The capture receipt itself is never a detachment or activation receipt.
 
-Nine disposable tests cover metadata-only capture, missing-value rejection, inactive custody, bounded watermarks, retained watch identities and the baseline-to-detached gap. Run the root-only receipt test against disposable temporary fixtures with `sudo bun test deploy/core-auxiliary.test.ts`.
+Disposable tests cover metadata-only capture, missing-value rejection, inactive custody, bounded watermarks, retained watch identities and the baseline-to-detached gap. Run the root-only receipt test against disposable temporary fixtures with `sudo bun test deploy/core-auxiliary.test.ts`.
