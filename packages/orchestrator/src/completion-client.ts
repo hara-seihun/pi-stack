@@ -1,6 +1,9 @@
 import { orchestratorUrl } from "./config.js";
 import { modelBrokerUrl } from "./model-broker-contract.js";
-import { completionError, isCompletionRecord, isCompletionRequestId, type CompletionInput, type CompletionFetch, type CompletionOutcome, type CompletionRecord } from "./completion-contract.js";
+import { completionError, isCompletionRecord, isCompletionRequestId, type CompletionError, type CompletionInput, type CompletionFetch, type CompletionOutcome, type CompletionRecord } from "./completion-contract.js";
+
+/** Codes a daemon or broker answers with when it refuses a request; anything else is a protocol fault. */
+const REJECTION_CODES = ["invalid-request", "unsupported-option", "not-found", "request-conflict", "invalid-state", "model-disabled", "model-policy-unavailable"] as const satisfies readonly CompletionError["code"][];
 
 export interface CompletionClientOptions {
   readonly baseUrl?: string;
@@ -49,7 +52,7 @@ export class CompletionClient {
       if (!response.ok && value && typeof value === "object" && "error" in value) {
         const error = value.error;
         if (error && typeof error === "object" && "code" in error && "message" in error && typeof error.code === "string" && typeof error.message === "string") {
-          const code = ["invalid-request", "unsupported-option", "not-found", "request-conflict", "invalid-state"].includes(error.code) ? error.code as "invalid-request" | "unsupported-option" | "not-found" | "request-conflict" | "invalid-state" : "protocol";
+          const code = REJECTION_CODES.find(known => known === error.code) ?? "protocol";
           return completionError(code, error.message);
         }
       }

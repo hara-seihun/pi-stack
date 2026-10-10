@@ -5,6 +5,7 @@ import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { Store } from "../packages/orchestrator/src/store";
 import { catalogModel } from "../packages/orchestrator/src/catalog";
 import { createModelBroker } from "../packages/orchestrator/src/model-broker";
+import { ModelAvailabilityStore, modelAvailabilityPath } from "../packages/orchestrator/src/threads/model-availability";
 import { chooseInteractiveAccount } from "../packages/orchestrator/src/auth/account-selection";
 import { defaultSharedAuthPath, providerOAuth } from "../packages/orchestrator/src/auth/shared-oauth";
 
@@ -46,7 +47,7 @@ export async function fixtureBroker(root: string, port = 19888) {
       owner.createLease(lease, account.id, "interactive"); leases.push(lease);
     }
     heartbeat = setInterval(() => { for (const lease of leases) owner.heartbeatLease(lease); }, 15_000);
-    broker = createModelBroker({ ledgerPath, authPath, grantOwner: "fixture-root", listeners: [{ principal: "fixture-root", port, accounts, models, maxInFlight: 8 }] });
+    broker = createModelBroker({ ledgerPath, authPath, grantOwner: "fixture-root", listeners: [{ principal: "fixture-root", port, accounts, models, maxInFlight: 8 }] }, new ModelAvailabilityStore(modelAvailabilityPath()));
     await broker.listen();
     return { url: `http://127.0.0.1:${port}`, close };
   } catch (error) { await close(); throw error; }

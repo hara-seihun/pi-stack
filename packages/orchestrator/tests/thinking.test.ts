@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { ORCHESTRATOR_CATALOG } from "../src/catalog.js";
 import { loadConfig } from "../src/config.js";
 import { assign, assignCompletion } from "../src/policy.js";
+import { noModelPolicy } from "./fixtures/model-availability.js";
 import { Store } from "../src/store.js";
 
 const roots: string[] = [], stores: Store[] = [];
@@ -39,6 +40,6 @@ it("schedules explicitly chosen Anthropic candidates for direct runs, lanes and 
   const config = loadConfig(path);
   expect(assign(store, "custom", "force", config).assignment).toMatchObject({ provider: "anthropic", accountId: "anthropic" });
   const id = create("custom");
-  expect(assignCompletion(store, id, "custom", config).refusals.map(refusal => refusal.reason).join()).not.toContain("OpenAI");
+  expect(assignCompletion(store, id, "custom", config, noModelPolicy).refusals.map(refusal => refusal.reason).join()).not.toContain("OpenAI");
   expect(store.assignRun(id, { provider: "anthropic", model: "claude-opus-5-5", accountId: "anthropic", unit: id, releasePath: "/release" })).toBe(true);
 });

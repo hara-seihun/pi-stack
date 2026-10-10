@@ -299,7 +299,10 @@ Model settings resolve centrally. New delegated agents use Sol/high/standard
 unless explicitly configured; Luna uses max thinking. Models are not prohibited
 merely because the requesting agent itself was launched by another agent.
 Machine model availability applies to new creation, while accepted existing
-settings and historical attribution survive policy changes. Actual provider
+settings and historical attribution survive policy changes. The model broker
+asks the same decision for every shared request, so a brokered thread on a
+model disabled after it started is refused on its next request
+([ordinary users](../packages/orchestrator/docs/ordinary-users.md)). Actual provider
 exhaustion, reservations and readiness remain independent admission constraints.
 
 A positively failed pre-native open releases its original capacity identity;
