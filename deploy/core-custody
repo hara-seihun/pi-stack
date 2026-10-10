@@ -29,15 +29,15 @@ def pin_self(identifier):
     return adoption.pin({'version': 1, 'namespaces': [{'id': identifier, 'namespace': process_namespace()}]})['namespaces'][0]
 
 
-def resource_handle(entry, read=False):
+def resource_handle(entry, read=False, clone_mount=False):
     logical = absolute(entry['path'])
     left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
     nsfd = os.open(namespace_path(entry['namespace']), os.O_RDONLY)
-    code = "import os,socket,array,sys;s=socket.socket(fileno=int(sys.argv[1]));fd=os.open(sys.argv[2],int(sys.argv[3]));s.sendmsg([b'fd'],[(socket.SOL_SOCKET,socket.SCM_RIGHTS,array.array('i',[fd]))])"
+    code = "import os,socket,array,sys,ctypes;s=socket.socket(fileno=int(sys.argv[1]));c=ctypes.CDLL(None,use_errno=True);fd=c.open_tree(-100,os.fsencode(sys.argv[2]),1|os.O_CLOEXEC) if sys.argv[4]=='clone' else os.open(sys.argv[2],int(sys.argv[3]));\nif fd<0:raise OSError(ctypes.get_errno(),'clone registered resource mount')\ns.sendmsg([b'fd'],[(socket.SOL_SOCKET,socket.SCM_RIGHTS,array.array('i',[fd]))])"
     child = None
     try:
         child = subprocess.Popen(['/usr/bin/nsenter', f'--mount=/proc/self/fd/{nsfd}', '--',
-                                  '/usr/bin/python3', '-c', code, str(right.fileno()), str(logical), str(os.O_RDONLY if read else os.O_PATH)],
+                                  '/usr/bin/python3', '-c', code, str(right.fileno()), str(logical), str(os.O_RDONLY if read else os.O_PATH), 'clone' if clone_mount else 'open'],
                                  pass_fds=(nsfd, right.fileno()), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         left.settimeout(5)
         _, ancillary, _, _ = left.recvmsg(16, socket.CMSG_SPACE(4))
@@ -121,7 +121,7 @@ def apply(addition, namespace):
     handles, children, mounted = [], [], []
     try:
         for entry in sorted(addition['resources'], key=lambda item: len(item['path'])):
-            descriptor, device, inode = resource_handle(entry)
+            descriptor, device, inode = resource_handle(entry, clone_mount=True)
             handles.append((entry, descriptor, device, inode))
         for generation in addition['generations']:
             validate_generation(generation)
@@ -132,8 +132,8 @@ def apply(addition, namespace):
             current = logical.stat()
             if (current.st_dev, current.st_ino) != (device, inode):
                 libc = ctypes.CDLL(None, use_errno=True)
-                if libc.mount(os.fsencode(f'/proc/self/fd/{descriptor}'), os.fsencode(logical), None, 4096, None) != 0:
-                    raise OSError(ctypes.get_errno(), 'bind exact registered resource handle')
+                if libc.move_mount(descriptor, b'', -100, os.fsencode(logical), 4) != 0:
+                    raise OSError(ctypes.get_errno(), 'attach exact registered resource mount clone')
                 mounted.append(logical)
             actual = logical.stat()
             if (actual.st_dev, actual.st_ino) != (device, inode) or not os.access(logical, os.R_OK):
