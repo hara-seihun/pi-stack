@@ -184,7 +184,7 @@ def rendered_units():
       '@PUBLISHER_TOKEN_FILE@':str(shared/'publisher-token'),'@KENAN_PRIVATE_DIR@':str(shared/'private'),
       '@KENAN_MEMORY_SOURCE@':memory_runtime,
       '@ROOT_CONSENT_CAPABILITY_FILE@':str(consent_capability),'@ROOT_ROUTER_URL@':f'http://127.0.0.1:{router_port}',
-      '@STATE_DIR@':str(shared),'@ROOMS_HOME@':str(rooms_home),
+      '@STATE_DIR@':str(shared),'@ROOMS_HOME@':str(rooms_home),'@ROOMS_TIMEZONE_DIR@':str(target('/var/lib/pi-timezones')/room_user),
       '@PERSONS_DIR@':str(persons_dir),'@BROKER_CONFIG@':str(target('/etc/pi-stack/one-kenan-broker.json')),
       '@ROOMS_ENV_FILE@':str(target('/etc/pi-stack/rooms.env')),'@ROOMS_CONFIG@':str(target('/etc/pi-stack/rooms.json')),
       '@ORCHESTRATOR_CONFIG@':config.get('orchestratorConfig','/var/lib/pi-orchestrator/config.json'),

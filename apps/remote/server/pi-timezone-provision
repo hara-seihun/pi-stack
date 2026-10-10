@@ -125,7 +125,7 @@ def main():
                 atomic(room, document)
                 directory = Path('/etc/systemd/system/pi-rooms.service.d')
                 directory.mkdir(mode=0o755, parents=True, exist_ok=True)
-                (directory / 'timezone.conf').write_text('[Service]\nEnvironment=PI_PERSON_TIMEZONE_FILE=' + document['environment']['PI_PERSON_TIMEZONE_FILE'] + '\n')
+                (directory / 'timezone.conf').write_text('[Service]\nEnvironment=PI_PERSON_TIMEZONE_FILE=' + document['environment']['PI_PERSON_TIMEZONE_FILE'] + '\nReadWritePaths=' + str(BASE / document['user']) + '\n')
         subprocess.run(['systemctl', 'daemon-reload'], check=True, timeout=8)
 
 

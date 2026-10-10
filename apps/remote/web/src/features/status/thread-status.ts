@@ -9,7 +9,7 @@ export interface ThreadStatus {
   busy: boolean; attention: boolean; since?: number; lastActivityAt?: number;
 }
 export const STATUS_REPORTING_ERROR: ThreadStatus = { key: "reporting_error", label: "Status unavailable", short: "Status unavailable", busy: false, attention: true, title: "The execution owner did not supply a lifecycle observation." };
-type StatusSession = Pick<Session, "lifecycle" | "idleUnread"> & Partial<Pick<Session, "lastActivityAt">>;
+type StatusSession = Pick<Session, "lifecycle" | "idleUnread"> & Partial<Pick<Session, "lastActivityAt" | "humanAttention">>;
 
 function lifecycleStatus(lifecycle: ThreadLifecycle, unread: boolean, lastActivityAt?: number): ThreadStatus {
   switch (lifecycle.kind) {
@@ -27,7 +27,8 @@ function lifecycleStatus(lifecycle: ThreadLifecycle, unread: boolean, lastActivi
 }
 export function threadStatus(session: StatusSession): ThreadStatus {
   if (!session.lifecycle) return STATUS_REPORTING_ERROR;
-  return lifecycleStatus(session.lifecycle, session.idleUnread, session.lastActivityAt);
+  const status = lifecycleStatus(session.lifecycle, session.idleUnread, session.lastActivityAt);
+  return { ...status, attention: status.attention && session.humanAttention === true };
 }
 export function monoThreadStatus(session: StatusSession): ThreadStatus {
   const status = threadStatus(session);
