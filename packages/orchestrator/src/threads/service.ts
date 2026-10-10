@@ -260,7 +260,7 @@ export class ThreadService implements ThreadApi {
         AND json_extract(data,'$.reason')='Managing Kenan heartbeat: consider the person''s current needs and held questions; speak only when there is something useful to say.';
       CREATE TABLE IF NOT EXISTS thread_context_generation (
         thread_id TEXT PRIMARY KEY REFERENCES thread(id), generation TEXT NOT NULL,
-        key_count INTEGER NOT NULL CHECK(key_count>=1), key_hash TEXT NOT NULL);
+        key_count INTEGER NOT NULL CHECK(key_count>=0), key_hash TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS thread_question (
         id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES thread(id), question TEXT NOT NULL,
         suggestions TEXT NOT NULL, recommended_id TEXT, created_at INTEGER NOT NULL,
@@ -295,6 +295,16 @@ export class ThreadService implements ThreadApi {
         WHERE json_type(metadata,'$.dependencyUpdate.desired')='array';
       UPDATE thread SET metadata=json_set(metadata,'$.dependencyUpdate',json_object('previous',json_extract(metadata,'$.peerDependencies'),'desired',json_extract(metadata,'$.peerDependencies')))
         WHERE json_array_length(json_extract(metadata,'$.peerDependencies'))>0 AND json_extract(metadata,'$.dependencyUpdate') IS NULL;`);
+    const generationSchema = this.sql("SELECT sql FROM sqlite_master WHERE type='table' AND name='thread_context_generation'").get() as { sql: string };
+    if (/CHECK\s*\(\s*key_count\s*>=\s*1\s*\)/i.test(generationSchema.sql)) this.transaction(() => {
+      // A new or empty native history has zero presentation keys. Preserve existing identities atomically.
+      this.db.exec(`CREATE TABLE thread_context_generation_migration (
+        thread_id TEXT PRIMARY KEY REFERENCES thread(id), generation TEXT NOT NULL,
+        key_count INTEGER NOT NULL CHECK(key_count>=0), key_hash TEXT NOT NULL);
+        INSERT INTO thread_context_generation_migration SELECT * FROM thread_context_generation;
+        DROP TABLE thread_context_generation;
+        ALTER TABLE thread_context_generation_migration RENAME TO thread_context_generation;`);
+    });
     this.transaction(() => {
       const unnamed = this.sql("SELECT id,metadata FROM thread WHERE json_type(metadata,'$.agentName') IS NOT 'text' OR trim(json_extract(metadata,'$.agentName'))=''").all() as Array<{ id: string; metadata: string }>;
       for (const row of unnamed) {
