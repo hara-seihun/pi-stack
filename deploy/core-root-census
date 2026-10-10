@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""Project exact post-fence original Root consultation metadata; never read journals or tokens."""
+import copy
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+from core_namespace import absolute, enter, publish, trusted
+
+
+def replace(value, old, new):
+    if isinstance(value, str):return value.replace(old,new)
+    if isinstance(value,list):return [replace(v,old,new) for v in value]
+    if isinstance(value,dict):return {k:replace(v,old,new) for k,v in value.items()}
+    return value
+
+
+def array(path):
+    s=path.lstat()
+    if path.is_symlink() or not path.is_file() or s.st_uid!=0 or s.st_mode & 0o022:raise ValueError('protected original authority array required')
+    value=json.loads(path.read_text())
+    if not isinstance(value,list):raise ValueError('explicit authority array required')
+    return value
+
+
+def extend(directory):
+    final=directory/'activation/final-schema';host=directory/'host-plans'
+    fence=trusted(host/'root-intake-fence.receipt.json')
+    if fence['response'].get('dispatchPaused') is not True:raise ValueError('positive original Root intake fence required')
+    census=trusted(host/'root-fenced-census.metadata.json')
+    admissions=trusted(host/'root-admission-fields.metadata.json')
+    if admissions['fields']!=['id','subjects','person'] or admissions['tokensRead'] is not False or admissions['journalsRead'] is not False:raise ValueError('closed admission field projection required')
+    authority=trusted(final/'scope-authority.json');root=trusted(final/'root.fragment.json');original=trusted(final/'root-original-owners.json');credentials=array(final/'credentials.json');policy=trusted(final/'policy.json');projection=trusted(directory/'activation/core-config.projection.json');manifest=trusted(directory/'manifest.json');features=trusted(final/'images-duties-authority-e4b3609f/per-scope.fragment.json')
+    scopes={s['id']:s for s in authority['scopes']};rows={r['id']:r for r in admissions['rows']}
+    roots=[s for s in scopes.values() if s['id'].startswith('legacy-root:')]
+    if not roots:raise ValueError('original registered Root custodian template required')
+    for s in roots:
+        run_id=s['id'].removeprefix('legacy-root:')
+        if run_id not in rows or set(s['resource']['subjects'])!=set(rows[run_id]['subjects']):raise ValueError('original authority differs from exact admission subject relation')
+    template=sorted(roots,key=lambda s:s['id'])[0];old=template['id'].removeprefix('legacy-root:')
+    technical=next(s for s in projection['config']['scopes'] if s['id']==template['id'])
+    source=next(s for s in manifest['scopes'] if s['id']=='root-consultations')
+    grants=[g for g in policy['grants'] if template['resource']['id'] in json.dumps(g)]
+    if len(grants)!=2 or any(g['effect']!='allow' for g in grants):raise ValueError('exact original two-service Root grant ceiling required')
+    own=next(o for o in original['owners'] if o['scopeId']==template['id'])
+    declared_root=Path(root['privateDir'])/'root-sessions';new=[]
+    for path in census['databasePaths']:
+        path=absolute(path);run_id=path.parent.name;identifier='legacy-root:'+run_id
+        if identifier in scopes:continue
+        if path!=declared_root/run_id/'threads.sqlite3' or run_id not in rows or not isinstance(rows[run_id]['subjects'],list) or not rows[run_id]['subjects']:raise ValueError('new store does not match an original Root admission')
+        record=replace(template,old,run_id);record['resource']['subjects']=rows[run_id]['subjects'];record['storage']['databasePath']=str(path);record['storage']['sessionsDir']=str(path.parent)
+        authority['scopes'].append(record);scopes[identifier]=record
+        t=replace(technical,old,run_id);t['resource']=record['resource'];t['storage']['databasePath']=str(path);t['storage']['sessionsDir']=str(path.parent);t['storage']['capabilityKeyPath']=str(path.parent/'thread-capability.key');projection['config']['scopes'].append(t)
+        m=copy.deepcopy(source);m.update({k:t[k] for k in ('id','principalId','resource','storage')});m['sessionsDir']=str(path.parent);m['oldOwnerUnit']='pi-kenan-root.service';manifest['scopes'].append(m)
+        root['consultationOwners'].append({'rootSessionId':run_id,'scopeId':identifier})
+        plans=trusted(host/'scope-adoption.plan.json');owner=next(o for o in plans['owners'] if o['unit']=='pi-kenan-root.service')
+        identity_code='import os,json; s=os.stat('+repr(str(path))+'); print(json.dumps({\"dev\":str(s.st_dev),\"ino\":str(s.st_ino),\"uid\":s.st_uid}))'
+        identity=json.loads(enter(owner['pinned'],['python3','-c',identity_code],technical['custody']['uid'],technical['custody']['gid']))
+        original['owners'].append({**replace(own,old,run_id),'subjects':rows[run_id]['subjects'],'fileIdentity':identity})
+        for c in credentials:
+            if template['id'] in c['scopeIds']:c['scopeIds'].append(identifier)
+        for g in grants:
+            retained = replace(g,old,run_id)
+            retained['id'] = g['id']+':consultation:'+run_id
+            policy['grants'].append(retained)
+        feature=next(s for s in features['scopes'] if s['id']==template['id']);features['scopes'].append(replace(feature,old,run_id))
+        new.append({'id':identifier,'databasePath':str(path),'sessionsDir':str(path.parent)})
+    evidence={'version':1,'kind':'original-root-post-fence-census','targetCommit':fence['targetCommit'],'sourceMetadataSha256':hashlib.sha256((host/'root-admission-fields.metadata.json').read_bytes()).hexdigest(),'admissionRelationValidated':True,'priorScopeCount':len(roots),'added':new,'newPeopleOrAuthority':False,'activationPermitted':False}
+    publish(host/'root-final-scope-append.metadata.json',evidence)
+    for path,value in [(final/'scope-authority.json',authority),(final/'root.fragment.json',root),(final/'root-original-owners.json',original),(final/'credentials.json',credentials),(final/'policy.json',policy),(directory/'activation/core-config.projection.json',projection),(directory/'manifest.json',manifest),(final/'images-duties-authority-e4b3609f/per-scope.fragment.json',features)]:publish(path,value)
+    return {'addedCount':len(new),'rootScopeCount':len(roots)+len(new),'activationPermitted':False}
+
+
+if __name__=='__main__':
+    try:
+        if os.geteuid()!=0 or len(sys.argv)!=2:raise ValueError('usage: root core-root-census MIGRATION_DIRECTORY')
+        print(json.dumps({'ok':True,'value':extend(absolute(sys.argv[1]))}))
+    except (OSError,ValueError,KeyError,TypeError) as error:
+        print(json.dumps({'ok':False,'error':{'code':'root-census-unmapped','message':str(error)}}));sys.exit(75)

@@ -49,6 +49,19 @@ def storage_identities(scopes):
     return result
 
 
+def image_drain_proofs(plan):
+    paths = plan.get('imageProofPaths')
+    if not isinstance(paths, list) or not paths:
+        raise ValueError('original Remote image intake must be fenced and accepted work drained before SIGTERM')
+    records = []
+    for path in paths:
+        proof = trusted(absolute(path))
+        if proof.get('protocol') != 'pi-core-original-image-drain-v1' or proof.get('pid') != plan['pid'] or proof.get('startTicks') != plan['startTicks'] or proof.get('state') != 'drained' or proof.get('generating') != 0:
+            raise ValueError('exact original image owner has not positively drained accepted provider work')
+        records.append({'path':path,'sha256':hashlib.sha256(Path(path).read_bytes()).hexdigest()})
+    return records
+
+
 def drain(path):
     plan = trusted(path)
     if plan.get('version') != 1 or plan.get('kind') not in ('fleet', 'remote', 'root', 'memory', 'broker') or not re.fullmatch(r'pi-[a-zA-Z0-9@_.-]+\.service', plan.get('unit', '')):
@@ -80,8 +93,14 @@ def drain(path):
             proof = trusted(absolute(plan['streamsProofPath']))
             if proof.get('protocol') != 'pi-core-original-broker-drain-v1' or proof.get('pid') != plan['pid'] or proof.get('startTicks') != plan['startTicks'] or proof.get('state') != 'drained' or proof.get('accepted') != 0:
                 raise ValueError('original runtime HTTP callbacks must positively drain before broker SIGTERM')
+        if plan['kind'] == 'root':
+            proof = trusted(absolute(plan['rootReadyProofPath']))
+            health = proof.get('health', {})
+            if proof.get('pid') != plan['pid'] or proof.get('startTicks') != plan['startTicks'] or proof.get('acceptedExecutionsDrained') is not True or health.get('dispatchPaused') is not True or health.get('handoffReady') is not True or health.get('activeExecutions') != 0 or health.get('consentActive') is not False:
+                raise ValueError('positive original Root dispatch/accepted-execution drain required before detach')
+        image_proofs = image_drain_proofs(plan) if plan['kind'] == 'remote' else []
         started = datetime.now(timezone.utc).isoformat()
-        state = {'version': 1, 'planSha256': digest, 'previous': current, 'startedAt': started, 'state': 'prepared', 'storageIdentities': storage_identities(plan['scopes'])}
+        state = {'version': 1, 'planSha256': digest, 'previous': current, 'startedAt': started, 'state': 'prepared', 'storageIdentities': storage_identities(plan['scopes']), 'imageDrainProofs':image_proofs}
         publish(state_path, state)
         # Preserve independent execution/FUSE resources even if a previous unit used
         # control-group killing. Their explicit resource owner remains separate.
@@ -122,7 +141,7 @@ def drain(path):
         receipt = {'version': 1, **scope.get('receiptExtras', {}), 'state': 'detached', 'scopeId': scope['scopeId'],
                    'databasePath': scope['databasePath'], 'sessionsDir': scope['sessionsDir'], 'databaseIdentity': identities[scope['scopeId']],
                    'previousOwner': {'identity': f"{plan['unit']}:{plan['pid']}:{plan['startTicks']}:{state['previous']['InvocationID']}", 'detachedAt': timestamp},
-                   'detachmentEvidence': {'protocol': 'pi-core-owner-drain-v1', 'planSha256': digest, 'exitCode': 0, 'sourceProof': plan['sourceProof']}}
+                   'detachmentEvidence': {'protocol': 'pi-core-owner-drain-v1', 'planSha256': digest, 'exitCode': 0, 'sourceProof': plan['sourceProof'], 'imageDrainProofs':state.get('imageDrainProofs',[])}}
         publish(absolute(scope['receiptPath']), receipt)
     publish(state_path, {**state, 'state': 'detached', 'detachedAt': timestamp})
     return {'protocol': 'pi-core-owner-drain-v1', 'state': 'detached', 'unit': plan['unit'], 'receiptCount': len(plan['scopes'])}
