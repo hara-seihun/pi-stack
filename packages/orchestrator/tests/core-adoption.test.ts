@@ -8,6 +8,8 @@ import { threadCapability } from "../src/threads/caller.js";
 import { CoreService, type CoreRuntime } from "../src/core/service.js";
 import { serveCore } from "../src/core/main.js";
 import { acquireDatabaseOwnership, acquireScopeOwnership } from "../src/core/ownership.js";
+import { bindGatewayRequest, registerGatewaySocket, type GatewayBinding } from "../src/core/gateway.js";
+import type { IncomingMessage } from "node:http";
 import type { CoreConfig, CoreScope } from "../src/core/contracts.js";
 
 const roots: string[] = [];
@@ -24,8 +26,8 @@ async function fixture() {
   const detached = await old.detach(); if (!detached.ok) throw new Error(detached.error.message);
   const stat = statSync(databasePath, { bigint: true });
   writeFileSync(adoptionReceiptPath, JSON.stringify({ version: 1, state: "detached", scopeId: "alice", databasePath, sessionsDir, databaseIdentity: { dev: String(stat.dev), ino: String(stat.ino) }, previousOwner: { identity: "old-supervisor-generation", detachedAt: new Date().toISOString() } }), { mode: 0o600 });
-  const scope: CoreScope = { id: "alice", principalId: "alice", availability: { kind: "adopt" }, resource: { id: "alice-threads", kind: "thread", owner: "alice", privacy: "private", subjects: ["alice"], consent: "not-required" }, storage: { databasePath, sessionsDir, capabilityKeyPath, adoptionReceiptPath }, custody: { uid: process.getuid!(), gid: process.getgid!(), namespace: { kind: "host" }, retainedRunnerNamespace: { kind: "host" }, dataDir: path, socketDir: path }, resources: [], environment: {}, manager: { kind: "none" }, managerRouting: { kind: "none" } };
-  const config: CoreConfig = { version: 1, host: "127.0.0.1", port: 19181, statePath: join(path, "core.sqlite3"), releaseCommit: "a".repeat(40), principals: [{ kind: "person", id: "alice", person: "alice" }, { kind: "person", id: "bob", person: "bob" }], credentials: [{ sha256: createHash("sha256").update("alice-token").digest("hex"), principalId: "alice", scopeIds: ["alice"], purpose: "service", routeCeiling: { kind: "scoped" } }, { sha256: createHash("sha256").update("bob-token").digest("hex"), principalId: "bob", scopeIds: ["alice"], purpose: "person", routeCeiling: { kind: "scoped" } }], policy: { revision: 1, grants: [{ id: "alice-own", principal: "alice", resource: { kind: "exact", id: "alice-threads" }, actions: ["read", "write", "dispatch", "control"], effect: "allow", validFrom: 0, validUntil: null, issuedBy: "owner", source: "existing person grant" }], consents: [] }, scopes: [scope], broker: { kind: "disabled" }, root: { kind: "disabled" }, memory: { kind: "disabled" }, images: { kind: "disabled" }, duties: { kind: "disabled" }, callbacks: { kind: "none" } };
+  const scope: CoreScope = { id: "alice", principalId: "alice", availability: { kind: "adopt" }, resource: { id: "alice-threads", kind: "thread", owner: "alice", privacy: "private", subjects: ["alice"], consent: "not-required" }, storage: { databasePath, sessionsDir, capabilityKeyPath, adoptionReceiptPath }, custody: { uid: process.getuid!(), gid: process.getgid!(), namespace: { kind: "host" }, retainedRunnerNamespace: { kind: "host" }, dataDir: path, socketDir: path }, resources: [], environment: {}, callbackGateway: { kind: "none" }, manager: { kind: "none" }, managerRouting: { kind: "none" } };
+  const config: CoreConfig = { version: 1, host: "127.0.0.1", port: 19181, statePath: join(path, "core.sqlite3"), releaseCommit: "a".repeat(40), principals: [{ kind: "person", id: "alice", person: "alice" }, { kind: "person", id: "bob", person: "bob" }], credentials: [{ sha256: createHash("sha256").update("alice-token").digest("hex"), principalId: "alice", scopeIds: ["alice"], purpose: "service", routeCeiling: { kind: "scoped" } }, { sha256: createHash("sha256").update("bob-token").digest("hex"), principalId: "bob", scopeIds: ["alice"], purpose: "person", routeCeiling: { kind: "scoped" } }], policy: { revision: 1, grants: [{ id: "alice-own", principal: "alice", resource: { kind: "exact", id: "alice-threads" }, actions: ["read", "write", "dispatch", "control"], effect: "allow", validFrom: 0, validUntil: null, issuedBy: "owner", source: "existing person grant" }], consents: [] }, scopes: [scope], broker: { kind: "disabled" }, root: { kind: "disabled" }, memory: { kind: "disabled" }, images: { kind: "disabled" }, duties: { kind: "disabled" }, callbacks: { kind: "none" }, gatewayTransport: { kind: "none" }, gatewayBindings: [] };
   const runtime: CoreRuntime = { openSession: async () => { throw new Error("No execution during adoption"); }, attachSession: async () => null, recoverSession: async () => null, detach() {}, path: value => value };
   return { scope, config, runtime, threadId: spawned.value.id, capability };
 }
@@ -60,6 +62,27 @@ test("one adopted writer preserves original thread, queue identity and scoped di
     expect(core.authorizeIngress(new Request(`${core.url}/v1/admin/root-sessions/not-a-session/transcript`, { headers: { authorization: "Bearer root-admin-token" } })).ok).toBe(false);
   } finally { expect((await core.close()).ok).toBe(true); }
   const reowned = acquireScopeOwnership(f.scope, path => path); expect(reowned.ok).toBe(true); if (reowned.ok) reowned.value.close();
+});
+
+test("kernel-admitted gateway identity and route ceilings bound native capabilities", async () => {
+  const f = await fixture();
+  const core = new CoreService(f.config, async () => ({ ok: true, value: f.runtime }));
+  const binding: GatewayBinding = { gatewayId: "alice-ui", purpose: "core-ingress", peerUid: process.getuid!(), principalId: "alice", scopeIds: ["alice"], routeCeiling: [{ method: "GET", kind: "exact", path: "/v1/scopes/alice/projection" }] };
+  const socket = {};
+  expect(registerGatewaySocket(socket, binding, { uid: binding.peerUid + 1 }).ok).toBe(false);
+  expect(registerGatewaySocket(socket, binding, { uid: binding.peerUid }).ok).toBe(true);
+  const request = (path: string, headers: Record<string, string> = {}) => {
+    const value = new Request(`${core.url}${path}`, { headers });
+    bindGatewayRequest({ socket } as IncomingMessage, value);
+    return value;
+  };
+  try {
+    expect((await core.start()).ok).toBe(true);
+    expect((await core.request(request("/v1/scopes/alice/projection")))?.status).toBe(200);
+    expect((await core.request(request("/v1/scopes/alice/projection", { authorization: "Bearer bob-token" })))?.status).toBe(401);
+    expect((await core.request(request("/v1/scopes/alice/projection", { "x-pi-thread-token": f.capability.issue(f.threadId) })))?.status).toBe(200);
+    expect(core.authorizeIngress(request("/v1/scopes/alice/events", { "x-pi-thread-token": f.capability.issue(f.threadId) })).ok).toBe(false);
+  } finally { await core.close(); }
 });
 
 test("unavailable partitions are not read, initialized or resumed", async () => {

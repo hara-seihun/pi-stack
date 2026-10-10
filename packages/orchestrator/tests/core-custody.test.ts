@@ -22,7 +22,7 @@ function fixture(): CoreScope {
   return { id: "private", principalId: "fixture", availability: { kind: "adopt" }, resource: { id: "private", owner: "fixture", kind: "thread", privacy: "confidential", subjects: [], consent: "not-required" },
     storage, custody: { uid: process.getuid!(), gid: process.getgid!(), dataDir: root, socketDir: root,
       namespace, retainedRunnerNamespace: namespace },
-    environment: {}, resources: [{ path: storage.sessionsDir, kind: "directory" }], manager: { kind: "none" }, managerRouting: { kind: "none" } };
+    environment: {}, resources: [{ path: storage.sessionsDir, kind: "directory" }], callbackGateway: { kind: "none" }, manager: { kind: "none" }, managerRouting: { kind: "none" } };
 }
 const listen = (server: Server, path: string) => new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(path, resolve); });
 const close = (server: Server) => new Promise<void>(resolve => server.close(() => resolve()));

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, existsSync, readFileSync } from "node:fs";
+import { mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { openSqlite } from "../sqlite.js";
 import { authorize, type PermissionAction, type Principal, type Resource } from "../permissions.js";
@@ -12,6 +12,8 @@ import type { CoreConfig, CoreEvent, CoreProjection, CoreScope } from "./contrac
 import type { CoreResult } from "./config.js";
 import { acquireScopeOwnership, type ScopeOwnership } from "./ownership.js";
 import { CoreManagerRelay } from "./manager-relay.js";
+import { gatewayAuthority, assertGatewayRequest, intersectGatewayAuthority } from "./gateway.js";
+import { unixGatewayFetch } from "./gateway-fetch.js";
 import { CoreManagerNotices } from "./manager-notices.js";
 import { readManagerReplies, type ManagerRepliesInput } from "./manager-replies.js";
 
@@ -64,11 +66,8 @@ export class CoreService {
       if (owner.scope.managerRouting.kind === "configured") {
         const routing = owner.scope.managerRouting;
         owner.relay = new CoreManagerRelay(routing.relay, owner.metadata, async (input, init) => {
-          const tokenPath = owner.scope.environment.PI_CORE_TOKEN_FILE;
-          if (!tokenPath) throw new Error("Manager transport credential is unset");
-          const token = readFileSync(owner.runtime.path(tokenPath), "utf8").trim();
-          const headers = new Headers(init?.headers); headers.set("authorization", `Bearer ${token}`);
-          return fetch(input, { ...init, headers });
+          if (owner.scope.callbackGateway.kind !== "remote-callback") throw new Error("Manager callback gateway is unset");
+          return unixGatewayFetch({ socketPath: `/run/pi-stack/gateways/remote-${owner.scope.id}/callback.sock`, peerUid: owner.scope.callbackGateway.peerUid }, input, init);
         }, (resource, action) => {
           const grant = authorize(this.config.policy, { principal, resource, action, now: Date.now() });
           return grant.ok ? { ok: true, value: undefined } : failure("unavailable", grant.error.message);
@@ -134,13 +133,10 @@ export class CoreService {
           ...(typeof thread.metadata?.bashTimeoutSeconds === "number" ? { PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS: String(thread.metadata.bashTimeoutSeconds) } : {}),
           ...(thread.metadata?.room ? { PI_REMOTE_ROOM_ID: thread.id } : {}),
         }),
-        ...(scope.environment.PI_REMOTE_SERVER_URL ? { prepareMessage: async (thread, message) => {
-          const tokenPath = scope.environment.PI_CORE_TOKEN_FILE;
-          if (!tokenPath) return failure("unavailable", "Message preparation requires the declared core credential file");
+        ...(scope.callbackGateway.kind === "remote-callback" ? { prepareMessage: async (thread, message) => {
+          if (scope.callbackGateway.kind !== "remote-callback") return failure("unavailable", "Message preparation gateway is unset");
           try {
-            const token = readFileSync(runtime.path(tokenPath), "utf8").trim();
-            if (!token) return failure("unavailable", "Message preparation credential is empty");
-            const response = await fetch(`${scope.environment.PI_REMOTE_SERVER_URL}/v1/core/prepare-message`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify({ thread, message }), signal: AbortSignal.timeout(30_000) });
+            const response = await unixGatewayFetch({ socketPath: `/run/pi-stack/gateways/remote-${scope.id}/callback.sock`, peerUid: scope.callbackGateway.peerUid }, "http://pi-remote-callback/v1/core/prepare-message", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ thread, message }), signal: AbortSignal.timeout(30_000) });
             const result = await response.json() as Result<{ text: string; images?: unknown[] }>;
             if (!response.ok || typeof result?.ok !== "boolean") return failure("unavailable", `Message preparation returned HTTP ${response.status}`);
             return result;
@@ -194,6 +190,11 @@ export class CoreService {
     for (const listener of this.listeners.get(scopeId) ?? []) listener({ cursor, change });
   }
   authorizeIngress(request: Request): Result<void> {
+    const gateway = gatewayAuthority(request);
+    if (gateway) {
+      const allowed = assertGatewayRequest(gateway, request);
+      if (!allowed.ok) return failure("invalid_request", allowed.error.message);
+    }
     const tokens = [request.headers.get("authorization")?.replace(/^Bearer /, ""), request.headers.get("x-pi-kenan-admin")].filter((value): value is string => !!value);
     for (const token of tokens) {
       const digest = createHash("sha256").update(token).digest("hex");
@@ -209,6 +210,8 @@ export class CoreService {
   private identity(request: Request, scopeId?: string): Result<Identity> {
     const ingress = this.authorizeIngress(request);
     if (!ingress.ok) return ingress;
+    const gateway = gatewayAuthority(request);
+    if (gateway && scopeId && !gateway.scopeIds.includes(scopeId)) return failure("invalid_request", "Gateway does not bind this scope");
     const bearer = request.headers.get("authorization");
     const token = request.headers.get("x-pi-thread-token");
     const owner = scopeId ? this.owners.get(scopeId) : undefined;
@@ -218,6 +221,7 @@ export class CoreService {
       const hash = createHash("sha256").update(bearer.slice(7)).digest("hex");
       credential = this.config.credentials.find(candidate => candidate.sha256 === hash);
       if (!credential) return failure("invalid_request", "Unknown core credential");
+      if (gateway && credential.principalId !== gateway.principalId) return failure("invalid_request", "Gateway and credential name different principals");
       if (scopeId && !credential.scopeIds.includes(scopeId)) return failure("invalid_request", "Credential does not bind this scope");
     }
     if (token !== null) {
@@ -230,7 +234,19 @@ export class CoreService {
       const source = sources[0]!;
       if (credential && credential.principalId !== source.candidate.scope.principalId) return failure("invalid_request", "Credential and thread capability name different principals");
       const principal = this.config.principals.find(principal => principal.id === source.candidate.scope.principalId)!;
-      return { ok: true, value: { principal, scopeIds: this.config.scopes.filter(scope => (!credential || credential.scopeIds.includes(scope.id)) && authorize(this.config.policy, { principal, resource: scope.resource, action: "read", now: Date.now() }).ok).map(scope => scope.id), caller: { kind: "thread", threadId: source.threadId } } };
+      let scopeIds = this.config.scopes.filter(scope => (!credential || credential.scopeIds.includes(scope.id)) && authorize(this.config.policy, { principal, resource: scope.resource, action: "read", now: Date.now() }).ok).map(scope => scope.id);
+      if (gateway) {
+        const bounded = intersectGatewayAuthority(gateway, { principalId: principal.id, scopeIds });
+        if (!bounded.ok) return failure("invalid_request", bounded.error.message);
+        scopeIds = bounded.value.scopeIds;
+      }
+      if (scopeId && !scopeIds.includes(scopeId)) return failure("invalid_request", "Native capability exceeds the admitted scope ceiling");
+      return { ok: true, value: { principal, scopeIds, caller: { kind: "thread", threadId: source.threadId } } };
+    }
+    if (gateway) {
+      const scopes = credential ? credential.scopeIds.filter(id => gateway.scopeIds.includes(id)) : gateway.scopeIds;
+      const principal = this.config.principals.find(principal => principal.id === gateway.principalId)!;
+      return { ok: true, value: { principal, scopeIds: scopes, caller: { kind: "service", pid: process.pid } } };
     }
     if (!credential) return failure("invalid_request", "An authenticated core credential is required");
     const principal = this.config.principals.find(principal => principal.id === credential.principalId)!;
