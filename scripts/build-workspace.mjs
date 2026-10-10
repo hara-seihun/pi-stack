@@ -6,9 +6,9 @@ import { dirname, join, resolve } from "node:path";
 const root = resolve(import.meta.dirname, "..");
 const name = process.argv[2];
 const builds = {
-  orchestrator: { workspace: "pi-orchestrator", sources: ["packages/orchestrator", "packages/kenan-memory"], output: "packages/orchestrator/dist" },
+  orchestrator: { workspace: "pi-orchestrator", sources: ["packages/orchestrator", "packages/kenan-memory", "packages/kenan-root", "scripts/workspace-closure.mjs"], output: "packages/orchestrator/dist", extraOutputs: ["packages/kenan-memory/dist", "packages/kenan-root/dist"], requiredArtifacts: ["packages/orchestrator/dist/core/main.js", "packages/orchestrator/dist/core/config.js"] },
   remote: { workspace: "pi-remote", sources: ["apps/remote", "packages/orchestrator/src", "packages/kenan-memory", "packages/kenan-root"], output: "apps/remote/web/dist", extraOutputs: ["apps/remote/server/phone/dist"] },
-  "kenan-root": { workspace: "kenan-root", sources: ["packages/kenan-root", "packages/kenan-memory", "packages/orchestrator"], output: "packages/kenan-root/dist" },
+  "kenan-root": { workspace: "pi-orchestrator", sources: ["packages/kenan-root", "packages/kenan-memory", "packages/orchestrator", "scripts/workspace-closure.mjs"], output: "packages/kenan-root/dist", extraOutputs: ["packages/orchestrator/dist", "packages/kenan-memory/dist"] },
 };
 const build = builds[name];
 if (!build) {
@@ -31,6 +31,7 @@ function digestFiles(files) {
 }
 
 function outputDigest() {
+  if (build.requiredArtifacts?.some(path => !existsSync(join(root, path)))) return null;
   const files = [];
   function visit(directory) {
     if (!existsSync(join(root, directory))) return;

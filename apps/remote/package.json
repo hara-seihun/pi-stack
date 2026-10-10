@@ -16,8 +16,6 @@
   "scripts": {
     "start": "bun server/main.ts",
     "dev": "vite",
-    "ui:inventory": "node web/ui-catalogue-inventory.mjs",
-    "preui:catalogue": "npm run ui:inventory",
     "ui:catalogue": "vite --config ui-catalogue.config.ts",
     "build": "vite build && npm run build:meet-adapter && npm run build:phone-media && node compress-dist.mjs",
     "build:meet-adapter": "vite build --config vite.meet-adapter.config.ts",
@@ -31,12 +29,10 @@
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.87.1",
-    "@js-temporal/polyfill": "^0.5.1",
     "@tanstack/react-virtual": "^3.14.10",
     "emojibase-data": "^17.0.0",
     "fast-sha256": "^1.3.0",
     "gpt-tokenizer": "4.0.0",
-    "ical.js": "^2.2.1",
     "kenan-memory": "0.1.0",
     "kenan-root": "0.1.0",
     "openid-client": "^6.8.8",
@@ -47,7 +43,6 @@
     "retell-client-js-sdk": "3.0.2",
     "livekit-client": "2.22.3",
     "sonner": "^2.0.8",
-    "timezones-ical-library": "^2.3.2",
     "typebox": "^1.3.16"
   },
   "peerDependencies": {

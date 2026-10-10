@@ -2,25 +2,21 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { dirname, posix } from 'node:path';
 
-const runtime = ['package.json', 'package-lock.json', 'vendor/pi', 'packages/runtime', 'packages/orchestrator/src', 'packages/kenan-memory', 'packages/kenan-root', 'config/packages.json', 'deploy/runtime', 'deploy/lib', 'deploy/source-scopes.mjs', 'deploy/component-cache.mjs'];
-const orchestrator = [...runtime, 'packages/orchestrator', 'scripts/build-workspace.mjs', 'deploy/orchestrator'];
-const remote = [...orchestrator, 'apps/remote', 'deploy/remote', 'deploy/remote-resources.mjs', 'scripts/check-remote-imports.ts', 'deploy/one-kenan-activate', 'deploy/editor', 'deploy/smoke', 'deploy/meeting-census', 'deploy/release-checkout', 'docs/editor.md', 'docs/native-history-migration.md', 'scripts/migrate-native-history.mjs'];
+const runtime = ['package.json', 'package-lock.json', 'vendor/pi', 'packages/runtime', 'packages/orchestrator/src', 'packages/kenan-memory', 'packages/kenan-root', 'config/packages.json', 'deploy/runtime', 'deploy/lib', 'deploy/source-scopes.mjs', 'deploy/component-cache.mjs', 'scripts/workspace-closure.mjs'];
+const orchestrator = [...runtime, 'packages/orchestrator', 'scripts/build-workspace.mjs', 'deploy/orchestrator', 'deploy/core-host.mjs', 'deploy/core-runtime', 'deploy/core-custody', 'deploy/core-adopt', 'deploy/core_namespace.py', 'deploy/systemd/pi-stack-core.service', 'deploy/systemd/pi-stack-core-custody.service'];
+const remote = [...orchestrator, 'apps/remote', 'deploy/remote', 'deploy/remote-resources.mjs', 'scripts/check-remote-imports.ts', 'deploy/editor', 'deploy/smoke', 'deploy/meeting-census', 'deploy/release-checkout', 'docs/editor.md', 'docs/native-history-migration.md', 'scripts/migrate-native-history.mjs'];
 export const componentScopes = { runtime, orchestrator, remote, tools: [...orchestrator, 'tools', 'config/tools.json', 'deploy/tools'] };
-const sdk = ['package.json', 'package-lock.json', 'vendor/pi', 'deploy/runtime', 'packages/runtime/patch-claude-oauth.mjs', 'packages/runtime/extensions/claude-oauth/client.json', 'packages/runtime/patch-codex-sse.mjs', 'packages/runtime/patch-codex-service-recovery.mjs', 'packages/runtime/codex-service-recovery.js', 'packages/runtime/patch-anthropic-error-content.mjs', 'packages/runtime/patch-anthropic-tool-schema.mjs', 'packages/runtime/anthropic-tool-schema.js', 'packages/runtime/patch-anthropic-narration.mjs', 'packages/runtime/patch-compaction-errors.mjs', 'packages/runtime/patch-summary-recovery.mjs', 'packages/runtime/bounded-summary.js', 'packages/runtime/patch-bash-spill.mjs', 'packages/runtime/patch-bash-cancellation.mjs', 'packages/runtime/pi-shell-owner.mjs', 'packages/runtime/pi-shell-owner.py', 'packages/runtime/patch-session-durability.mjs', 'packages/runtime/patch-shared-custody.mjs', 'packages/runtime/patch-shared-rpc.mjs'];
-const rootOwner = [...sdk, 'packages/kenan-root', 'packages/kenan-memory', 'packages/orchestrator/src', 'packages/orchestrator/package.json', 'scripts/build-workspace.mjs', 'deploy/systemd/pi-kenan-root.service', 'deploy/one-kenan-runtime'];
-const memoryOwner = ['package.json', 'package-lock.json', 'packages/kenan-memory', 'packages/orchestrator/src/person-timezone.ts', 'packages/orchestrator/src/person-settings-contract.ts', 'apps/remote/server/room-audience.mjs', 'deploy/systemd/pi-kenan-memory.service', 'deploy/one-kenan-runtime'];
+const sdk = ['package.json', 'package-lock.json', 'vendor/pi', 'deploy/runtime', 'packages/runtime/patch-claude-oauth.mjs', 'packages/runtime/extensions/claude-oauth/client.json', 'packages/runtime/patch-codex-sse.mjs', 'packages/runtime/patch-codex-service-recovery.mjs', 'packages/runtime/codex-service-recovery.js', 'packages/runtime/patch-anthropic-error-content.mjs', 'packages/runtime/patch-anthropic-tool-schema.mjs', 'packages/runtime/anthropic-tool-schema.js', 'packages/runtime/patch-anthropic-narration.mjs', 'packages/runtime/patch-compaction-errors.mjs', 'packages/runtime/patch-summary-recovery.mjs', 'packages/runtime/bounded-summary.js', 'packages/runtime/patch-bash-spill.mjs', 'packages/runtime/patch-bash-cancellation.mjs', 'packages/runtime/pi-shell-owner.mjs', 'packages/runtime/pi-shell-owner.py', 'packages/runtime/pi-bash-worker.py', 'packages/runtime/patch-session-durability.mjs', 'packages/runtime/patch-shared-custody.mjs', 'packages/runtime/patch-shared-rpc.mjs'];
 const roomsOwner = [...orchestrator, 'apps/remote/server', 'apps/remote/shared', 'apps/remote/package.json', 'apps/remote/meeting-runtime.json', 'apps/remote/data-contract.json', 'deploy/systemd/pi-rooms.service'];
 export const ownerScopes = {
   remote: [...orchestrator, 'apps/remote/server', 'apps/remote/shared', 'apps/remote/meeting-runtime.json', 'apps/remote/data-contract.json', 'deploy/remote', 'deploy/remote-resources.mjs'],
   router: [...runtime, 'apps/remote/server', 'apps/remote/shared', 'apps/remote/package.json', 'deploy/systemd/pi-remote-router.service'],
-  daemons: [...orchestrator, 'config/models.json', 'deploy/systemd/pi-orchestrator@.service'],
-  brokers: [...orchestrator, 'apps/remote/server/model-broker', 'apps/remote/server/model-broker.ts', 'config/models.json'],
+  core: [...orchestrator, 'config/models.json', 'deploy/core-host.mjs', 'deploy/systemd/pi-stack-core.service'],
   voice: [...orchestrator, 'apps/remote/server', 'apps/remote/shared', 'deploy/voice', 'deploy/systemd/pi-stack-voice.service'],
   phone: [...orchestrator, 'apps/remote/server', 'apps/remote/shared', 'deploy/phone', 'deploy/systemd/pi-stack-phone.service'],
-  root: rootOwner,
-  memory: memoryOwner,
   rooms: roomsOwner,
-  oneKenan: [...new Set([...rootOwner, ...memoryOwner, ...roomsOwner])],
+  custody: ['apps/remote/server/one-kenan-access.ts', 'apps/remote/server/one-kenan-keys.ts', 'apps/remote/server/one-kenan-mounts.ts', 'deploy/one-kenan-runtime', 'deploy/systemd/pi-kenan-access.service', 'deploy/systemd/pi-kenan-custody.service'],
+  oneKenan: [...new Set([...orchestrator, ...roomsOwner])],
 };
 function memoryImports(root, commit, entries) {
   const available = new Set(entries.map(entry => entry.slice(entry.indexOf('\t') + 1)));

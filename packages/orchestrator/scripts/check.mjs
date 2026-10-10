@@ -4,19 +4,16 @@ import { runJobs } from "../../../scripts/run-jobs.mjs";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
 const cwd = join(root, "packages/orchestrator");
-const memory = ["orchestrator memory build", "npm", ["run", "build", "--workspace=kenan-memory"], { cwd: root }];
-const types = ["orchestrator types", process.execPath, [join(root, "node_modules/typescript/bin/tsc"),
-  "--noEmit", "--incremental", "--tsBuildInfoFile", join(root, "node_modules/.cache/orchestrator.tsbuildinfo")],
-  { cwd, dependsOn: [memory[0]] }];
+const memory = ["orchestrator memory build", process.execPath, [join(root, "scripts/workspace-closure.mjs"), "build"], { cwd: root }];
+const types = ["orchestrator types", process.execPath, [join(root, "scripts/workspace-closure.mjs"), "check"],
+  { cwd: root, dependsOn: [memory[0]] }];
 
 export function orchestratorTypeChecks() {
   return [memory, types];
 }
 
 export function orchestratorBuildChecks() {
-  return [memory, ["orchestrator build", process.execPath,
-    [join(root, "node_modules/typescript/bin/tsc"), "-p", "tsconfig.build.json"],
-    { cwd, dependsOn: [memory[0]] }]];
+  return [memory];
 }
 
 export function orchestratorTestChecks(suites) {

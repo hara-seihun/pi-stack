@@ -1,138 +1,69 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
 root=$(cd "$(dirname "$0")/.." && pwd)
 source "$root/deploy/lib"
 pi_stack_enter_deployment "$0" "$root" "$@"
 dest=${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}
 runtime=${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}
 commit=$(git -C "$root" rev-parse HEAD)
-[[ $# == 0 || ( $# == 1 && $1 == --links-only ) ]] || { echo 'usage: deploy/orchestrator [--links-only]' >&2; exit 64; }
+action=${1:---build}
+case $action in
+  --build|--links-only|--install-core) [[ $# -le 1 ]] || exit 64;;
+  *) echo 'usage: deploy/orchestrator [--links-only|--install-core]' >&2; exit 64;;
+esac
 
-# Every account that runs orchestrator commands reaches the CLI through
-# ~/.local/bin/pi-orchestrator, so the links are reconciled on every run,
-# including the already-deployed fast path.
 reconcile_cli_links() {
-  local user home owner group link
+  local user home owner group
   while IFS= read -r user; do
     home=$(pi_stack_home "$user")
     [[ -n $home && -d $home ]] || continue
     owner=$(stat -c %U "$home"); group=$(stat -c %G "$home")
-    link=$home/.local/bin/pi-orchestrator
     pi_stack_as_root install -d -m 755 -o "$owner" -g "$group" "$home/.local" "$home/.local/bin"
-    pi_stack_as_root ln -sfn "$dest/dist/cli.js" "$link"
-    pi_stack_as_root chown -h "$owner:$group" "$link"
-    link=$home/.local/bin/pi-agent-capacity
-    pi_stack_as_root ln -sfn "$dest/dist/agent-capacity-cli.js" "$link"
-    pi_stack_as_root chown -h "$owner:$group" "$link"
+    for pair in 'pi-orchestrator:cli.js' 'pi-agent-capacity:agent-capacity-cli.js'; do
+      pi_stack_as_root ln -sfn "$dest/dist/${pair#*:}" "$home/.local/bin/${pair%%:*}"
+      pi_stack_as_root chown -h "$owner:$group" "$home/.local/bin/${pair%%:*}"
+    done
   done < <(pi_stack_users)
 }
-
-normalize_model_defaults() {
-  local fleet home config
-  fleet=$(pi_stack_fleet_user)
-  [[ -n $fleet ]] || return 0
-  home=$(pi_stack_home "$fleet")
-  config=${PI_ORCHESTRATOR_CONFIG:-$home/.config/pi-orchestrator/config.json}
-  [[ -f $config ]] || return 0
-  pi_stack_as_root node - "$config" <<'NODE'
-const fs = require('node:fs'), path = require('node:path');
-const file = fs.realpathSync(process.argv[2]), stat = fs.statSync(file);
-const value = JSON.parse(fs.readFileSync(file, 'utf8'));
-let changed = false;
-for (const candidates of Object.values(value.profiles ?? {})) for (const candidate of candidates) {
-  for (const key of ['thinking', 'thinkingPair']) if (key in candidate) { delete candidate[key]; changed = true; }
+check_artifact() {
+  test -f "$dest/dist/core/main.js" && test -f "$dest/dist/core/config.js" &&
+    test -f "$dest/host/core-host.mjs" && test -x "$dest/host/core-runtime" && test -f "$dest/dist/cli.js" &&
+    test -f "$dest/dist/agent-capacity-cli.js" || {
+      echo "Shared core artifact is incomplete: $dest" >&2; return 66;
+    }
 }
-if (changed) {
-  const temporary = `${file}.${process.pid}.tmp`, fd = fs.openSync(temporary, 'wx', stat.mode);
-  try { fs.writeFileSync(fd, JSON.stringify(value, null, 2) + '\n'); fs.fchownSync(fd, stat.uid, stat.gid); fs.fsyncSync(fd); }
-  finally { fs.closeSync(fd); }
-  fs.renameSync(temporary, file);
-  const directory = fs.openSync(path.dirname(file), 'r'); try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
-}
-NODE
-}
-[[ ${PI_STACK_PREPARE_ONLY:-0} == 1 ]] || normalize_model_defaults
-
-reconcile_model_availability() {
-  local fleet path group
-  fleet=$(pi_stack_fleet_user)
-  [[ -n $fleet ]] || return 0
-  if [[ -n ${PI_STACK_ORCHESTRATOR_DEST:-} && -z ${PI_STACK_MODEL_AVAILABILITY_PATH:-} ]]; then return 0; fi
-  path=${PI_STACK_MODEL_AVAILABILITY_PATH:-/var/lib/pi-stack/model-availability/policy.json}
-  group=$(id -gn "$fleet")
-  pi_stack_as_root install -d -m 755 -o "$fleet" -g "$group" "$(dirname "$path")"
-  if [[ -e $path ]]; then
-    pi_stack_as_root chown "$fleet:$group" "$path"
-    pi_stack_as_root chmod 644 "$path"
-  fi
-}
-[[ ${PI_STACK_PREPARE_ONLY:-0} == 1 ]] || reconcile_model_availability
-if [[ ${1:-} == --links-only ]]; then
+if [[ $action != --build ]]; then
   pi_stack_require_release "$dest" "$commit"
-  reconcile_cli_links
+  check_artifact
+  if [[ $action == --install-core ]]; then
+    pi_stack_as_root bun "$dest/host/core-host.mjs" install "$dest" "${PI_STACK_CORE_CONFIG:-/etc/pi-stack/core.json}"
+  else
+    reconcile_cli_links
+  fi
   exit 0
 fi
-
-# The fleet user's operator config names the lane manifest. A release whose
-# daemon cannot parse the live manifest must not be selected.
-validate_manifest() {
-  local fleet home config manifest
-  fleet=$(pi_stack_fleet_user)
-  [[ -n $fleet ]] || return 0
-  home=$(pi_stack_home "$fleet")
-  config=${PI_ORCHESTRATOR_CONFIG:-$home/.config/pi-orchestrator/config.json}
-  [[ -f $config ]] || return 0
-  manifest=$(pi_stack_as_root jq -r '.taskManifest // empty' "$config")
-  [[ -n $manifest ]] || return 0
-  pi_stack_as_root test -f "$manifest" || { echo "orchestrator lane manifest does not exist: $manifest" >&2; return 1; }
-  PI_STACK_LANE_MANIFEST="$(pi_stack_as_root cat "$manifest")" node - <<'NODE'
-const manifest = JSON.parse(process.env.PI_STACK_LANE_MANIFEST);
-if (manifest.version !== 2 || !Array.isArray(manifest.lanes)) throw new Error("lane manifest version 2 required");
-for (const lane of manifest.lanes) {
-  for (const key of ["id", "cwd", "profile"]) if (typeof lane[key] !== "string" || !lane[key]) throw new Error(`lane ${key} is required`);
-  if ((typeof lane.prompt !== "string" || !lane.prompt) && (typeof lane.promptFile !== "string" || !lane.promptFile)) throw new Error(`lane ${lane.id} needs prompt or promptFile`);
-  if (!(Number(lane.weight) > 0)) throw new Error(`lane ${lane.id} needs a positive weight`);
-}
-NODE
-}
-
-# Loading the CLI takes about two seconds; it overlaps the manifest and link work.
-check_cli() { "$dest/dist/cli.js" help | grep -q '^usage: pi-orchestrator'; }
-
-if [[ -f $dest/.pi-stack-commit && $(<"$dest/.pi-stack-commit") == "$commit" && -x $dest/dist/cli.js && -x $dest/dist/agent-capacity-cli.js ]]; then
-  check_cli &
-  cli_pid=$!
-  validate_manifest
+if [[ -f $dest/.pi-stack-commit && $(<"$dest/.pi-stack-commit") == "$commit" ]]; then
+  check_artifact
   [[ ${PI_STACK_PREPARE_ONLY:-0} == 1 ]] || reconcile_cli_links
-  wait "$cli_pid" || { echo "deployed Pi Orchestrator CLI does not answer: $dest/dist/cli.js" >&2; exit 1; }
-  printf 'Pi Orchestrator from %s is already deployed\n' "$commit"
+  printf 'Pi Stack core from %s is already deployed\n' "$commit"
   exit 0
 fi
-stage=$(mktemp -d "${TMPDIR:-/tmp}/pi-orchestrator.XXXXXXXX")
+stage=$(mktemp -d "${TMPDIR:-/tmp}/pi-stack-core.XXXXXXXX")
 trap 'rm -rf "$stage"' EXIT
-
 cd "$root"
 pi_stack_prepare_dependencies "$root"
-[[ -f $runtime/.pi-stack-commit && $(<"$runtime/.pi-stack-commit") == "$commit" ]] || {
-  echo "deploy Pi Runtime $commit before Pi Orchestrator" >&2
-  exit 66
-}
+pi_stack_require_release "$runtime" "$commit"
 dependencies=$(readlink -f "$runtime/node_modules")
-[[ -d $dependencies ]] || { echo "Pi Runtime dependencies are missing at $dependencies" >&2; exit 66; }
+[[ -d $dependencies ]] || { echo "Pi Runtime dependencies are missing: $dependencies" >&2; exit 66; }
 node "$root/scripts/build-workspace.mjs" orchestrator
-
-mkdir -p "$stage/release"
-rsync -a --chmod=D755,Fu=rwX,Fgo=rX packages/orchestrator/dist packages/orchestrator/src \
-  packages/orchestrator/package.json "$stage/release/"
+mkdir -p "$stage/release/host"
+rsync -a --chmod=D755,Fu=rwX,Fgo=rX packages/orchestrator/dist packages/orchestrator/src packages/orchestrator/package.json "$stage/release/"
+install -m644 deploy/core-host.mjs deploy/core_namespace.py deploy/systemd/pi-stack-core.service deploy/systemd/pi-stack-core-custody.service "$stage/release/host/"
+install -m755 deploy/core-runtime deploy/core-custody deploy/core-adopt "$stage/release/host/"
 chmod 755 "$stage/release/dist/cli.js" "$stage/release/dist/agent-capacity-cli.js"
 ln -s "$dependencies" "$stage/release/node_modules"
 printf '%s\n' "$commit" > "$stage/release/.pi-stack-commit"
-validate_manifest
 pi_stack_publish_release "$root" "$stage/release" "$dest" orchestrator
-
-check_cli &
-cli_pid=$!
+check_artifact
 [[ ${PI_STACK_PREPARE_ONLY:-0} == 1 ]] || reconcile_cli_links
-wait "$cli_pid" || { echo "deployed Pi Orchestrator CLI does not answer: $dest/dist/cli.js" >&2; exit 1; }
-printf 'deployed Pi Orchestrator from %s to %s\n' "$commit" "$dest"
+printf 'deployed Pi Stack core from %s to %s\n' "$commit" "$dest"

@@ -14,6 +14,11 @@
     "src"
   ],
   "exports": {
+    "./room-audience": {
+      "types": "./src/core/room-audience.ts",
+      "bun": "./src/core/room-audience.ts",
+      "default": "./dist/core/room-audience.js"
+    },
     "./permissions": {
       "types": "./src/permissions.ts",
       "bun": "./src/permissions.ts",
@@ -63,6 +68,11 @@
       "bun": "./src/image-service.ts",
       "default": "./dist/image-service.js"
     },
+    "./core-native": {
+      "types": "./src/core/native-session.ts",
+      "bun": "./src/core/native-session.ts",
+      "default": "./dist/core/native-session.js"
+    },
     "./agent-capacity": {
       "types": "./src/agent-capacity.ts",
       "bun": "./src/agent-capacity.ts",
@@ -88,6 +98,7 @@
     "@pi-plugins/claude-oauth": "0.3.7",
     "eventsource-parser": "3.1.1",
     "kenan-memory": "0.1.0",
+    "kenan-root": "file:../kenan-root",
     "openai": "6.40.0",
     "typebox": "1.3.16",
     "ws": "^8.22.0"

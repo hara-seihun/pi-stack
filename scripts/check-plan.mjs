@@ -32,24 +32,25 @@ const shipping = {
   'user usage': ['tools/user-usage'],
   'Claude reset collector': ['tools/claude-reset'],
   'runtime dependency closure': ['deploy/runtime', 'packages/runtime', 'packages/orchestrator', 'packages/kenan-memory', 'packages/kenan-root'],
-  'One Kenan deployment': ['deploy', 'config', 'scripts/one-kenan-deploy.test.py'],
-  'One Kenan activation': ['deploy/one-kenan-activate', 'deploy/host-plan.mjs', 'deploy/source-scopes.mjs'],
+  'core host bindings': ['deploy/core-host.mjs', 'scripts/core-host.test.mjs'],
+  'core generation adoption': ['deploy/core-adopt', 'deploy/core_namespace.py', 'deploy/core-custody', 'scripts/core-adopt.test.py'],
+  'publication dependency retention': ['deploy/integration-retain.py', 'deploy/publication', 'scripts/integration-retain.test.py'],
   'prompt availability': ['deploy/prompt-availability', 'scripts/prompt-availability.test.py'],
   'Meet recognition protocol': ['apps/meet-recognition'],
   'action journal publication': ['deploy'],
   'mail send boundary': ['tools/mail-send'],
   'raw outbound boundary': ['tools/raw-outbound-guard', 'deploy/outbound-transports', 'deploy/host', 'config/tools.json'],
   'provider rollback boundary': ['deploy/host', 'deploy/remote-rollback-compatible.mjs', 'deploy/remote-resources.mjs', 'apps/remote/provider-contract.json', 'scripts/remote-rollback-compatible.test.mjs'],
-  'life import': ['scripts/life-import.ts', 'scripts/life-import.test.ts', 'packages/kenan-memory'],
+  'memory adoption': ['scripts/memory-adopt.ts', 'packages/kenan-memory', 'packages/orchestrator/src/permissions.ts', 'packages/orchestrator/tests/permissions.test.ts'],
   mcp: ['tools/mcp'],
   'mcp-script': ['tools/mcp-script', 'tools/mcp'],
   'session readers': ['tools/read-condensed-session'],
 };
 const buildPolicies = {
   'Kenan build': { inputs: ['apps/kenan/build.mjs', 'apps/kenan/package.json', 'apps/remote/web/dist'], outputs: ['apps/kenan/dist'] },
-  'orchestrator memory build': { inputs: ['packages/kenan-memory/src', 'packages/kenan-memory/tsconfig.json', 'packages/kenan-memory/package.json'], outputs: ['packages/kenan-memory/dist'], completeScope: true, typeProgram: true },
-  'orchestrator types': { inputs: ['packages/orchestrator', 'packages/kenan-memory/src', 'packages/kenan-memory/package.json'], outputs: [], completeScope: true, typeProgram: true },
-  'remote prepare': { inputs: ['apps/remote/prepare-check.mjs', 'packages/orchestrator/src', 'packages/orchestrator/tsconfig.build.json', 'packages/orchestrator/tsconfig.json', 'packages/orchestrator/package.json', 'packages/kenan-memory/src', 'packages/kenan-memory/package.json', 'packages/kenan-memory/tsconfig.json', 'packages/kenan-root/src', 'packages/kenan-root/package.json', 'packages/kenan-root/tsconfig.json'], outputs: ['packages/orchestrator/dist', 'packages/kenan-memory/dist', 'packages/kenan-root/dist'], completeScope: true, typeProgram: true },
+  'orchestrator memory build': { inputs: ['scripts/workspace-closure.mjs', 'packages/orchestrator/src', 'packages/kenan-memory/src', 'packages/kenan-root/src', 'packages/orchestrator/package.json', 'packages/kenan-memory/package.json', 'packages/kenan-root/package.json'], outputs: ['packages/orchestrator/dist', 'packages/kenan-memory/dist', 'packages/kenan-root/dist'], completeScope: true, typeProgram: true },
+  'orchestrator types': { inputs: ['scripts/workspace-closure.mjs', 'packages/orchestrator', 'packages/kenan-memory/src', 'packages/kenan-memory/package.json', 'packages/kenan-root/src', 'packages/kenan-root/package.json'], outputs: [], completeScope: true, typeProgram: true },
+  'remote prepare': { inputs: ['apps/remote/prepare-check.mjs', 'scripts/workspace-closure.mjs', 'packages/orchestrator/src', 'packages/orchestrator/tsconfig.build.json', 'packages/orchestrator/tsconfig.json', 'packages/orchestrator/package.json', 'packages/kenan-memory/src', 'packages/kenan-memory/package.json', 'packages/kenan-memory/tsconfig.json', 'packages/kenan-root/src', 'packages/kenan-root/package.json', 'packages/kenan-root/tsconfig.json'], outputs: ['packages/orchestrator/dist', 'packages/kenan-memory/dist', 'packages/kenan-root/dist'], completeScope: true, typeProgram: true },
 };
 
 const generatedRuntimeFixtures = new Set([

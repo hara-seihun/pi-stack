@@ -1,0 +1,21 @@
+[Unit]
+Description=Pi Stack shared permission-scoped core
+After=network-online.target pi-stack-core-custody.service
+Wants=network-online.target pi-stack-core-custody.service
+ConditionPathExists=/etc/pi-stack/core.json
+ConditionPathExists=/etc/pi-stack/core-runtime.json
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/srv/pi/pi-orchestrator
+Environment=PI_CORE_CONFIG=/etc/pi-stack/core.json
+ExecStart=/srv/pi/pi-orchestrator/host/core-runtime launch /srv/pi/pi-orchestrator /etc/pi-stack/core.json
+Restart=on-failure
+RestartSec=2
+KillMode=process
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target

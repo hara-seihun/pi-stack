@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""Pin native custody before drain; certify a detached same-cipher generation."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+from core_namespace import PIN_ROOT, absolute, enter, namespace_path, publish, trusted
+
+SNAPSHOT = r'''
+import hashlib,json,os,sys
+from pathlib import Path
+p=Path(sys.argv[1])
+def file(p):
+ s=p.stat(); h=hashlib.sha256()
+ with p.open('rb') as f:
+  for block in iter(lambda:f.read(1048576),b''): h.update(block)
+ t=p.stat()
+ if (s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns)!=(t.st_dev,t.st_ino,t.st_size,t.st_mtime_ns): raise ValueError('store changed during snapshot')
+ return {'sha256':h.hexdigest(),'size':s.st_size}
+s=p.stat(); wal=Path(str(p)+'-wal')
+print(json.dumps({'databaseIdentity':{'dev':str(s.st_dev),'ino':str(s.st_ino)},'files':{'database':file(p),'wal':{'kind':'present',**file(wal)} if wal.exists() else {'kind':'absent'}}}))
+'''
+
+
+def mount_identity(namespace, mountpoint):
+    text = enter(namespace, ['/usr/bin/python3', '-c', "from pathlib import Path;print(Path('/proc/self/mountinfo').read_text())"], 0, 0)
+    decode = lambda value: re.sub(r'\\([0-7]{3})', lambda m: chr(int(m[1], 8)), value)
+    found = []
+    for line in text.splitlines():
+        left, right = line.split(' - ', 1)
+        fields, fs = left.split(), right.split()
+        if decode(fields[4]) == mountpoint:
+            found.append({'filesystem': fs[0], 'source': decode(fs[1]), 'options': fs[2].split(',')})
+    if len(found) != 1 or found[0]['filesystem'] != 'fuse.gocryptfs':
+        raise ValueError('exact registered encrypted mount is unavailable or stacked')
+    return found[0]
+
+
+def validate_plan(plan):
+    if plan.get('version') != 1 or not isinstance(plan.get('scopeId'), str) or not plan['scopeId']:
+        raise ValueError('explicit scope adoption plan required')
+    registry_path = absolute(plan['registryPath'])
+    person = trusted(registry_path)
+    if person['user'] != plan['user'] or person.get('unlock') != {'cipherDir': plan['cipherDir'], 'mountpoint': plan['mountpoint']}:
+        raise ValueError('adoption differs from the owning encrypted-folder registry')
+    mountpoint, database, sessions = (absolute(plan[key]) for key in ('mountpoint', 'databasePath', 'sessionsDir'))
+    if not database.is_relative_to(mountpoint) or not sessions.is_relative_to(mountpoint):
+        raise ValueError('storage must belong to its registered encrypted folder')
+    if absolute(plan['adoptionReceiptPath']).is_relative_to(mountpoint):
+        raise ValueError('generation receipt must live in root host custody outside the transferred encrypted mount')
+    for role in ('source', 'target'):
+        view = plan[role]
+        if type(view.get('uid')) is not int or type(view.get('gid')) is not int or view['uid'] < 0 or view['gid'] < 0:
+            raise ValueError('explicit source and target UID/GID required')
+        if view['namespace'].get('kind') != 'pinned':
+            raise ValueError('source and target namespaces must be durably pinned before detach')
+        namespace_path(view['namespace'])
+        mount = mount_identity(view['namespace'], str(mountpoint))
+        if mount['source'] != str(absolute(plan['cipherDir'])):
+            raise ValueError('generation mount uses another encrypted backing directory')
+    return {'path': str(registry_path), 'sha256': hashlib.sha256(registry_path.read_bytes()).hexdigest()}
+
+
+def transfer(plan):
+    registry = validate_plan(plan)
+    detached = trusted(absolute(plan['detachmentReceiptPath']))
+    if detached.get('version') != 1 or detached.get('state') != 'detached' or detached.get('scopeId') != plan['scopeId'] or detached.get('databasePath') != plan['databasePath'] or detached.get('sessionsDir') != plan['sessionsDir']:
+        raise ValueError('owning controller detachment receipt is required')
+    retained = trusted(absolute(plan['sourceMountReceiptPath']))
+    if retained.get('version') != 1 or retained.get('cipherDir') != plan['cipherDir'] or retained.get('mountpoint') != plan['mountpoint'] or retained.get('namespace') != plan['source']['namespace']:
+        raise ValueError('retained source encrypted resource receipt required')
+    verify_fuse(retained)
+    owner = detached.get('previousOwner')
+    if not isinstance(owner, dict) or not isinstance(owner.get('identity'), str) or not owner['identity'] or not isinstance(owner.get('detachedAt'), str):
+        raise ValueError('detached owner identity and time required')
+    # Mount preparation is an owning resource action; this command never unlocks a folder.
+    preparation = trusted(absolute(plan['targetMountReceiptPath']))
+    if preparation.get('version') != 1 or preparation.get('cipherDir') != plan['cipherDir'] or preparation.get('mountpoint') != plan['mountpoint'] or preparation.get('namespace') != plan['target']['namespace'] or preparation.get('sharedstorage') is not True:
+        raise ValueError('explicit sharedstorage target generation receipt required')
+    snapshots = {}
+    for _ in range(2):
+        for role in ('source', 'target'):
+            view = plan[role]
+            current = json.loads(enter(view['namespace'], ['/usr/bin/python3', '-c', SNAPSHOT, plan['databasePath']], view['uid'], view['gid'], timeout=30))
+            if role in snapshots and snapshots[role] != current:
+                raise ValueError('detached storage changed during generation adoption')
+            snapshots[role] = current
+        if snapshots['source']['files'] != snapshots['target']['files']:
+            raise ValueError('encrypted mount generations do not expose identical detached DB/WAL content')
+    if snapshots['source']['databaseIdentity'] != detached.get('databaseIdentity'):
+        raise ValueError('detachment receipt belongs to another source database')
+    receipt = dict(detached)
+    receipt['databaseIdentity'] = snapshots['target']['databaseIdentity']
+    receipt['generationTransfer'] = {'version': 1, 'registry': registry, 'cipherDir': plan['cipherDir'], 'mountpoint': plan['mountpoint'],
+        'source': {'namespace': plan['source']['namespace'], **snapshots['source']},
+        'target': {'namespace': plan['target']['namespace'], **snapshots['target']},
+        'retainedRunnerNamespace': plan['source']['namespace']}
+    publish(absolute(plan['adoptionReceiptPath']), receipt)
+    return {'ok': True, 'scopeId': plan['scopeId'], 'databaseIdentity': receipt['databaseIdentity'], 'copied': False}
+
+
+def pin(plan):
+    if plan.get('version') != 1 or not isinstance(plan.get('namespaces'), list) or not plan['namespaces']:
+        raise ValueError('explicit namespace pin list required')
+    PIN_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if PIN_ROOT.stat().st_uid != 0 or PIN_ROOT.stat().st_mode & 0o022:
+        raise ValueError('untrusted namespace pin directory')
+    result = []
+    for item in plan['namespaces']:
+        name = item['id']
+        if not isinstance(name, str) or not re.fullmatch(r'[a-zA-Z0-9_.-]+', name):
+            raise ValueError('invalid pin identifier')
+        source = namespace_path(item['namespace'])
+        fd = os.open(source, os.O_RDONLY)
+        try:
+            inode = str(os.fstat(fd).st_ino)
+            target = PIN_ROOT / name
+            host_target = Path('/proc/1/root' + str(target))
+            if host_target.exists() and str(host_target.stat().st_ino) == inode:
+                result.append({'kind': 'pinned', 'path': str(target), 'mountNamespaceInode': inode})
+                continue
+            if host_target.exists():
+                raise ValueError('pin identifier already belongs to another namespace')
+            host_target.touch(mode=0o600, exist_ok=False)
+            try:
+                subprocess.run(['/usr/bin/nsenter', '--mount=/proc/1/ns/mnt', '--', '/usr/bin/mount', '--bind', f'/proc/{os.getpid()}/fd/{fd}', str(target)], pass_fds=(fd,), check=True, capture_output=True, timeout=5)
+            except subprocess.SubprocessError:
+                host_target.unlink()
+                raise
+            if str(host_target.stat().st_ino) != inode:
+                raise ValueError('namespace pin identity differs')
+            result.append({'kind': 'pinned', 'path': str(target), 'mountNamespaceInode': inode})
+        finally:
+            os.close(fd)
+    return {'ok': True, 'namespaces': result}
+
+
+def verify_fuse(resource):
+    pid = resource['pid']
+    if type(pid) is not int or pid < 1:
+        raise ValueError('explicit original FUSE PID required')
+    fields = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
+    if fields[19] != resource['startTicks'] or Path(os.readlink(f'/proc/{pid}/exe')).name != 'gocryptfs':
+        raise ValueError('original encrypted resource process changed')
+    argv = Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
+    if os.fsencode(resource['cipherDir']) not in argv or os.fsencode(resource['mountpoint']) not in argv:
+        raise ValueError('original FUSE process is not bound to registered ciphertext')
+    namespace_path(resource['namespace'])
+    if str(Path(f'/proc/{pid}/ns/mnt').stat().st_ino) != resource['namespace']['mountNamespaceInode']:
+        raise ValueError('original FUSE resource namespace changed')
+    if mount_identity(resource['namespace'], resource['mountpoint'])['source'] != resource['cipherDir']:
+        raise ValueError('original FUSE mount differs from ciphertext registry')
+    if 'resourceUnit' in resource:
+        if resource['resourceUnit'] != 'pi-stack-core-custody.service' or '0::/system.slice/pi-stack-core-custody.service' not in Path(f'/proc/{pid}/cgroup').read_text().splitlines():
+            raise ValueError('original encrypted resource custody changed')
+
+
+def retain_fuse(plan):
+    if plan.get('version') != 1:
+        raise ValueError('explicit FUSE resource retention plan required')
+    resource = plan['resource']
+    person = trusted(absolute(plan['registryPath']))
+    if person['user'] != plan['user'] or person.get('unlock') != {'cipherDir': resource['cipherDir'], 'mountpoint': resource['mountpoint']}:
+        raise ValueError('retention differs from owning encrypted-folder registry')
+    if resource['namespace'].get('kind') != 'pinned':
+        raise ValueError('pin original namespace before moving its resource process')
+    verify_fuse(resource)
+    unit = 'pi-stack-core-custody.service'
+    properties = subprocess.run(['/usr/bin/systemctl', 'show', unit, '--property=ActiveState,ControlGroup,MainPID'], check=True, capture_output=True, text=True, timeout=5).stdout
+    values = dict(line.split('=', 1) for line in properties.splitlines() if '=' in line)
+    if values.get('ActiveState') != 'active' or values.get('ControlGroup') != '/system.slice/' + unit or not values.get('MainPID', '').isdigit() or int(values['MainPID']) < 1:
+        raise ValueError('running resource-only custody keeper required before supervisor drain')
+    group = '/sys/fs/cgroup' + values['ControlGroup']
+    with Path(group, 'cgroup.procs').open('w') as stream:
+        stream.write(str(resource['pid']) + '\n')
+    verify_fuse(resource)
+    if f"0::{values['ControlGroup']}" not in Path(f"/proc/{resource['pid']}/cgroup").read_text().splitlines():
+        raise ValueError('FUSE resource ownership transfer not confirmed')
+    receipt = {'version': 1, **resource, 'resourceUnit': unit}
+    publish(absolute(plan['receiptPath']), receipt)
+    return {'ok': True, 'retained': 'encrypted-resource-only', 'pid': resource['pid'], 'unit': unit}
+
+
+def main():
+    actions = {'pin': pin, 'transfer': transfer, 'retain-fuse': retain_fuse}
+    if os.geteuid() != 0 or len(sys.argv) != 3 or sys.argv[1] not in actions:
+        raise ValueError('usage: root core-adopt pin|retain-fuse|transfer ABSOLUTE_ROOT_PLAN')
+    plan = trusted(absolute(sys.argv[2]))
+    print(json.dumps(actions[sys.argv[1]](plan)))
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        print(json.dumps({'ok': False, 'error': {'code': 'core-adoption-refused', 'message': str(error)}}), file=sys.stderr)
+        sys.exit(75)

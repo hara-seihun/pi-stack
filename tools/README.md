@@ -10,7 +10,7 @@ These commands depend on Pi sessions, Pi models, or the orchestrator ledger.
 | [`user-usage`](user-usage/README.md) | `pi-user-usage` | Count a person's recorded tokens, logged API value, and estimated subscription dollars. |
 | [`mcp`](mcp/README.md) | `mcp` | Discover and call configured MCP servers. |
 | [`mcp-script`](mcp-script/README.md) | `mcp-script` | Run JavaScript over one MCP client. |
-| [`read-condensed-session`](read-condensed-session/README.md) | `read-thread`, `read-condensed-session` | Read and search stored JSONL for self, fleet sessions and other Remote threads; optional model-assisted condensation. |
+| [`read-condensed-session`](read-condensed-session/README.md) | `read-thread` | Read and search exact stored JSONL for accessible threads. |
 
 [`../config/tools.json`](../config/tools.json) defines the command names. CI tests every command. Shared command-line parsing lives in [`shared`](shared). `../deploy/tools` links the reviewed runtime dependency tree into a commit-addressed release, switches `/srv/pi/tools` atomically, and links every command into each Pi account's `~/.local/bin`.
 

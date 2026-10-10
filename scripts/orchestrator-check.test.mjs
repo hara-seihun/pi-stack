@@ -85,13 +85,16 @@ test("focused npm test cannot report success for a transpile-valid fixture missi
     writeFileSync(join(root, path), content);
   };
   try {
-    for (const path of ["scripts/run-jobs.mjs", "packages/orchestrator/scripts/check.mjs"]) {
+    for (const path of ["scripts/run-jobs.mjs", "scripts/workspace-closure.mjs", "packages/orchestrator/scripts/check.mjs"]) {
       put(path, readFileSync(join(repository, path)));
     }
     const manifest = JSON.parse(readFileSync(join(repository, "packages/orchestrator/package.json"), "utf8"));
     put("package.json", JSON.stringify({ private: true, workspaces: ["packages/*"] }));
-    put("packages/orchestrator/package.json", JSON.stringify({ name: manifest.name, type: "module", scripts: manifest.scripts }));
-    put("packages/kenan-memory/package.json", JSON.stringify({ name: "kenan-memory", scripts: { build: "node -e \"process.exit(0)\"" } }));
+    put("packages/orchestrator/package.json", JSON.stringify({ name: manifest.name, type: "module", exports: {}, scripts: manifest.scripts }));
+    for (const name of ['kenan-memory', 'kenan-root']) {
+      put(`packages/${name}/package.json`, JSON.stringify({ name, type: 'module', exports: {} }));
+      mkdirSync(join(root, 'packages', name, 'src'));
+    }
     put("packages/runtime/patch-shared-rpc.mjs", "process.exit(0);\n");
     put("packages/runtime/patch-anthropic-tool-schema.mjs", "process.exit(0);\n");
     copyFileSync(join(repository, "packages/orchestrator/tsconfig.json"), join(cwd, "tsconfig.json"));
@@ -108,6 +111,7 @@ it('import fixture', () => {
   writeFileSync('runtime-ran', 'yes');
 });\n`;
     put("packages/orchestrator/tests/import.test.ts", fixture(""));
+    put('packages/orchestrator/vitest.config.ts', 'export default {};\n');
     let output = "";
     const raw = await runJob(["raw transpile", process.execPath,
       [join(root, "node_modules/vitest/vitest.mjs"), "run", "--maxWorkers=1", "tests/import.test.ts"], { cwd }], text => { output += text; });

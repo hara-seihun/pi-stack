@@ -259,7 +259,7 @@ function installFrom(sourceRoot, activate = true) {
   const commandSource = join(sourceRoot, "deploy/publication");
   const unitNames = ["pi-stack-publication.service", "pi-stack-publication.timer", "pi-stack-publication.path",
     "pi-stack-publication-watchdog.service", "pi-stack-publication-watchdog.timer", "pi-stack-publication-repair@.service", "pi-stack-publication-host@.service", "pi-stack-publication-post@.service", "pi-stack-publication-notices.service"];
-  const modules = ["publication-control.mjs", "publication-config.mjs", "publication-hosts.mjs", "publication-bundle.mjs", "publication-continuation.mjs", "publication-timings.mjs", "publication-preflight.mjs", "action-journal.mjs", "release-checkout", "meeting-census", "phone-census", "native-prerequisites"];
+  const modules = ["publication-control.mjs", "publication-config.mjs", "publication-hosts.mjs", "publication-bundle.mjs", "publication-continuation.mjs", "publication-timings.mjs", "publication-preflight.mjs", "action-journal.mjs", "integration-retain.py", "release-checkout", "meeting-census", "phone-census", "native-prerequisites"];
   for (const path of [commandSource, ...modules.map(name => join(sourceRoot, "deploy", name)), ...unitNames.map(name => join(sourceRoot, "deploy/systemd", name))]) {
     if (!existsSync(path)) throw new Error(`publication installation source is missing: ${path}`);
   }
@@ -1185,7 +1185,7 @@ function nativeSourceProbe(request, target, ensureSource = false) {
 export function nativeMaintenanceSourceProof(repository, candidate, retained) {
   const files = ['deploy/native-history-boundary', 'deploy/native-history-coordinator.mjs', 'deploy/native-history-owner-recovery.mjs', 'deploy/native-history-bridge.mjs',
     'deploy/native-history-closed-owner.mjs', 'deploy/native-history-package-identity.mjs', 'deploy/native-history-root-boundary',
-    'deploy/one-kenan-activate', 'scripts/migrate-native-history.mjs', 'deploy/prepare', 'deploy/host',
+    'deploy/core-host.mjs', 'deploy/core-runtime', 'deploy/core-adopt', 'deploy/core_namespace.py', 'scripts/migrate-native-history.mjs', 'deploy/prepare', 'deploy/host',
     'deploy/runtime', 'deploy/lib', 'deploy/orchestrator', 'deploy/prepared-components.mjs'];
   try {
     const tree = sha => new Map(checked('git', ['-C', repository, 'ls-tree', '-r', '--format=%(objectname) %(path)', sha, '--', ...files])
@@ -1347,9 +1347,9 @@ prove_owner() {
   equivalence=$(jq -c --argjson proof "$proof" '. + [$proof]' <<<"$equivalence")
 }
 prove_owner voice "$voice"
-if jq -e '.oneKenan == true' "$host_config" >/dev/null; then
-  pi_stack_as_root python3 "$source_repository/deploy/one-kenan-activate" proof --host "$host_config" --expected "$expected" >/dev/null
-fi
+core_proof=$(pi_stack_as_root /srv/pi/pi-orchestrator/host/core-runtime proof /srv/pi/pi-orchestrator /etc/pi-stack/core.json)
+core_commit=$(jq -er '.value.releaseCommit' <<<"$core_proof")
+prove_owner core "$core_commit"
 [[ $remote == "$expected" && $orchestrator == "$expected" ]] || {
   printf '%s: deployed commit markers do not match integration: expected=%s remote=%s orchestrator=%s voice=%s\n' "$host" "$expected" "$remote" "$orchestrator" "$voice" >&2; exit 1;
 }
@@ -2440,6 +2440,19 @@ function gateStatus() {
   }, null, 2)}\n`);
 }
 
+function collectPublishedDependencies() {
+  const helper = join(dirname(self), 'integration-retain.py');
+  const args = ['python3', helper, stateRoot, '--execute', '--worker-lock-held'];
+  const result = process.getuid() === 0 ? commandResult(args.shift(), args, { timeoutSeconds: 50 })
+    : commandResult('sudo', ['-n', ...args], { timeoutSeconds: 50 });
+  const alert = join(alertInbox, 'pi-stack-publication-dependency-retention.md');
+  if (!result.ok) {
+    atomicWrite(alert, `# Pi Stack integration dependency retention\n\nPublished source and deployed dependencies are preserved.\nCollector failed: ${result.stderr || result.stdout || result.status}\nRun the installed integration-retain.py as root after the publication worker releases custody.\n`);
+    return;
+  }
+  rmSync(alert, { force: true });
+}
+
 function allRequests() {
   return readdirSync(requestRoot).filter(name => /^PUB-[a-f0-9]{24}\.json$/.test(name))
     .map(name => mergeHostLanes(migrateRequestOnRead(JSON.parse(readFileSync(join(requestRoot, name), "utf8"))), hostLaneRoot, targets))
@@ -3007,7 +3020,7 @@ export function drain() {
     if (cancelled) { processRequest(cancelled); continue; }
     reconcileSourceBundles();
     const request = allRequests().find(candidate => (runnable(candidate) && (!candidate.sourceBundleOwner || candidate.bundleEvidence)) || candidate.status === "running");
-    if (!request) return;
+    if (!request) { collectPublishedDependencies(); return; }
     if (request.status === "running") {
       if (canResumeRebootedIntegration(request, workerBootId) || canResumeCheckedRequest(request)) processRequest(request);
       else failStalled(request.requestId, "Publication worker interrupted; retained host custody has been recovered. Repair required before retry.");

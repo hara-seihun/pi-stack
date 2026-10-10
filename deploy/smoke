@@ -28,17 +28,13 @@ owner_matches() {
     [[ $running == "$peer" && $running =~ ^[a-f0-9]{40}$ ]]
   fi
 }
-voice_matches() {
-  jq -e '.enabled == true' "$body" >/dev/null 2>&1 && owner_matches voice "$(jq -r '.releaseCommit // empty' "$body")" "$release"
-}
-
 scratch=$(mktemp -d)
 body=$scratch/body
 headers=$scratch/auth
 trap 'rm -rf "$scratch"' EXIT
 
 # The web client, served to anyone: it is what asks for a name and a key.
-for page in / /voice.html; do
+for page in /; do
   code=$(get "$page" "$body")
   [[ $code == 200 ]] && grep -q '<html' "$body" || fail "GET $page returned $code without the web client"
   # The client is built for a browser mount path, so its assets are relative
@@ -107,7 +103,7 @@ for file in "$persons_dir"/*.json; do
     # Keep the public router closed and probe the UID-gated supervisor directly.
     port=$(pi_stack_as_root jq -r '.port' "$file")
     [[ $port =~ ^[0-9]+$ ]] || { fail "$user: invalid supervisor port"; continue; }
-    for path in /v1/health /v1/environment /v1/sessions /v1/actions /v1/workspaces /v1/voice /v1/meet; do
+    for path in /v1/health /v1/environment /v1/sessions /v1/actions /v1/workspaces /v1/meet; do
       if [[ $path == /v1/actions && $user != "$administrator" ]]; then
         # System actions are the host administrator's; everyone else is refused.
         code=$(pi_stack_as_root curl -sS -o "$body" -w '%{http_code}' --max-time 10 "http://127.0.0.1:$port$path" 2>/dev/null || echo 000)
@@ -123,7 +119,6 @@ for file in "$persons_dir"/*.json; do
           [[ $(jq -r '.environmentId // empty' "$body") == "$environment" ]] || fail "$user: wrong environment"
           release=$(jq -r '.releaseCommit // empty' "$body")
           owner_matches remote "$release" "$release" || fail "$user: supervisor source differs from the selected release" ;;
-        /v1/voice) voice_matches || fail "$user: Voice source differs from the selected release" ;;
         /v1/meet) jq -e '.transcriptionAvailable == true' "$body" >/dev/null || fail "$user: transcription unavailable" ;;
       esac
     done
@@ -162,12 +157,10 @@ for file in "$persons_dir"/*.json; do
   [[ $(jq -r '.environmentId // empty' "$body") == "$environment" ]] || fail "$user: supervisor reports a different environment than the front door"
   release=$(jq -r '.releaseCommit // empty' "$body")
   owner_matches remote "$release" "$release" || fail "$user: supervisor source differs from the selected release"
-  code=$(get /v1/voice "$body" -H "@$headers")
-  [[ $code == 200 ]] && voice_matches || fail "$user: Voice source differs from the selected release"
   code=$(get /v1/meet "$body" -H "@$headers")
   [[ $code == 200 ]] && jq -e '.transcriptionAvailable == true' "$body" >/dev/null 2>&1 || fail "$user: Meet transcription runtime is unavailable"
   if (( failures == person_failures )); then
-    echo "smoke: $user is unlocked and her supervisor, Meet and Voice answer"
+    echo "smoke: $user is unlocked and her supervisor and Meet answer"
   fi
 done
 

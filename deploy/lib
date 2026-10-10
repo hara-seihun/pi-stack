@@ -238,24 +238,6 @@ pi_stack_users() {
     fi
   } | awk 'NF && !seen[$0]++'
 }
-pi_stack_daemon_units() {
-  local running user state fleet
-  running=$(pi_stack_as_root systemctl list-units --type=service --state=running --no-legend 'pi-orchestrator@*.service') || return
-  fleet=$(pi_stack_fleet_user) || return
-  local -a units=()
-  [[ -z $fleet ]] || units+=("pi-orchestrator@$fleet.service")
-  # list-unit-files lists templates, not their enabled instances on NixOS.
-  for user in "$@"; do
-    state=$(pi_stack_as_root systemctl show --property=UnitFileState --value "pi-orchestrator@$user.service") || return
-    case "$state" in
-      enabled|enabled-runtime) units+=("pi-orchestrator@$user.service");;
-    esac
-  done
-  {
-    printf '%s\n' "$running" | awk '$1 ~ /^pi-orchestrator@.+\.service$/ {print $1}'
-    printf '%s\n' "${units[@]}"
-  } | awk 'NF' | sort -u
-}
 # Another account may not be able to read the checkout's .git; the parent hands
 # the commit down instead.
 pi_stack_commit() { printf '%s\n' "${PI_STACK_COMMIT:-$(git -C "${PI_STACK_ROOT_DIR:-.}" rev-parse HEAD)}"; }

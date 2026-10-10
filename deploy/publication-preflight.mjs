@@ -119,7 +119,7 @@ export function parseHostPreflight(result, input) {
 
 const maintenanceFiles = ['deploy/native-history-boundary', 'deploy/native-history-coordinator.mjs',
   'deploy/native-history-owner-recovery.mjs', 'deploy/native-history-bridge.mjs', 'deploy/native-history-closed-owner.mjs',
-  'deploy/native-history-package-identity.mjs', 'deploy/native-history-root-boundary', 'deploy/one-kenan-activate',
+  'deploy/native-history-package-identity.mjs', 'deploy/native-history-root-boundary', 'deploy/core-host.mjs', 'deploy/core-runtime', 'deploy/core-adopt', 'deploy/core_namespace.py',
   'scripts/migrate-native-history.mjs', 'deploy/prepare', 'deploy/host', 'deploy/runtime', 'deploy/lib',
   'deploy/orchestrator', 'deploy/prepared-components.mjs'];
 

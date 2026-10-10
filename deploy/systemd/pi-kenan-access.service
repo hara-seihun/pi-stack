@@ -1,6 +1,6 @@
 [Unit]
 Description=Additive root Kenan UID gates
-Before=pi-kenan-broker.service pi-kenan-memory.service pi-kenan-root.service pi-rooms.service
+Before=pi-stack-core.service pi-rooms.service
 
 [Service]
 Type=oneshot

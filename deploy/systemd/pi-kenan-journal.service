@@ -1,8 +1,7 @@
 [Unit]
 Description=Publish Kenan's durable outbound action journal into shared memory
-Requires=pi-kenan-custody.service
-BindsTo=pi-kenan-custody.service
-After=pi-kenan-custody.service pi-kenan-memory.service
+Requires=pi-stack-core.service pi-stack-core-custody.service
+After=pi-stack-core.service pi-stack-core-custody.service
 
 [Service]
 Type=oneshot

@@ -1,0 +1,16 @@
+[Unit]
+Description=Pi Stack common source-identical resource namespace
+ConditionPathExists=/etc/pi-stack/core-custody.json
+
+[Service]
+Type=notify
+User=root
+Group=root
+ExecStart=/srv/pi/pi-orchestrator/host/core-custody /etc/pi-stack/core-custody.json /etc/pi-stack/core-runtime.json
+NotifyAccess=main
+TimeoutStartSec=30
+Restart=no
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
