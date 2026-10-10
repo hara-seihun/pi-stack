@@ -1731,6 +1731,16 @@ function sparseSourcePaths(entries, patterns) {
 }
 
 function sourceCapacityPlan(repository, sourceCommit, intent, blockSize, mirror, sparsePatterns = []) {
+  if (!existsSync(repository)) {
+    if (!mirror || !existsSync(mirror) || existsSync(path.join(mirror, "objects", "info", "alternates"))) {
+      fail("source capacity estimate unknown: remote commit needs independent durable mirror custody; remote import remains unestimated");
+    }
+    const resolved = command("git", ["--git-dir", mirror, "rev-parse", "--verify", `${sourceCommit}^{commit}`]);
+    if (resolved.status !== 0 || resolved.stdout !== sourceCommit) {
+      fail("source capacity estimate unknown: remote commit is absent from durable mirror custody; remote import remains unestimated");
+    }
+    repository = mirror;
+  }
   if (!Number.isSafeInteger(blockSize) || blockSize <= 0) fail("source capacity estimate unknown: invalid filesystem allocation unit");
   const filters = command("git", ["-C", repository, "config", "--get-regexp", "^filter\\..*\\.(smudge|process)$"]);
   if (filters.status !== 1) fail("source capacity estimate unknown: configured checkout filters need an independently budgeted installer");
@@ -2074,7 +2084,7 @@ function cachedImmutableSource(mirror, repository, ref) {
   return cached.status === 0 && cached.stdout === ref ? ref : null;
 }
 
-function resolveSource(statePath, mirror, repository, upstream, ref) {
+function resolveRequestedSource(repository, ref) {
   if (existsSync(repository)) {
     const resolved = command("git", ["-C", repository, "rev-parse", "--verify", `${ref}^{commit}`]);
     if (resolved.status !== 0) fail(`cannot resolve source ${ref}: ${resolved.stderr}`);
@@ -2091,11 +2101,22 @@ function resolveSource(statePath, mirror, repository, upstream, ref) {
     if (named === undefined) fail(`cannot resolve source ${ref}; provide an exact remote ref or full commit`);
     ref = refs.get(`${named}^{}`) ?? refs.get(named);
   }
+  return ref;
+}
+
+function resolveSource(statePath, mirror, repository, upstream, ref) {
+  ref = resolveRequestedSource(repository, ref);
   const cached = cachedImmutableSource(mirror, repository, ref);
   if (cached !== null) return cached;
   return withResourceLock(statePath, `mirror:${mirror}`, () => {
     const shared = cachedImmutableSource(mirror, repository, ref);
     if (shared !== null) return shared;
+    if (existsSync(path.join(mirror, "objects", "info", "alternates"))) fail(`shared mirror must own its objects independently: ${mirror}`);
+    if (/^[0-9a-f]{40}$/u.test(ref) && existsSync(mirror)
+      && command("git", ["--git-dir", mirror, "cat-file", "-e", `${ref}^{commit}`]).status === 0) {
+      run("git", ["--git-dir", mirror, "update-ref", sourceRefFor(repository, ref), ref]);
+      return ref;
+    }
     prepareMirror(mirror, repository, upstream);
     if (/^[0-9a-f]{4,39}$/u.test(ref)) {
       run("git", ["--git-dir", mirror, "fetch", "--prune", "--no-tags", "origin"], { timeout: 120_000 });
@@ -2252,8 +2273,12 @@ function createWorkspace(database, args, statePath) {
       assertCapacity(root, args, database);
       plan = { intent: "unestimated", estimate: "unknown", constructionBytes: Math.ceil(numberFlag(args, "min-free-gib", DEFAULT_MIN_FREE_GIB) * 1024 ** 3), growthBytes: 0, headroomBytes: 0 };
     } else {
-      if (!existsSync(repository)) fail("source capacity estimate unknown: budgeted intent requires an existing local Git object source; remote import remains unestimated");
-      sourceCommit = git(repository, ["rev-parse", "--verify", `${ref}^{commit}`]);
+      sourceCommit = resolveRequestedSource(repository, ref);
+      if (!/^[0-9a-f]{40}$/u.test(sourceCommit) && !existsSync(repository)) {
+        const resolved = command("git", ["--git-dir", mirror, "rev-parse", "--verify", `${sourceCommit}^{commit}`]);
+        if (resolved.status !== 0) fail("source capacity estimate unknown: remote commit is absent from durable mirror custody; remote import remains unestimated");
+        sourceCommit = resolved.stdout;
+      }
       plan = sourceCapacityPlan(repository, sourceCommit, intent, statfsSync(root).bsize, mirror, sparsePatterns);
     }
     const device = String(statSync(root).dev);

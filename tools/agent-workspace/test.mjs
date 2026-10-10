@@ -1087,6 +1087,80 @@ test("sourceCapacityPlan retains full tree metadata while excluded blob sizes ch
   } finally { f.close(); }
 });
 
+for (const seed of ["remote", "local"]) test(`priced sparse remote URL reuses ${seed}-imported durable custody without fetching`, () => {
+  const f = fixture();
+  try {
+    const repository = "http://127.0.0.1:8810/dev/git/programmes/12.git";
+    const config = path.join(f.root, "gitconfig");
+    execFileSync("git", ["config", "--file", config, `url.file://${f.remote}.insteadOf`, repository]);
+    const env = { ...f.env, GIT_CONFIG_GLOBAL: config };
+    git(f.source, "remote", "set-url", "origin", repository);
+    mkdirSync(path.join(f.source, "canon", "real-model", "binary-whole-map"), { recursive: true });
+    writeFileSync(path.join(f.source, "AGENTS.md"), "source instructions\n");
+    writeFileSync(path.join(f.source, "canon", "real-model", "binary-whole-map", "result.md"), "selected result\n");
+    writeFileSync(path.join(f.source, "excluded.bin"), Buffer.alloc(3 * 1024 ** 2));
+    git(f.source, "add", ".");
+    git(f.source, "commit", "-m", "programme sparse fixture");
+    const commit = git(f.source, "rev-parse", "HEAD");
+    git(f.source, "push", f.remote, "main");
+    const selection = ["--sparse-pattern", "/AGENTS.md", "--sparse-pattern", "/canon/real-model/binary-whole-map/"];
+    const args = ["create", "--root", f.workspaces, "--name", "priced-url", "--repo", repository,
+      "--ref", commit, "--intent", "source-only", "--headroom-gib", "1", "--growth-mib", "8", ...selection, "--json"];
+    assert.throws(() => run(args, env), /remote import remains unestimated/);
+    assert.deepEqual(JSON.parse(run(["status", "--json"], env)).records, []);
+    const seedArgs = seed === "remote"
+      ? ["--repo", repository, "--min-free-gib", "0"]
+      : ["--repo", f.source, "--intent", "source-only", "--headroom-gib", "1", "--growth-mib", "8"];
+    const imported = JSON.parse(run(["create", "--root", f.workspaces, "--name", "seed", ...seedArgs,
+      "--ref", commit, ...selection, "--json"], seed === "local" ? f.env : env));
+    const mirror = path.dirname(readFileSync(path.join(imported.path, ".git", "objects", "info", "alternates"), "utf8").trim());
+    const expected = workspaceTesting.sourceCapacityPlan(mirror, commit,
+      { intent: "source-only", headroomBytes: 1024 ** 3, growthBytes: 8 * 1024 ** 2 },
+      statfsSync(f.workspaces).bsize, mirror, ["/AGENTS.md", "/canon/real-model/binary-whole-map/"]);
+    const bin = path.join(f.root, "bin");
+    mkdirSync(bin);
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    writeFileSync(path.join(bin, "git"), `#!${process.execPath}
+const { spawnSync } = require('node:child_process');
+const args = process.argv.slice(2);
+if (args.includes('fetch') || args.includes('ls-remote')) { console.error('remote transport forbidden by custody fixture'); process.exit(99); }
+const result = spawnSync(${JSON.stringify(realGit)}, args, { stdio: 'inherit' });
+process.exit(result.status ?? 1);
+`);
+    chmodSync(path.join(bin, "git"), 0o755);
+    writeFileSync(path.join(f.source, "new-commit.txt"), "not in custody\n");
+    git(f.source, "add", ".");
+    git(f.source, "commit", "-m", "uncustodied remote commit");
+    const missing = git(f.source, "rev-parse", "HEAD");
+    rmSync(f.source, { recursive: true });
+    rmSync(f.remote, { recursive: true });
+    const offline = { ...env, PATH: `${bin}:${process.env.PATH}` };
+    assert.throws(() => run(args.map(value => value === commit ? missing : value), offline), /remote import remains unestimated/);
+    assert.equal(JSON.parse(run(["status", "--json"], offline)).records.length, 1);
+    assert.equal(existsSync(path.join(f.workspaces, "priced-url")), false);
+    const created = JSON.parse(run(args, offline));
+    assert.equal(created.state, "active");
+    assert.equal(created.sourceCommit, commit);
+    assert.equal(created.capacity.estimate, "git-sparse-upper-bound");
+    assert.equal(created.capacity.sourceImportBytes, 0);
+    assert.equal(created.capacity.constructionBytes, expected.constructionBytes);
+    assert.equal(readFileSync(path.join(created.path, "AGENTS.md"), "utf8"), "source instructions\n");
+    assert.equal(readFileSync(path.join(created.path, "canon", "real-model", "binary-whole-map", "result.md"), "utf8"), "selected result\n");
+    assert.equal(existsSync(path.join(created.path, "excluded.bin")), false);
+    assert.equal(git(created.path, "config", "--local", "--get", "remote.origin.url"), repository);
+    assert.equal(path.dirname(readFileSync(path.join(created.path, ".git", "objects", "info", "alternates"), "utf8").trim()), mirror);
+    assert.deepEqual(JSON.parse(run(args, offline)), created);
+    const db = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    db.prepare("DELETE FROM workspace_capacity WHERE workspace_id=?").run(created.id);
+    db.prepare("UPDATE workspace SET state='creating' WHERE id=?").run(created.id);
+    db.close();
+    const resumed = JSON.parse(run(args, offline));
+    assert.equal(resumed.id, created.id);
+    assert.equal(resumed.capacity.sourceImportBytes, 0);
+    assert.equal(resumed.capacity.constructionBytes, expected.constructionBytes);
+  } finally { f.close(); }
+});
+
 test("budgeted source creation shares existing objects and records immutable sparse pricing", () => {
   const f = fixture();
   try {
