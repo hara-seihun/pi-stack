@@ -2831,6 +2831,48 @@ describe("thread inspection", () => {
     };
     expect(await service.inspect(thread.id, { context: "full" })).toMatchObject({ ok: false, error: { code: "oversized" } });
   });
+  it("projects empty native history before its first message and retains its generation after append and restart", async () => {
+    const { service, directory, sessions } = fixture();
+    const thread = value(await service.spawn({ requestId: "empty-native-window", cwd: directory }));
+    writeFileSync(thread.sessionFile, JSON.stringify({ type: "session", id: "empty", version: 3, timestamp: "2026-10-10T00:00:00Z", cwd: directory }) + "\n");
+    const first = value(await service.inspect(thread.id, { contextWindow: { limit: 60 } })).contextWindow!;
+    expect(first).toMatchObject({ total: 0, records: [] });
+    expect(value(await service.inspect(thread.id, { contextWindow: { limit: 60 } })).contextWindow!.source.generation).toBe(first.source.generation);
+    appendFileSync(thread.sessionFile, JSON.stringify({ type: "message", id: "first", parentId: null, message: { role: "user", content: "first", timestamp: 1 } }) + "\n");
+    const appended = value(await service.inspect(thread.id, { contextWindow: { limit: 60, generation: first.source.generation } })).contextWindow!;
+    expect(appended.total).toBe(1);
+    expect(appended.source.generation).toBe(first.source.generation);
+    expect(sessions).toHaveLength(0);
+    await service.close();
+    const restarted = fixture(directory).service;
+    expect(value(await restarted.inspect(thread.id, { contextWindow: { limit: 60 } })).contextWindow!.source.generation).toBe(first.source.generation);
+  });
+  it("migrates positive-only derived generation rows without losing identities and permits zero keys", async () => {
+    const { service, directory } = fixture();
+    const thread = value(await service.spawn({ requestId: "generation-schema-upgrade", cwd: directory }));
+    writeFileSync(thread.sessionFile, JSON.stringify({ type: "message", id: "prior", parentId: null, message: { role: "user", content: "retained", timestamp: 1 } }) + "\n");
+    const prior = value(await service.inspect(thread.id, { contextWindow: { limit: 60 } })).contextWindow!;
+    await service.close();
+    const db = new DatabaseSync(join(directory, "threads.sqlite"));
+    db.exec(`ALTER TABLE thread_context_generation RENAME TO saved_generation;
+      CREATE TABLE thread_context_generation(thread_id TEXT PRIMARY KEY REFERENCES thread(id),generation TEXT NOT NULL,key_count INTEGER NOT NULL CHECK(key_count>=1),key_hash TEXT NOT NULL);
+      INSERT INTO thread_context_generation SELECT * FROM saved_generation; DROP TABLE saved_generation;`);
+    const row = db.prepare("SELECT * FROM thread_context_generation WHERE thread_id=?").get(thread.id);
+    db.close();
+    const restored = fixture(directory).service;
+    expect(value(await restored.inspect(thread.id, { contextWindow: { limit: 60 } })).contextWindow!.source.generation).toBe(prior.source.generation);
+    const read = new DatabaseSync(join(directory, "threads.sqlite"));
+    expect(read.prepare("SELECT * FROM thread_context_generation WHERE thread_id=?").get(thread.id)).toEqual(row);
+    expect(() => read.prepare("UPDATE thread_context_generation SET key_count=-1 WHERE thread_id=?").run(thread.id)).toThrow();
+    read.close();
+    writeFileSync(thread.sessionFile, "");
+    const empty = value(await restored.inspect(thread.id, { contextWindow: { limit: 60 } })).contextWindow!;
+    expect(empty).toMatchObject({ total: 0, records: [] });
+    expect(empty.source.generation).not.toBe(prior.source.generation);
+    await restored.close();
+    const again = fixture(directory).service;
+    expect(value(await again.inspect(thread.id, { contextWindow: { limit: 60 } })).contextWindow!.source.generation).toBe(empty.source.generation);
+  });
   it("exports exact native entries on an explicit branch with stable presentation identities", async () => {
     const { service, directory } = fixture(undefined, false, undefined, () => ({ PI_REMOTE_SENDER_ID: "owner", PI_REMOTE_SENDER_NAME: "Owner" }));
     const thread = value(await service.spawn({ requestId: "explicit-native-branch", cwd: directory }));
