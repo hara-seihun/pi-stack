@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { cleanShellSpills } from "../deploy/clean-shell-spills.mjs";
 
@@ -11,6 +12,49 @@ function fixture(t) {
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   return directory;
 }
+
+test("native owner bundles its own package helpers and loads with only external runtime dependencies", t => {
+  const directory = fixture(t);
+  const root = fileURLToPath(new URL("../", import.meta.url));
+  const modules = process.env.PI_TEST_RUNTIME_MODULES ?? join(root, "node_modules");
+  const esbuild = join(modules, "esbuild/bin/esbuild");
+  const stage = join(directory, "runtime");
+  fs.mkdirSync(join(stage, "capacity"), { recursive: true });
+  fs.writeFileSync(join(stage, "package.json"), '{"type":"module"}');
+  fs.copyFileSync(join(root, "packages/runtime/managed-agent.mjs"), join(stage, "managed-agent.mjs"));
+  const recipe = fs.readFileSync(join(root, "deploy/runtime"), "utf8").split("\n")
+    .find(line => line.includes('--outfile="$stage/capacity/native-session.js"'));
+  assert.ok(recipe, "deployment must declare its native-session build");
+  const build = spawnSync("bash", ["-euo", "pipefail", "-c",
+    `${recipe.replace('"$root/node_modules/esbuild/bin/esbuild"', '"$esbuild"')} --metafile="$stage/inputs.json"`], {
+    env: { ...process.env, root, stage, esbuild }, encoding: "utf8", timeout: 5000,
+  });
+  assert.equal(build.status, 0, build.stderr);
+  const metadata = JSON.parse(fs.readFileSync(join(stage, "inputs.json"), "utf8"));
+  const imports = Object.values(metadata.outputs).flatMap(output => output.imports).filter(entry => entry.external);
+  const packages = new Set();
+  for (const { path } of imports) {
+    if (path.startsWith("node:")) continue;
+    const name = path.startsWith("@") ? path.split("/").slice(0, 2).join("/") : path.split("/")[0];
+    assert.notEqual(name, "pi-orchestrator", `native owner leaked a self-import: ${path}`);
+    packages.add(name);
+  }
+  for (const name of packages) {
+    const target = join(stage, "node_modules", name);
+    fs.mkdirSync(dirname(target), { recursive: true });
+    fs.symlinkSync(join(modules, name), target);
+  }
+  const load = spawnSync(process.execPath, ["--input-type=module", "-e", `
+    import assert from 'node:assert/strict';
+    import { pathToFileURL } from 'node:url';
+    const sdk = await import(pathToFileURL(${JSON.stringify(join(stage, "node_modules/@earendil-works/pi-coding-agent/dist/index.js"))}));
+    const owner = await import(pathToFileURL(${JSON.stringify(join(stage, "managed-agent.mjs"))}));
+    assert.equal(typeof sdk.main, 'function');
+    assert.equal(typeof owner.createManagedAgentSession, 'function');
+    assert.equal(typeof owner.recoverNativeSessionOwners, 'function');
+  `], { env: { ...process.env, PI_STACK_NATIVE_SESSION_MODULE: `file://${stage}/capacity/native-session.js` }, encoding: "utf8", timeout: 8000 });
+  assert.equal(load.status, 0, `${load.stdout}\n${load.stderr}`);
+});
 
 test("cleanup removes and counts only top-level regular spill logs", t => {
   const directory = fixture(t);
