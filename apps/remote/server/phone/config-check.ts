@@ -20,6 +20,16 @@ try {
   if (typeof config.chromium !== "string" || !config.chromium.startsWith("/") || !statSync(config.chromium).isFile()) fail("An absolute Chromium executable is required");
   accessSync(config.chromium, constants.X_OK);
 } catch { fail("Configured Chromium executable is unavailable"); }
+for (const field of ["holdsFile", "followUpApprovalsFile"]) {
+  if (config[field] === undefined) continue;
+  try {
+    if (typeof config[field] !== "string" || !config[field].startsWith("/")) fail("Contact policy files require absolute paths");
+    const stat = statSync(config[field]);
+    if (!stat.isFile() || stat.size > 1024 * 1024 || field === "followUpApprovalsFile" && (stat.uid !== 0 || (stat.mode & 0o022) !== 0)) fail("Follow-up approval policy must be operator-owned and not caller-writable");
+    const value = JSON.parse(readFileSync(config[field], "utf8"));
+    if (!value || typeof value !== "object" || Array.isArray(value)) fail("Contact policy files require JSON objects");
+  } catch { fail("Contact policy files are unreadable or invalid"); }
+}
 let adminToken = "", silentToken = "";
 for (const field of ["adminTokenFile", "silentTokenFile"]) {
   try {
