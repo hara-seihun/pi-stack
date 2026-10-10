@@ -59,7 +59,29 @@ if (name === "ssh") {
   const script = readFileSync(0, "utf8");
   args = args.slice(1);
   if (args[0] === "--") args.shift();
-  if (script.includes('operation=$1') && script.includes('pi_stack_acquire_host_lock')) {
+  if (script.includes('observations=\'{}\'') && script.includes('meeting_mode=$6')) {
+    assert.equal(args.length, 6);
+    const [requestId, integrationSha, hostId, repository, hostConfig, meetingMode] = args;
+    assert.equal(hostId, host);
+    assert.equal(repository, join(root, 'repository'));
+    assert.equal(hostConfig, join(root, 'host.json'));
+    const reservation = JSON.parse(readFileSync(process.env.PI_STACK_HOST_LOCK_PATH + '.publication', 'utf8'));
+    assert.deepEqual(reservation, { requestId, integrationSha }, 'batched observation cannot outlive its own reservation');
+    const state = world().hosts[host];
+    event('census');
+    const census = { host, selectedCommit: state.selected, checkoutCommit: state.selected, runtimes: [], fleet: { activeRuns: [] } };
+    const meetings = meetingMode === 'override' ? { state: 'override' } : { status: 0, stdout: state.mode === 'live-meeting' ? 'fixture-room:1\n' : '', stderr: '' };
+    if (meetingMode !== 'override') event('meeting-probe');
+    event('native-probe');
+    const native = ['native-probe-error', 'native-unmarked-busy'].includes(state.mode)
+      ? { status: state.mode === 'native-unmarked-busy' ? 75 : 66, stdout: '', stderr: 'fixture native source status unavailable\n' }
+      : { status: 0, stdout: '', stderr: '' };
+    json({ version: 1, host, requestId, integrationSha, observations: {
+      reservation: { status: 0, stdout: '', stderr: '' }, runtime: { status: 0, stdout: JSON.stringify(census), stderr: '' }, meetings, native,
+    } });
+  } else if (script.includes('git -C "$1" fetch --quiet --no-tags origin "$2"')) {
+    exec('/bin/bash', ['-s', '--', ...args], { input: script });
+  } else if (script.includes('operation=$1') && script.includes('pi_stack_acquire_host_lock')) {
     event(args[0]);
     exec("/bin/bash", ["-s", "--", ...args], { input: script });
   } else if (script.includes('native-history-boundary-fixture')) {
@@ -709,7 +731,7 @@ for (const divergentHost of hostIds) test(`divergent ancestry on ${divergentHost
   assert.equal(f.world().hosts[readyHost].selected, f.revision);
   assert.equal(f.world().hosts[divergentHost].selected, divergent);
   assert.ok(f.events().filter(event => event.host === divergentHost)
-    .every(event => ["reserve", "census", "release"].includes(event.action)));
+    .every(event => ["reserve", "census", "meeting-probe", "native-probe", "release"].includes(event.action)));
   for (const host of hostIds) {
     assert.equal(request.reservations[host].state, "released");
     assert.equal(existsSync(join(f.root, `${host}.lock.publication`)), false);
