@@ -20,6 +20,7 @@ import { loopbackPeer } from "pi-orchestrator/api";
 import { handleAgentRooms, roomPersonUids } from "./agent-rooms";
 import { handleAgentSignal, isSignalProductPath } from "./agent-signal";
 import { handleAgentActions } from "./agent-actions";
+import { handleWorkAgentActions, readWorkActionsConfig, WORK_ACTION_CAPABILITY_HEADER } from "./work-action-routing";
 import { handleAgentManager } from "./agent-manager";
 import { oneKenanEnabled } from "kenan-memory/config";
 import { oneKenanConfig, custodyAuthenticate, custodyStatus } from "./one-kenan";
@@ -368,7 +369,7 @@ async function proxy(person: Pick<Person, "user" | "port">, origin: string, req:
   const headers = new Headers(req.headers);
   for (const name of (headers.get("connection") ?? "").split(",")) if (name.trim()) headers.delete(name.trim());
   for (const name of [...headers.keys()]) {
-    if (HOP_BY_HOP.has(name) || ["host", "cookie", "authorization", "forwarded", "referer", "cf-access-token", "cf-access-jwt-assertion", "cf-access-authenticated-user-email"].includes(name) || name.startsWith("x-forwarded-") || name.startsWith("x-pi-remote-")) headers.delete(name);
+    if (HOP_BY_HOP.has(name) || ["host", "cookie", "authorization", "forwarded", "referer", "cf-access-token", "cf-access-jwt-assertion", "cf-access-authenticated-user-email", WORK_ACTION_CAPABILITY_HEADER].includes(name) || name.startsWith("x-forwarded-") || name.startsWith("x-pi-remote-")) headers.delete(name);
   }
   headers.set("x-pi-remote-user", person.user);
   if (upstream) headers.set(UPSTREAM_CREDENTIAL_HEADER, upstreamCredential(upstream));
@@ -479,10 +480,14 @@ async function route(req: Request, url: URL, peer?: { uid: number }): Promise<Re
     user => grants.get(user) ?? [], ENVIRONMENT_ID,
     (person, origin, request, target, upstream, sourceEnvironment) => proxy(person, origin, request, target, request.signal, upstream, sourceEnvironment));
   if (/^\/v1\/(?:manager-relay|remotes\/[^/]+\/v1\/manager-relay)(?:\/|$)/.test(url.pathname)) return Response.json({ error: "Use the account-bound manager relay" }, { status: 403 });
-  if (url.pathname === "/v1/external-actions") return handleAgentActions(req, peer, roomPeople, user => byUser.get(user),
-    user => grants.get(user) ?? [], ENVIRONMENT_ID,
-    (person, origin, request, target, upstream, sourceEnvironment) => proxy(person, origin, request, target, request.signal, upstream, sourceEnvironment));
-  if (/^\/v1\/remotes\/[^/]+\/v1\/external-actions(?:\/|$)/.test(url.pathname)) return Response.json({ ok: false, error: "unavailable", message: "External actions require the account-bound local authority" }, { status: 403 });
+  if (url.pathname === "/v1/external-actions") {
+    const work = await handleWorkAgentActions(req, peer, roomPeople, user => byUser.get(user), readWorkActionsConfig());
+    if (work) return work;
+    return handleAgentActions(req, peer, roomPeople, user => byUser.get(user),
+      user => grants.get(user) ?? [], ENVIRONMENT_ID,
+      (person, origin, request, target, upstream, sourceEnvironment) => proxy(person, origin, request, target, request.signal, upstream, sourceEnvironment));
+  }
+  if (/^\/v1\/(?:work-external-actions|remotes\/[^/]+\/v1\/(?:external-actions|work-external-actions))(?:\/|$)/.test(url.pathname)) return Response.json({ ok: false, error: "unavailable", message: "External actions require the account-bound local authority" }, { status: 403 });
   if (/^\/v1\/agent-signal(?:\/|$)/.test(url.pathname)) return handleAgentSignal(req, peer, roomPeople, user => byUser.get(user),
     (person, request, target) => proxy(person, `http://127.0.0.1:${person.port}`, request, target, request.signal));
   if (isSignalProductPath(url.pathname)) return Response.json({ error: "Signal is an agent tool, not an app endpoint", code: "forbidden" }, { status: 403 });
