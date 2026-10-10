@@ -1,4 +1,4 @@
-import { createServer, type Server } from "node:http";
+import { createServer, type Server, type RequestListener } from "node:http";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { loadCoreConfig, type CoreResult } from "./config.js";
@@ -13,6 +13,7 @@ import { createCoreProvider, type CoreProvider } from "./provider.js";
 import { createCoreRootIntegration, type CoreRootPlugin } from "./root.js";
 import { webRequest, writeResponse } from "./http.js";
 import { startCallbackTransports, type CallbackTransports } from "./callback-transports.js";
+import { startGatewayTransports, type GatewayTransports } from "./gateway-transport.js";
 
 export type RunningCore = { service: CoreService; close(): Promise<CoreResult<void>> };
 export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningCore>> {
@@ -21,6 +22,7 @@ export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningC
   let provider: CoreProvider | undefined, root: CoreRootPlugin | null = null, images: CoreImages | undefined, memory: CoreMemoryAdapter | undefined;
   const duties = new CoreDuties(config.duties, { scopes: config.scopes, principals: config.principals, policy: config.policy, owner: id => core.owner(id), enabled: () => !shutdown.signal.aborted });
   let callbacks: CallbackTransports | undefined;
+  let gateways: GatewayTransports | undefined;
   let server: Server | undefined, clock: ReturnType<typeof setInterval> | undefined;
   let reconciliation: Promise<void> | undefined, closing: Promise<CoreResult<void>> | undefined;
   let healthy = true;
@@ -30,6 +32,7 @@ export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningC
       shutdown.abort();
       if (clock) clearInterval(clock);
       try {
+        await gateways?.close();
         await callbacks?.close();
         await root?.drain();
         await reconciliation;
@@ -96,7 +99,7 @@ export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningC
     const retained = await startCallbackTransports(config.callbacks, { root, memory: config.memory.kind === "configured" ? memory ?? null : null });
     if (!retained.ok) { await close(); return retained; }
     callbacks = retained.value;
-    server = createServer((req, res) => {
+    const handleRequest: RequestListener = (req, res) => {
       const abort = new AbortController();
       res.once("close", () => abort.abort());
       void (async () => {
@@ -127,10 +130,14 @@ export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningC
         if (res.headersSent) res.destroy();
         else { res.writeHead(500, { "content-type": "application/json" }); res.end(JSON.stringify({ error: { code: "unavailable", message: "Core request failed; inspect existing request identity before retry" } })); }
       });
-    });
+    };
+    server = createServer(handleRequest);
     await new Promise<void>((resolve, reject) => { server!.once("error", reject); server!.listen(config.port, config.host, () => { server!.off("error", reject); resolve(); }); });
     const activated = await core.activate();
     if (!activated.ok) { await close(); return activated; }
+    const admittedGateways = await startGatewayTransports(config.gatewayTransport, config.gatewayBindings, handleRequest);
+    if (!admittedGateways.ok) { await close(); return admittedGateways; }
+    gateways = admittedGateways.value;
     const reconcile = () => {
       provider?.tick();
       if (reconciliation || shutdown.signal.aborted) return;

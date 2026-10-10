@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
+import { bindGatewayRequest } from "./gateway.js";
 
 export function webRequest(req: IncomingMessage, origin: string, signal: AbortSignal, body: "stream" | "unread"): Request {
   const headers = new Headers();
@@ -10,7 +11,9 @@ export function webRequest(req: IncomingMessage, origin: string, signal: AbortSi
   const method = req.method ?? "GET";
   const init: RequestInit & { duplex?: "half" } = { method, headers, signal };
   if (body === "stream" && method !== "GET" && method !== "HEAD") { init.body = Readable.toWeb(req) as unknown as ReadableStream<Uint8Array>; init.duplex = "half"; }
-  return new Request(new URL(req.url ?? "/", origin), init);
+  const request = new Request(new URL(req.url ?? "/", origin), init);
+  bindGatewayRequest(req, request);
+  return request;
 }
 export async function writeResponse(response: Response, res: ServerResponse): Promise<void> {
   res.writeHead(response.status, Object.fromEntries(response.headers));

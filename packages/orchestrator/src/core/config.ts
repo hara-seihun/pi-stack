@@ -5,6 +5,7 @@ import type { CoreConfig, CoreScope } from "./contracts.js";
 import { parseCoreProviderConfig } from "./provider.js";
 import { parseCoreRootConfig } from "./root.js";
 import { parseCoreCallbackConfig } from "./callback-transports.js";
+import { parseGatewayConfig } from "./gateway.js";
 import { parseCoreImagesConfig } from "./images.js";
 import { parseCoreMemoryConfig } from "./memory.js";
 import { parseCoreDutiesConfig } from "./duties-runtime.js";
@@ -54,6 +55,8 @@ export function parseCoreConfig(value: unknown): CoreResult<CoreConfig> {
     scopeIds.add(scope.id);
     databases.add(storage.databasePath as string);
   }
+  const gateways = parseGatewayConfig(value.gatewayTransport, value.gatewayBindings, value.principals, value.scopes as unknown as CoreScope[]);
+  if (!gateways.ok) return gateways;
   const digests = new Set<string>();
   for (const credential of value.credentials) {
     if (!record(credential) || typeof credential.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(credential.sha256) || digests.has(credential.sha256)

@@ -38,6 +38,16 @@ These are additional HTTP sockets in the same core process, forwarding exclusive
 
 Retirement is explicit: after retained clients referencing an old URL have drained or advanced to current endpoints, remove that listener from the registered configuration; use `{kind:"none"}` when all are retired. An idle socket or elapsed time does not prove its clients are gone. There is no automatic timeout retirement.
 
+## Verified owning gateways
+
+`gatewayTransport` is explicitly `{kind:"none"}` with `gatewayBindings:[]`, or `{kind:"unix",socketDir:"/run/pi-stack/gateways"}` with registered bindings. Each binding names `{gatewayId,purpose:"core-ingress",peerUid,principalId,scopeIds,routeCeiling:[{method,kind:"exact"|"prefix",path}]}`. Its fixed socket is `GATEWAY_ID.sock`. The host configuration selects the principal; request headers cannot select one. Scope routes, images and the exact read-only usage/people-usage endpoints require explicit ceilings. Their actual resource grants remain independent.
+
+Before Node HTTP sees a connection, the fixed `gateway-peer.py` helper reads Linux `SO_PEERCRED` from an inherited socket descriptor without consuming bytes. Only the configured kernel UID is admitted. `webRequest()` preserves that verified context for both unread and streamed request construction. Core authorization intersects gateway principal/scope/route ceilings with native thread capabilities and any separately supplied credential; it never promotes memory, provider, signing or unlock credentials. The owning Remote/router remains responsible for browser sessions, current room membership, revocation and full reply audiences. A room custodian's internal shared-scope custody is not a person's disclosure grant.
+
+`unixGatewayFetch({socketPath,peerUid},input,init)` verifies the server's kernel UID before writing any request, supports streamed bodies/responses and abort, and introduces no secret or retry. It serves both directions. Core callbacks use the configured `scope.callbackGateway` and exact `/run/pi-stack/gateways/remote-SCOPE/callback.sock`; deployment prepares that scope's UID-owned protected directory below the root-owned parent. Remote owns a separate `purpose:"remote-callback"` binding with core UID and exact prepare-message/manager-relay ceilings. Ordinary TCP callbacks cannot acquire this verified context.
+
+Core socket startup holds an exclusive resource-owner flock through bind, drain and unlink. Following a crash it removes a configured socket only after affirmative `ECONNREFUSED`, unchanged inode, exact owner and private mode. A live or uncertain listener is never unlinked. Kernel credential acquisition and socket lifetime are resources only, not another controller.
+
 ## Focused proof and deployment boundary
 
 `tests/core-custody.test.ts` attaches synthetic old-generation sockets through a real process descriptor, checks unchanged store identity/bytes, rejects changed PID birth and unregistered paths, proves atomic private-batch rejection and accepted judgment drain, and transports a large frame through the fixed Python bridge. Root managed-session tests exercise the actual shared ThreadService/capacity, exact queued original request adoption, replay fencing, terminal reply reuse and missing-owner errors.
