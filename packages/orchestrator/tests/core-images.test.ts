@@ -13,7 +13,7 @@ import { indexedThreadHistory } from "../src/threads/history.mjs";
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
 
-async function fixture(native?: { watermarked: boolean }) {
+async function fixture(native?: { watermarked: boolean }, unavailable = false) {
   const root = mkdtempSync(join(tmpdir(), "core-image-adoption-"));
   const databasePath = join(root, "supervisor.sqlite3"), artifactRoot = join(root, "images"), adoptionReceiptPath = join(root, "adopt.json");
   mkdirSync(artifactRoot);
@@ -55,7 +55,7 @@ async function fixture(native?: { watermarked: boolean }) {
   const seen: readonly string[][] = [];
   let listener: ((event: ThreadServiceEvent) => void) | null = null;
   const service = new CoreImages({ kind: "configured", registries: [spec] }, { accounts: { store: accountStore, shared: undefined },
-    scope: () => ({ ok: true, value: { runtime: { path: path => path }, uid: process.getuid!(), allowsThread: id => id === "thread",
+    scope: () => ({ ok: true, value: unavailable ? null : { runtime: { path: path => path }, uid: process.getuid!(), allowsThread: id => id === "thread",
       threads: { snapshot: () => native ? [{ id: "thread", sessionFile: nativePath } as Thread] : [], subscribe: value => { listener = value; return () => { listener = null; }; } } } }),
     authorizeNative: () => ({ ok: true, value: undefined }),
     authorize: (_request, _scope, _resource, actions) => {
@@ -71,6 +71,14 @@ test("images require explicit configuration and cannot infer filesystem grants",
   expect(parseCoreImagesConfig(undefined).ok).toBe(false);
   expect(parseCoreImagesConfig({ kind: "disabled" })).toEqual({ ok: true, value: { kind: "disabled" } });
   expect(parseCoreImagesConfig({ kind: "configured", registries: [] }).ok).toBe(false);
+});
+
+test("unavailable image scope retains its descriptor without opening missing storage", async () => {
+  const f = await fixture(undefined, true);
+  rmSync(f.spec.databasePath);
+  rmSync(f.spec.adoptionReceiptPath);
+  expect((await f.service.start()).ok).toBe(true);
+  expect((await f.request("sync", { have: {} }))!.status).toBe(503);
 });
 
 test("core adopts retained registry/artifacts in place, gates all requests, and rejects changed message identities", async () => {

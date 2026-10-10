@@ -25,7 +25,7 @@ export type CoreImagesConfig = { kind: "disabled" } | { kind: "configured"; regi
 export type CoreImageScope = { runtime: Pick<CoreRuntime, "path">; uid: number; allowsThread(id: string): boolean; threads: Pick<ThreadService, "snapshot" | "subscribe"> };
 export type CoreImagesOptions = {
   accounts: SharedImageAccountOwner;
-  scope(scopeId: string): CoreResult<CoreImageScope>;
+  scope(scopeId: string): CoreResult<CoreImageScope | null>;
   authorize(request: Request, scopeId: string, resource: Resource, actions: readonly ("read" | "execute" | "use")[]): CoreResult<void>;
   authorizeNative(scopeId: string, resource: Resource, actions: readonly ("execute" | "use")[]): CoreResult<void>;
 };
@@ -67,8 +67,10 @@ export class CoreImages {
     if (this.config.kind === "disabled") return { ok: true, value: undefined };
     for (const spec of this.config.registries) {
       if (this.registries.has(spec.scopeId)) return invalid("Core images already started");
-      const scope = this.options.scope(spec.scopeId);
-      if (!scope.ok) { await this.close(); return scope; }
+      const resolved = this.options.scope(spec.scopeId);
+      if (!resolved.ok) { await this.close(); return resolved; }
+      if (resolved.value === null) continue;
+      const scope = { value: resolved.value };
       const ownership = acquireDatabaseOwnership({ id: `${spec.scopeId}:images`, databasePath: spec.databasePath, adoptionReceiptPath: spec.adoptionReceiptPath, uid: scope.value.uid, requiredTables: ["inline_images", "inline_image_versions", "inline_image_messages", "core_image_acceptance", "core_image_sources", "core_image_ingress_errors", "core_image_threads"] }, path => scope.value.runtime.path(path));
       if (!ownership.ok) { await this.close(); return ownership; }
       let db: Database | undefined;

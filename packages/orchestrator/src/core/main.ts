@@ -81,9 +81,11 @@ export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningC
       if (!provider) { await close(); return { ok: false, error: { code: "invalid-config", message: "Image generation requires the configured shared provider owner" } }; }
       images = new CoreImages(config.images, { accounts: provider.imageAccounts,
         scope: id => {
-          const owner = core.owner(id), scope = config.scopes.find(scope => scope.id === id);
-          if (!owner.ok) return owner;
+          const scope = config.scopes.find(scope => scope.id === id);
           if (!scope) return { ok: false, error: { code: "invalid-config", message: "Unknown image scope" } };
+          if (scope.availability.kind === "unavailable") return { ok: true, value: null };
+          const owner = core.owner(id);
+          if (!owner.ok) return owner;
           return { ok: true, value: { runtime: owner.value.runtime, uid: scope.custody.uid, threads: owner.value.threads, allowsThread: threadId => !!owner.value.threads.get(threadId) } };
         },
         authorize: (request, id, resource, actions) => core.authorizeScope(request, id, resource, actions),
