@@ -2616,6 +2616,7 @@ function repairRun(requestId) {
         "--owner", repair.id, "--mode", "writer", "--intent", "source-only", "--headroom-gib", "2",
         "--growth-mib", "512", "--creation-timeout-seconds", "40", "--json"], { timeoutSeconds: 45 }));
       repair.workspace = workspace.path;
+      repair.ownedWorkspace = { id: workspace.id, path: workspace.path, owner: workspace.owner };
       writeRepair(repair);
       checked("git", ["checkout", "--detach", repairSource], { cwd: repair.workspace });
     } catch (error) {
@@ -2680,7 +2681,9 @@ function acceptRepairResult(repair) {
     checked(installedCommand, ['continue-source', request.requestId, outcome.sourceSha, sourceRef, repair.id], { timeoutSeconds: 45 });
     repair.status = "retry-submitted";
     writeRepair(repair);
-    checked("agent-workspace", ["release", "--path", repair.workspace], { timeoutSeconds: 10 });
+    if (typeof repair.ownedWorkspace?.id === 'string' && repair.ownedWorkspace.owner === repair.id && repair.ownedWorkspace.path === repair.workspace) {
+      checked("agent-workspace", ["release", "--id", repair.ownedWorkspace.id], { timeoutSeconds: 10 });
+    }
   } else if (outcome.status === "infrastructure-fixed") {
     repair.status = "ready-to-retry";
   }

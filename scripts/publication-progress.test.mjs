@@ -66,7 +66,12 @@ fi
   executable(join(bin, "agent-workspace"), `#!/bin/sh
 printf '%s\\n' "$*" >> "$AGENT_WORKSPACE_LOG"
 if [ "$1" = "create" ]; then
-  printf '{"path":"%s"}\\n' "$STUB_WORKSPACE"
+  owner=''
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = '--owner' ]; then owner="$2"; break; fi
+    shift
+  done
+  printf '{"id":"fixture-owned-workspace","path":"%s","owner":"%s"}\\n' "$STUB_WORKSPACE" "$owner"
 fi
 `);
   executable(join(bin, "pi"), `#!/bin/sh
@@ -525,6 +530,8 @@ esac
   assert.equal(continued.integrationSha, undefined);
   assert.equal(continued.integrationHistory[0].integrationSha, request.integrationSha);
   assert.equal(existsSync(curlLog), false, "notification transport cannot gate source custody");
+  assert.equal(existsSync(environment.AGENT_WORKSPACE_LOG), false, 'accepting external source never releases a workspace this repair did not create');
+  assert.ok(existsSync(f.workspace));
   assert.equal(run("git", ["rev-parse", repairSourceRef(requestId, f.repairedSha)], { cwd: f.remote }).stdout.trim(), f.repairedSha);
   const repeated = runPublication(f.root, f.bin, "repair-result", environment);
   assert.equal(repeated.status, 0, repeated.stderr);
@@ -592,7 +599,7 @@ test("repair-run launches the registered local Pi process once and accepts each 
       assert.match(prompt, /"command":"npm","args":\["run","check"\]/);
       if (scenario.source) {
         assert.match(readFileSync(environment.PUBLICATION_SUBMIT_LOG, "utf8"), new RegExp(`continue-source ${requestId} ${fixture.repairedSha} ${repairSourceRef(requestId, fixture.repairedSha)} ${repair.id}`));
-        assert.match(workspaceCalls, new RegExp(`release --path ${fixture.workspace.replaceAll("/", "\\/")}`));
+        assert.match(workspaceCalls, /release --id fixture-owned-workspace/);
       }
 
       result = runPublication(fixture.root, fixture.bin, "repair-run", environment);
