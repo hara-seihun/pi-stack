@@ -78,3 +78,11 @@ button.agent-route-name:hover, button.agent-route-name:focus-visible { text-deco
 .agent-message-step[open] > summary > .agent-message-chevron { transform: rotate(90deg); }
 .agent-message-detail { padding-left: calc(18px + var(--space-2)); }
 @media (max-width: 420px) { .agent-message-detail { padding-left: 0; } }
+
+.manager-conversation .transcript-message-human { width: fit-content; min-width: 0; max-width: 85%; margin-left: auto; }
+.manager-conversation .transcript-message-human > .message { padding: 10px 14px; border-radius: 14px 14px 4px 14px; background: var(--surface-2); }
+.manager-conversation .transcript-message-human .message-input-status { text-align: right; padding-top: 4px; }
+.manager-conversation .transcript-message-agent { width: fit-content; min-width: 0; max-width: 96%; margin-right: auto; }
+.manager-conversation .live-answer > .message { max-width: 96%; margin-right: auto; }
+.message-input-status { color: var(--muted); font-size: 12px; padding: 0 14px 6px; overflow-wrap: anywhere; }
+.message-input-failed { color: var(--danger); }

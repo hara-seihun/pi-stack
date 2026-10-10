@@ -24,7 +24,7 @@ export { createWorkspaceAdmission, createCwdAdmission,
 } from "./workspace-admission.js";
 export type { Result, ThreadError, Delivery, ThinkingLevel, Speed, Admission, ThreadState, WorkOutcome,
   ThreadSettings, SettingsOverrides, Thread, ThreadMessage, ThreadQuestion, PendingQuestions, PendingQuestionsQuery, QuestionThread, QuestionInput, AskThreadQuestions, AnswerThreadQuestion, QuestionsReceipt, QuestionReceipt, QuestionEvents, QuestionState, SpawnThread, SendThread, ThreadList, ThreadPage, ArchivedThreadsQuery, ArchivedThreadsResult,
-  ThreadRead, ThreadHistory, ThreadInspection, ThreadSettlement, ThreadSettlements, AwaitThreads, ThreadAwaitResult, ThreadControl, ThreadApi, PiEvent, PiCommand, PiSession, PiSessionOptions, OpenPiSession, PiRunnerReference, AttachPiSession } from "./threads/contracts.js";
+  ThreadRead, ThreadHistory, ThreadInspection, ThreadInputState, ThreadSettlement, ThreadSettlements, AwaitThreads, ThreadAwaitResult, ThreadControl, ThreadApi, PiEvent, PiCommand, PiSession, PiSessionOptions, OpenPiSession, PiRunnerReference, AttachPiSession } from "./threads/contracts.js";
 export { THREAD_STATES, isThreadState, resolveDelivery, validateThreadAwait, THREAD_AWAIT_TIMEOUT_MS } from "./threads/contracts.js";
 export { MANAGER_INACTIVITY_MS, combineManagerWork, validateManagerWorkSummary, type ManagerWorkSummary, type ManagerWatchObservation } from "./threads/manager-watchdog.js";
 export type { ThreadLifecycle } from "./threads/lifecycle.js";

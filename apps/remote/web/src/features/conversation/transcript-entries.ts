@@ -31,9 +31,10 @@ export function entryFromHead(head: TranscriptItemHead, bodyLoaded = false): Con
   const metricsSignature = metrics
     ? `:metrics:${metrics.ttftMs}:${metrics.generationMs}:${metrics.outputTokens}:${metrics.tokensPerSecond ?? "null"}`
     : "";
+  const inputSignature = head.kind === "user" && head.inputId ? `:input:${head.inputId}:${JSON.stringify(head.inputState ?? null)}` : "";
   const base = {
-    key: `${head.kind}:${head.seq}`,
-    signature: `${head.id}${head.monoVisibility === undefined ? "" : `:mono:${head.monoVisibility}`}${bodyLoaded ? ":body" : ""}${"textTruncated" in head && head.textTruncated ? ":preview" : ""}${metricsSignature}${head.kind === "user" || head.kind === "assistant" ? `${head.label ?? ""}:${JSON.stringify(head.agentSender ?? null)}:${head.identity?.id ?? ""}:${JSON.stringify(head.reactions ?? [])}:${JSON.stringify(head.reply ?? null)}` : ""}`,
+    key: head.sourceKey ?? `${head.kind}:${head.seq}`,
+    signature: `${head.id}${head.monoVisibility === undefined ? "" : `:mono:${head.monoVisibility}`}${bodyLoaded ? ":body" : ""}${"textTruncated" in head && head.textTruncated ? ":preview" : ""}${metricsSignature}${inputSignature}${head.kind === "user" || head.kind === "assistant" ? `${head.label ?? ""}:${JSON.stringify(head.agentSender ?? null)}:${head.identity?.id ?? ""}:${JSON.stringify(head.reactions ?? [])}:${JSON.stringify(head.reply ?? null)}` : ""}`,
     kind: head.kind,
     monoVisibility: head.monoVisibility,
     label: entryLabel(head),
@@ -55,7 +56,7 @@ export function entryFromHead(head: TranscriptItemHead, bodyLoaded = false): Con
   switch (head.kind) {
     case "user":
     case "assistant":
-      return presentAgentMessage({ ...base, text: head.text, textTruncated: head.textTruncated, agentSender: head.agentSender, messageTimestamp: head.timestamp, identity: head.identity, reactions: head.reactions, reply: head.reply });
+      return presentAgentMessage({ ...base, text: head.text, textTruncated: head.textTruncated, agentSender: head.agentSender, messageTimestamp: head.timestamp, inputId: head.inputId, inputState: head.inputState, identity: head.identity, reactions: head.reactions, reply: head.reply });
     case "notice":
       return { ...base, text: head.text, textTruncated: head.textTruncated, messageTimestamp: head.timestamp };
     case "system": case "tool": case "thinking":

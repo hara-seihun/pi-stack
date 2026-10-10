@@ -56,6 +56,29 @@ test("interactive sessions default to thirty minutes and remote settings take pr
   assert.match(prompt, /1800 seconds \(30 minutes\)/);
 });
 
+test("the canonical manager has a hard five-second cap independent of UI and configured worker limits", () => {
+  for (const context of [undefined, ui, { hasUI: false }]) {
+    const handlers = load({ PI_THREAD_MANAGER: "1", PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS: "1800" });
+    const toolCall = handlers.get("tool_call");
+    expectManager(toolCall, context);
+    assert.match(handlers.get("before_agent_start")({ systemPrompt: "base" }, context).systemPrompt, /5 seconds/);
+  }
+  for (const marker of [undefined, "0", "true"]) {
+    assert.equal(timeoutPolicy({ PI_THREAD_MANAGER: marker }, true).maxTimeoutSeconds, 1800);
+    assert.equal(timeoutPolicy({ PI_THREAD_MANAGER: marker }).maxTimeoutSeconds, 55);
+  }
+  assert.equal(timeoutPolicy({ PI_THREAD_MANAGER: "1", PI_BASH_TIMEOUT_MAX_SECONDS: "2" }).maxTimeoutSeconds, 2);
+});
+
+function expectManager(toolCall, context) {
+  for (const timeout of [undefined, null, 0, -1, NaN, Infinity, "5", 5.01, 55]) {
+    assert.equal(toolCall(bashCall({ command: "true", timeout }), context).block, true);
+    assert.equal(toolCall({ toolName: "converge", input: { action: "bash", command: "true", timeout } }, context).block, true);
+  }
+  assert.equal(toolCall(bashCall({ command: "true", timeout: 5 }), context), undefined);
+  assert.equal(toolCall({ toolName: "converge", input: { action: "read", path: "x" } }, context), undefined);
+}
+
 test("only bounded positive timeouts are accepted", () => {
   const policy = timeoutPolicy({});
   assert.equal(checkBashTimeout(1, policy), null);

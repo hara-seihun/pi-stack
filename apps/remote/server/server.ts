@@ -91,6 +91,7 @@ import { ensureExternalMeetingThread } from "./meet/threads";
 import { liveDevInstructions } from "./skills";
 import { configuredThreadDestinations, defaultThreadDestinations, recentThreadModels, threadModelOptions, type ThreadDestination } from "./thread-model-defaults";
 import { contextFilesPrompt, listContextFiles, selectContextFiles, watchContextFiles, type ContextFileSources } from "./thread-context-files";
+import { reconcileThreadContextSelection, type ThreadContextSelection } from "./manager-context-selection";
 import { API } from "./api";
 import { SettingsService, type OwnedSettingAdapter } from "./settings-store";
 import { machineActionDefinition, modelAvailabilityDefinition } from "../shared/settings";
@@ -389,12 +390,14 @@ manager = MANAGER_DESTINATION ? new Manager(db, threads, () => {
   const admitted = workspaceAdmission.resolve(MANAGER_DESTINATION.workspaceId);
   if (!admitted.ok) return { ok: false, error: { code: "unavailable", message: admitted.error.message } };
   const sources = destinationContextSources(MANAGER_DESTINATION);
-  const selected = selectContextFiles(sources, watchContextFiles(MANAGER_DESTINATION.managerContextFiles, sources?.directory));
-  return selected.ok ? { ok: true, value: { cwd: admitted.value.cwd, metadata: {
-    workspaceId: MANAGER_DESTINATION.workspaceId, profileId: MANAGER_DESTINATION.id, contextFiles: selected.value,
-  } } } : { ok: false, error: { code: "invalid_request", message: selected.error } };
+  const contextFiles = sources ? listContextFiles(sources).map(offer => offer.name) : [];
+  return { ok: true, value: { cwd: admitted.value.cwd, metadata: {
+    workspaceId: MANAGER_DESTINATION.workspaceId, profileId: MANAGER_DESTINATION.id, contextFiles, contextSelection: "all",
+  } } };
 }, unwrap(managerSettings(process.env.PI_REMOTE_MANAGER_MODEL)), () => { signalSync(); void refreshThreadNotifications(); void pushNotifications(); }) : null;
 if (manager) {
+  const existingManager = manager.snapshot().managerThreadId;
+  if (existingManager && threads.get(existingManager)) effectiveThreadContextSelection(existingManager);
   const workObserver = managerRelayClient();
   threads.setManagerWatchdog(async () => {
     const managerThreadId = manager!.snapshot().managerThreadId;
@@ -767,13 +770,21 @@ function meetingInstructions(sessionId: string, audience: "thread" | "voice" = "
   return meetingThreadInstructions(thread.metadata?.liveDispatcher === true ? "root" : "worker");
 }
 
-/** The chosen context files of a thread, whole, for its system prompt. Children do not inherit their parent's choice. */
+function effectiveThreadContextSelection(sessionId: string): ThreadContextSelection {
+  const thread = threads.get(sessionId);
+  if (!thread) throw new Error("Context selection requires an owned thread");
+  const destination = THREAD_DESTINATIONS.get(String(thread.metadata?.profileId ?? ""));
+  if (thread.metadata?.manager === true && !destination) throw new Error("Manager context destination is unavailable");
+  return unwrap(reconcileThreadContextSelection(thread, destinationContextSources(destination), metadata => threads.update(sessionId, { metadata })));
+}
+
+/** Whole current-destination context, reread each turn; workers never inherit the manager's selection. */
 function chosenContextFiles(sessionId: string): string {
   const thread = threads.get(sessionId);
-  const names = thread?.metadata?.contextFiles;
-  if (!Array.isArray(names) || !names.length) return "";
-  const sources = destinationContextSources(THREAD_DESTINATIONS.get(String(thread!.metadata!.profileId ?? "")));
-  return contextFilesPrompt(sources, names.filter((name): name is string => typeof name === "string"));
+  if (!thread) return "";
+  const selection = effectiveThreadContextSelection(sessionId);
+  const sources = destinationContextSources(THREAD_DESTINATIONS.get(String(thread.metadata?.profileId ?? "")));
+  return contextFilesPrompt(sources, selection.files, selection.mode === "all");
 }
 
 function threadInstructions(sessionId: string, audience: "thread" | "voice" = "thread"): string {
@@ -1002,11 +1013,11 @@ function queuedMessagesFor(id: string): QueuedMessage[] {
   return pendingMessages(id).filter(message => !message.landedAt).map(message => {
     // A message the runtime has taken cannot be edited, steered or removed;
     // one still waiting can be all three, whether or not the thread is held.
-    const waiting = (message.state ?? "queued") === "queued";
+    const waiting = message.state === "queued";
     return {
       id: message.id, text: decodeMessageReply(message.text).text, delivery: message.delivery,
       state: waiting ? "queued" as const : "dispatched" as const,
-      ...(!waiting && message.insertedAt === null ? { acknowledgement: acknowledgement?.overdue ? "unconfirmed" as const : "pending" as const } : {}),
+      ...(!waiting && message.insertedAt == null ? { acknowledgement: acknowledgement?.overdue ? "unconfirmed" as const : "pending" as const } : {}),
       canSteer: waiting && message.delivery === "queue",
       canHardSteer: waiting,
       canCancel: waiting,
@@ -1026,6 +1037,7 @@ function publicSession(row: any,
     origin,
     watchList: row.metadata?.watchList === true,
     manager: row.metadata?.manager === true,
+    contextSelection: effectiveThreadContextSelection(row.id),
     foreground: typeof row.metadata?.foreground === "boolean" ? row.metadata.foreground : origin === "person" && !row.parentId && !row.metadata?.watchList,
     agentName: typeof row.metadata?.agentName === "string" ? row.metadata.agentName : liveThread(row.id)?.agentName,
     dependencies: row.metadata?.peerDependencies,
@@ -1042,7 +1054,9 @@ function publicSession(row: any,
     revision: row.revision,
     idleUnread: notificationUnread(db, currentNotificationPolicy(), row.id, Boolean(row.idle_unread)),
     humanAttention: currentNotificationPolicy()?.view === "classic" || notificationUnread(db, currentNotificationPolicy(), row.id, Boolean(row.idle_unread)),
-    queuedMessages: queued ? queuedMessagesFor(row.id) : [], archivedAt: row.archived_at,
+    queuedMessages: queued ? queuedMessagesFor(row.id) : [],
+    ...(queued ? { inputs: threads.get(row.id) ? threads.inputStates(row.id) : peerInspections.get(row.id)?.inputs } : {}),
+    archivedAt: row.archived_at,
   };
 }
 
@@ -1100,7 +1114,7 @@ function pushBootstrap(): void {
 function sendState(stream: ClientStream): void {
   const selected = stream.subscription.session;
   const sessions = streamSessions(stateSnapshot.sessions, selected).map(session => session.id === selected
-    ? { ...session, queuedMessages: queuedMessagesFor(selected) } : session);
+    ? { ...session, queuedMessages: queuedMessagesFor(selected), inputs: threads.get(selected) ? threads.inputStates(selected) : peerInspections.get(selected)?.inputs } : session);
   stream.publish({ type: "state", sessions, archivedTotal: stateSnapshot.archivedTotal, ownerErrors: stateSnapshot.ownerErrors });
   if (stream.subscription.workers) stream.publish({ type: "workers", sessions: fleetSessions(stateSnapshot.sessions) });
 }
@@ -1158,7 +1172,7 @@ function sendLive(stream: ClientStream): void {
   const sessionId = stream.subscription.session;
   if (!sessionId) return;
   const runtime = liveProjections.get(sessionId);
-  stream.publish({ type: "live", sessionId, text: runtime?.liveText ?? "",
+  stream.publish({ type: "live", sessionId, text: runtime?.liveText ?? "", messageTimestamp: runtime?.messageTimestamp ?? null,
     ...(stream.subscription.thinking ? { thinking: runtime?.liveThinking ?? "" } : {}) });
 }
 
@@ -1379,7 +1393,13 @@ function handlePiEvent(sessionId: string, event: any) {
   // supervisor: delivery can arrive in bursts, which made a whole response
   // look like it streamed in a few hundred milliseconds (over 1000 tok/s).
   const eventAt = typeof event.emittedAt === "number" ? event.emittedAt : Date.now();
-  if (event.type === "message_start" && event.message?.role === "assistant") responseTiming.start(sessionId, eventAt);
+  if (event.type === "message_start" && event.message?.role === "assistant") {
+    rt.liveText = "";
+    rt.liveThinking = "";
+    rt.messageTimestamp = typeof event.message.timestamp === "number" ? event.message.timestamp : null;
+    responseTiming.start(sessionId, eventAt);
+    signalLiveSync();
+  }
   if (event.type === "message_update" && ["text_delta", "thinking_delta"].includes(String(event.assistantMessageEvent?.type)))
     responseTiming.firstToken(sessionId, eventAt);
 
@@ -1413,6 +1433,7 @@ function handlePiEvent(sessionId: string, event: any) {
       inlineImages.accept(sessionId, sha256(text), text);
       recordResponseMetrics(sessionId, responseTiming.finish(sessionId, event.message, eventAt), messageFinalizationKey(event.message));
       rt.liveText = "";
+      rt.messageTimestamp = null;
       rt.liveThinking = "";
       rt.thinkingBlockStart = 0;
       signalTranscript(sessionId);

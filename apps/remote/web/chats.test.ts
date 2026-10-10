@@ -97,7 +97,7 @@ test("running and dependency-waiting launched agents do not make an idle launche
 
 test("status vocabulary covers every lifecycle and preserves unread", () => {
   expect(threadStatus(session("a")).key).toBe("idle");
-  expect(threadStatus(session("a", { lifecycle: { kind: "waiting", target: "dispatch", reason: "Queued for execution", since: 1 } }))).toMatchObject({ key: "waiting", busy: false });
+  expect(threadStatus(session("a", { lifecycle: { kind: "waiting", target: "dispatch", reason: "Queued for execution", since: 1 } }))).toMatchObject({ key: "queued", busy: false });
   expect(threadStatus(session("a", { lifecycle: { kind: "working", phase: "thinking", since: 1 } })).key).toBe("working");
   expect(threadStatus(session("a", { lifecycle: { kind: "working", phase: "responding", since: 1 } })).key).toBe("typing");
   expect(threadStatus(session("a", { held: true, queuedMessages: [queued] }))).toMatchObject({ key: "idle", label: "Idle", attention: false });
@@ -140,9 +140,9 @@ test("the inbox shows idle unread and owner-provided execution detail without in
   const workingMarkup = renderToStaticMarkup(createElement(InboxRowView, {
     row: { ...working, chat: { ...working.chat, icon: "🤖" } }, selected: false, compactSelected: false, place: "", onOpen() {}, onClose() {},
   }));
-  expect(workingMarkup).toContain('data-status="waiting"');
-  expect(workingMarkup).toContain('aria-label="Waiting for execution"');
-  expect(workingMarkup).toContain('data-glyph="waiting"');
+  expect(workingMarkup).toContain('data-status="queued"');
+  expect(workingMarkup).toContain('aria-label="Queued for execution"');
+  expect(workingMarkup).toContain('data-glyph="held"');
 });
 
 test("directly discovered rows yield to the authoritative directory", () => {

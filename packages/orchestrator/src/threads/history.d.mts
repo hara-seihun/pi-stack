@@ -28,8 +28,10 @@ export type RecordDescriptor = Readonly<{
   /** Manager wake input stays hidden; the rest of its turn is visible only when it contains assistant text. */
   monoVisibility?: "hidden" | "visible";
   timestamp?: number | null;
-  /** Native custom-data entry discriminator; no custom data is retained. */
+  /** Native custom-data entry discriminator; bodies are not retained. */
   customType?: string;
+  /** Native USER identity proven by preceding thread_landed ancestry; absent when unknown. */
+  inputId?: string;
 }>;
 export type MessageRecordDescriptor = RecordDescriptor & Readonly<{
   type: "message" | "custom_message";

@@ -7,7 +7,7 @@ const quietText = (quiet: string) => `Quiet for ${quiet}`;
 
 /** The full written state, for places that explain a thread rather than list it. */
 export function StatusPill({ status }: { status: ThreadStatus }) {
-  const timed = status.busy && Boolean(status.since || status.lastActivityAt);
+  const timed = (status.busy || status.key === "waiting" || status.key === "queued") && (status.since !== undefined || status.lastActivityAt !== undefined);
   const { ref, now } = useVisualClock<HTMLSpanElement>(timed);
   const timing = activityTiming(status, now);
   return <span ref={ref} className="status-pill" data-status={status.key}>
@@ -20,7 +20,7 @@ export function StatusPill({ status }: { status: ThreadStatus }) {
 
 /** A stalled busy thread stays visible in dense rows, where the glyph alone cannot say how long it has been silent. Empty until quiet. */
 export function StatusQuiet({ status }: { status: ThreadStatus }) {
-  const { ref, now } = useVisualClock<HTMLSpanElement>(status.busy && Boolean(status.lastActivityAt));
+  const { ref, now } = useVisualClock<HTMLSpanElement>(status.busy && status.lastActivityAt !== undefined);
   const { quiet } = activityTiming(status, now);
   return <span ref={ref} className="status-quiet">{quiet ? quietText(quiet) : null}</span>;
 }

@@ -42,6 +42,14 @@ npm test --workspace=pi-orchestrator -- tests/runner-memory.test.ts tests/runner
 
 The manager fixtures prove escaped-child cleanup on timeout/abort/normal exit, cwd/UID/session environment/mount continuity, controller survival through an actual tool OOM, and twenty native SDK sessions retaining and settling accepted work once while twenty concurrent ordinary shells progress under the 8 GiB aggregate. They use extension-command preflight rather than provider requests: this is a native custody/admission regression, not a measurement of twenty production model contexts or completed producer output. The real native-browser fixture adds two Chromium trees, proves their UID/mount and cgroup boundaries, and forces a tooling-cgroup OOM while all twenty accepted sessions survive. Browser-dependent tests also require an installed Chromium (or `PI_TEST_CHROME_EXECUTABLE`). Manager-dependent tests skip explicitly on hosts without a user manager.
 
+## Manager shell budget
+
+Only immutable `metadata.manager === true` selects `PI_THREAD_MANAGER=1`; other threads, including isolated application roots, receive `0`. The adapter overwrites an inherited runner marker with this open's marker so sharing a host never shares a manager budget.
+
+[`manager-shell-budget.ts`](../src/threads/manager-shell-budget.ts) and [`PiExecution`](../src/threads/pi-execution.ts) enforce an explicit finite positive timeout of at most five seconds for manager `bash` and `converge action:bash`, even without the timeout-guard extension. Reloaded extension tools inherit the same boundary. Manager deadlines abort the tool and return a typed timeout with effect/cleanup uncertainty. Underlying cleanup remains tracked until it returns; native Stop still waits for it. Durable Bash scopes also carry a systemd runtime deadline. Manager Converge's SSH deadline includes connection and execution, sends SIGKILL immediately, and has no transport grace. Workers retain their existing ceilings and cleanup contracts.
+
+Offline focused checks: `tests/pi-execution.test.ts`, `tests/converge.test.ts`, and the canonical-manager isolation case in `tests/pi-session-halt.test.ts`. The timeout-guard package tests UI/non-UI policy selection separately.
+
 ## Native receipts
 
 Inputs carry a stable `workId`. Before invoking Pi, the adapter writes and syncs a `thread_input` custom entry in the native session. This takes custody before extension preflight can produce effects. Explicit preflight rejection adds `thread_rejected`; successful acknowledgement needs no second input copy. Queued steering uses the same receipt. There is no portable conversation or separate child journal.

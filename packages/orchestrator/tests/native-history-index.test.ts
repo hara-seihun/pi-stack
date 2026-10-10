@@ -25,9 +25,110 @@ function index(path: string, leafId?: string, options?: IndexedThreadHistoryOpti
 const managerVisibility = { managerWakeVisibility: true };
 function wakeText(source: "explicit" | "notification" = "notification", id = "thread-wake:generation:1000") {
   return formatThreadMessage({ id, threadId: "manager", senderId: "manager", senderName: "Manager",
-    source, text: "Scheduled wake check: WAKE_BODY_NOT_INDEXED", delivery: "steer", createdAt: 1, state: "queued" },
+    priority: "normal", source, text: "Scheduled wake check: WAKE_BODY_NOT_INDEXED", delivery: "steer", createdAt: 1, state: "queued" },
   "Scheduled wake check: WAKE_BODY_NOT_INDEXED");
 }
+
+const custom = (id: string, parentId: string | null, customType: string, data: unknown = {}) =>
+  ({ type: "custom", id, parentId, customType, data });
+
+it("associates landed receipts with exact USER ancestry through custom metadata, not repeated text or clocks", () => {
+  const entries = [
+    custom("landed-1", null, "thread_landed", { workId: "input-1", body: "RECEIPT_BODY_NOT_INDEXED".repeat(20_000) }),
+    custom("metadata", "landed-1", "extension_note", { workId: "not-the-input" }),
+    message("user-1", "metadata", "user", "Identical input"),
+    custom("landed-2", "user-1", "thread_landed", { workId: "input-2" }),
+    message("user-2", "landed-2", "user", "Identical input"),
+    message("unreceipted", "user-2", "user", "Identical input", { inputId: "unproven" }),
+    message("assistant", "unreceipted", "assistant", "Identical input"),
+  ];
+  const path = source(entries), history = index(path);
+  expect(history.messages.map(record => record.inputId)).toEqual(["input-1", "input-2", undefined, undefined]);
+  expect(history.entries[2]).toBe(history.messages[0]);
+  expect(JSON.stringify(history.entries)).not.toMatch(/RECEIPT_BODY_NOT_INDEXED|not-the-input|Identical input|unproven/);
+  expect(history.read(history.messages[0]!)).toEqual({ ok: true, value: entries[2] });
+  const bounded = withIndexedThreadHistory(path, undefined, managerVisibility, window =>
+    window.messages.slice(1, 2).map(descriptor => ({ inputId: descriptor.inputId, read: window.read(descriptor) })));
+  expect(bounded).toEqual({ ok: true, value: [{ inputId: "input-2", read: { ok: true, value: entries[4] } }] });
+  expect(index(source(entries)).messages.map(record => record.inputId)).toEqual(history.messages.map(record => record.inputId));
+});
+
+it("does not reuse consumed landed receipts across forks, messages or compaction boundaries", () => {
+  const entries = [
+    custom("landed", null, "thread_landed", { workId: "input" }),
+    message("original", "landed", "user", "Identical input"),
+    message("forked", "landed", "user", "Identical input"),
+    { type: "compaction", id: "compact", parentId: "original", firstKeptEntryId: "original", summary: "Summary" },
+    custom("after-compact", "compact", "thread_landed", { workId: "next-input" }),
+    message("next", "after-compact", "user", "Identical input"),
+    message("no-receipt", "compact", "user", "Identical input"),
+    custom("interrupted", "next", "thread_landed", { workId: "interrupted-input" }),
+    { type: "compaction", id: "interposed-compact", parentId: "interrupted", firstKeptEntryId: "next", summary: "Summary" },
+    message("after-interruption", "interposed-compact", "user", "Identical input"),
+    custom("not-user-landed", "next", "thread_landed", { workId: "not-user-input" }),
+    message("not-user", "not-user-landed", "assistant", "Answer"),
+    message("later-user", "not-user", "user", "Identical input"),
+  ];
+  const path = source(entries);
+  expect(index(path, "original").messages[0]!.inputId).toBe("input");
+  expect(index(path, "forked").messages[0]!.inputId).toBeUndefined();
+  expect(index(path, "next").messages.map(record => record.inputId)).toEqual(["input", "next-input"]);
+  expect(index(path, "no-receipt").messages.map(record => record.inputId)).toEqual(["input", undefined]);
+  expect(index(path, "after-interruption").messages.at(-1)!.inputId).toBeUndefined();
+  expect(index(path, "later-user").messages.at(-1)!.inputId).toBeUndefined();
+});
+
+it("clears interrupted lifecycle receipts and only associates the latest valid landed receipt", () => {
+  for (const barrier of ["thread_stop", "thread_stopped", "thread_settled", "thread_rejected", "thread_deferred", "thread_resume", "thread_branch"]) {
+    const path = source([
+      custom("landed", null, "thread_landed", { workId: "stale" }),
+      custom("barrier", "landed", barrier),
+      custom("metadata", "barrier", "extension_note"),
+      message("user", "metadata", "user", "Input"),
+    ]);
+    expect(index(path).messages[0]!.inputId).toBeUndefined();
+  }
+  for (const workId of ["", null, {}, "x".repeat(4097)]) {
+    const path = source([custom("landed", null, "thread_landed", { workId }), message("user", "landed", "user", "Input")]);
+    expect(index(path).messages[0]!.inputId).toBeUndefined();
+  }
+  const path = source([
+    custom("old", null, "thread_landed", { workId: "old" }),
+    custom("new", "old", "thread_landed", { workId: "new" }),
+    message("user", "new", "user", "Input"),
+  ]);
+  expect(index(path).messages[0]!.inputId).toBe("new");
+});
+
+it("charges both retained landed identity and associated USER identity to the metadata budget", () => {
+  const workId = "x".repeat(4096);
+  const entries = Array.from({ length: 4000 }, (_, i) => [
+    custom(`landed-${i}`, i ? `user-${i - 1}` : null, "thread_landed", { workId }),
+    message(`user-${i}`, `landed-${i}`, "user", "Input"),
+  ]).flat();
+  const path = source(entries);
+  expect(indexedThreadHistory(path)).toMatchObject({ ok: false, error: { code: "oversized-index", limit: MAX_HISTORY_INDEX_BYTES } });
+});
+
+it("recovers receipt association when USER appends after the receipt-only snapshot and after source replacement", () => {
+  const landed = custom("landed", null, "thread_landed", { workId: "input" });
+  const user = message("user", "landed", "user", "Input");
+  const path = source([landed]), first = index(path);
+  expect(first.messages).toEqual([]);
+  appendFileSync(path, JSON.stringify(user) + "\n");
+  const next = index(path);
+  expect(next.source.generation).toBe(first.source.generation);
+  expect(next.messages[0]!.inputId).toBe("input");
+  appendFileSync(path, JSON.stringify(message("assistant", "user", "assistant", "Answer")) + "\n");
+  expect(index(path).messages[0]).toBe(next.messages[0]);
+  const replacement = path + ".replacement";
+  writeFileSync(replacement, [landed, user].map(entry => JSON.stringify(entry)).join("\n") + "\n");
+  renameSync(replacement, path);
+  const restarted = index(path);
+  expect(restarted.source.generation).not.toBe(next.source.generation);
+  expect(restarted.messages[0]!.inputId).toBe("input");
+  expect(next.read(next.messages[0]!)).toMatchObject({ ok: false, error: { code: "stale-source" } });
+});
 
 it("restarts the entire window after append between indexing and reads without mixing revisions", () => {
   const first = message("a", null, "user", "A"), second = message("b", "a", "assistant", "B");

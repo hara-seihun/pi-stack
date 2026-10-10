@@ -1,5 +1,4 @@
-// Optional context is injected only when a thread explicitly selects it.
-import { accessSync, constants, readdirSync, readFileSync, statSync } from "node:fs";
+import { accessSync, constants, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { countTokens } from "gpt-tokenizer/encoding/o200k_base";
 import type { ThreadStartContext } from "./protocol";
@@ -98,24 +97,30 @@ function contextFilePath(sources: ContextFileSources | null, name: string): stri
 }
 
 /** Chosen files whole, read fresh each turn. Missing choices are reported, never replaced with a different file. */
-export function contextFilesPrompt(sources: ContextFileSources | null, names: readonly string[]): string {
+export function contextFilesPrompt(sources: ContextFileSources | null, names: readonly string[], automatic = false): string {
   if (!names.length) return "";
   const sections = [
     `# Context files chosen for this thread`,
-    `The person starting this thread picked the files listed below to be in your context. Each appears here whole, read from disk at the start of every turn, so an edit to the file is live on the next message. Other files were not chosen; read them yourself only if the conversation needs them.`,
+    automatic
+      ? `This managing thread automatically selects every context file offered by its current destination. Files below appear whole, read from disk each turn. New offered files and edits are live on the next message. Selected workspace instruction files already loaded by Pi are not injected twice.`
+      : `The person starting this thread picked the files listed below to be in your context. Each appears here whole, read from disk at the start of every turn, so an edit to the file is live on the next message. Other files were not chosen; read them yourself only if the conversation needs them.`,
   ];
-  for (const name of names) {
+  const identity = (path: string) => { try { return realpathSync(path); } catch { return path; } };
+  const loaded = new Set(automatic ? (sources?.agentsPaths ?? []).map(identity) : []);
+  for (const name of new Set(names)) {
     const path = contextFilePath(sources, name);
     if (!path) {
       sections.push(`## ${name}\n\nThis chosen file is no longer available from this destination. Say so rather than working from recalled or inferred content.`);
       continue;
     }
+    if (automatic && loaded.has(identity(path))) continue;
     let text: string;
     try { text = readFileSync(path, "utf8"); } catch (error) {
       const code = (error as NodeJS.ErrnoException).code ?? "unknown error";
       sections.push(`## ${path}\n\nThis chosen file could not be read (${code}). Say so rather than working from recalled or inferred content.`);
       continue;
     }
+    loaded.add(identity(path));
     sections.push(`## ${path}\n\n${text}`);
   }
   return sections.join("\n\n");

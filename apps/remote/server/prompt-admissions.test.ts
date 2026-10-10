@@ -14,6 +14,16 @@ const prepared = (text: string): PreparedPrompt => ({ text, delivery: "hardSteer
 const good = <T>(value: T) => ({ ok: true as const, value });
 const unreachable = async (): Promise<never> => { throw new Error("This effect must not run"); };
 
+test("manager priority normalization preserves requested admission identity while reporting effective delivery", async () => {
+  const f = fixture(), body = input();
+  const accepted = await f.admissions.submit("manager", body, {
+    prepare: async () => good(prepared(body.text)),
+    send: async () => good({ id: "manager-work", delivery: "steer" }),
+  });
+  expect(accepted).toEqual({ status: 202, body: { outcome: "accepted", accepted: true, workId: "manager-work", delivery: "hardSteer", effectiveDelivery: "steer" } });
+  expect(await new PromptAdmissions(f.db).submit("manager", body, { prepare: unreachable, send: unreachable })).toEqual(accepted);
+});
+
 test("resolved quote, attachment body and meeting image bytes persist before first send and survive lost acknowledgement/restart", async () => {
   const f = fixture();
   const body = input();

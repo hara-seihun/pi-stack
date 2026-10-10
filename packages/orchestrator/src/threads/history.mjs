@@ -19,6 +19,8 @@ const sameFile = (a, b) => a.dev === b.dev && a.ino === b.ino;
 const nonempty = value => typeof value === "string" && value.length > 0 && value.length <= 4096;
 const managerWakeInput = Symbol("managerWakeInput");
 const humanFacingText = Symbol("humanFacingText");
+const landedWorkId = Symbol("landedWorkId");
+const inputAssociationBarriers = new Set(["thread_stop", "thread_stopped", "thread_settled", "thread_rejected", "thread_deferred", "thread_resume", "thread_branch"]);
 const AGENT_MESSAGE_PREFIX = "<agent_message>\nThis is an agent-to-agent message, not a user message.\n";
 
 function isManagerWakeInput(content) {
@@ -97,7 +99,9 @@ function recordMetadata(entry, raw, path, line, offset) {
   }
   const base = { id: entry.id, parentId: entry.parentId ?? null, type: entry.type, offset, length: raw.length, line,
     timestamp: timestampMs(entry.timestamp) ?? null, digest: createHash("sha256").update(raw).digest("hex"),
-    ...(entry.type === "custom" && entry.customType != null ? { customType: entry.customType } : {}) };
+    ...(entry.type === "custom" && entry.customType != null ? { customType: entry.customType } : {}),
+    ...(entry.type === "custom" && entry.customType === "thread_landed" && nonempty(entry.data?.workId)
+      ? { [landedWorkId]: entry.data.workId } : {}) };
   if (entry.type !== "message" && entry.type !== "custom_message") return ok(Object.freeze(base));
   const nativeMessage = entry.type === "custom_message" ? { role: "custom", content: entry.content, timestamp: entry.timestamp } : entry.message;
   const message = nativeMessage && typeof nativeMessage === "object" ? projectAnthropicNarrationMessage(nativeMessage) : nativeMessage;
@@ -143,9 +147,30 @@ function recordMetadata(entry, raw, path, line, offset) {
       : (message.content ?? []).some(block => block.type === "text" && typeof block.text === "string" && Boolean(block.text.trim())) } : {}) }));
 }
 
+function associateInputIds(records) {
+  const pending = new Map(), consumed = new Set();
+  let addedMetadataBytes = 0;
+  const associated = records.map(record => {
+    if (record.type === "custom") {
+      pending.set(record.id, record.customType === "thread_landed" ? (record[landedWorkId] ? record : null)
+        : inputAssociationBarriers.has(record.customType) ? null : pending.get(record.parentId) ?? null);
+    }
+    if (record.type !== "message" || record.role !== "user") return record;
+    const receipt = pending.get(record.parentId);
+    if (!receipt || consumed.has(receipt.id)) return record;
+    // Stored order consumes a receipt once, even when a later fork reuses its ancestry.
+    consumed.add(receipt.id);
+    if (record.inputId === receipt[landedWorkId]) return record;
+    const annotated = Object.freeze({ ...record, inputId: receipt[landedWorkId] });
+    addedMetadataBytes += metadataBytes(annotated) - metadataBytes(record);
+    return annotated;
+  });
+  return { records: associated, addedMetadataBytes };
+}
+
 function metadataBytes(record) {
   const stringBytes = text => typeof text === "string" ? 32 + text.length * 2 : 0;
-  let bytes = 512 + [record.id, record.parentId, record.type, record.digest, record.role, record.questionId, record.toolResultId, record.customType]
+  let bytes = 512 + [record.id, record.parentId, record.type, record.digest, record.role, record.questionId, record.toolResultId, record.customType, record.inputId, record[landedWorkId]]
     .reduce((sum, text) => sum + stringBytes(text), 0);
   for (const block of record.blocks ?? []) {
     bytes += 256 + stringBytes(block.type) + stringBytes(block.toolCallId) + stringBytes(block.name) + stringBytes(block.namespace);
@@ -337,7 +362,10 @@ export function indexedThreadHistory(path, leafId, options) {
       const scanned = scanRecords(fd, path, size, append ? cache.resumeOffset : 0, append ? cache.resumeLine : 1,
         completeHash, append ? cache.size : 0, initialMetadataBytes);
       if (!scanned.ok) return scanned;
-      const records = append ? [...retained, ...scanned.value.records] : scanned.value.records;
+      const associated = associateInputIds(append ? [...retained, ...scanned.value.records] : scanned.value.records);
+      const records = associated.records;
+      const recordMetadataBytes = scanned.value.metadataBytes + associated.addedMetadataBytes;
+      if (recordMetadataBytes > MAX_HISTORY_INDEX_BYTES) return failure("oversized-index", path, `Session metadata exceeds ${MAX_HISTORY_INDEX_BYTES} estimated bytes`, { limit: MAX_HISTORY_INDEX_BYTES });
       const byId = new Map();
       for (const record of records) {
         if (byId.has(record.id)) return failure("invalid-record", path, `Duplicate session entry ${record.id}`, { line: record.line, offset: record.offset, entryId: record.id });
@@ -345,7 +373,7 @@ export function indexedThreadHistory(path, leafId, options) {
       }
       if (stamp(fstatSync(fd, { bigint: true })) !== revision || stamp(statSync(path, { bigint: true })) !== revision) return failure("stale-source", path, "Session changed during indexing");
       cache = { stat, revision, size, generation: append ? cache.generation : randomUUID(), digest: completeHash.digest("hex"),
-        records, byId, recordMetadataBytes: scanned.value.metadataBytes, metadataBytes: scanned.value.metadataBytes,
+        records, byId, recordMetadataBytes, metadataBytes: recordMetadataBytes,
         snapshots: new Map(), resumeOffset: scanned.value.resumeOffset, resumeLine: scanned.value.resumeLine };
       const previous = indexes.get(path);
       if (previous) indexedMetadataBytes -= previous.metadataBytes;

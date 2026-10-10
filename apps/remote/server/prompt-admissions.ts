@@ -9,7 +9,7 @@ export type PromptFailure = { code: ThreadError["code"] | "forbidden"; message: 
 export type AdmissionResult<T> = { ok: true; value: T } | { ok: false; error: PromptFailure };
 export type PromptAdmissionResponse = {
   status: number;
-  body: { outcome: "accepted"; accepted: true; workId: string; delivery: Delivery }
+  body: { outcome: "accepted"; accepted: true; workId: string; delivery: Delivery; effectiveDelivery?: Delivery }
     | { outcome: "pending" | "rejected"; error: string; code: string };
 };
 export type PromptAdmissionEffects = {
@@ -105,8 +105,9 @@ export class PromptAdmissions {
         const response = failureResponse(sent.error);
         return response.body.outcome === "rejected" ? this.terminal(input.requestId, response) : response;
       }
-      if (typeof sent.value.id !== "string" || !sent.value.id || sent.value.delivery !== input.delivery) return pending("The owner returned an invalid admission receipt; acceptance is unconfirmed.");
-      return this.terminal(input.requestId, { status: 202, body: { outcome: "accepted", accepted: true, workId: sent.value.id, delivery: sent.value.delivery } });
+      if (typeof sent.value.id !== "string" || !sent.value.id || !["queue", "steer", "hardSteer"].includes(sent.value.delivery)) return pending("The owner returned an invalid admission receipt; acceptance is unconfirmed.");
+      return this.terminal(input.requestId, { status: 202, body: { outcome: "accepted", accepted: true, workId: sent.value.id, delivery: input.delivery,
+        ...(sent.value.delivery !== input.delivery ? { effectiveDelivery: sent.value.delivery } : {}) } });
     } catch (error) { return pending(error instanceof Error ? error.message : String(error)); }
   }
 }

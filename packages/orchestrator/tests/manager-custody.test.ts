@@ -217,7 +217,7 @@ it("recovers fleet receive and manager fanout outboxes across unavailable transp
 it.each(["thread-wake:g:0", "manager-questions:child:call", "manager-custody:child:call"])("changes indexed window generation when a quiet manager background turn becomes human-facing (%s)", async workId => {
   const { service } = await setup(); const path = service.get("manager")!.sessionFile;
   const entry = (id: string, parentId: string | null, message: object) => JSON.stringify({ type: "message", id, parentId, message }) + "\n";
-  const wake = formatThreadMessage({ id: workId, threadId: "manager", senderId: "manager", source: "notification", text: "Scheduled heartbeat", delivery: "steer", createdAt: 1, state: "done" }, "Scheduled heartbeat");
+  const wake = formatThreadMessage({ id: workId, threadId: "manager", senderId: "manager", priority: "manager", source: "notification", text: "Scheduled heartbeat", delivery: "steer", createdAt: 1, state: "done" }, "Scheduled heartbeat");
   writeFileSync(path, entry("wake", null, { role: "user", content: [{ type: "text", text: wake }], timestamp: 1 }) + entry("thinking", "wake", { role: "assistant", content: [{ type: "thinking", thinking: "Inspect tasks" }], timestamp: 2 }));
   const initial = unwrap(await service.inspect("manager", { contextWindow: { limit: 20 } })).contextWindow!;
   expect(initial.monoLiveVisibility).toBe("hidden"); expect(initial.records.every(record => record.monoVisibility === "hidden")).toBe(true);

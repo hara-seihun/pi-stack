@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createLocalBashOperations, type BashOperations } from "@earendil-works/pi-coding-agent";
 import { managerCommand, runnerSlices, runnerUnit, TOOL_MEMORY } from "./runner-resources.js";
+import { managerShellBudget, ManagerShellError } from "./manager-shell-budget.js";
 
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 // After its timeout or abort, a killed tool normally exits at once. A process in
@@ -35,12 +36,17 @@ export function scopedBashOperations(env: NodeJS.ProcessEnv, local: BashOperatio
   const user = env.PI_ORCHESTRATOR_EXECUTION !== "root-repair";
   return { exec: async (command, cwd, options) => {
     if (options.signal?.aborted) throw new Error("aborted");
+    if (env.PI_THREAD_MANAGER === "1") {
+      const budget = managerShellBudget("bash", options);
+      if (!budget.ok) throw new ManagerShellError(budget.error.code, budget.error.message);
+    }
     const unit = `pi-thread-tool-${randomUUID()}.scope`;
     const toolEnv = { ...env, ...options.env };
     const args = ["systemd-run", ...(user ? ["--user"] : []), "--scope", "--collect", "--quiet",
       `--unit=${unit}`, `--slice=${runnerSlices(id).tools}`, `--property=BindsTo=${runner}`, `--property=After=${runner}`,
       `--property=MemoryHigh=${memory}`, `--property=MemoryMax=${memory}`, "--property=MemorySwapMax=256M", "--property=OOMPolicy=kill",
-      "--property=KillMode=control-group", "--property=KillSignal=SIGKILL", "--property=TimeoutStopSec=3s", "--", "bash", "-c",
+      "--property=KillMode=control-group", "--property=KillSignal=SIGKILL", "--property=TimeoutStopSec=3s",
+      ...(env.PI_THREAD_MANAGER === "1" ? [`--property=RuntimeMaxSec=${options.timeout}s`] : []), "--", "bash", "-c",
       `printf '1000' > /proc/self/oom_score_adj || exit 125; exec bash -c ${quote(command)}`];
     let abandoned: AbandonedTool | undefined;
     try {

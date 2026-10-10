@@ -122,6 +122,8 @@ export interface QuestionEvents {
   items: Array<{ seq: number; questionId: string; threadId: string; question: string; time: number }>;
 }
 export interface ThreadMessage {
+  /** Owner-assigned admission tier; FIFO within each tier. */
+  priority: "human" | "manager" | "normal";
   id: string;
   threadId: string;
   senderId: string | null;
@@ -300,7 +302,10 @@ export function validateInspectOptions(input: unknown): Result<InspectOptions> {
   }
   return { ok: true, value: options };
 }
+export type ThreadInputState = Pick<ThreadMessage, "id" | "threadId" | "senderId" | "delivery" | "source" | "state" | "priority" | "createdAt" | "insertedAt" | "landedAt" | "outcome"> & { error?: string };
 export interface ThreadInspection {
+  /** Latest sixty durable input receipts, oldest first; payloads stay in history. */
+  inputs?: ThreadInputState[];
   thread: Thread;
   pending: ThreadMessage[];
   context?: Record<string, unknown>;

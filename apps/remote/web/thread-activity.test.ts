@@ -24,6 +24,7 @@ test("canonical lifecycle controls presentation even when coarse state and activ
     [{ kind: "working", phase: "thinking", since: 1000, detail: "Reading source" }, "working", true],
     [{ kind: "working", phase: "responding", since: 1000 }, "typing", true],
     [{ kind: "cancelling" }, "stopping", true],
+    [{ kind: "waiting", target: "dispatch", since: 1000 }, "queued", false],
     [{ kind: "waiting", target: "agents", reason: "Need result", since: 1000 }, "waiting", false],
     [{ kind: "failed", reason: "Runner exited", control: "none" }, "error", false],
   ];
@@ -40,12 +41,12 @@ test("durable waits name all dependency and scheduling targets without pretendin
   for (const target of ["agents", "job", "deployment", "message", "capacity", "retry", "dispatch"] as const) {
     const lifecycle = (target === "capacity" || target === "retry" ? { kind: "waiting", target, reason: "Owner receipt", since: 1000 } : { kind: "waiting", target, since: 1000 }) as ThreadLifecycle;
     const status = threadStatus(observation(lifecycle, { lastActivityAt: 1000 }));
-    expect(status).toMatchObject({ key: "waiting", busy: false, since: 1000 });
+    expect(status).toMatchObject({ key: target === "dispatch" ? "queued" : "waiting", busy: false, since: 1000 });
     expect(status.title).toBe(target === "capacity" || target === "retry" ? "Owner receipt" : undefined);
-    expect(status.label).toContain("Waiting for");
+    expect(status.label).toContain(target === "dispatch" ? "Queued" : "Waiting for");
     expect(activityTiming(status, 80000)).toEqual({ elapsed: "1m 19s" });
     const mono = monoThreadStatus(observation(lifecycle));
-    expect(mono).toMatchObject({ key: "working", label: "Working" });
+    expect(mono).toMatchObject({ key: status.key, label: status.label, busy: false });
     expect(mono.title).toBeUndefined();
   }
 });
@@ -92,6 +93,7 @@ test("phase age and lack of updates are separate, and observation time never imp
 
 test("confirmed failure and cancellation are distinct, and failure preserves the actual cause", () => {
   expect(threadStatus(observation({ kind: "cancelling" }))).toMatchObject({ key: "stopping", busy: true });
+  expect(monoThreadStatus(observation({ kind: "cancelling" }))).toMatchObject({ key: "stopping", label: "Cancelling", busy: true });
   const failure = threadStatus(observation({ kind: "failed", reason: "Runner could not cancel", control: "stop" }));
   expect(failure).toMatchObject({ key: "error", busy: false, attention: true, title: "Runner could not cancel" });
   expect(renderToStaticMarkup(createElement(StatusPill, { status: failure }))).toContain('class="status-error-detail">Runner could not cancel</span>');

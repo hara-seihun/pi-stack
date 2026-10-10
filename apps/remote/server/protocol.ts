@@ -4,6 +4,7 @@
 // the other instead of silently reading undefined at runtime.
 
 import type { AgentWait, ThreadWakeSchedule, ExecutionPhase, ThreadState, ThreadLifecycle, Delivery as ThreadDelivery } from "pi-orchestrator/api";
+import type { ThreadInputState } from "../../../packages/orchestrator/src/threads/contracts";
 import type { ReconcileFrame } from "../shared/reconcile.js";
 export type ChatId = `ai:${string}` | `room:${string}`;
 export type FileBrowserEntry = { name: string; path: string; kind: "directory" | "file" | "other" };
@@ -78,6 +79,7 @@ export interface Session {
   model: string;
   /** Native Pi context estimate, not cumulative billed tokens. Null after compaction until fresh usage arrives. */
   contextUsage?: ContextUsage;
+  contextSelection?: { mode: "all"; files: string[] } | { mode: "manual"; files: string[] };
   name: string;
   color?: ThreadColor | null;
   cwd: string;
@@ -106,6 +108,8 @@ export interface Session {
   humanAttention?: boolean;
   /** Full rows only for the stream's subscribed session; other rows carry an empty list. */
   queuedMessages: QueuedMessage[];
+  /** Bounded metadata receipts for the subscribed thread, from its canonical owner. */
+  inputs?: ThreadInputState[];
   archivedAt: string | null;
 }
 
@@ -382,6 +386,8 @@ export interface ResponseMetrics {
 
 interface TranscriptItemBase {
   seq: number;
+  /** Native entry and block identity, independent of content hash and page position. */
+  sourceKey?: string;
   /** SHA-256 of the item's complete body. Changes when a result lands on a call. */
   id: string;
   kind: TranscriptItemKind;
@@ -400,6 +406,8 @@ interface TranscriptItemBase {
 
 /** Visible words; large messages carry a marked preview with an exact lazy body. */
 export interface InlineTextItem extends TranscriptItemBase {
+  inputId?: string;
+  inputState?: ThreadInputState;
   agentSender?: { threadId: string; name?: string };
   identity?: import("./message-protocol.js").MessageIdentity;
   reactions?: import("./message-protocol.js").MessageReaction[];
@@ -505,7 +513,7 @@ export type StreamSnapshot =
   | { type: "dashboard"; dashboard: Dashboard }
   | { type: "workers"; sessions: Session[] }
   | ({ type: "transcript" } & TranscriptPage)
-  | { type: "live"; sessionId: string; text: string; thinking?: string }
+  | { type: "live"; sessionId: string; text: string; thinking?: string; messageTimestamp?: number | null }
   | { type: "images"; sessionId: string; snapshot: InlineImageSnapshot }
   | ({ type: "questions"; sessionId: string } & QuestionsResource);
 

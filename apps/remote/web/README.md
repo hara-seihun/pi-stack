@@ -80,9 +80,23 @@ Each visible fact has one owner in the current view. Navigation pairs its icons 
 
 Collapsed entries summarize their content. Opening an entry replaces its excerpt with the complete data rather than displaying both. Tool arguments, results, copy actions and original model context remain available. The inspector opens as a right sidebar, and the new-chat menu stays within the inbox column. Other modal sheets cover the underlying screen. Keyboard interaction, accessible names and distinct actions such as cancellation versus attachment remain separate from visual repetition.
 
+## Canonical conversation state
+
+Transcript `sourceKey` identifies a native message block or a tool-call identity. Body hashes address immutable content, not messages: two identical messages remain two messages. Page overlap, stream replay and live-tool finalization reconcile through this key; generation replacement discards the former branch. Native scroll anchoring and bounded earlier-page loading retain their existing owners.
+
+Live assistant output carries its originating `messageTimestamp`. The conversation joins it against finalized assistant heads before rendering, so history arriving before the live-clear frame cannot display the same answer twice. Owner and native projections clear finished assistant output; reconnect never restores finalized text as live work.
+
+The header reads canonical owner lifecycle and separately reports connection syncing/disconnection. A disconnected view labels execution as last known. The queue remains accessible in mono and classic. Canonical managers always retain a Send composer during execution or dependency waits; ordinary worker cancellation controls are unchanged. Manager questions remain answerable without removing its message input.
+
+Exact native `thread_landed` receipts associate submitted user bubbles with input IDs. Bounded owner metadata distinguishes queued, dispatch acceptance unconfirmed, accepted in the runtime queue, consumed/in-progress, and explicit successful/failed/cancelled turn outcomes. Historical pages carry their own input receipt; recent session receipts update live bubbles. A finished turn is not a claim that a larger task is complete. Failures show their actual reason. Prompt admission receipts preserve requested delivery identity and expose normalized `effectiveDelivery` separately.
+
+Manager conversations keep normal chronological flow with human bubbles aligned right and Kenan replies aligned left. Input receipts remain attached to their user bubble; ordinary worker layouts are unchanged.
+
+Managers with owner-reported all-context selection show a read-only expandable list of every selected destination file. Ordinary new-thread context selection remains manual.
+
 ## Optimistic actions
 
-A pending mutation renders its successful result immediately. Keep the same layout and controls, with a small pending marker where needed. Do not introduce a second pending card, a banner or recovery buttons during a healthy request. Errors belong to the affected operation and can expose recovery actions after failure or an uncertain outcome.
+A pending mutation retains the same layout and controls with its local submission marker. Durable prompt outbox state owns saved/unconfirmed/rejected submissions until canonical admission; it does not create a second optimistic transcript message or manufacture an execution outcome. Errors belong to the affected operation and can expose recovery actions after failure or an uncertain outcome.
 
 AI prompts use a [bounded durable outbox](../docs/prompt-outbox.md): intent is saved before HTTP, retries reuse the exact requestId/body, and accepted admission is distinct from execution. Active new-agent creation and prompt submission survive short controller replacement through [`controller-replacement.ts`](src/controller-replacement.ts), inside the shared and pinned transports: connection/body loss or HTTP 502/503/504 retries the exact request for at most 60 seconds. The selected person, session and environment remain pinned; changed ownership, cancellation and owner validation/authentication decisions stop replay. Acceptance is returned only from the owner's committed receipt. Uncertain sends survive reload with explicit Retry; rejected sends remain visible until dismissed. Stop and commands never enter prompt replay storage. Run `bun test apps/remote/web/controller-replacement.test.ts apps/remote/web/router-client.test.ts` for durable owner restart, lost acknowledgements, request identity and privacy boundaries.
 
