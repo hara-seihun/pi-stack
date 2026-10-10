@@ -172,7 +172,7 @@ function registerMemoryTools(options: MemoryToolOptions, pi: ExtensionAPI) {
       execute: async (_id, input) => request({ operation: "read", ...input, context: context() }),
     }));
     pi.registerTool(defineTool({ name: "memory_write", label: "Remember",
-      description: "Record a durable memory, its subjects, provenance and privacy. source must include saidBy (person who said it) or actedFor (person an action was taken for); action records use actedFor with action and externalId. This connection supplies the verified setting and person.",
+      description: "Journal an accountable action with its subjects, provenance and privacy. Working facts, decisions, calendar and work state belong in the granted Markdown memory folder, not a second task ledger. source must include saidBy (person who said it) or actedFor (person an action was taken for); action records use actedFor with action and externalId. This connection supplies the verified setting and person.",
       parameters: Type.Object({ text: nonBlank(), about: strings, obviouslyPrivate: Type.Boolean(), occurredAt: optionalTime, source: memorySourceSchema }),
       execute: async (_id, input) => request({ operation: "write", item: { ...input, setting: setting() } }),
     }));

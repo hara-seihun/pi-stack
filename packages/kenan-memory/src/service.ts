@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import type { PersonTimezone, SettingsResult } from "pi-orchestrator/person-timezone";
 import type { Authorization, PermissionResult } from "pi-orchestrator/permissions";
 import type { RootAdmission } from "./contract.js";
-import { KENAN_REQUEST_ID_PATTERN, MEMORY_TOKEN_HEADER, type MemoryRequest, type MemoryResult, type MemoryRole, type MemoryValue, type RoomAudienceResolver, type RootResumeConsent, type RootLogConsent, type RootLogNotification, type RootLogRequestStatus } from "./contract.js";
+import { KENAN_REQUEST_ID_PATTERN, MEMORY_TOKEN_HEADER, type MemoryRequest, type MemoryResult, type MemoryRole, type MemoryValue, type RoomAudienceResolver, type MemoryItem, type Disclosure, type RootResumeConsent, type RootLogConsent, type RootLogNotification, type RootLogRequestStatus } from "./contract.js";
 import { MemoryStore } from "./store.js";
 import { validateRequest } from "./validation.js";
 import { unreachable } from "./explicit-state.js";
@@ -15,7 +15,8 @@ export interface MemoryAuth {
   uidPersons?: Record<string, string>;
 }
 export type MemoryPrincipal = { kind: "person"; person: string; role: MemoryRole; threadId?: string } | { kind: "publisher" } | { kind: "root-service" };
-export type MemoryAuthorizer = (request: { caller: MemoryPrincipal; route: string; input: unknown }) => PermissionResult<Authorization> | Promise<PermissionResult<Authorization>>;
+export type MemoryAuthorizationRecord = { about: readonly string[]; obviouslyPrivate?: boolean };
+export type MemoryAuthorizer = (request: { caller: MemoryPrincipal; route: string; input: unknown; record?: MemoryAuthorizationRecord }) => PermissionResult<Authorization>;
 export interface MemoryServiceOptions {
   store: MemoryStore;
   auth: MemoryAuth;
@@ -83,6 +84,10 @@ export function memoryService(options: MemoryServiceOptions) {
       if (request.url?.startsWith("/v1/root/")) {
         if (caller.kind !== "root-service") return denied("This operation belongs to the root Kenan service");
         if (!object(input)) return invalid("Root operation must be an object");
+        const rootSubjects = typeof input.rootSessionId === "string" ? store.authorizationSubjects(input.rootSessionId) : [];
+        const asking = typeof input.callerToken === "string" ? store.resolveSession(input.callerToken) : undefined;
+        const subjects = [...new Set([...rootSubjects, ...(asking ? [asking.person] : []), ...(strings(input.subjects) ? input.subjects : []), ...(typeof input.subject === "string" ? [input.subject] : []), ...(typeof input.recipient === "string" ? [input.recipient] : [])])];
+        if (subjects.length && !options.authorize({ caller, route: request.url!, input, record: { about: subjects, obviouslyPrivate: true } }).ok) return denied("The consultation records are outside the granted subjects");
         if (request.url === "/v1/root/authenticate-caller") {
           if (!fields(input, ["callerToken"]) || typeof input.callerToken !== "string") return invalid("Invalid caller authentication");
           const session = store.resolveSession(input.callerToken);
@@ -211,19 +216,22 @@ export function memoryService(options: MemoryServiceOptions) {
         if (operation.operation === "log-disclosure" && operation.disclosure.about.some(id => id !== person)) return denied("Cross-person disclosure accounting belongs to ask_kenan");
         if (operation.operation === "finalize-turn") return denied("Root disclosure finalization belongs to the root boundary");
       }
-      const result: MemoryResult = { ok: true, value: dispatch(store, person, role, operation) };
+      const permit = (record: MemoryAuthorizationRecord) => options.authorize({ caller, route: request.url!, input, record }).ok;
+      const mutationRecords = operation.operation === "write" ? [operation.item] : operation.operation === "log-disclosure" ? [operation.disclosure] : operation.operation === "forget" ? store.authorizationItems(operation.ids) : [];
+      if (operation.operation === "forget" && mutationRecords.length !== operation.ids.length || mutationRecords.some(record => !permit(record))) return denied("The memory mutation is outside the granted records");
+      const result: MemoryResult = { ok: true, value: dispatch(store, person, role, operation, permit) };
       send(200, result);
     } catch { send(500, { ok: false, error: "unavailable", message: "Memory service could not complete the operation" }); }
   });
 }
-function dispatch(store: MemoryStore, person: string, role: MemoryRole, request: MemoryRequest): MemoryValue {
+function dispatch(store: MemoryStore, person: string, role: MemoryRole, request: MemoryRequest, permit: (record: MemoryItem | Disclosure) => boolean): MemoryValue {
   switch (request.operation) {
     case "write": return store.write(person, request.item);
-    case "search": return store.search(person, request.context, request.query, request.about, request.limit, role);
-    case "read": return store.read(person, request.context, request.ids, role);
+    case "search": return store.search(person, request.context, request.query, request.about, request.limit, role, permit);
+    case "read": return store.read(person, request.context, request.ids, role, permit);
     case "forget": return store.forget(request.ids, request.mode);
     case "log-disclosure": return store.disclose(person, request.disclosure);
-    case "disclosures": return store.disclosures(person, request.context, request.limit, role, request.about);
+    case "disclosures": return store.disclosures(person, request.context, request.limit, role, request.about, permit);
     case "finalize-turn": return store.finalize(person, request.context, request.reply);
   }
   return unreachable(request);

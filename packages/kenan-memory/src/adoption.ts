@@ -36,6 +36,7 @@ function records(db: Database, source: AdoptionSource): RecordData[] {
   const output: RecordData[] = [];
   const tables = new Set((db.query("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map(row => row.name));
   const selection = source.selection;
+  if (source.format === "calendar" && !tables.has("events") || source.format === "memory" && !tables.has("memories") && !tables.has("life_versions")) throw new Error("Source does not match its declared format");
   if (source.format === "calendar") {
     for (const table of ["events", "subscriptions", "settings", "delete_undo"]) {
       if (!tables.has(table)) continue;
