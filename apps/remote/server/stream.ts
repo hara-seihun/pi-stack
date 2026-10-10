@@ -1,5 +1,6 @@
 import type { StreamSnapshot, StreamSubscription, StreamWireEvent } from "./protocol";
 import { ReconcilePublisher, readReconcileHave } from "../shared/reconcile";
+import { historySourceChanged } from "../shared/history-source-retry";
 
 export const PING_INTERVAL_MS = 10_000;
 function optionalString(value: unknown): string | null | undefined {
@@ -93,9 +94,18 @@ export class ClientStream {
     if (!session) return;
     const current = () => !this.closed && this.subscription.session === session && this.subscription.selectionId === selectionId;
     try {
-      await refresh();
-      if (!current()) return;
-      await publish();
+      for (let attempt = 0; ; attempt++) {
+        if (!current()) return;
+        try {
+          await refresh();
+          if (!current()) return;
+          await publish();
+          break;
+        } catch (cause) {
+          if (!historySourceChanged(cause) || attempt === 2) throw cause;
+          await Promise.resolve();
+        }
+      }
       if (!current() || !selectionId) return;
       const resources = ["state", `transcript:${session}`, `live:${session}`];
       if (resources.some(resource => !this.held.has(resource))) return;

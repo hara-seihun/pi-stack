@@ -161,6 +161,64 @@ test("finite reconciliation acknowledges visible resources before disposable pus
   expect(h.calls.every(call => call.init.method === "POST" && call.init.cache === "no-store")).toBe(true);
 }));
 
+test("legacy finite history-window churn retains the view and replay cursors without declaring disconnection", () => harness(async h => {
+  let changing = false, attempts = 0;
+  const message = "Could not refresh thread: conflict: Session kept changing during window reading; refresh the history index";
+  h.publisher.publish("transcript:a", { ...transcript("a"), total: 10 });
+  const client = h.client(call => {
+    if (call.path === "/v1/stream") return h.push(call.signal);
+    if (changing && ++attempts < 3) return finite([hello, { type: "error", message }]);
+    return h.response(call.body);
+  }, { subscription: { session: "a", viewing: true, transcriptFrom: 4, notificationsAfter: 33, eventsAfter: 14 } });
+  client.start(); await h.time.flush();
+  const retained = h.calls[1].body.have;
+  const alreadyDisplayed = h.events.length;
+  changing = true;
+  h.publisher.publish("transcript:a", { ...transcript("a"), total: 11 });
+  client.reconnect(); await h.time.flush();
+  expect(client.state()).toBe("open");
+  expect(h.events.slice(alreadyDisplayed).some(event => event.type === "error")).toBe(false);
+  await h.time.advance(249);
+  expect(attempts).toBe(1);
+  await h.time.advance(1);
+  expect(attempts).toBe(2);
+  await h.time.advance(500);
+  expect(attempts).toBe(3);
+  expect(h.statuses.some(status => status.state === "offline")).toBe(false);
+  expect(h.selections.at(-1)).toEqual({ sessionId: "a", ready: true });
+  for (const call of h.calls.filter(call => call.path === "/v1/reconcile").slice(1)) {
+    expect(call.body).toMatchObject({ session: "a", transcriptFrom: 4, notificationsAfter: 33, eventsAfter: 14, have: retained });
+  }
+  expect(h.events.filter(event => event.type === "transcript").at(-1)).toMatchObject({ total: 11 });
+}));
+
+test("persistent source churn has bounded retry traffic, no terminal protocol error and no false offline timer", () => harness(async h => {
+  const client = h.client(() => finite([hello, { type: "error", message: "Could not refresh thread: stale-source: Session changed during indexing" }]), { subscription: { session: "a", viewing: true } });
+  client.start(); await h.time.flush();
+  await h.time.advance(RECONNECT_GRACE_MS * 4);
+  expect(client.state()).toBe("connecting");
+  expect(h.calls.length).toBeGreaterThan(1);
+  expect(h.calls.length).toBeLessThan(12);
+  expect(h.events.some(event => event.type === "error")).toBe(false);
+  expect(h.statuses.some(status => status.state === "offline")).toBe(false);
+  expect(h.selections.some(selection => selection.ready)).toBe(false);
+}));
+
+test("push source churn keeps live delivery open until finite source recovery", () => harness(async h => {
+  const client = h.client(undefined, { subscription: { session: "a", viewing: true } });
+  client.start(); await h.time.flush();
+  h.wires[0].emit({ type: "error", message: "Could not read transcript: stale_source: The transcript generation has been replaced" });
+  h.publisher.publish("live:a", { type: "live", sessionId: "a", text: "new live tokens" });
+  h.wires[0].emit(h.reconcile("live:a"));
+  await h.time.flush();
+  expect(client.state()).toBe("open");
+  expect(h.events.some(event => event.type === "error")).toBe(false);
+  expect(h.events.filter(event => event.type === "live").at(-1)).toMatchObject({ text: "new live tokens" });
+  await h.time.advance(250);
+  expect(h.calls.filter(call => call.path === "/v1/reconcile")).toHaveLength(2);
+  expect(h.selections.at(-1)).toEqual({ sessionId: "a", ready: true });
+}));
+
 test("healthy revalidation and subscription changes never report transport recovery", () => harness(async h => {
   const pending = deferred<Response>();
   let waiting = false;

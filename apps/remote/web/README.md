@@ -28,6 +28,8 @@ Uploads, pasted documents and drawings attach to the draft without sending. Imag
 
 Foreground, network and focus transitions coalesce into reconciliation. Hidden ordinary views release feeds and timers; external Meet owns its media lifecycle. Current selection acknowledgements fence old responses. Cached history remains readable during recovery while its header shows Updating or the concrete failure.
 
+Native history changing during an indexed window read is source churn, not disconnection. Selection publication retries a bounded fresh read; the client resynchronizes with capped backoff while retaining its view, resource hashes, loaded transcript range and event/notification cursors. These source errors never enter the app's terminal protocol-error path. Authentication, malformed input and unrelated failures retain their explicit error behavior.
+
 Resource subscriptions follow the visible route: selected transcript, images and questions; Machine only while open; thinking only while disclosed. Native notification leases hand off durable cursors without duplicate stream/poll delivery. Every person/environment retains its own notification cursor.
 
 [`client-cache.ts`](src/client-cache.ts) and [`transcript-cache.ts`](src/transcript-cache.ts) retain byte-bounded heads and immutable bodies. Exact text loads on disclosure/copy. Native history remains authoritative; live text is a disposable projection. Virtualized transcript anchors preserve the reading position through streaming and late media, and Jump to latest explicitly resumes following.

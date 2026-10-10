@@ -10,6 +10,7 @@ import { piFetch } from "./client";
 import { abortable } from "./abortable";
 import { assertNever, requireState } from "../../shared/explicit-state";
 import { stateObject, stateString, stateArray, validateBootstrap, validateStreamSnapshot } from "../../shared/state-validation";
+import { historySourceChanged } from "../../shared/history-source-retry";
 
 export type StreamState = "connecting" | "open" | "offline";
 export interface StreamStatus { state: StreamState; error: string; diagnostic?: string }
@@ -80,6 +81,7 @@ export class EventStreamParser {
 
 export class StreamProtocolError extends Error {}
 class StreamReplicaError extends Error {}
+class StreamSourceRetry extends Error {}
 
 /** Invalid wire input never becomes a healthy event or a silent no-op. */
 export function streamEventFromFrame(frame: StreamFrame): StreamWireEvent | null {
@@ -154,6 +156,7 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
   let failures = 0;
   let generation = 0;
   let pushFailures = 0;
+  let sourceFailures = 0;
   let acknowledged = false;
   const runnable = () => !stopped && (!options.suspendWhenHidden || document.visibilityState === "visible");
   const declaration = (): StreamSubscription => {
@@ -198,6 +201,7 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
   };
   const recovered = () => {
     failures = 0;
+    sourceFailures = 0;
     clearRecovery();
     setStatus("open");
   };
@@ -209,6 +213,15 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
       authenticationError = error.message;
       showRecovery();
     } else beginRecovery();
+  };
+  const retrySource = (message: string) => {
+    // A valid finite response or live frame proves transport liveness even if
+    // the native source changed. Keep the replica and all replay cursors.
+    clearRecovery();
+    diagnostic = message;
+    options.onSelectionStatus?.({ sessionId: subscription.session ?? null, ready: false });
+    setStatus(state === "open" ? "open" : "connecting");
+    schedule(Math.min(MAX_RETRY_MS, 250 * 2 ** Math.min(sourceFailures++, 5)));
   };
   const clearWatchdog = () => { if (watchdog) clearTimeout(watchdog); watchdog = null; };
   const armWatchdog = (active: AbortController) => {
@@ -254,7 +267,14 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
       case "events":
         if (event.sessionId !== subscription.session) return;
         options.onEvent(event); return;
-      case "notifications": case "error": options.onEvent(event); return;
+      case "error":
+        if (historySourceChanged(event.message)) {
+          if (source === "finite") throw new StreamSourceRetry(event.message);
+          retrySource(event.message);
+          return;
+        }
+        options.onEvent(event); return;
+      case "notifications": options.onEvent(event); return;
     }
     assertNever(event, "Stream delivery");
   };
@@ -361,6 +381,7 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
         if (mine !== generation || stopped) return;
         clearWatchdog();
         if (error instanceof StreamReplicaError) schedule(0);
+        else if (error instanceof StreamSourceRetry) retrySource(error.message);
         else {
           failed(controller?.signal.aborted ? controller.signal.reason : error);
           schedule(failures++ === 0 ? 0 : Math.min(MAX_RETRY_MS, 250 * 2 ** Math.min(failures, 5)));
