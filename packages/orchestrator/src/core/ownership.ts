@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, statSync } from "node:fs";
 import type { CoreScope, CustodyNamespace } from "./contracts.js";
 import type { CoreResult } from "./config.js";
 
@@ -29,18 +29,7 @@ function validFiles(value: unknown): boolean {
   return value.wal.kind === "absent" ? exact(value.wal, ["kind"])
     : value.wal.kind === "present" && exact(value.wal, ["kind", "sha256", "size", "identity"]) && digest(value.wal) && fileIdentity(value.wal.identity);
 }
-function snapshotFile(path: string): { sha256: string; size: number; identity: { dev: string; ino: string } } {
-  const fd = openSync(path, "r");
-  try {
-    const before = fstatSync(fd, { bigint: true }), hash = createHash("sha256"), buffer = Buffer.allocUnsafe(1024 * 1024);
-    let bytes: number;
-    while ((bytes = readSync(fd, buffer, 0, buffer.length, null)) > 0) hash.update(buffer.subarray(0, bytes));
-    const after = statSync(path, { bigint: true });
-    if (!before.isFile() || before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) throw new Error("Detached store changed during snapshot");
-    return { sha256: hash.digest("hex"), size: Number(before.size), identity: { dev: String(before.dev), ino: String(before.ino) } };
-  } finally { closeSync(fd); }
-}
-function samePhysicalRebinding(receipt: Record<string, any>, custody: DatabaseCustody, database: string): boolean {
+function samePhysicalRebinding(receipt: Record<string, any>, custody: DatabaseCustody): boolean {
   const binding = receipt.namespaceRebinding;
   if (!custody.namespaces || receipt.generationTransfer !== undefined || !exact(binding, ["version", "kind", "source", "target", "retainedRunnerNamespace"])
     || binding.version !== 1 || binding.kind !== "same-physical-object"
@@ -49,10 +38,7 @@ function samePhysicalRebinding(receipt: Record<string, any>, custody: DatabaseCu
     || !isDeepStrictEqual(binding.target.namespace, custody.namespaces.data) || !fileIdentity(binding.source.databaseIdentity)
     || !isDeepStrictEqual(binding.source.databaseIdentity, binding.target.databaseIdentity) || !isDeepStrictEqual(binding.target.databaseIdentity, receipt.databaseIdentity)
     || !validFiles(binding.source.files) || !isDeepStrictEqual(binding.source.files, binding.target.files)) return false;
-  const current = snapshotFile(database), walPath = `${database}-wal`;
-  const { identity, ...databaseFile } = current;
-  const wal = existsSync(walPath) ? { kind: "present", ...snapshotFile(walPath) } : { kind: "absent" };
-  return isDeepStrictEqual(identity, binding.target.databaseIdentity) && isDeepStrictEqual({ database: databaseFile, wal }, binding.target.files);
+  return true;
 }
 export function acquireDatabaseOwnership(custody: DatabaseCustody, path: (logicalPath: string) => string): CoreResult<ScopeOwnership> {
   return acquire(custody, path);
@@ -78,7 +64,7 @@ function acquire(custody: DatabaseCustody, path: (logicalPath: string) => string
       || !Number.isFinite(Date.parse(receipt.previousOwner.detachedAt))) return { ok: false, error: { code: "ownership-conflict", message: `Adoption receipt does not bind detached ${custody.id} storage` } };
     if (custody.namespaces && !isDeepStrictEqual(custody.namespaces.data, custody.namespaces.retained)) {
       const transfer = receipt.generationTransfer;
-      const rebind = receiptStat.uid === 0 && samePhysicalRebinding(receipt, custody, database);
+      const rebind = receiptStat.uid === 0 && samePhysicalRebinding(receipt, custody);
       if (!rebind && (receipt.namespaceRebinding !== undefined || receiptStat.uid !== 0 || transfer?.version !== 1
         || !isDeepStrictEqual(transfer.target?.namespace, custody.namespaces.data)
         || !isDeepStrictEqual(transfer.retainedRunnerNamespace, custody.namespaces.retained)

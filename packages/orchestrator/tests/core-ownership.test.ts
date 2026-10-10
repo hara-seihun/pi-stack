@@ -26,7 +26,7 @@ function fixture() {
   const receipt: any = { version: 1, state: "detached", scopeId: "alice", databasePath, sessionsDir: root,
     databaseIdentity: identity(databasePath), previousOwner: { identity: "original-controller:birth", detachedAt: "2026-10-10T00:00:00Z" } };
   const snapshot = { databaseIdentity: receipt.databaseIdentity, files: { database: file(databasePath), wal: { kind: "present", ...file(`${databasePath}-wal`), identity: identity(`${databasePath}-wal`) } } };
-  const rebinding = { version: 1, kind: "same-physical-object", source: { namespace: namespaces.retained, ...snapshot }, target: { namespace: namespaces.data, ...snapshot }, retainedRunnerNamespace: namespaces.retained };
+  const rebinding = { version: 1, kind: "same-physical-object", source: { namespace: namespaces.retained, ...snapshot }, target: { namespace: namespaces.data, ...structuredClone(snapshot) }, retainedRunnerNamespace: namespaces.retained };
   const custody: DatabaseCustody = { id: "alice", databasePath, adoptionReceiptPath, uid: process.getuid!(), namespaces };
   const save = () => writeFileSync(adoptionReceiptPath, JSON.stringify(receipt), { mode: 0o600 });
   save();
@@ -57,15 +57,16 @@ rootTest("root physical rebinding admits exact detached DB/WAL and fences a seco
   expect(f.own().ok).toBe(false);
 });
 
-rootTest("physical rebinding rejects namespace, inode, content, WAL and detached-owner substitutions", () => {
+rootTest("physical rebinding rejects namespace, inode, historical DB/WAL proof and detached-owner substitutions", () => {
   for (const mutate of [
     (f: ReturnType<typeof fixture>) => { f.receipt.namespaceRebinding.source.namespace = f.custody.namespaces!.data; },
     (f: ReturnType<typeof fixture>) => { f.receipt.namespaceRebinding.target.databaseIdentity = { ...f.receipt.databaseIdentity, ino: "0" }; },
     (f: ReturnType<typeof fixture>) => { const copied = join(f.root, "copy.sqlite3"); copyFileSync(f.databasePath, copied); f.receipt.namespaceRebinding.source.databaseIdentity = identity(copied); },
-    (f: ReturnType<typeof fixture>) => { writeFileSync(f.databasePath, "changed database bytes"); },
-    (f: ReturnType<typeof fixture>) => { writeFileSync(`${f.databasePath}-wal`, "changed WAL bytes"); },
-    (f: ReturnType<typeof fixture>) => { const wal = `${f.databasePath}-wal`; renameSync(wal, join(f.root, "wal-copy")); copyFileSync(join(f.root, "wal-copy"), wal); },
-    (f: ReturnType<typeof fixture>) => { rmSync(`${f.databasePath}-wal`); },
+    (f: ReturnType<typeof fixture>) => { f.receipt.namespaceRebinding.source.files.database.sha256 = "b".repeat(64); },
+    (f: ReturnType<typeof fixture>) => { f.receipt.namespaceRebinding.source.files.wal.sha256 = "b".repeat(64); },
+    (f: ReturnType<typeof fixture>) => { f.receipt.namespaceRebinding.source.files.wal.identity.ino = "0"; },
+    (f: ReturnType<typeof fixture>) => { f.receipt.namespaceRebinding.source.files.wal = { kind: "absent" }; },
+    (f: ReturnType<typeof fixture>) => { renameSync(f.databasePath, join(f.root, "original.sqlite3")); copyFileSync(join(f.root, "original.sqlite3"), f.databasePath); },
     (f: ReturnType<typeof fixture>) => { f.receipt.previousOwner.detachedAt = "not a detachment time"; },
     (f: ReturnType<typeof fixture>) => { f.receipt.namespaceRebinding.extra = "unknown receipt variant field"; },
     (f: ReturnType<typeof fixture>) => { f.receipt.generationTransfer = {}; },
@@ -73,6 +74,26 @@ rootTest("physical rebinding rejects namespace, inode, content, WAL and detached
     const f = fixture(); f.receipt.namespaceRebinding = structuredClone(f.rebinding); mutate(f); f.save();
     expect(f.own().ok).toBe(false);
   }
+});
+
+rootTest("physical rebinding survives legitimate SQLite schema/content writes and WAL checkpoint on restart", () => {
+  const f = fixture(); rmSync(f.databasePath); rmSync(`${f.databasePath}-wal`);
+  const db = new DatabaseSync(f.databasePath);
+  db.exec("PRAGMA journal_mode=WAL; CREATE TABLE accepted(id TEXT PRIMARY KEY);");
+  f.receipt.databaseIdentity = identity(f.databasePath);
+  const snapshot = { databaseIdentity: f.receipt.databaseIdentity, files: { database: file(f.databasePath),
+    wal: { kind: "present", ...file(`${f.databasePath}-wal`), identity: identity(`${f.databasePath}-wal`) } } };
+  f.receipt.namespaceRebinding = { ...f.rebinding, source: { namespace: f.custody.namespaces!.retained, ...snapshot }, target: { namespace: f.custody.namespaces!.data, ...snapshot } }; f.save();
+  let closed = false;
+  try {
+    const adopted = f.own(); expect(adopted.ok).toBe(true); if (!adopted.ok) return;
+    db.exec("CREATE TABLE core_adopted(value TEXT); INSERT INTO accepted VALUES('original-input'); PRAGMA wal_checkpoint(TRUNCATE);");
+    db.close(); closed = true; adopted.value.close();
+    expect(f.own().ok).toBe(true);
+    const reopened = new DatabaseSync(f.databasePath);
+    try { expect(reopened.prepare("SELECT id FROM accepted").get()).toMatchObject({ id: "original-input" }); }
+    finally { reopened.close(); }
+  } finally { if (!closed) db.close(); }
 });
 
 rootTest("a person-owned receipt cannot authorize physical namespace rebinding", () => {
