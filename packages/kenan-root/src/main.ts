@@ -36,26 +36,26 @@ const bridge = createConsentBridge(process.env.PI_KENAN_ROOT_ROUTER_URL ?? "http
 consent = new RootConsentManager(consentStore, {
   bridge,
   memory: rootMemoryRpc(memoryUrl, memoryRootToken), executor, enabled: oneKenanEnabled });
-const releaseState: RootReleaseState = { dispatchPaused: false, consentActive: false };
+const requestStorePath = resolve(process.env.PI_KENAN_ROOT_REQUEST_STORE ?? join(privateDir, "root/requests.sqlite3"));
+if (!requestStorePath.startsWith(resolve(privateDir) + sep)) throw new Error("Root requests must remain inside the mounted encrypted private store");
+const requestStore = new RootRequestStore(requestStorePath);
+const releaseState: RootReleaseState = { dispatchPaused: requestStore.handoffTarget() !== null, consentActive: false };
 let reconciliation: Promise<void> | undefined;
 const timer = setInterval(() => {
   if (releaseState.consentActive || releaseState.dispatchPaused || closing.signal.aborted) return;
   releaseState.consentActive = true;
   reconciliation = (async () => {
     try {
-      const [result, requests] = await Promise.all([consent.drain(), handle.drain()]);
+      const [result, requests] = await Promise.all([consent.drain(() => !releaseState.dispatchPaused && !closing.signal.aborted), handle.drain()]);
       if (result.errors) console.error(`Root consent: ${result.errors} pending exchanges require retry; state retained`);
       if (requests.errors) console.error(`Root requests: ${requests.errors} pending replies require retry; state retained`);
     }
     finally { releaseState.consentActive = false; }
   })();
 }, 2_000);
-const requestStorePath = resolve(process.env.PI_KENAN_ROOT_REQUEST_STORE ?? join(privateDir, "root/requests.sqlite3"));
-if (!requestStorePath.startsWith(resolve(privateDir) + sep)) throw new Error("Root requests must remain inside the mounted encrypted private store");
-const requestStore = new RootRequestStore(requestStorePath);
 const handle = rootService({ enabled: oneKenanEnabled, memoryUrl, requestStore, bridge,
   memoryRootToken, adminCapability, sessionsDir: config.sessionsDir, executor,
-  releaseCommit: process.env.PI_STACK_RELEASE_COMMIT, releaseState });
+  releaseCommit: process.env.PI_STACK_RELEASE_COMMIT, releaseState, shutdownSignal: closing.signal });
 const server = Bun.serve({ hostname: "127.0.0.1", port: Number(process.env.PI_KENAN_ROOT_PORT ?? KENAN_ROOT_DEFAULT_PORT), idleTimeout: 255,
   fetch: handle });
 closing.signal.addEventListener("abort", () => {
@@ -63,7 +63,7 @@ closing.signal.addEventListener("abort", () => {
   clearInterval(timer);
   void (async () => {
     await reconciliation;
-    await handle.settled();
+    await handle.dispatchSettled();
     await server.stop(false);
     await handle.settled();
     consent.close();

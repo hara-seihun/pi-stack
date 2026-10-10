@@ -38,6 +38,7 @@ export class RootRequestStore {
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;
       CREATE TABLE IF NOT EXISTS requests(id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS not_accepted(id TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS release_handoff(slot INTEGER PRIMARY KEY CHECK(slot=1), target_commit TEXT NOT NULL);
       UPDATE requests SET body=json_set(body,'$.state','interrupted') WHERE json_extract(body,'$.state')='executing';`);
   }
   get(id: string): RootRequest | undefined {
@@ -65,6 +66,18 @@ export class RootRequestStore {
   }
   pending(limit = 4): RootRequest[] {
     return (this.db.query("SELECT body FROM requests WHERE (json_extract(body,'$.state')='queued' AND json_extract(body,'$.retryAt')<=?) OR json_extract(body,'$.state')='finalizing' OR (json_extract(body,'$.state') IN ('completed','failed','interrupted') AND json_extract(body,'$.delivery')='pending') OR coalesce(json_extract(body,'$.state'),'') NOT IN ('queued','executing','finalizing','completed','failed','interrupted') OR coalesce(json_extract(body,'$.delivery'),'') NOT IN ('pending','delivered','inline') ORDER BY coalesce(json_extract(body,'$.attemptedAt'),0),rowid LIMIT ?").all(Date.now(), limit) as { body: string }[]).map(row => parseRootRequest(row.body));
+  }
+  handoffTarget(): string | null {
+    const row = this.db.query("SELECT target_commit FROM release_handoff WHERE slot=1").get() as { target_commit: string } | null;
+    if (row && !/^[0-9a-f]{40}$/.test(row.target_commit)) throw new Error("Invalid stored Root handoff target");
+    return row?.target_commit ?? null;
+  }
+  setHandoff(target: string | null): void {
+    if (target === null) this.db.query("DELETE FROM release_handoff WHERE slot=1").run();
+    else {
+      if (!/^[0-9a-f]{40}$/.test(target)) throw new Error("Invalid Root handoff target");
+      this.db.query("INSERT INTO release_handoff(slot,target_commit) VALUES(1,?) ON CONFLICT(slot) DO UPDATE SET target_commit=excluded.target_commit").run(target);
+    }
   }
   close() { this.db.close(); }
 }

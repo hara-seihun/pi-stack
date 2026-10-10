@@ -23,7 +23,7 @@ class Deferred(Exception):
 class Host:
     def __init__(self, config, expected):
         self.config, self.expected = config, expected
-        self.deadline = time.monotonic() + 40
+        self.deadline = time.monotonic() + 120
 
     def command(self, *args):
         return subprocess.check_output(args, text=True, timeout=min(5, max(.1, self.deadline-time.monotonic()))).strip()
@@ -31,7 +31,7 @@ class Host:
     def health(self, role):
         return self.http(role, '/v1/health')[1]
 
-    def http(self, role, path, method='GET'):
+    def http(self, role, path, method='GET', body=None):
         port = self.config.get(role+'Port', {'memory': 18820, 'root': 18821, 'rooms': 18822}[role])
         if not isinstance(port, int) or not 0 < port < 65536:
             raise RuntimeError('Invalid One Kenan listener port')
@@ -41,28 +41,45 @@ class Host:
             if not re.fullmatch('[0-9a-f]{64}', token):
                 raise RuntimeError('Invalid root release capability')
             headers['x-pi-kenan-admin'] = token
-        request = urllib.request.Request(f'http://127.0.0.1:{port}{path}', method=method, headers=headers)
+        if body is not None:
+            headers['content-type'] = 'application/json'
+        request = urllib.request.Request(f'http://127.0.0.1:{port}{path}', method=method, headers=headers,
+                                        data=None if body is None else json.dumps(body).encode())
         try:
             with urllib.request.urlopen(request, timeout=2) as response:
                 return response.status, json.loads(response.read(16384))
         except urllib.error.HTTPError as error:
-            return error.code, {}
+            try:
+                return error.code, json.loads(error.read(16384))
+            except (OSError, http.client.HTTPException, ValueError):
+                return error.code, {}
         except (OSError, http.client.HTTPException, ValueError):
             return 0, {}
 
-    def idle(self, pid):
-        if self.command('systemctl', 'show', UNITS['root'], '-p', 'MainPID', '--value') != pid:
-            raise Deferred('Root PID changed while obtaining idle evidence')
-        group = self.command('systemctl', 'show', UNITS['root'], '-p', 'ControlGroup', '--value')
-        if not group.startswith('/') or '..' in group.split('/'):
-            raise RuntimeError('Invalid root cgroup path')
-        pids = set()
-        for directory, _, files in os.walk('/sys/fs/cgroup' + group):
-            if 'cgroup.procs' in files:
-                pids.update(pathlib.Path(directory, 'cgroup.procs').read_text().split())
-        if pid not in pids:
-            raise Deferred('Inspected root PID no longer belongs to its service')
-        return {'childProcesses': len(pids - {pid})}
+    def acquire_idle(self):
+        deadline = min(self.deadline, time.monotonic() + 60)
+        delay = .05
+        while True:
+            status, body = self.http('root', '/v1/admin/release', 'POST')
+            if status != 409 or body != {'ok': False, 'error': 'busy'}:
+                return status, body
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise Deferred('Protocol 1/2 Root did not reach natural idle during the bounded atomic acquisition window; intake and running work remain unchanged')
+            time.sleep(min(delay, remaining))
+            delay = min(.25, delay * 1.5)
+
+    def wait_handoff(self, pid):
+        while time.monotonic() < self.deadline:
+            if self.command('systemctl', 'show', UNITS['root'], '-p', 'MainPID', '--value') != pid:
+                raise Deferred('Root generation changed during dispatch drain; durable handoff needs reconciliation')
+            health = self.health('root')
+            if health.get('ok') is not True or health.get('releaseProtocol') != 3 or health.get('handoffTarget') != self.expected or health.get('dispatchPaused') is not True or type(health.get('handoffReady')) is not bool:
+                raise Deferred('Root durable dispatch handoff is not positively owned by this release')
+            if health.get('handoffReady') is True:
+                return
+            time.sleep(.1)
+        raise Deferred('Root running executions are finishing naturally; dispatch remains durably paused and accepted requests stay queued for the next activation attempt')
 
     def ready(self, role, previous_pid=None):
         while time.monotonic() < self.deadline:
@@ -118,8 +135,11 @@ def check(host):
             raise RuntimeError(f'Enabled One Kenan is missing {unit}')
     health = host.health('root')
     protocol = health.get('releaseProtocol')
-    if health.get('ok') is not True or type(protocol) is not int or protocol not in (1, 2):
-        raise Deferred('The running Root executor has no atomic idle handoff protocol; it remains running')
+    if health.get('ok') is not True or type(protocol) is not int or protocol not in (1, 2, 3):
+        raise Deferred('The running Root executor has no recognized handoff protocol; it remains running')
+    capabilities = health.get('releaseCapabilities')
+    if protocol == 3 and (type(capabilities) is not list or 'durable-dispatch-handoff' not in capabilities):
+        raise Deferred('Root protocol 3 has not declared the durable dispatch handoff capability')
     return protocol
 
 
@@ -151,6 +171,8 @@ def prove(host):
         health = host.health(role)
         if health.get('ok') is not True or not release_matches(host, role, health.get('releaseCommit')):
             raise RuntimeError(f'{unit} running source does not match {host.expected}')
+        if role == 'root' and health.get('releaseProtocol') == 3 and (health.get('dispatchPaused') is not False or health.get('handoffTarget') is not None):
+            raise RuntimeError('Root dispatch has not been explicitly resumed; selected source alone is not an activated executor')
         result[role] = {'unit': unit, 'releaseCommit': health['releaseCommit']}
     return {'enabled': True, 'consumers': result}
 
@@ -170,54 +192,110 @@ def activate_rooms(host):
     return {'enabled': True, 'consumers': {'rooms': {'unit': UNITS['rooms'], 'releaseCommit': health['releaseCommit']}}}
 
 
+def release_request(host, protocol, method):
+    if protocol == 3:
+        return host.http('root', '/v1/admin/release', method, {'targetCommit': host.expected})
+    return host.http('root', '/v1/admin/release', method)
+
+
+def release_response(host, protocol, paused):
+    result = {'ok': True, 'quiescing' if protocol == 1 else 'dispatchPaused': paused}
+    if protocol == 3:
+        result['targetCommit'] = host.expected
+    return result
+
+
+def pause(host, protocol):
+    if protocol == 3:
+        health = host.health('root')
+        target = health.get('handoffTarget')
+        request = {'targetCommit': host.expected}
+        if target is not None and target != host.expected:
+            if not isinstance(target, str) or not re.fullmatch('[0-9a-f]{40}', target) or health.get('dispatchPaused') is not True:
+                raise Deferred('Root existing handoff ownership is invalid; dispatch remains unchanged')
+            request['previousTarget'] = target
+        status, body = host.http('root', '/v1/admin/release', 'POST', request)
+    else:
+        status, body = host.acquire_idle()
+    if status != 200 or body != release_response(host, protocol, True):
+        raise Deferred('Root handoff was not confirmed; no consumers restarted')
+
+
+def resume_owned(host, protocol):
+    for role in ('memory', 'root'):
+        health = host.health(role)
+        if host.command('systemctl', 'is-active', UNITS[role]) != 'active' or health.get('ok') is not True or not release_matches(host, role, health.get('releaseCommit')):
+            raise Deferred('Root/memory replacement source ownership is not proven; dispatch resume remains pending')
+    status, body = release_request(host, protocol, 'DELETE')
+    if status != 200 or body != release_response(host, protocol, False):
+        raise Deferred('Root dispatch resume was not confirmed')
+    if protocol == 3:
+        health = host.health('root')
+        if health.get('dispatchPaused') is not False or health.get('handoffTarget') is not None or not release_matches(host, 'root', health.get('releaseCommit')):
+            raise Deferred('Root accepting source and explicit dispatch resume have not been proven')
+
+
 def activate(host):
     stale = [role for role in ('memory', 'root') if not release_matches(host, role, host.health(role).get('releaseCommit'))]
     if not stale:
+        health = host.health('root')
+        if health.get('releaseProtocol') == 3 and health.get('dispatchPaused') is True:
+            protocol = check(host)
+            pid = host.command('systemctl', 'show', UNITS['root'], '-p', 'MainPID', '--value')
+            if health.get('handoffTarget') != host.expected:
+                pause(host, protocol)
+            host.wait_handoff(pid)
+            resume_owned(host, protocol)
         activate_rooms(host)
         return prove(host)
     protocol = check(host)
     if protocol == 1 and 'root' not in stale:
         raise Deferred('Protocol 1 owner needs a prepared accepting Root replacement before memory activation')
-    # All preparation happens before protocol 1's one-time atomic idle handoff.
     for role in stale:
         host.prepare(role)
     paused_pid = host.command('systemctl', 'show', UNITS['root'], '-p', 'MainPID', '--value')
     if not re.fullmatch(r'[1-9][0-9]*', paused_pid):
         raise Deferred('Root owner changed during preparation; intake remains unchanged')
-    status, body = host.http('root', '/v1/admin/release', 'POST')
-    if status == 409:
-        raise Deferred('Root has active work; request intake is unchanged and executor replacement waits for natural idle')
+    durable = protocol == 3
     try:
-        expected_pause = {'ok': True, 'quiescing': True} if protocol == 1 else {'ok': True, 'dispatchPaused': True}
-        if status != 200 or body != expected_pause:
-            raise Deferred('Root idle handoff was not confirmed; no consumers restarted')
+        pause(host, protocol)
         if host.command('systemctl', 'show', UNITS['root'], '-p', 'MainPID', '--value') != paused_pid:
-            raise Deferred('Root generation changed after idle handoff; no consumers restarted')
+            raise Deferred('Root generation changed after handoff; no consumers restarted')
+        if protocol == 3:
+            host.wait_handoff(paused_pid)
         if protocol == 1:
             host.command('systemctl', 'restart', '--no-block', UNITS['root'])
-            health = host.ready('root', paused_pid)
-            if health.get('releaseProtocol') != 2:
+            host.ready('root', paused_pid)
+            protocol = check(host)
+            durable = durable or protocol == 3
+            if protocol not in (2, 3):
                 raise Deferred('Root replacement has not established accepting dispatch-only handoff')
-            protocol = 2
             stale.remove('root')
             if 'memory' in stale:
-                status, body = host.http('root', '/v1/admin/release', 'POST')
-                if status != 200 or body != {'ok': True, 'dispatchPaused': True}:
-                    raise Deferred('New Root has active work; memory activation waits with normal intake accepting')
+                pause(host, protocol)
+                if protocol == 3:
+                    pid = host.command('systemctl', 'show', UNITS['root'], '-p', 'MainPID', '--value')
+                    host.wait_handoff(pid)
         for role in stale:
             previous_pid = host.command('systemctl', 'show', UNITS[role], '-p', 'MainPID', '--value')
             host.command('systemctl', 'restart', '--no-block', UNITS[role])
-            host.ready(role, previous_pid)
-        status, body = host.http('root', '/v1/admin/release', 'DELETE')
-        if status != 200 or body != {'ok': True, 'dispatchPaused': False}:
-            raise Deferred('Root dispatch resume was not confirmed')
+            health = host.ready(role, previous_pid)
+            if role == 'root':
+                previous_protocol = protocol
+                protocol = check(host)
+                durable = durable or protocol == 3
+                if previous_protocol == 3 and (protocol != 3 or health.get('dispatchPaused') is not True or health.get('handoffTarget') != host.expected):
+                    raise Deferred('Root replacement lost its durable dispatch handoff; source ownership must be reconciled')
+        resume_owned(host, protocol)
         activate_rooms(host)
         return prove(host)
     finally:
-        status, body = host.http('root', '/v1/admin/release', 'DELETE')
-        resumed = {'ok': True, 'quiescing': False} if protocol == 1 else {'ok': True, 'dispatchPaused': False}
-        if status != 200 or body != resumed:
-            raise Deferred('Root replacement is still settling; request receipts remain durable and dispatch resume must be reconciled')
+        # Protocol 3 retains its release-owned pause across deferred attempts and crashes.
+        # Idle-only owners cannot persist it and must be explicitly reopened on failure.
+        if not durable and protocol in (1, 2):
+            status, body = release_request(host, protocol, 'DELETE')
+            if status != 200 or body != release_response(host, protocol, False):
+                raise Deferred('Root replacement is still settling; request receipts remain durable and dispatch resume must be reconciled')
 
 
 def public_config(path):

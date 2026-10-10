@@ -135,10 +135,11 @@ export class RootConsentManager {
     if (row.state === "failed") return { ok: false, message: row.lastError ?? "Notification was rejected; nothing was delivered" };
     return { ok: false, message: "Invalid stored notification state; nothing was delivered" };
   }
-  async drain(): Promise<{ pending: number; delivered: number; errors: number }> {
+  async drain(canDispatch: () => boolean = this.options.enabled): Promise<{ pending: number; delivered: number; errors: number }> {
     const notifications = this.db.query("SELECT id FROM root_notification WHERE state NOT IN ('delivered','failed') ORDER BY updated_at LIMIT 32").all() as { id: string }[];
     let notificationDelivered = 0, notificationErrors = 0;
-    if (this.options.enabled()) await Promise.all(notifications.map(({ id }) => this.serial(id, async () => {
+    if (this.options.enabled() && canDispatch()) await Promise.all(notifications.map(({ id }) => this.serial(id, async () => {
+      if (!canDispatch()) return;
       const row: PendingNotification = JSON.parse((this.db.query("SELECT data FROM root_notification WHERE id=?").get(id) as { data: string }).data);
       try {
         const result = await this.advanceNotification(row);
@@ -148,18 +149,19 @@ export class RootConsentManager {
     })));
     const rows = this.db.query("SELECT id FROM root_consent WHERE state!='delivered' ORDER BY updated_at LIMIT 32").all() as { id: string }[];
     let delivered = notificationDelivered, errors = notificationErrors;
-    if (!this.options.enabled()) return { pending: rows.length + notifications.length, delivered, errors };
+    if (!this.options.enabled() || !canDispatch()) return { pending: rows.length + notifications.length, delivered, errors };
     for (const { id } of rows) await this.serial(id, async () => {
       const row = this.get(id);
       try {
-        const advanced = await this.advance(row);
+        const advanced = await this.advance(row, canDispatch);
         if (!advanced.ok) { row.lastError = advanced.message; this.save(row); errors++; }
         else if (row.state === "delivered") delivered++;
       } catch { row.lastError = "Consent reconciliation failed; the durable record is retained"; this.save(row); errors++; }
     });
     return { pending: rows.length + notifications.length - delivered, delivered, errors };
   }
-  private async advance(row: PendingConsent): Promise<ConsentResult<void>> {
+  private async advance(row: PendingConsent, canDispatch: () => boolean): Promise<ConsentResult<void>> {
+    if (!canDispatch()) return { ok: true, value: undefined };
     if (row.state === "queued") return this.dispatch(row);
     if (row.state === "waiting") {
       const answer = await this.options.bridge.answer({ consentId: row.id, subject: row.subject, ...row.receipt! });
@@ -172,6 +174,7 @@ export class RootConsentManager {
       const logged = await this.log(row, "answer", row.answer!); if (!logged.ok) return logged;
       const resumed = await this.options.memory<RootAdmission>("/v1/root/resume-consent", { rootSessionId: row.original.rootSessionId, subject: row.subject, question: row.question, answer: row.answer, consentId: row.id });
       if (!resumed.ok) return { ok: false, message: resumed.message };
+      if (!canDispatch()) return { ok: true, value: undefined };
       const reply = await this.options.executor(resumed.value, `Reconsider the original request using the subject's exact human answer below. Consent is scoped to this question and audience, not a blanket release. Dismissal or refusal is not permission. Do not ask this same question again. Select the final reply for the original requester's existing thread.\n${JSON.stringify({ originalRequest: row.request, subject: row.subject, question: row.question, humanAnswer: JSON.parse(row.answer!) })}`);
       if (!reply.ok) return { ok: false, message: reply.message };
       row.chosen = reply.value; row.resumedRootSessionId = resumed.value.rootSessionId; row.state = "decided"; this.save(row);

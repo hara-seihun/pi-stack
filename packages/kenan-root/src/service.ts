@@ -21,14 +21,16 @@ export interface RootServiceOptions {
   report?: InfrastructureReporter;
   releaseCommit?: string;
   releaseState?: RootReleaseState;
+  shutdownSignal?: AbortSignal;
   requestStore?: RootRequestStore;
   bridge?: Pick<ConsentBridge, "reply">;
 }
-export function rootService(options: RootServiceOptions): ((request: Request) => Promise<Response>) & { drain(): Promise<{ errors: number }>; settled(): Promise<void> } {
+export function rootService(options: RootServiceOptions): ((request: Request) => Promise<Response>) & { drain(): Promise<{ errors: number }>; settled(): Promise<void>; dispatchSettled(): Promise<void> } {
   const transport = options.transport ?? fetch;
   const report = options.report ?? reportInfrastructure;
   const releaseState = options.releaseState ?? { dispatchPaused: false, consentActive: false };
   const requests = options.requestStore ?? new RootRequestStore(":memory:");
+  if (requests.handoffTarget() !== null) releaseState.dispatchPaused = true;
   const accepting = new Map<string, Promise<void>>();
   const finalizing = new Map<string, Promise<void>>();
   const delivering = new Map<string, Promise<void>>();
@@ -95,7 +97,7 @@ export function rootService(options: RootServiceOptions): ((request: Request) =>
   const drain = async () => {
     if (!options.enabled() || releaseState.dispatchPaused) return { errors: 0 };
     const results = await Promise.all(requests.pending(options.maxConcurrent ?? 4).map(async record => {
-      try { if (record.state === "queued") await resume(record); else { await finalize(record); await deliver(record.id); } }
+      try { if (record.state === "queued") await resume(record); else if (!releaseState.dispatchPaused) { await finalize(record); await deliver(record.id); } }
       catch (error) { report({ component: "root-service", stage: "request", outcome: "failed", reason: infrastructureReason(error), durationMs: 0 }); }
       const current = requests.get(record.id)!;
       return current.state !== "queued" && (current.state === "finalizing" || current.delivery === "pending");
@@ -145,6 +147,10 @@ export function rootService(options: RootServiceOptions): ((request: Request) =>
           return;
         }
         if (admitted.value.rootSessionId !== record.admission.rootSessionId || admitted.value.person !== record.admission.person || admitted.value.threadId !== record.admission.threadId || JSON.stringify(admitted.value.recipients) !== JSON.stringify(record.admission.recipients)) throw new Error("Queued root admission changed during recovery");
+        if (releaseState.dispatchPaused) {
+          requests.save({ ...record, reason: "executor-handoff", retryAt: Date.now() });
+          return;
+        }
         launched = true;
         await execute(record, admitted.value, record.request);
       } catch (error) {
@@ -177,13 +183,29 @@ export function rootService(options: RootServiceOptions): ((request: Request) =>
       const admission = rootAdminAdmission(request, options.adminCapability);
       if (!admission.ok) return admission.response;
       if (admission.route.kind === "release") {
+        let body: unknown;
+        try { body = await request.json(); } catch { return Response.json({ ok: false, error: "invalid-handoff" }, { status: 400 }); }
+        if (!body || typeof body !== "object" || Array.isArray(body)
+          || typeof (body as any).targetCommit !== "string" || !/^[0-9a-f]{40}$/.test((body as any).targetCommit))
+          return Response.json({ ok: false, error: "invalid-handoff" }, { status: 400 });
+        const fields = Object.keys(body), payload = body as Record<string, unknown>;
+        const retarget = "previousTarget" in payload;
+        if (fields.length !== (retarget ? 2 : 1) || (retarget && (request.method !== "POST"
+          || typeof payload.previousTarget !== "string" || !/^[0-9a-f]{40}$/.test(payload.previousTarget))))
+          return Response.json({ ok: false, error: "invalid-handoff" }, { status: 400 });
+        const targetCommit = (body as { targetCommit: string }).targetCommit;
+        const current = requests.handoffTarget();
+        if (retarget ? current !== payload.previousTarget : current !== null && current !== targetCommit)
+          return Response.json({ ok: false, error: "handoff-conflict" }, { status: 409 });
         if (request.method === "DELETE") {
+          if (options.shutdownSignal?.aborted) return Response.json({ ok: false, error: "executor-stopping" }, { status: 503 });
+          requests.setHandoff(null);
           releaseState.dispatchPaused = false;
-          return Response.json({ ok: true, dispatchPaused: false });
+          return Response.json({ ok: true, dispatchPaused: false, targetCommit });
         }
-        if (active || releaseState.consentActive) return Response.json({ ok: false, error: "busy" }, { status: 409 });
+        requests.setHandoff(targetCommit);
         releaseState.dispatchPaused = true;
-        return Response.json({ ok: true, dispatchPaused: true });
+        return Response.json({ ok: true, dispatchPaused: true, targetCommit });
       }
       // No private-store inspection happens before the separate admin capability is checked.
       if (admission.route.kind === "list") {
@@ -200,7 +222,7 @@ export function rootService(options: RootServiceOptions): ((request: Request) =>
       const files = readdirSync(directory).filter(name => name.endsWith(".jsonl") && !lstatSync(join(directory, name)).isSymbolicLink());
       return Response.json({ sessionId: admission.route.sessionId, transcripts: files.map(name => ({ name, jsonl: readFileSync(join(directory, name), "utf8") })) }, { headers: { "cache-control": "no-store" } });
     }
-    if (path === "/v1/health" && request.method === "GET") return Response.json({ ok: true, service: "kenan-root", releaseCommit: options.releaseCommit ?? null, releaseProtocol: 2, activeExecutions: active, consentActive: releaseState.consentActive });
+    if (path === "/v1/health" && request.method === "GET") return Response.json({ ok: true, service: "kenan-root", releaseCommit: options.releaseCommit ?? null, releaseProtocol: 3, releaseCapabilities: ["durable-dispatch-handoff"], dispatchPaused: releaseState.dispatchPaused, handoffTarget: requests.handoffTarget(), handoffReady: releaseState.dispatchPaused && !releaseState.consentActive && !running.size && !resuming.size && !finalizing.size && !delivering.size, activeExecutions: active, consentActive: releaseState.consentActive });
     const lookup = /^\/v1\/ask\/([^/]+)$/.exec(path);
     if (!(path === "/v1/ask" && request.method === "POST") && !(lookup && request.method === "GET")) return new Response("Not found", { status: 404 });
     const callerToken = request.headers.get(MEMORY_TOKEN_HEADER);
@@ -279,5 +301,10 @@ export function rootService(options: RootServiceOptions): ((request: Request) =>
       await Promise.all([...accepting.values(), ...running.values(), ...resuming.values(), ...finalizing.values(), ...delivering.values()]);
     }
   };
-  return Object.assign(handle, { drain, settled });
+  const dispatchSettled = async () => {
+    while (running.size || resuming.size || finalizing.size || delivering.size) {
+      await Promise.all([...running.values(), ...resuming.values(), ...finalizing.values(), ...delivering.values()]);
+    }
+  };
+  return Object.assign(handle, { drain, settled, dispatchSettled });
 }
