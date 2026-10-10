@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { openSqlite } from "../src/sqlite.js";
 import { CoreProvisioner, type CoreProvisionRegistration } from "../src/core/provision.js";
 import { provisionRegisteredAccount } from "../src/core/provision-command.js";
+import { prepareRegisteredStorage } from "../src/core/provision-worker.js";
 import { acquireScopeOwnership } from "../src/core/ownership.js";
 import { ThreadService } from "../src/threads/service.js";
 import { type PermissionPolicy, type Principal } from "../src/permissions.js";
@@ -19,7 +20,7 @@ function fixture() {
   const principals: Principal[] = [{ id: "registrar", kind: "service" }, { id: "alice", kind: "person", person: "alice" }];
   const registration: CoreProvisionRegistration = { id: "account-alice-v1", requestId: "account-alice-create", creatorPrincipalId: "registrar", source: "Authenticated account creation registration", operation: { id: "register-alice", kind: "operation", owner: "registrar", privacy: "private", subjects: [], consent: "not-required" }, directory,
     scope: { id: "alice-person", principalId: "alice", availability: { kind: "adopt" }, resource: { id: "alice-threads", kind: "thread", owner: "alice", privacy: "private", subjects: ["alice"], consent: "not-required" }, storage: { databasePath: join(directory, "threads.sqlite3"), sessionsDir: join(directory, "sessions"), capabilityKeyPath: join(directory, "capability.key"), adoptionReceiptPath: join(directory, "adoption.json") }, custody: { uid: process.getuid!(), gid: process.getgid!(), namespace: { kind: "host" }, retainedRunnerNamespace: { kind: "host" }, dataDir: directory, socketDir: root }, resources: [{ path: root, kind: "directory" }], environment: {}, callbackGateway: { kind: "none" }, manager: { kind: "existing", threadId: "alice-kenaznia" }, managerRouting: { kind: "none" } },
-    manager: { cwd: root, settings: { model: "sol", thinkingLevel: "low", speed: "ultrafast" } } };
+    manager: { cwd: root, settings: { model: "sol", thinkingLevel: "low", speed: "ultrafast" } }, markdown: { kind: "none" } };
   const policy: PermissionPolicy = { revision: 1, consents: [], grants: [
     { id: "register-authority", principal: "registrar", resource: { kind: "exact", id: "register-alice" }, actions: ["execute"], effect: "allow", validFrom: 0, validUntil: null, issuedBy: "account-owner", source: "Explicit account creation grant" },
     { id: "alice-scope", principal: "alice", resource: { kind: "exact", id: "alice-threads" }, actions: ["read", "dispatch", "control"], effect: "allow", validFrom: 0, validUntil: null, issuedBy: "account-owner", source: "Registered person scope grant" },
@@ -109,11 +110,35 @@ test("accepted missing storage is an error, never fresh reconstruction", async (
   expect(existsSync(f.registration.scope.storage.databasePath)).toBe(false);
 });
 
+test("explicit Markdown bootstrap never overwrites existing owning text", async () => {
+  const f = fixture();
+  writeFileSync(join(f.root, "README.md"), "My existing state\n", { mode: 0o600 });
+  f.registration.markdown = { kind: "configured", folder: f.root, readme: "Source initial state", agents: "Source account instructions" };
+  expect((await f.build().provision(f.input, "registrar")).ok).toBe(true);
+  expect(readFileSync(join(f.root, "README.md"), "utf8")).toBe("My existing state\n");
+  expect(readFileSync(join(f.root, "AGENTS.md"), "utf8")).toBe("Source account instructions");
+  unlinkSync(join(f.root, "AGENTS.md"));
+  expect((await f.build().provision(f.input, "registrar")).ok).toBe(false);
+  expect(existsSync(join(f.root, "AGENTS.md"))).toBe(false);
+});
+
 test("same-process concurrent retries conserve one receipt and manager", async () => {
   const f = fixture(), provisioner = f.build();
   const results = await Promise.all([provisioner.provision(f.input, "registrar"), provisioner.provision(f.input, "registrar")]);
   expect(results[0]?.ok).toBe(true); expect(results[1]).toEqual(results[0]);
   expect(managers(f.registration.scope.storage.databasePath)).toHaveLength(1);
+});
+
+test("finite preparation worker enforces original namespace and Unix owner", async () => {
+  const f = fixture();
+  const payload = { registration: f.registration, principals: f.principals, policy: f.policy, input: f.input, actor: "registrar", namespaceInode: "0" };
+  expect(await prepareRegisteredStorage(payload)).toMatchObject({ ok: false, error: { code: "ownership-conflict" } });
+  expect(existsSync(f.directory)).toBe(false);
+  payload.namespaceInode = statSync("/proc/self/ns/mnt", { bigint: true }).ino.toString();
+  expect((await prepareRegisteredStorage(payload)).ok).toBe(true);
+  const g = fixture(); g.registration.scope.custody.uid += 1;
+  expect((await g.build().provision(g.input, "registrar")).ok).toBe(false);
+  expect(existsSync(g.directory)).toBe(false);
 });
 
 test("host command cannot accept an ordinary user actor or caller-supplied scope", async () => {

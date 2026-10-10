@@ -1,9 +1,12 @@
-import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { dirname, isAbsolute, resolve, sep } from "node:path";
+import { spawnSync } from "node:child_process";
+import { closeSync, constants, fstatSync, openSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { dirname, isAbsolute, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { parseCoreConfig, type CoreResult } from "./config.js";
 import { CustodyResources } from "./custody-resources.js";
-import { CoreProvisioner, type CoreProvisionRegistration, type CoreProvisionReceipt } from "./provision.js";
+import type { CoreProvisionRegistration, CoreProvisionReceipt } from "./provision.js";
+import type { ProvisionWorkerInput } from "./provision-worker.js";
 
 export type RegisteredAccountProvisionInput = { configPath: string; registrationPath: string; requestId: string };
 function ownerDocument(path: string): unknown {
@@ -35,21 +38,26 @@ export async function provisionRegisteredAccount(input: RegisteredAccountProvisi
     const ancestor = dirname(registration.directory);
     if (!scope.resources.some(resource => resource.kind === "directory" && resource.path === ancestor)) return { ok: false, error: { code: "invalid-config", message: "Fresh storage parent must be an explicitly registered directory" } };
     resources = new CustodyResources(scope.custody);
-    const custody = resources;
-    const exact = new Set([registration.directory, ancestor, registration.manager.cwd, ...Object.values(scope.storage)]);
-    const provisioner = new CoreProvisioner([registration], { principals: config.value.principals, policy: config.value.policy, path(_scope, logical) {
-      custody.assert();
-      if (!isAbsolute(logical) || resolve(logical) !== logical || !exact.has(logical)) throw new Error("Unregistered fresh account resource");
-      let existing = logical;
-      while (!existsSync(existing)) existing = dirname(existing);
-      const visible = statSync(existing, { bigint: true }), registered = statSync(custody.directory(existing), { bigint: true });
-      if (visible.dev !== registered.dev || visible.ino !== registered.ino) throw new Error("Account storage is not mounted in its registered namespace view");
-      const root = logical === registration.manager.cwd ? registration.manager.cwd : ancestor;
-      const actual = realpathSync(existing), realRoot = realpathSync(root);
-      if (actual !== realRoot && !actual.startsWith(realRoot + sep)) throw new Error("Fresh account path escapes its registered ancestor");
-      return logical;
-    } });
-    return await provisioner.provision({ registrationId: registration.id, requestId: input.requestId }, registration.creatorPrincipalId);
+    const namespace = scope.custody.namespace;
+    const namespaceInode = namespace.kind === "host" ? statSync("/proc/1/ns/mnt", { bigint: true }).ino.toString() : namespace.mountNamespaceInode;
+    const principalIds = new Set([registration.creatorPrincipalId, scope.principalId]);
+    const payload: ProvisionWorkerInput = { registration, input: { registrationId: registration.id, requestId: input.requestId }, actor: registration.creatorPrincipalId, namespaceInode,
+      principals: config.value.principals.filter(principal => principalIds.has(principal.id)),
+      policy: { revision: config.value.policy.revision,
+        grants: config.value.policy.grants.filter(grant => {
+          const selector = grant.resource;
+          return principalIds.has(grant.principal) && (selector.kind === "exact" ? [registration.operation.id, scope.resource.id].includes(selector.id)
+            : [registration.operation, scope.resource].some(resource => resource.owner === selector.owner && resource.kind === selector.resourceKind));
+        }),
+        consents: config.value.policy.consents.filter(consent => principalIds.has(consent.principal) && [registration.operation.id, scope.resource.id].includes(consent.resource)) },
+    };
+    const worker = fileURLToPath(new URL(import.meta.url.endsWith(".ts") ? "./provision-worker.ts" : "./provision-worker.js", import.meta.url));
+    const command = resources.launch([process.execPath, worker]);
+    const child = spawnSync(command[0]!, command.slice(1), { input: JSON.stringify(payload), encoding: "utf8", env: { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C" }, timeout: 15_000, maxBuffer: 2_000_000 });
+    if (child.error || child.signal) return { ok: false, error: { code: "unavailable", message: "Account preparation acknowledgement is uncertain; recover the same registration/request, never replace storage" } };
+    const result = JSON.parse(child.stdout) as CoreResult<CoreProvisionReceipt>;
+    if (typeof result?.ok !== "boolean" || result.ok && (child.status !== 0 || !isDeepStrictEqual(result.value?.scope, scope) || result.value.managerThreadId !== (scope.manager.kind === "existing" ? scope.manager.threadId : null))) throw new Error("Invalid account owner preparation receipt");
+    return result;
   } catch (cause) {
     return { ok: false, error: { code: "io", message: `Account creation registration unavailable: ${cause instanceof Error ? cause.message : String(cause)}` } };
   } finally { resources?.close(); }

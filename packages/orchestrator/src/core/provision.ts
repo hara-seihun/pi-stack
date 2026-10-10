@@ -22,6 +22,7 @@ export type CoreProvisionRegistration = {
   directory: string;
   scope: CoreScope;
   manager: { cwd: string; settings: ThreadSettings };
+  markdown: { kind: "none" } | { kind: "configured"; folder: string; readme: string; agents: string };
 };
 export type CoreProvisionInput = { registrationId: string; requestId: string };
 export type CoreProvisionReceipt = { scope: CoreScope; managerThreadId: string; receiptPath: string };
@@ -79,6 +80,7 @@ export class CoreProvisioner {
     }
   }
   async provision(input: CoreProvisionInput, authenticatedPrincipalId: string): Promise<CoreResult<CoreProvisionReceipt>> {
+    if (!input || !identifier(input.registrationId) || !identifier(input.requestId) || Object.keys(input).some(key => !["registrationId", "requestId"].includes(key))) return fail("invalid-config", "Provision requests contain only exact registration and request IDs");
     const registration = this.registrations.get(input.registrationId);
     if (!registration || input.requestId !== registration.requestId) return fail("invalid-config", "No exact owning account-creation registration binds this request");
     try {
@@ -111,10 +113,16 @@ export class CoreProvisioner {
     if (paths.some(path => !canonical(path) || dirname(path) !== registration.directory) || new Set(paths).size !== paths.length
       || paths.some(path => [".core-provision.json", ".core-provision.lock"].includes(path.slice(registration.directory.length + 1)))) return fail("invalid-config", "Fresh storage descriptors must be distinct direct children of the exclusive registered directory");
     if (!canonical(registration.manager.cwd) || !scope.resources.some(resource => resource.kind === "directory" && resource.path === registration.manager.cwd)) return fail("invalid-config", "Manager workspace must be an explicitly registered directory");
+    const markdown = registration.markdown;
+    if (!markdown || !["none", "configured"].includes(markdown.kind) || markdown.kind === "configured" && (!canonical(markdown.folder)
+      || !scope.resources.some(resource => resource.kind === "directory" && resource.path === markdown.folder)
+      || typeof markdown.readme !== "string" || !markdown.readme.trim() || markdown.readme.length > 100_000
+      || typeof markdown.agents !== "string" || !markdown.agents.trim() || markdown.agents.length > 100_000)) return fail("invalid-config", "Markdown bootstrap must be explicitly unset or nonempty source text for an exact declared folder");
     const settings = registration.manager.settings;
     if (!settings || typeof settings.model !== "string" || !settings.model.trim() || !isThinkingLevel(settings.thinkingLevel) || !["standard", "priority", "ultrafast"].includes(settings.speed)) return fail("invalid-config", "Manager model, thinking and speed must be explicit");
     if (!Number.isSafeInteger(scope.custody.uid) || scope.custody.uid < 0 || !Number.isSafeInteger(scope.custody.gid) || scope.custody.gid < 0
       || stable(scope.custody.namespace) !== stable(scope.custody.retainedRunnerNamespace)) return fail("invalid-config", "Fresh account storage ownership and one namespace must be explicit");
+    if (process.getuid?.() !== scope.custody.uid || process.getgid?.() !== scope.custody.gid) return fail("unavailable", "Fresh storage preparation must execute as its registered Unix owner");
     return { ok: true, value: undefined };
   }
   private async initialize(registration: CoreProvisionRegistration): Promise<CoreResult<CoreProvisionReceipt>> {
@@ -150,6 +158,20 @@ export class CoreProvisioner {
       }
       const database = path(scope.storage.databasePath), sessions = path(scope.storage.sessionsDir), key = path(scope.storage.capabilityKeyPath), receipt = path(scope.storage.adoptionReceiptPath);
       const value = { scope, managerThreadId: scope.manager.kind === "existing" ? scope.manager.threadId : "", receiptPath: scope.storage.adoptionReceiptPath };
+      if (registration.markdown.kind === "configured") {
+        const markdown = registration.markdown;
+        const folder = path(markdown.folder);
+        owned(folder, scope, true);
+        for (const [name, text] of [["README.md", markdown.readme], ["AGENTS.md", markdown.agents]] as const) {
+          const file = path(join(markdown.folder, name));
+          if (!existsSync(file)) {
+            if (record.state === "ready") return fail("ownership-conflict", "Accepted Markdown state is missing; never reconstruct it");
+            writeOwned(file, text, scope); sync(folder);
+          }
+          owned(file, scope, false);
+          if (!readFileSync(file, "utf8").trim()) return fail("ownership-conflict", "Existing Markdown bootstrap is empty; preserve it for explicit repair");
+        }
+      }
       if (record.state === "ready") {
         for (const file of [database, key, receipt]) owned(file, scope, false);
         owned(sessions, scope, true);
