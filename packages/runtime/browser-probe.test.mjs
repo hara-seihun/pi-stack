@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { probeBrowser } from "./browser-probe.mjs";
+import { probeBrowser, settleBrowserProofs } from "./browser-probe.mjs";
 
 function fixture(t, defect) {
   const directory = mkdtempSync(join(tmpdir(), "browser-probe-test-"));
@@ -142,6 +142,26 @@ test("failed isolated cleanup prevents continuing the proof", async (t) => {
   assert.equal(f.calls.length, 1);
 });
 
+
+test('independent browser proofs run concurrently and join peer cleanup before propagating a failure', async () => {
+  const events = [];
+  let release, started;
+  const peerStarted = new Promise(resolve => { started = resolve; });
+  const peerRelease = new Promise(resolve => { release = resolve; });
+  const result = settleBrowserProofs([
+    async () => { await peerStarted; events.push('failed proof cleaned'); throw new Error('first proof rejected'); },
+    async () => { events.push('peer started'); started(); await peerRelease; events.push('peer cleaned'); },
+  ]);
+  const outcome = result.then(() => 'passed', error => { events.push('failure propagated'); return error; });
+  await peerStarted;
+  await Promise.resolve();
+  assert.equal(events.includes('failure propagated'), false, 'no release before the independent peer settles');
+  release();
+  const error = await outcome;
+  assert.ok(error instanceof AggregateError);
+  assert.equal(error.errors[0].message, 'first proof rejected');
+  assert.ok(events.indexOf('peer cleaned') < events.indexOf('failure propagated'));
+});
 
 test("unfinished download command is recorded before failure and owner cleanup", async t => {
   const f = fixture(t), records = [], execute = f.tool.execute;

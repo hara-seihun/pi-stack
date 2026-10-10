@@ -9,7 +9,7 @@ import { homedir, hostname, tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import { probeBrowser } from "./browser-probe.mjs";
+import { probeBrowser, settleBrowserProofs } from "./browser-probe.mjs";
 import { probeTabRestoration } from "./browser-tab-restore-probe.mjs";
 import { createManagedAgentSession } from "./managed-agent.mjs";
 
@@ -153,17 +153,11 @@ try {
   const visibleTextCheck = compileAgentBrowserQaPreset({ attached: true, expectedText: title }).compiled.steps.find((step) => step.action === "assertText").args;
   browserAttempted = true;
   const phases = [];
-  await probeBrowser(tools[0], {
-    url, title, visibleTextCheck, frameValue, screenshotPath, downloadPath, downloadContent,
-    record: (phase) => {
-      phases.push(phase);
-      writeFileSync(join(directory, "browser-proof.json"), JSON.stringify(phases, null, 2));
-    },
-  });
-  await probeTabRestoration(tools[0], {
-    url, statePath: join(directory, "authorized-tab-state.json"),
-    record: phase => { phases.push(phase); writeFileSync(join(directory, "browser-proof.json"), JSON.stringify(phases, null, 2)); },
-  });
+  const record = phase => { phases.push(phase); writeFileSync(join(directory, "browser-proof.json"), JSON.stringify(phases, null, 2)); };
+  await settleBrowserProofs([
+    () => probeBrowser(tools[0], { url, title, visibleTextCheck, frameValue, screenshotPath, downloadPath, downloadContent, record }),
+    () => probeTabRestoration(tools[0], { url, statePath: join(directory, "authorized-tab-state.json"), record }),
+  ]);
   accepted = true;
   console.log(JSON.stringify({ host: hostname(), sdk, runtime, bin, wrapperVersion, browserVersion, recovered: !!values["session-file"], phases: phases.map(({ phase, elapsedMs }) => ({ phase, elapsedMs })), nativeOpen: true, snapshot: true, visibleText: true, screenshot: true, download: true, crossOriginFrameFill: true, dynamicCrossOriginFrameFill: true, remoteExistingFrameFill: true, controlledDateFill: true, controlledDatetimeFill: true, controlledFindFill: true, controlledSemanticFill: true, semanticEmptyFill: true, controlledReactEmptyFill: true, rawEmptyFill: true, semanticUnsetTextRejected: true, semanticZeroFill: true, semanticNonemptyFill: true, authorizedTabRestoration: true, frameEval: true, sensitiveInputRedaction: true, cleanup: "closed" }));
 } finally {

@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, readFileSync, rmSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync, execFileSync } from 'node:child_process';
-import { doctorDigest } from '../deploy/doctor-cache.mjs';
+import { doctorDigest, configuredExtensionKey } from '../deploy/doctor-cache.mjs';
 
 function fixture(t, source) {
   const root = mkdtempSync(join(tmpdir(), 'doctor-command-cache-'));
@@ -93,6 +93,23 @@ test('doctor closure identity follows executable bytes across generation paths a
   assert.notEqual(doctorDigest(a,cache),before,'mutation of linked executable bytes invalidates the memoized input');
   writeFileSync(join(b,'node_modules/jiti/lib/jiti-cli.mjs'),'changed executable');
   assert.notEqual(doctorDigest(a,cache),doctorDigest(b,cache),'changed SDK executable cannot acquire source equivalence');
+});
+
+test('Remote doctor scope follows executable extension imports, not web/controller/docs; unknown dynamic inputs stay cold', t => {
+  const root=mkdtempSync(join(tmpdir(),'remote-doctor-imports-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+  const packageRoot=join(root,'remote'),cache=join(root,'cache');mkdirSync(join(packageRoot,'server'),{recursive:true});
+  writeFileSync(join(packageRoot,'package.json'),JSON.stringify({name:'pi-remote',type:'module',pi:{extensions:['./server/conversation.ts']}}));
+  writeFileSync(join(packageRoot,'server/conversation.ts'),'import {x} from "./leaf"; export default function extension(){return x;}');
+  writeFileSync(join(packageRoot,'server/leaf.ts'),'export const x=1;');
+  const first=configuredExtensionKey(packageRoot,cache,'first');
+  mkdirSync(join(packageRoot,'web/dist'),{recursive:true});writeFileSync(join(packageRoot,'web/dist/index.html'),'new web');
+  writeFileSync(join(packageRoot,'server/server.ts'),'changed controller not imported by Pi extension');
+  writeFileSync(join(packageRoot,'deployment.md'),'changed docs');
+  assert.equal(configuredExtensionKey(packageRoot,cache,'second'),first,'unloaded products cannot invalidate passing browser proof');
+  writeFileSync(join(packageRoot,'server/leaf.ts'),'export const x=2;');
+  assert.notEqual(configuredExtensionKey(packageRoot,cache,'second'),first,'transitive loaded executable mutation invalidates proof');
+  writeFileSync(join(packageRoot,'server/conversation.ts'),'export default async function extension(){return await import(process.env.UNKNOWN_IMPORT);}');
+  assert.notEqual(configuredExtensionKey(packageRoot,cache,'first'),configuredExtensionKey(packageRoot,cache,'second'),'unknown dynamic executable lookup cannot reuse a prior pass');
 });
 
 test('mutating bytes of the captured package refuses successful-command proof', t => {
