@@ -1711,13 +1711,13 @@ describe("ThreadService", () => {
     expect(service.latestSettlement(child.id)?.finalMessage).toEqual(finalMessage);
   });
 
-  it.each([null, { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "" }] }])("retains an ephemeral owner after an incomplete native result: %j", async finalMessage => {
+  it.each([false, true].flatMap(ephemeral => [null, { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "" }] }].map(finalMessage => ({ ephemeral, finalMessage }))))("fails and archives an incomplete background result: %j", async ({ ephemeral, finalMessage }) => {
     const f = fixture();
     const { directory } = f;
     let { service, sessions } = f;
     const root = value(await service.spawn({ requestId: "root", cwd: directory }));
-    const child = value(await service.spawn({ requestId: "empty-child", parentId: root.id, cwd: directory, message: "Finish the work", ephemeral: true }));
-    value(await service.control({ threadId: root.id, action: "stop", descendants: false }));
+    value(await service.control({ threadId: root.id, action: "placement", foreground: true }));
+    const child = value(await service.spawn({ requestId: "empty-child", parentId: root.id, cwd: directory, message: "Finish the work", ephemeral }));
     value(await service.start());
     await waitFor(() => sessions.some(session => session.options.threadId === child.id && session.isStreaming));
     const native = sessions.find(session => session.options.threadId === child.id)!;
@@ -1726,17 +1726,20 @@ describe("ThreadService", () => {
     native.emit({ type: "agent_settled", workIds: ["empty-child"], outcome: "complete", lastAssistantMessage: finalMessage });
     await waitFor(() => !!service.latestSettlement(child.id));
     expect(service.latestSettlement(child.id)).toMatchObject({ outcome: "failed", error: "Native turn ended without a final result or a durable dependency wait" });
-    await turn();
+    await waitFor(() => service.get(child.id)?.metadata?.archived === true);
     expect(service.get(child.id)?.metadata).toMatchObject({ incompleteResult: { error: expect.any(String) } });
-    expect(service.get(child.id)?.metadata?.archived).not.toBe(true);
+    await waitFor(() => sessions.some(session => session.options.threadId === root.id && session.commands.some(command => String(command.message).includes("Native turn ended without a final result"))));
+    expect(sessions.find(session => session.options.threadId === root.id)!.commands.filter(command => String(command.message).includes("Native turn ended without a final result"))).toHaveLength(1);
     service.reconcile();
     await turn();
-    expect(service.get(child.id)?.metadata?.archived).not.toBe(true);
+    expect(service.get(child.id)?.metadata?.archived).toBe(true);
     await service.close();
     ({ service, sessions } = fixture(directory));
     value(await service.start());
     await turn();
-    expect(service.get(child.id)?.metadata?.archived).not.toBe(true);
+    expect(service.get(child.id)?.metadata?.archived).toBe(true);
+    expect(await service.send({ requestId: "late-result", threadId: child.id, text: "Return the finished result" })).toMatchObject({ ok: false, error: { code: "unavailable" } });
+    value(await service.control({ threadId: child.id, action: "reopen" }));
     value(await service.send({ requestId: "repair-result", threadId: child.id, text: "Return the finished result" }));
     await waitFor(() => sessions.some(session => session.options.threadId === child.id && session.commands.some(command => command.workId === "repair-result")));
     [...sessions].reverse().find(session => session.options.threadId === child.id)!.settle("Finished result");

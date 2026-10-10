@@ -44,8 +44,11 @@ archive sweeps preserve that owner across restarts. Successful startup clears th
 failure; explicit Stop/close still takes effect and never resumes failed work.
 A native turn without nonempty final assistant text or a retained dependency/question
 returns a failed settlement with `Native turn ended without a final result or a durable
-dependency wait`. Its `metadata.incompleteResult` keeps the owner open across archive
-sweeps and restart; a subsequent settled result clears it. Explicit close remains available.
+dependency wait`. The failed result is delivered to its assignment requester and result
+subscribers, and a background thread archives just like any other settled assignment.
+`metadata.incompleteResult` records the failure; it is not ongoing work. Startup reconciles
+previously retained incomplete background results the same way. Foreground human conversations
+and the canonical manager remain open; durable waits, questions and wakes retain their owners.
 
 `lastUserMessageAt` records accepted explicit input without an agent sender.
 Automatic notices, agent messages, tool activity, titles and settlements do not

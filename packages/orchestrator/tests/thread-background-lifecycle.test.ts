@@ -95,14 +95,37 @@ it("leaves foreground threads in the live directory and archives settled watch c
   expect(f.service.watchCheckOutcome("watch")).toMatchObject({ ok: true, value: { status: "complete" } });
 });
 
-it("backfills previously completed background work on restart", async () => {
+it.each(["wake", "job", "foreground", "manager"] as const)("preserves an owner awaiting %s after a blank turn and restart", async kind => {
+  const first = fixture(); await first.service.start();
+  const thread = await first.service.spawn({ id: "retained", requestId: "retained", cwd: first.root, message: "work",
+    ...(kind === "manager" ? { metadata: { manager: true } } : {}) });
+  if (!thread.ok) throw new Error(thread.error.message);
+  await until(() => !!first.sessions.get("retained")?.active);
+  const retained = kind === "wake"
+    ? await first.service.wakeSchedule({ action: "set", threadId: "retained", requestId: "wake", reason: "Check the job result", cadenceMs: 60_000, nextDueAt: Date.now() + 86_400_000 })
+    : kind === "job"
+      ? await first.service.agentWait({ action: "set", threadId: "retained", requestId: "wait", kind: "job", jobId: "concrete-job" })
+      : await first.service.control({ action: "placement", threadId: "retained", foreground: kind === "foreground" });
+  if (!retained.ok) throw new Error(retained.error.message);
+  first.sessions.get("retained")!.settle("");
+  await until(() => !!first.service.latestSettlement("retained"));
+  expect(first.service.get("retained")?.metadata?.archived).not.toBe(true);
+  if (kind === "wake" || kind === "job") expect(first.service.latestSettlement("retained")?.assignmentPending).toBe(true);
+  await first.service.close();
+  const next = fixture(first.root); await next.service.start();
+  expect(next.service.get("retained")?.metadata?.archived).not.toBe(true);
+  if (kind === "wake") expect(next.service.get("retained")?.wakeSchedule?.reason).toBe("Check the job result");
+  if (kind === "job") expect(next.service.get("retained")?.waitingOnAgents).toMatchObject({ kind: "job", jobId: "concrete-job" });
+});
+
+it.each(["Persisted result", ""])("backfills previously settled background work on restart: %j", async text => {
   const first = fixture(); await first.service.start();
   const parent = await first.service.spawn({ id: "parent", requestId: "parent", cwd: first.root });
   if (!parent.ok) throw new Error(parent.error.message);
   const thread = await first.service.spawn({ id: "old-background", requestId: "old", parentId: "parent", cwd: first.root, message: "finish" });
   if (!thread.ok) throw new Error(thread.error.message);
   await until(() => !!first.sessions.get("old-background")?.active);
-  first.sessions.get("old-background")!.settle("Persisted result");
+  first.sessions.get("old-background")!.settle(text);
   await until(() => first.service.get("old-background")?.state === "idle");
 
   const db = new DatabaseSync(join(first.root, "threads.sqlite"));
@@ -111,6 +134,6 @@ it("backfills previously completed background work on restart", async () => {
   await first.service.close();
   const next = fixture(first.root); await next.service.start();
   await until(() => next.service.get("old-background")?.metadata?.archived === true);
-  expect(next.service.latestSettlement("old-background")?.finalMessage).toMatchObject({ content: [{ text: "Persisted result" }] });
+  expect(next.service.latestSettlement("old-background")).toMatchObject({ outcome: text ? "complete" : "failed", finalMessage: { content: [{ text }] } });
   expect(readFileSync(thread.value.sessionFile, "utf8")).toContain('"old-background"');
 });
