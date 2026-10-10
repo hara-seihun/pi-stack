@@ -51,7 +51,7 @@ export class KenanMounts {
     const owner = this.options.userFor?.(person);
     if (owner && process.getuid!() !== 0) return { ok: false, status: 503, error: "Folder-owner mount helper requires its fixed privileged service" };
     const forced = this.options.forceOwner;
-    const command = ["gocryptfs", "-fg", "-q", "-nosyslog", "-acl", "-allow_other",
+    const command = ["gocryptfs", "-fg", "-q", "-nosyslog", "-sharedstorage", "-acl", "-allow_other",
       ...(forced ? ["-force_owner", `${forced.uid}:${forced.gid}`] : []), "--", cipherDir, mountpoint];
     const child = Bun.spawn(owner ? ["runuser", "-u", owner, "--", ...command] : command, { stdin: "pipe", stdout: "ignore", stderr: "pipe" });
     // Never put folder keys in argv, the environment, logs or durable plaintext files.

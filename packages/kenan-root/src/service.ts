@@ -1,5 +1,5 @@
 import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { KENAN_REQUEST_HEADER, KENAN_REQUEST_ID_PATTERN, kenanRequestNotice, MEMORY_TOKEN_HEADER, type RootAdmission, type MemoryResult } from "kenan-memory/contract";
 import { rootAdminAdmission, rootReplyResponse } from "./visibility.js";
@@ -15,6 +15,7 @@ export interface RootServiceOptions {
   memoryRootToken: string;
   adminCapability: string;
   sessionsDir: string;
+  transcriptPaths?(sessionId: string): string[];
   executor: RootExecutor;
   maxConcurrent?: number;
   transport?: typeof fetch;
@@ -219,8 +220,9 @@ export function rootService(options: RootServiceOptions): ((request: Request) =>
       if (admission.route.kind !== "transcript") throw new Error("Invalid root administrator route");
       const directory = join(options.sessionsDir, admission.route.sessionId);
       if (!existsSync(directory) || lstatSync(directory).isSymbolicLink()) return new Response("Not found", { status: 404 });
-      const files = readdirSync(directory).filter(name => name.endsWith(".jsonl") && !lstatSync(join(directory, name)).isSymbolicLink());
-      return Response.json({ sessionId: admission.route.sessionId, transcripts: files.map(name => ({ name, jsonl: readFileSync(join(directory, name), "utf8") })) }, { headers: { "cache-control": "no-store" } });
+      const files = [...new Set([...readdirSync(directory).filter(name => name.endsWith(".jsonl") && !lstatSync(join(directory, name)).isSymbolicLink()).map(name => join(directory, name)),
+        ...(options.transcriptPaths?.(admission.route.sessionId) ?? [])])];
+      return Response.json({ sessionId: admission.route.sessionId, transcripts: files.map(path => ({ name: basename(path), jsonl: readFileSync(path, "utf8") })) }, { headers: { "cache-control": "no-store" } });
     }
     if (path === "/v1/health" && request.method === "GET") return Response.json({ ok: true, service: "kenan-root", releaseCommit: options.releaseCommit ?? null, releaseProtocol: 3, releaseCapabilities: ["durable-dispatch-handoff"], dispatchPaused: releaseState.dispatchPaused, handoffTarget: requests.handoffTarget(), handoffReady: releaseState.dispatchPaused && !releaseState.consentActive && !running.size && !resuming.size && !finalizing.size && !delivering.size, activeExecutions: active, consentActive: releaseState.consentActive });
     const lookup = /^\/v1\/ask\/([^/]+)$/.exec(path);

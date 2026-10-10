@@ -33,7 +33,7 @@ if [[ -n $cipher_dir ]]; then
     # else. A wrong key fails here and the unit never starts, which is what
     # tells the front door to report the key as wrong rather than serving an
     # empty folder.
-    gocryptfs -q -passfile "$key" -- "$cipher_dir" "$mountpoint_dir"
+    gocryptfs -q -sharedstorage -passfile "$key" -- "$cipher_dir" "$mountpoint_dir"
   fi
 fi
 
