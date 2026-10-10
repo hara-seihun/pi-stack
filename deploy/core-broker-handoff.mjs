@@ -75,8 +75,13 @@ function rootPlan(path) {
   if (!metadata.isFile() || metadata.uid !== 0 || metadata.mode & 0o022 || realpathSync(path) !== path) throw new Error('protected canonical root broker handoff plan required');
   return JSON.parse(readFileSync(path, 'utf8'));
 }
+export function isOriginalBrokerUnit(unit, configPath) {
+  if (/^pi-(?:model|kenan)-broker\.service$/.test(unit)) return true;
+  const match = /^pi-stack-model-broker@([a-z_][a-z0-9_-]{0,31})\.service$/.exec(unit);
+  return match !== null && configPath === `/var/lib/pi-stack-oidc/brokers/${match[1]}.json`;
+}
 export async function handoff(plan) {
-  if (process.getuid() !== 0 || plan.version !== 1 || !/^pi-(?:model|kenan)-broker\.service$/.test(plan.unit) || !Number.isSafeInteger(plan.pid) || plan.pid < 1 || !Number.isSafeInteger(plan.uid) || !/^\d+$/.test(plan.startTicks) || !Array.isArray(plan.ports) || plan.ports.length === 0 || new Set(plan.ports).size !== plan.ports.length || plan.ports.some(port => !Number.isSafeInteger(port) || port < 1 || port > 65535) || plan.inspectorPort !== 9229) throw new Error('exact original broker unit/process/listeners and fixed loopback inspector required');
+  if (process.getuid() !== 0 || plan.version !== 1 || !isOriginalBrokerUnit(plan.unit, plan.configPath) || !Number.isSafeInteger(plan.pid) || plan.pid < 1 || !Number.isSafeInteger(plan.uid) || !/^\d+$/.test(plan.startTicks) || !Array.isArray(plan.ports) || plan.ports.length === 0 || new Set(plan.ports).size !== plan.ports.length || plan.ports.some(port => !Number.isSafeInteger(port) || port < 1 || port > 65535) || plan.inspectorPort !== 9229) throw new Error('exact original broker unit/process/listeners and fixed loopback inspector required');
   const unit = spawnSync('/usr/bin/systemctl', ['show', plan.unit, '--property=MainPID', '--value'], { encoding: 'utf8', timeout: 2000 });
   if (unit.status !== 0 || Number(unit.stdout.trim()) !== plan.pid || statSync(`/proc/${plan.pid}`).uid !== plan.uid) throw new Error('original broker unit identity changed');
   const fields = readFileSync(`/proc/${plan.pid}/stat`, 'utf8').split(')').slice(1).join(')').trim().split(/\s+/);

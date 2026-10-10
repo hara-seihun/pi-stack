@@ -4,7 +4,15 @@ import { once } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import test from 'node:test';
-import { admissionExpression, inspectorEvaluate } from '../deploy/core-broker-handoff.mjs';
+import { admissionExpression, inspectorEvaluate, isOriginalBrokerUnit } from '../deploy/core-broker-handoff.mjs';
+
+test('registered per-person broker unit binds its exact original config', () => {
+  const user = 'pi5381e24743c0d8b3dcf0f3a4';
+  assert.equal(isOriginalBrokerUnit(`pi-stack-model-broker@${user}.service`, `/var/lib/pi-stack-oidc/brokers/${user}.json`), true);
+  assert.equal(isOriginalBrokerUnit(`pi-stack-model-broker@${user}.service`, '/var/lib/pi-stack-oidc/brokers/other.json'), false);
+  assert.equal(isOriginalBrokerUnit('arbitrary.service', '/var/lib/pi-stack-oidc/brokers/other.json'), false);
+  assert.equal(isOriginalBrokerUnit('pi-model-broker.service', '/declared-original.json'), true);
+});
 
 const program = `const http=require('node:http');let long;let late=0;const server=http.createServer((req,res)=>{if(req.url==='/long'){long=res;process.send({accepted:true});}else{late++;res.end('unexpected late admission');}});server.listen(0,'127.0.0.1',()=>process.send({port:server.address().port}));process.on('message',message=>{if(message.finish){long.end('original accepted result');process.send({late});}});setInterval(()=>{},1000);`;
 test('owned broker admission closes only future requests and positively drains accepted HTTP', { timeout: 10000 }, async () => {
