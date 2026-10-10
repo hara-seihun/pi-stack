@@ -1,5 +1,6 @@
 export const MAX_TIMEOUT_SECONDS = 55;
 export const INTERACTIVE_MAX_TIMEOUT_SECONDS = 1800;
+export const MANAGER_MAX_TIMEOUT_SECONDS = 5;
 
 function positiveSeconds(value, fallback) {
   const parsed = Number(value);
@@ -21,15 +22,16 @@ const detachmentRefusal = (found, policy) =>
   policy.rule;
 
 /**
- * A session with a UI attached defaults to thirty minutes. Autonomous sessions
- * default to 55 seconds. Either host setting replaces that default, so operators
- * can raise or lower the limit without changing this extension.
+ * The canonical manager has a hard five-second cap. Other sessions retain
+ * their UI/autonomous ceiling and host configuration.
  */
 export function timeoutPolicy(environment = process.env, interactive = false) {
   const fallback = interactive ? INTERACTIVE_MAX_TIMEOUT_SECONDS : MAX_TIMEOUT_SECONDS;
   const configured = environment.PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS
     ?? environment.PI_BASH_TIMEOUT_MAX_SECONDS;
-  const maxTimeoutSeconds = positiveSeconds(configured, fallback);
+  const maxTimeoutSeconds = environment.PI_THREAD_MANAGER === "1"
+    ? Math.min(MANAGER_MAX_TIMEOUT_SECONDS, positiveSeconds(configured, MANAGER_MAX_TIMEOUT_SECONDS))
+    : positiveSeconds(configured, fallback);
   return {
     maxTimeoutSeconds,
     foregroundOnly: true,
@@ -179,7 +181,8 @@ export function registerGuard(pi, environment = process.env) {
   const policyFor = (ctx) => timeoutPolicy(environment, ctx?.hasUI === true);
 
   pi.on("tool_call", (event, ctx) => {
-    if (event.toolName !== "bash") return undefined;
+    if (event.toolName !== "bash" && !(environment.PI_THREAD_MANAGER === "1"
+      && event.toolName === "converge" && event.input?.action === "bash")) return undefined;
     const policy = policyFor(ctx);
     const reason =
       checkBashTimeout(event.input?.timeout, policy) ?? checkBashCommand(event.input?.command, policy);

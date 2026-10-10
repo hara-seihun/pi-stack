@@ -25,7 +25,7 @@ function index(path: string, leafId?: string, options?: IndexedThreadHistoryOpti
 const managerVisibility = { managerWakeVisibility: true };
 function wakeText(source: "explicit" | "notification" = "notification", id = "thread-wake:generation:1000") {
   return formatThreadMessage({ id, threadId: "manager", senderId: "manager", senderName: "Manager",
-    source, text: "Scheduled wake check: WAKE_BODY_NOT_INDEXED", delivery: "steer", createdAt: 1, state: "queued" },
+    priority: "normal", source, text: "Scheduled wake check: WAKE_BODY_NOT_INDEXED", delivery: "steer", createdAt: 1, state: "queued" },
   "Scheduled wake check: WAKE_BODY_NOT_INDEXED");
 }
 

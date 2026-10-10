@@ -87,6 +87,27 @@ async function fixture(prepare?: (session: AgentSession) => void, extension?: st
   return { get session() { return session; }, get native() { return native; }, events, command, waitFor, reply, message, providerStream, reopen };
 }
 
+it("isolates the canonical manager marker from shared runner defaults and other native sessions", async () => {
+  const previous = process.env.PI_THREAD_MANAGER;
+  process.env.PI_THREAD_MANAGER = "1";
+  try {
+    const manager = await fixture(undefined, undefined, { PI_THREAD_MANAGER: "1" });
+    const worker = await fixture(undefined, undefined, { PI_THREAD_MANAGER: "0" });
+    const ordinary = await fixture();
+    const bash = (f: typeof manager) => f.native.agent.state.tools.find(tool => tool.name === "bash")!;
+    await expect(bash(manager).execute("refused", { command: "true", timeout: 55 }, undefined)).rejects.toMatchObject({ code: "invalid_request" });
+    for (const f of [worker, ordinary]) {
+      const result = await bash(f).execute("allowed", { command: "printf '%s' \"$PI_THREAD_MANAGER\"", timeout: 55 }, undefined);
+      expect(result.content).toMatchObject([{ type: "text", text: "0" }]);
+    }
+    const result = await bash(manager).execute("manager", { command: "printf '%s' \"$PI_THREAD_MANAGER\"", timeout: 5 }, undefined);
+    expect(result.content).toMatchObject([{ type: "text", text: "1" }]);
+  } finally {
+    if (previous === undefined) delete process.env.PI_THREAD_MANAGER;
+    else process.env.PI_THREAD_MANAGER = previous;
+  }
+}, 3000);
+
 it("recovers a lost accepted input acknowledgement by native identity without repeating its prompt", async () => {
   const f = await fixture();
   let calls = 0;
@@ -224,12 +245,14 @@ it("reconnect state preserves observed streaming phase and production timestamps
   stream.push({ type: "text_delta", contentIndex: 0, delta: "answer", partial: answer });
   const text = await f.waitFor(event => (event.assistantMessageEvent as any)?.type === "text_delta");
   const first = await f.command("get_state");
-  expect(first).toMatchObject({ data: { live: { activity: "responding", isThinking: false, activitySince: text.emittedAt, lastActivityAt: text.emittedAt } } });
+  expect(first).toMatchObject({ data: { live: { activity: "responding", isThinking: false, activitySince: text.emittedAt, lastActivityAt: text.emittedAt,
+    messageTimestamp: partial.timestamp, text: "answer", thinking: "reason" } } });
   expect((await f.command("get_state")).data).toEqual(first.data);
   stream.push({ type: "done", reason: "stop", message: answer });
   stream.end();
   await f.waitFor(event => event.type === "agent_settled");
-  expect(await f.command("get_state")).toMatchObject({ data: { live: { activity: undefined, activitySince: undefined, isThinking: false, tools: [] } } });
+  expect(await f.command("get_state")).toMatchObject({ data: { live: { activity: undefined, activitySince: undefined, isThinking: false, tools: [],
+    text: "", thinking: "", messageTimestamp: undefined } } });
 }, 3000);
 
 async function httpProviderFixture(extension = "") {

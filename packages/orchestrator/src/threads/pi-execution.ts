@@ -1,5 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+import { managerShellBudget, ManagerShellError, MANAGER_SHELL_MAX_SECONDS, MANAGER_SHELL_RULE, runManagerShell } from "./manager-shell-budget.js";
 
 type Work = "tool" | "prompt";
 
@@ -9,7 +11,7 @@ export class PiExecution {
   private controller = new AbortController();
   private halting?: Promise<void>;
 
-  constructor(private readonly onIdle: () => void = () => {}) {}
+  constructor(private readonly onIdle: () => void = () => {}, private readonly manager = false) {}
 
   get blocked() { return this.controller.signal.aborted; }
   get activeTools() { return [...this.pending.values()].filter(kind => kind === "tool").length; }
@@ -31,17 +33,42 @@ export class PiExecution {
   }
 
   bind(session: AgentSession): void {
+    if (this.manager) {
+      const beforeToolCall = session.agent.beforeToolCall;
+      session.agent.beforeToolCall = async (context, signal) => {
+        const budget = managerShellBudget(context.toolCall.name, context.toolCall.arguments);
+        if (!budget.ok) return { block: true, reason: budget.error.message };
+        return beforeToolCall?.(context, signal);
+      };
+    }
     const state = session.agent.state;
     const descriptor = Object.getOwnPropertyDescriptor(state, "tools")!;
     const wrapped = new WeakMap<object, typeof state.tools[number]>();
     const wrap = (tool: typeof state.tools[number]): typeof tool => {
       const existing = wrapped.get(tool);
       if (existing) return existing;
-      const next = { ...tool, execute: (...args: Parameters<typeof tool.execute>) => {
-        const signal = args[2];
-        args[2] = signal ? AbortSignal.any([signal, this.controller.signal]) : this.controller.signal;
-        return this.track("tool", () => { args[2]!.throwIfAborted(); return tool.execute(...args); });
-      } };
+      const next = { ...tool,
+        ...(this.manager && tool.name === "bash" ? {
+          description: `${tool.description} ${MANAGER_SHELL_RULE}`,
+          parameters: { ...tool.parameters, properties: { ...tool.parameters.properties,
+            timeout: Type.Number({ exclusiveMinimum: 0, maximum: MANAGER_SHELL_MAX_SECONDS, description: "Explicit manager shell deadline in seconds" }) },
+          required: [...new Set([...(tool.parameters.required ?? []), "timeout"])] } as typeof tool.parameters,
+        } : {}),
+        execute: (...args: Parameters<typeof tool.execute>) => {
+          const signal = args[2];
+          args[2] = signal ? AbortSignal.any([signal, this.controller.signal]) : this.controller.signal;
+          return this.track("tool", () => {
+            args[2]!.throwIfAborted();
+            if (!this.manager) return tool.execute(...args);
+            const budget = managerShellBudget(tool.name, args[1]);
+            if (!budget.ok) throw new ManagerShellError(budget.error.code, budget.error.message);
+            if (budget.timeout === null) return tool.execute(...args);
+            return runManagerShell(budget.timeout, args[2], stopped => {
+              args[2] = stopped;
+              return this.track("tool", () => tool.execute(...args));
+            });
+          });
+        } };
       wrapped.set(tool, next);
       wrapped.set(next, next);
       return next;

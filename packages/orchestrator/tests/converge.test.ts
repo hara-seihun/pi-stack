@@ -103,6 +103,29 @@ describe("Converge reach", () => {
     expect(() => process.kill(pid, 0)).toThrow();
   });
 
+  it("refuses manager missing/invalid/over-five timeouts before SSH, including without explicit host limits", async () => {
+    const launch = () => { throw new Error("must not launch"); };
+    for (const timeout of [undefined, 0, NaN, Infinity, 5.01, 1800]) {
+      expect(await executeConverge({ action: "bash", command: "true", timeout }, { env: { ...env, PI_THREAD_MANAGER: "1" }, launch }))
+        .toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    }
+  });
+
+  it("includes stalled SSH in the manager deadline, without transport or kill grace, preserving uncertainty", async () => {
+    let child!: ReturnType<typeof spawn>;
+    const started = performance.now();
+    const result = await executeConverge({ action: "bash", command: "mutation", timeout: 0.15 }, {
+      env: { ...env, PI_THREAD_MANAGER: "1" }, launch: () => {
+        child = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{}); process.stdout.end(); setInterval(()=>{},1000)"], { stdio: "pipe" });
+        return child as any;
+      },
+    });
+    expect(result).toMatchObject({ ok: false, error: { code: "timeout", message: expect.stringContaining("inspect before retrying") } });
+    expect(performance.now() - started).toBeLessThan(500);
+    if (child.exitCode === null && child.signalCode === null) await new Promise(resolve => child.once("close", resolve));
+    expect(child.signalCode).toBe("SIGKILL");
+  });
+
   it("rejects bad cwd and excessive timeout before SSH, and does not retry transport errors", async () => {
     let calls = 0;
     const launch = () => { calls++; return spawn("python3", ["-c", "import sys;sys.stderr.write('denied');sys.exit(255)"], { stdio: "pipe" }); };

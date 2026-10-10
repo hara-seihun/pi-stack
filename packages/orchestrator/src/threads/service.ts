@@ -309,6 +309,12 @@ export class ThreadService implements ThreadApi {
     if (!executionColumns.some(column => column.name === "retry_settings")) this.db.exec("ALTER TABLE thread_execution ADD COLUMN retry_settings TEXT");
     if (!executionColumns.some(column => column.name === "assignment_pending")) this.db.exec("ALTER TABLE thread_execution ADD COLUMN assignment_pending INTEGER NOT NULL DEFAULT 0");
     if (executionColumns.some(column => column.name === "state")) this.db.exec("ALTER TABLE thread_execution DROP COLUMN state");
+    if (!(this.sql("PRAGMA table_info(thread_work)").all() as { name: string }[]).some(column => column.name === "priority")) this.db.exec("ALTER TABLE thread_work ADD COLUMN priority INTEGER NOT NULL DEFAULT 0 CHECK(priority IN (0,1,2))");
+    this.db.exec(`UPDATE thread_work SET priority=CASE WHEN EXISTS(SELECT 1 FROM thread_human_activity h WHERE h.work_id=thread_work.id) THEN 2 ELSE 1 END,
+      delivery=CASE WHEN id LIKE 'thread-wake:manager-inactivity:%' THEN delivery ELSE 'steer' END,
+      front=CASE WHEN id LIKE 'thread-wake:manager-inactivity:%' THEN front ELSE 0 END WHERE thread_id IN (SELECT id FROM thread WHERE json_extract(metadata,'$.manager')=1) AND status='queued';
+      DROP INDEX IF EXISTS thread_work_queue;
+      CREATE INDEX thread_work_queue ON thread_work(thread_id,status,priority DESC,front DESC,ordinal);`);
     if (!(this.sql("PRAGMA table_info(thread_work)").all() as { name: string }[]).some(column => column.name === "sender_name")) this.db.exec("ALTER TABLE thread_work ADD COLUMN sender_name TEXT");
     if (!(this.sql("PRAGMA table_info(thread_work)").all() as { name: string }[]).some(column => column.name === "landed_at")) this.db.exec("ALTER TABLE thread_work ADD COLUMN landed_at INTEGER; UPDATE thread_work SET landed_at=inserted_at WHERE status='dispatched' AND inserted_at IS NOT NULL");
     this.db.exec(`CREATE INDEX IF NOT EXISTS thread_execution_settlements ON thread_execution(thread_id,ended_at DESC,id DESC);
@@ -480,13 +486,25 @@ export class ThreadService implements ThreadApi {
     const row = this.sql("SELECT * FROM thread_execution WHERE thread_id=? AND ended_at IS NOT NULL ORDER BY ended_at DESC,settlement_seq DESC,id DESC LIMIT 1").get(id) as Json | undefined;
     return row ? { seq: row.settlement_seq ?? 0, executionId: row.id, threadId: row.thread_id, workId: row.work_id, outcome: row.outcome, ...(row.assignment_pending ? { assignmentPending: true } : {}), time: row.ended_at, finalMessage: JSON.parse(row.final_message ?? "null"), ...(row.error ? { error: row.error } : {}) } : null;
   }
+  private inputState(row: Json): import("./contracts.js").ThreadInputState {
+    return { id: row.id, threadId: row.thread_id, senderId: row.sender_id, delivery: row.delivery, source: row.source, state: row.status,
+      priority: row.priority === 2 ? "human" : row.priority === 1 ? "manager" : "normal",
+      createdAt: row.created_at, insertedAt: row.inserted_at, landedAt: row.landed_at, ...(row.outcome ? { outcome: row.outcome } : {}), ...(row.error ? { error: row.error } : {}) };
+  }
+  private inputReceipt(threadId: string, inputId: string): import("./contracts.js").ThreadInputState | undefined {
+    const row = this.sql("SELECT id,thread_id,sender_id,delivery,source,status,priority,created_at,inserted_at,landed_at,outcome,error FROM thread_work WHERE thread_id=? AND id=?").get(threadId, inputId) as Json | undefined;
+    return row ? this.inputState(row) : undefined;
+  }
+  inputStates(id: string): import("./contracts.js").ThreadInputState[] {
+    return (this.sql("SELECT id,thread_id,sender_id,delivery,source,status,priority,created_at,inserted_at,landed_at,outcome,error FROM thread_work WHERE thread_id=? ORDER BY ordinal DESC LIMIT 60").all(id) as Json[]).reverse().map(row => this.inputState(row));
+  }
   async inspect(id: string, options: InspectOptions = {}): Promise<Result<ThreadInspection>> {
     const valid = validateInspectOptions(options);
     if (!valid.ok) return valid;
     if (typeof id !== "string" || !id.trim()) return bad("invalid_request", "A thread ID is required");
     const thread = this.get(id); if (!thread) return bad("not_found", "Thread not found");
     const projection = this.projections.get(id);
-    const state = { thread, pending: this.pending(id), ...(projection ? { live: projection.live } : {}) };
+    const state = { thread, pending: this.pending(id), inputs: this.inputStates(id), ...(projection ? { live: projection.live } : {}) };
     if (options.inputReceipts) {
       const ids = options.inputReceipts.workIds;
       const rows = this.sql(`SELECT id,landed_at FROM thread_work WHERE thread_id=? AND id IN (${ids.map(() => "?").join(",")})`).all(id, ...ids) as Array<{ id: string; landed_at: number | null }>;
@@ -684,6 +702,7 @@ export class ThreadService implements ThreadApi {
     for (let index = start; index < end; index++) {
       const code = projected[index]!;
       let entry: Json;
+      let inputId: string | undefined;
       if (code < 0) {
         const receipt = this.questionAnswerEntryById(thread.id, metadata.receipts[-code - 1]!.entryId);
         if (!receipt.ok) return receipt;
@@ -692,8 +711,10 @@ export class ThreadService implements ThreadApi {
         const read = history.read((includeEntries ? history.entries : history.messages)[code]!);
         if (!read.ok) return historyFailure(read.error);
         entry = read.value;
+        inputId = ((includeEntries ? history.entries : history.messages)[code] as RecordDescriptor & { inputId?: string }).inputId;
       }
-      const message = entry.type === "message" ? entry.message
+      const inputState = inputId === undefined ? undefined : this.inputReceipt(thread.id, inputId);
+      const message = entry.type === "message" ? inputId !== undefined && entry.message?.role === "user" ? { ...entry.message, inputId, ...(inputState ? { inputState } : {}) } : entry.message
         : entry.type === "custom_message" ? { role: "custom", content: entry.content, customType: entry.customType, details: entry.details }
         : { role: "notice", content: entry, timestamp: timestampMs(entry.timestamp) };
       const record = { index, entryId: entry.id, message: this.nativeMessageIdentity(thread, entry, message), ...(includeEntries ? { entry } : {}) };
@@ -809,6 +830,11 @@ export class ThreadService implements ThreadApi {
         const entry = history.read(descriptor);
         if (!entry.ok) return historyFailure(entry.error);
         sourceMessage = this.nativeMessageIdentity(thread, entry.value, message(entry.value));
+        const inputId = (descriptor as MessageRecordDescriptor & { inputId?: string }).inputId;
+        if (inputId !== undefined && sourceMessage.role === "user") {
+          const inputState = this.inputReceipt(thread.id, inputId);
+          sourceMessage = { ...sourceMessage, inputId, ...(inputState ? { inputState } : {}) };
+        }
         entryId = descriptor.id;
         const selectedCalls = new Set<string>();
         let ordinal = 0;
@@ -841,9 +867,9 @@ export class ThreadService implements ThreadApi {
       knownToolCallIds: (request.toolCallIds ?? []).filter(id => calls.has(id)),
       completedToolCallIds: (request.toolCallIds ?? []).filter(id => { const call = calls.get(id); return call !== undefined && results.get(call)?.some(index => history.messages[index]!.toolResultId === id); }) });
   }
-  private message(row: Json): ThreadMessage { return { id: row.id, threadId: row.thread_id, senderId: row.sender_id, ...(row.sender_name || row.sender_id && this.get(row.sender_id)?.agentName ? { senderName: row.sender_name ?? this.get(row.sender_id)!.agentName } : {}), text: row.text, images: JSON.parse(row.images), delivery: row.delivery, source: row.source, state: row.status, createdAt: row.created_at, insertedAt: row.inserted_at, landedAt: row.landed_at, ...(row.outcome ? { outcome: row.outcome } : {}), ...(row.reply_to ? { replyTo: row.reply_to } : {}) }; }
+  private message(row: Json): ThreadMessage { return { priority: row.priority === 2 ? "human" : row.priority === 1 ? "manager" : "normal", id: row.id, threadId: row.thread_id, senderId: row.sender_id, ...(row.sender_name || row.sender_id && this.get(row.sender_id)?.agentName ? { senderName: row.sender_name ?? this.get(row.sender_id)!.agentName } : {}), text: row.text, images: JSON.parse(row.images), delivery: row.delivery, source: row.source, state: row.status, createdAt: row.created_at, insertedAt: row.inserted_at, landedAt: row.landed_at, ...(row.outcome ? { outcome: row.outcome } : {}), ...(row.reply_to ? { replyTo: row.reply_to } : {}) }; }
   pending(id: string): PendingMessage[] {
-    return this.sql("SELECT * FROM thread_work WHERE thread_id=? AND status!='done' ORDER BY front DESC,ordinal").all(id).map(row => this.message(row as Json) as PendingMessage);
+    return this.sql("SELECT * FROM thread_work WHERE thread_id=? AND status!='done' ORDER BY priority DESC,front DESC,ordinal").all(id).map(row => this.message(row as Json) as PendingMessage);
   }
   /** Pi holds a steer or follow-up in its queue until a tool boundary, then starts it as a user message with the exact text it was sent. */
   private land(id: string, text: string): void {
@@ -1370,8 +1396,10 @@ export class ThreadService implements ThreadApi {
     if (wait && (input.source !== "notification" || resumed || priorChildResult)) {
       this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.agentWait') WHERE id=?").run(input.threadId);
     }
-    this.sql("INSERT INTO thread_work(id,thread_id,sender_id,text,images,delivery,source,reply_to,front,settings,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
-      .run(id, input.threadId, input.senderId ?? null, input.text, JSON.stringify(input.images ?? []), resolveDelivery(input), input.source ?? "explicit", input.replyTo ?? null, front ? Date.now() : 0, JSON.stringify(settings), Date.now());
+    const manager = current?.metadata?.manager === true;
+    const delivery = manager && !id.startsWith(MANAGER_WATCHDOG_PREFIX) ? "steer" : resolveDelivery(input);
+    this.sql("INSERT INTO thread_work(id,thread_id,sender_id,text,images,delivery,source,reply_to,front,settings,created_at,priority) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
+      .run(id, input.threadId, input.senderId ?? null, input.text, JSON.stringify(input.images ?? []), delivery, input.source ?? "explicit", input.replyTo ?? null, manager && !id.startsWith(MANAGER_WATCHDOG_PREFIX) ? 0 : front ? Date.now() : 0, JSON.stringify(settings), Date.now(), manager ? humanActivity ? 2 : 1 : 0);
     if (humanActivity) this.sql("INSERT INTO thread_human_activity(work_id,thread_id,created_at) SELECT id,thread_id,created_at FROM thread_work WHERE id=?").run(id);
     if (senderName) this.sql("UPDATE thread_work SET sender_name=? WHERE id=?").run(senderName, id);
     if (input.source === "notification" && this.get(input.threadId)?.metadata?.archived) this.sql("UPDATE thread_work SET status='done',outcome='cancelled' WHERE id=?").run(id);
@@ -1946,7 +1974,7 @@ export class ThreadService implements ThreadApi {
     } catch (error) { return bad("unavailable", errorText(error)); }
   }
   async send(request: SendThread): Promise<Result<ThreadMessage>> {
-    if (request.senderId && request.delivery === "queue") return bad("invalid_request", "Agents must use steer or hard steer; they cannot queue messages");
+    if (request.senderId && request.delivery === "queue" && this.get(request.threadId)?.metadata?.manager !== true) return bad("invalid_request", "Agents must use steer or hard steer; they cannot queue messages");
     const input = { ...request, delivery: resolveDelivery(request) };
     try {
       const prior = this.request(input.requestId, input, "send"); if (!prior.ok) return prior;
@@ -1990,7 +2018,7 @@ export class ThreadService implements ThreadApi {
       });
       this.changed(thread.id);
       const runtime = this.runtimes.get(thread.id);
-      if (input.delivery === "hardSteer" && (runtime || this.opening.has(thread.id) || this.execution(thread.id) || thread.metadata?.runnerReference)) void this.halt(thread.id).then(() => this.wake(thread.id));
+      if (thread.metadata?.manager !== true && input.delivery === "hardSteer" && (runtime || this.opening.has(thread.id) || this.execution(thread.id) || thread.metadata?.runnerReference)) void this.halt(thread.id).then(() => this.wake(thread.id));
       this.wake(thread.id); return good(message);
     } catch (error) { return bad("unavailable", errorText(error)); }
   }
@@ -2257,7 +2285,7 @@ export class ThreadService implements ThreadApi {
       if (this.closed || this.suspended || thread.held || thread.metadata?.archived || this.halts.has(id)) return bad("conflict", "Stopped or archived work cannot be retried");
       if (this.runtimes.has(id) || this.opening.has(id) || thread.metadata?.runnerReference) return bad("conflict", "Current native work must settle before switching its model");
       const execution = this.execution(id);
-      const work = execution ? undefined : this.sql("SELECT * FROM thread_work WHERE thread_id=? AND status='queued' AND execution_id IS NULL ORDER BY front DESC,ordinal LIMIT 1").get(id) as Json | undefined;
+      const work = execution ? undefined : this.sql("SELECT * FROM thread_work WHERE thread_id=? AND status='queued' AND execution_id IS NULL ORDER BY priority DESC,front DESC,ordinal LIMIT 1").get(id) as Json | undefined;
       if (execution ? !thread.metadata?.providerWait : !work || !thread.metadata?.admissionWait) return bad("conflict", "Only dormant provider or admission waiting work can switch models");
       const previous = execution ? this.executionSettings(execution) : JSON.parse(work!.settings) as ThreadSettings;
       const priorSelection = resolveThreadSettings({}, previous);
@@ -2478,7 +2506,7 @@ export class ThreadService implements ThreadApi {
   private effectiveSettings(id: string): ThreadSettings | undefined {
     const execution = this.execution(id);
     if (execution) return this.executionSettings(execution);
-    const work = this.sql("SELECT settings FROM thread_work WHERE thread_id=? AND status!='done' ORDER BY front DESC,ordinal LIMIT 1").get(id) as Json | undefined;
+    const work = this.sql("SELECT settings FROM thread_work WHERE thread_id=? AND status!='done' ORDER BY priority DESC,front DESC,ordinal LIMIT 1").get(id) as Json | undefined;
     return work ? JSON.parse(work.settings) : this.runtimes.get(id)?.settings;
   }
   private busy(state: Json): boolean { return !!(state.isStreaming || state.isCompacting || state.isBashRunning || state.localTools > 0 || state.cancellationFailed || state.pendingCommandCount > 0 || state.pendingMessageCount > 0); }
@@ -2675,7 +2703,7 @@ export class ThreadService implements ThreadApi {
   }
   private environmentKey(thread: Thread, extraEnv: Record<string, string | undefined>): string {
     return digest([import.meta.url, thread.cwd, thread.metadata?.context, thread.metadata?.raw, thread.metadata?.telephoneContext, thread.metadata?.sandbox,
-      thread.metadata?.execution, sandboxPolicy(thread.metadata ?? {}), thread.role, thread.metadata?.watchList, thread.metadata?.mode,
+      thread.metadata?.execution, thread.metadata?.manager, sandboxPolicy(thread.metadata ?? {}), thread.role, thread.metadata?.watchList, thread.metadata?.mode,
       this.options.environment?.(thread), extraEnv]);
   }
   private open(id: string, settings: ThreadSettings, recovering: boolean, extraEnv: Record<string, string | undefined> = {}): Promise<Runtime> {
@@ -2747,6 +2775,7 @@ export class ThreadService implements ThreadApi {
       // Explicit false survives JSON transport and overrides older runners' launch environment.
       PI_THREAD_REQUIRE_SESSION: thread.metadata?.nativeHistoryRequired || recovering ? "1" : "0",
       PI_THREAD_CAN_SPAWN: sandbox ? "0" : "1",
+      PI_THREAD_MANAGER: thread.metadata?.manager === true ? "1" : "0",
       PI_THREAD_LIVE_DISPATCHER: thread.metadata?.liveDispatcher === true ? "1" : "0",
       PI_THREAD_MODE: isThreadModeName(thread.metadata?.mode) ? thread.metadata.mode : undefined,
       PI_THREAD_RUNNER_REFERENCE: thread.metadata?.runnerReference ? JSON.stringify(thread.metadata.runnerReference) : undefined,
@@ -2809,7 +2838,13 @@ export class ThreadService implements ThreadApi {
     const projection = this.projections.get(id) ?? { live: { text: "", thinking: "", isThinking: false, tools: [] }, activity: createExecutionActivity() };
     this.projections.set(id, projection);
     observeExecutionActivity(projection.activity, event);
-    if (event.type === "message_start" && (event.message as Json)?.role === "assistant") { projection.live.text = ""; projection.live.thinking = ""; }
+    if (event.type === "message_start" && (event.message as Json)?.role === "assistant") {
+      projection.live.text = ""; projection.live.thinking = "";
+      projection.live.messageTimestamp = typeof (event.message as Json).timestamp === "number" ? (event.message as Json).timestamp : null;
+    }
+    if (event.type === "message_end" && (event.message as Json)?.role === "assistant") {
+      projection.live.text = ""; projection.live.thinking = ""; projection.live.messageTimestamp = null;
+    }
     if (event.type === "message_update") {
       const update = event.assistantMessageEvent as Json;
       if (update?.type === "text_delta") projection.live.text += String(update.delta ?? "");
@@ -2823,8 +2858,9 @@ export class ThreadService implements ThreadApi {
     if (event.type === "tool_execution_end") projection.live.tools = projection.live.tools.filter((tool: Json) => tool.toolCallId !== event.toolCallId);
     if (event.type === "response" && event.command === "get_state" && event.success && (event.data as Json)?.live) {
       const live = (event.data as Json).live;
-      if (live.text || !projection.live.text) projection.live.text = live.text ?? "";
-      if (live.thinking || !projection.live.thinking) projection.live.thinking = live.thinking ?? "";
+      projection.live.text = live.text ?? "";
+      projection.live.thinking = live.thinking ?? "";
+      projection.live.messageTimestamp = typeof live.messageTimestamp === "number" ? live.messageTimestamp : null;
       if (live.activity || live.isThinking || live.tools?.length) restoreExecutionActivity(projection.activity, live);
       if (Array.isArray(live.tools)) projection.live.tools = live.tools;
     }
@@ -2935,8 +2971,9 @@ export class ThreadService implements ThreadApi {
       }
       if (this.get(id)?.metadata?.acknowledgementWait) return;
     }
-    const work = this.sql(`SELECT * FROM thread_work WHERE thread_id=? AND status='queued' ${execution ? "AND delivery IN ('steer','hardSteer')" : ""} ORDER BY front DESC,ordinal LIMIT 1`).get(id) as Json | undefined;
+    const work = this.sql(`SELECT * FROM thread_work WHERE thread_id=? AND status='queued' ${execution ? "AND delivery IN ('steer','hardSteer')" : ""} ORDER BY priority DESC,front DESC,ordinal LIMIT 1`).get(id) as Json | undefined;
     if (!work) { if (!execution && !runtime?.busy) { this.state(id, "idle"); if (runtime) await this.park(id, runtime); } return; }
+    const stillNext = () => thread.metadata?.manager !== true || (this.sql(`SELECT id FROM thread_work WHERE thread_id=? AND status='queued' ${execution ? "AND delivery IN ('steer','hardSteer')" : ""} ORDER BY priority DESC,front DESC,ordinal LIMIT 1`).get(id) as Json | undefined)?.id === work.id;
     if (!execution && runtime?.busy) return;
     if (work.id.startsWith(MANAGER_WATCHDOG_PREFIX)
       && (!await this.validateManagerCheck(id, work.id) || this.managerWatchdogApproved !== work.id || !this.queuedWork(work.id))) return;
@@ -2948,15 +2985,16 @@ export class ThreadService implements ThreadApi {
       work.prepared = JSON.stringify(prepared.value);
       this.sql("UPDATE thread_work SET prepared=? WHERE id=? AND prepared IS NULL").run(work.prepared, work.id);
     }
+    if (!stillNext()) { this.wake(id); return; }
     if (!execution) {
       const settings = JSON.parse(work.settings) as ThreadSettings, executionId = this.capacityLedger?.candidate(id, work.id) ?? randomUUID();
       this.phase(id, "admitting", "Acquiring global execution capacity");
       const capacity = await this.acquireCapacity(id, executionId, work.id, "work");
       if (!capacity.ok) { this.admissionWait(id, capacity.error); return; }
-      if (this.suspended || this.closed || this.row(id)?.held || this.halts.has(id) || !this.queuedWork(work.id)) { await this.releaseUnenteredCapacity(id, executionId); return; }
+      if (this.suspended || this.closed || this.row(id)?.held || this.halts.has(id) || !this.queuedWork(work.id) || !stillNext()) { await this.releaseUnenteredCapacity(id, executionId); this.wake(id); return; }
       this.phase(id, "admitting", "Acquiring a model account");
       const admission = this.options.admit ? await this.options.admit(thread, settings, false, executionId) : good<ThreadAdmission>({ release() {} });
-      if (!this.queuedWork(work.id)) { if (admission.ok) await admission.value.release(); await this.releaseUnenteredCapacity(id, executionId); return; }
+      if (!this.queuedWork(work.id) || !stillNext()) { if (admission.ok) await admission.value.release(); await this.releaseUnenteredCapacity(id, executionId); this.wake(id); return; }
       if (!admission.ok) {
         await this.releaseUnenteredCapacity(id, executionId);
         // Capacity refusals are retried by reconcile; anything else will refuse identically forever.
@@ -2988,11 +3026,11 @@ export class ThreadService implements ThreadApi {
       }
       this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.startupFailure') WHERE id=?").run(id);
       runtime.lease = admission.value;
-      if (this.suspended || this.row(id)?.held || this.halts.has(id) || !this.queuedWork(work.id)) {
+      if (this.suspended || this.row(id)?.held || this.halts.has(id) || !this.queuedWork(work.id) || !stillNext()) {
         await admission.value.release(); runtime.lease = undefined;
         if (!runtime.busy) await this.releaseCapacity(id, executionId);
         if (!this.halts.has(id)) await this.retire(id, runtime);
-        return;
+        this.wake(id); return;
       }
       this.transaction(() => {
         this.sql("INSERT INTO thread_execution(id,thread_id,work_id,settings,created_at) VALUES(?,?,?,?,?)").run(executionId, id, work.id, JSON.stringify(admission.value.settings ?? settings), Date.now());
@@ -3057,7 +3095,7 @@ export class ThreadService implements ThreadApi {
     await this.releaseCapacity(id);
     this.transaction(() => {
       if (this.execution(id)) return;
-      const work = this.sql("SELECT id,settings FROM thread_work WHERE thread_id=? AND status='queued' ORDER BY front DESC,ordinal LIMIT 1").get(id) as Json | undefined;
+      const work = this.sql("SELECT id,settings FROM thread_work WHERE thread_id=? AND status='queued' ORDER BY priority DESC,front DESC,ordinal LIMIT 1").get(id) as Json | undefined;
       if (!work) return;
       const executionId = this.capacityLedger?.candidate(id, work.id) ?? randomUUID();
       this.sql("INSERT INTO thread_execution(id,thread_id,work_id,settings,created_at) VALUES(?,?,?,?,?)").run(executionId, id, work.id, work.settings, Date.now());

@@ -5,7 +5,7 @@ import type { ThreadMessage } from "../src/threads/contracts.js";
 const senderId = "7c925d87-bc2b-4293-933a-f9ffee9b3592";
 const message: ThreadMessage = {
   id: "parent:assignment", threadId: "303efcde-ee6c-43f5-b3ed-522aa9f34ca4", senderId,
-  senderName: "Kelana", text: "Do the work.", delivery: "steer", source: "explicit", createdAt: 1, state: "queued",
+  priority: "normal", senderName: "Kelana", text: "Do the work.", delivery: "steer", source: "explicit", createdAt: 1, state: "queued",
 };
 
 it("completion notifications retain only signed narration, never genuine thinking or signatures", () => {
