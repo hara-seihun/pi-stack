@@ -29,7 +29,7 @@ def mount_identity(namespace, mountpoint):
     text = enter(namespace, ['/usr/bin/python3', '-c', "from pathlib import Path;print(Path('/proc/self/mountinfo').read_text())"], 0, 0)
     decode = lambda value: re.sub(r'\\([0-7]{3})', lambda m: chr(int(m[1], 8)), value)
     found = []
-    for line in text.splitlines():
+    for line in text.strip().splitlines():
         left, right = line.split(' - ', 1)
         fields, fs = left.split(), right.split()
         if decode(fields[4]) == mountpoint:
