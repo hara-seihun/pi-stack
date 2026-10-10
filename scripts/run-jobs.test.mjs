@@ -168,12 +168,12 @@ test("publication shards Orchestrator under the shared budget without dropping t
     assert.equal(command, process.execPath);
     assert.equal(args[1], "run");
     assert.ok(args.includes("--exclude=tests/routing-runtime.test.ts"));
-    assert.deepEqual(options.dependsOn, ["orchestrator shared RPC"]);
+    assert.deepEqual(options.dependsOn, ["orchestrator shared RPC", "orchestrator tool schemas"]);
   }
   const routing = checkJobs.find(([name]) => name === "orchestrator routing runtime");
   assert.equal(routing[2].at(-1), "tests/routing-runtime.test.ts");
   assert.deepEqual(routing[3].dependsOn, shards[0][3].dependsOn);
-  for (const prerequisite of ["orchestrator memory build", "orchestrator types", "orchestrator shared RPC"]) {
+  for (const prerequisite of ["orchestrator memory build", "orchestrator types", "orchestrator shared RPC", "orchestrator tool schemas"]) {
     assert.equal(checkJobs.filter(([name]) => name === prerequisite).length, 1);
   }
   let output = "";

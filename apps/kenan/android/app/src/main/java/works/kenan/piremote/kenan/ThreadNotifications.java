@@ -21,21 +21,26 @@ final class ThreadNotifications {
 
     static synchronized void policy(Context context, String user, String environment, JSONObject policy) throws Exception {
         String scope = key(user, environment, "");
-        switch (policy.getString("view")) {
-            case "classic" -> managerOnly.remove(scope);
-            case "mono" -> {
-                String manager = policy.getString("managerThreadId");
-                if (manager.isBlank()) throw new IllegalArgumentException("Mono notification policy requires a manager");
-                managerOnly.put(scope, key(user, environment, manager));
-            }
-            default -> throw new IllegalArgumentException("Unknown notification view");
-        }
+        String manager = policyManagerThread(user, environment, policy);
+        if (manager == null) managerOnly.remove(scope);
+        else managerOnly.put(scope, manager);
         pending.removeIf(toast -> !allowed(toast.notification));
         NotificationManager notifications = context.getSystemService(NotificationManager.class);
         for (StatusBarNotification notification : notifications.getActiveNotifications()) {
             if (notification.getNotification().extras.containsKey("piRemoteThread") && !allowed(notification.getNotification()))
                 notifications.cancel(notification.getTag(), notification.getId());
         }
+    }
+
+    private static String policyManagerThread(String user, String environment, JSONObject policy) throws Exception {
+        switch (policy.getString("view")) {
+            case "classic": return null;
+            case "mono":
+                String manager = policy.getString("managerThreadId");
+                if (manager.isBlank()) throw new IllegalArgumentException("Mono notification policy requires a manager");
+                return key(user, environment, manager);
+        }
+        throw new IllegalArgumentException("Unknown notification view");
     }
 
     private static boolean allowed(Notification notification) {
