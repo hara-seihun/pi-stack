@@ -128,7 +128,7 @@ const historyFailure = (error: ThreadHistoryError): Result<never> => {
   switch (error.code) {
     case "stale-source": return bad("conflict", error.message);
     case "oversized-record": case "oversized-index": return bad("oversized", error.message);
-    case "invalid-descriptor": return bad("invalid_request", error.message);
+    case "invalid-descriptor": case "invalid-watermark": return bad("invalid_request", error.message);
     case "missing": case "io": case "invalid-record": case "invalid-branch": return bad("unavailable", error.message);
   }
 };
