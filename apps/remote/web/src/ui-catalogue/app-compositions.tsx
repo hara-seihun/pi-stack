@@ -12,7 +12,7 @@ type RootMode = "ready" | "pending" | "retained";
 const sessionIds: Record<RootMode, string> = { ready: "33333333-3333-4333-8333-333333333333", pending: "44444444-4444-4444-8444-444444444444", retained: "55555555-5555-4555-8555-555555555555" };
 const at = Date.parse("2026-10-09T10:00:00Z");
 const session: Session = {
-  id: sessionIds.ready, name: "Retained synthetic conversation", agentName: "Kenan", parentId: null, hasChildren: false,
+  id: sessionIds.ready, name: "Retained synthetic conversation", parentId: null, hasChildren: false,
   origin: "person", foreground: true, model: "openai/gpt-6.1-sol", provider: "openai", cwd: "/synthetic", workspaceName: "Synthetic", environment: "synthetic",
   state: "idle", lifecycle: { kind: "idle" }, held: false, activity: "idle", activeTools: [], revision: 1, idleUnread: false, queuedMessages: [], archivedAt: null,
   createdAt: new Date(at).toISOString(), updatedAt: new Date(at).toISOString(),

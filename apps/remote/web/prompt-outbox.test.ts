@@ -46,13 +46,25 @@ test("intent precedes HTTP and exact request, attachment text, reply and deliver
   }
 });
 
+test("single-mode prompts omit delivery and accept the owner's durable admission", async () => {
+  const outbox = fixture().create();
+  const input = { requestId: crypto.randomUUID(), text: "Next message" };
+  const saved = value(await outbox.enqueue("thread", input));
+  expect(JSON.parse(saved.bodyJson)).not.toHaveProperty("delivery");
+  const result = value(await outbox.submit(input.requestId, async entry => {
+    expect(entry.bodyJson).toBe(saved.bodyJson);
+    return { status: 202, body: { accepted: true, workId: "durable-admission", delivery: "pending" } };
+  }));
+  expect(result.outcome).toEqual({ kind: "accepted", workId: "durable-admission" });
+});
+
 test("only authoritative rejection is terminal; unavailable, malformed, generic400 and auth retain intent", async () => {
   const f = fixture();
   const outbox = f.create();
   const responses = [
     { status: 400, body: { error: "An old server lost the acknowledgement" } },
     { status: 503, body: { outcome: "pending", error: "Thread owner unavailable" } },
-    { status: 202, body: { accepted: true, workId: "wrong-mode", delivery: "queue" } },
+    { status: 202, body: { accepted: true, workId: "" } },
     { status: 200, body: { ok: true } },
     { status: 423, body: { error: "Locked" } },
   ];
@@ -173,9 +185,9 @@ test("saved request identity cannot change its body or recipient; caller mutatio
   expect(value(await outbox.list())[0]?.requestId).toBe(requestId);
 });
 
-test("commands, Stop, unknown prompt fields and missing delivery cannot enter replay storage", async () => {
+test("commands, Stop and unknown prompt fields cannot enter replay storage", async () => {
   const outbox = fixture().create();
-  for (const invalid of [{ requestId: crypto.randomUUID(), action: "stop", descendants: true }, { ...body(), name: "compact" }, { ...body(), delivery: undefined }, { ...body(), control: "stop" }]) {
+  for (const invalid of [{ requestId: crypto.randomUUID(), action: "stop", descendants: true }, { ...body(), name: "compact" }, { ...body(), delivery: "future" }, { ...body(), control: "stop" }]) {
     expect(await outbox.enqueue("thread", invalid as PromptOutboxBody)).toMatchObject({ ok: false, error: { kind: "invalid_prompt" } });
   }
   expect(value(await outbox.list())).toEqual([]);

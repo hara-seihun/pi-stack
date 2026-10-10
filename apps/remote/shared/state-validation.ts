@@ -77,7 +77,7 @@ export function validateInputState(value: unknown): void {
   for (const key of ["id", "threadId"] as const) if (!stateString(input[key], `Input ${key}`).trim()) throw new Error(`Input ${key}: empty identity`);
   requireState(input.state, { queued: true, dispatched: true, done: true }, "Input state");
   requireState(input.priority, { human: true, manager: true, normal: true }, "Input priority");
-  requireState(input.delivery, { queue: true, steer: true, hardSteer: true }, "Input delivery");
+  requireState(input.delivery, { pending: true, queue: true, steer: true, hardSteer: true }, "Input delivery");
   requireState(input.source, { explicit: true, notification: true }, "Input source");
   if (!Number.isFinite(input.createdAt)) throw new Error("Input createdAt: invalid timestamp");
   for (const key of ["insertedAt", "landedAt"] as const) if (input[key] != null && !Number.isFinite(input[key])) throw new Error(`Input ${key}: invalid timestamp`);
@@ -97,7 +97,7 @@ export function validateSession(value: unknown): asserts value is Session {
   stateArray(row.queuedMessages, "Queued messages").forEach(value => {
     const message = stateObject(value, "Queued message");
     requireState(message.state, { queued: true, dispatched: true } satisfies Record<Session["queuedMessages"][number]["state"], true>, "Queued message state");
-    requireState(message.delivery, { queue: true, steer: true, hardSteer: true } satisfies Record<Session["queuedMessages"][number]["delivery"], true>, "Queued message delivery");
+    requireState(message.delivery, { pending: true, queue: true, steer: true, hardSteer: true } satisfies Record<Session["queuedMessages"][number]["delivery"], true>, "Queued message delivery");
     if (message.acknowledgement !== undefined) requireState(message.acknowledgement, { pending: true, unconfirmed: true }, "Message acknowledgement");
   });
   if (row.inputs !== undefined) stateArray(row.inputs, "Input receipts").forEach(validateInputState);

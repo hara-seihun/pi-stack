@@ -9,7 +9,6 @@ import { CachedImage, useCachedMedia } from "./cached-media";
 import { useNearViewport } from "./near-viewport";
 import { formatResponseMetrics } from "./response-metrics";
 import { copyText, useMessageMenu, type MessageMenuItem } from "./message-menu";
-import { speech, speechTitle, useSpeech } from "./speech";
 import "./chat-message.css";
 
 const ClipboardIcon = () => <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="12" height="16" rx="2"/><path d="M9 5V3h6v2M9 5h6"/></svg>;
@@ -85,7 +84,6 @@ function MessageFrame({ kind, label, appearance, heading, avatar, text, resolveC
   children: ReactNode;
 }) {
   const time = timestamp === undefined ? undefined : new Date(timestamp);
-  const reader = useSpeech().catalog !== null;
   const [copyError, setCopyError] = useState<string | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const copy = async () => {
@@ -96,10 +94,6 @@ function MessageFrame({ kind, label, appearance, heading, avatar, text, resolveC
   };
   const { menu: openMenu, handlers } = useMessageMenu([
     { label: "Copy", onSelect: copy },
-    ...(reader && text.trim() ? [{ label: "Speak", onSelect: async () => {
-      try { const full = resolveCopyText ? await resolveCopyText() : text; speech.speak(full, speechTitle(full)); setCopyError(null); }
-      catch (cause) { setCopyError(cause instanceof Error ? cause.message : "The full message could not be loaded."); }
-    } }] : []),
     ...(identity && onReply ? [{ label: "Reply", onSelect: async () => {
       try { onReply(replyTarget(identity, resolveCopyText ? await resolveCopyText() : text)); setCopyError(null); }
       catch (cause) { setCopyError(cause instanceof Error ? cause.message : "The full message could not be loaded."); }

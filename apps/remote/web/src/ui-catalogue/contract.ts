@@ -11,13 +11,3 @@ export type UiCase = {
   render(): ReactNode;
   actions?: ReadonlyArray<{ id: string; label: string; run(): UiFixtureActionResult }>;
 };
-
-export type UiReview = {
-  caseId: string;
-  viewport: "phone" | "tablet" | "desktop";
-  theme: "light" | "dark";
-  status: "passed" | "fixed" | "needs-fix";
-  evidence: string;
-  additionalEvidence?: string[];
-  judgment: string;
-};

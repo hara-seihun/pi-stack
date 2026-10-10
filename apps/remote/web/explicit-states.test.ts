@@ -51,8 +51,8 @@ test("route boundaries allow the empty entrance but reject malformed or undescri
 });
 
 test("queue boundaries do not turn unknowns into sent messages", () => {
-  expect(() => queueMessageStatus({ state: "new" as any, delivery: "queue" }, false)).toThrow("undescribed state");
-  expect(() => queueMessageStatus({ state: "queued", delivery: "new" as any }, false)).toThrow("invalid state");
+  expect(() => queueMessageStatus({ state: "new" as any }, false)).toThrow("undescribed state");
+  expect(() => queueMessageStatus({ state: "dispatched", acknowledgement: "new" as any }, false)).toThrow("undescribed state");
 });
 
 test("unknown Android install acknowledgement is a retryable error, never Restarting", async () => {

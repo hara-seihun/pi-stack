@@ -9,8 +9,6 @@ import { nativePlatform, remote } from "../../native";
 import { SettingsFields } from "../../thread-settings";
 import type { useAppUpdate } from "../../app-update";
 import type { Session, ThreadSettings } from "../../types";
-import { CalendarSettings } from "./CalendarSettings";
-import { SpeechSettings } from "./SpeechSettings";
 import { parseSettingsEntry, parseSettingsSnapshot } from "../../../../shared/settings-wire";
 import { assertNever } from "../../../../shared/explicit-state";
 import "./settings.css";
@@ -193,8 +191,6 @@ export function SettingsScreen({ sessions, update, autoCollapse, onAutoCollapseC
     const entry = entries.find(entry => entry.definition.id === id);
     return entry ? <div>{entry.value.state === "unavailable" && <p className="settings-detail">{entry.value.message}</p>}<Owner entry={entry} /></div> : null;
   };
-  const timezone = entries.find(entry => entry.definition.id === "person.timezone");
-  const timezoneRecord = timezone ? timezoneValue(timezone) : null;
   const autoCollapseEntry = entries.find(entry => entry.definition.id === "person.autoCollapse");
   const administrator = resource.state === "ready" && resource.value.administrator === true;
   const selected = sessions.find(session => session.id === threadId);
@@ -211,10 +207,8 @@ export function SettingsScreen({ sessions, update, autoCollapse, onAutoCollapseC
       {autoCollapseEntry?.value.state === "unset" && autoCollapseEntry.editable && <div className="settings-unset-actions"><button type="button" onClick={() => onAutoCollapseChange(true)}>Enable automatic collapse</button><button type="button" onClick={() => onAutoCollapseChange(false)}>Disable automatic collapse</button></div>}
       {autoCollapseEntry && <Owner entry={autoCollapseEntry} />}
     </Section>
-    <Section title="Speech preferences"><SpeechSettings key={scopeKey} />{sectionOwner("device.speech")}</Section>
     <Section title="Notifications" description="Permission belongs to this device or browser, not to your other devices."><NotificationControl />{sectionOwner("device.notifications")}</Section>
     <Section title="Phone control">{nativePlatform ? <PermissionsSetup key={scopeKey} /> : <p>Phone control preferences and permissions are available in the Android app on that phone.</p>}{sectionOwner("device.phone")}</Section>
-    <Section title="Calendar subscriptions"><CalendarSettings key={scopeKey} refreshVersion={timezoneRecord ? `${timezoneRecord.zone}:${timezoneRecord.observedAt}` : "unset"} />{sectionOwner("person.calendar")}</Section>
     <Section title="Thread settings" description="Choose a real thread to change its model, thinking, speed and command timeout.">
       <label className="settings-field-label" htmlFor="settings-thread">Thread</label><select id="settings-thread" value={selected ? threadId : ""} onChange={event => setThreadId(event.target.value)}><option value="">Choose a thread</option>{sessions.map(session => <option key={session.id} value={session.id}>{session.name || session.id}{session.archivedAt ? " · Closed" : ""}</option>)}</select>
       {!sessions.length && <p>No threads are available in this environment.</p>}

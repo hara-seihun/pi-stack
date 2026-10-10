@@ -13,7 +13,7 @@ import type { UiCase } from "./contract";
 import { configureFixtureTransport, type FixtureRoute } from "./transport";
 
 const long = "Synthetic delivery failed — 日本語 العربية 🌿. ".repeat(12);
-export const appFixtureBootstrap: Bootstrap = { managerOwnerEnvironmentId: "synthetic", manager: { view: "classic", managerThreadId: null, hintSeen: false }, environmentId: "synthetic", home: "/synthetic", threadStarts: [{ id: "personal", label: "Personal", icon: "personal", models: [{ id: "openai/gpt-6.1-sol", label: "Sol", icon: "openai" }] }], speech: null };
+export const appFixtureBootstrap: Bootstrap = { managerOwnerEnvironmentId: "synthetic", manager: { view: "classic", managerThreadId: null, hintSeen: false }, environmentId: "synthetic", home: "/synthetic", threadStarts: [{ id: "personal", label: "Personal", icon: "personal", models: [{ id: "openai/gpt-6.1-sol", label: "Sol", icon: "openai" }] }] };
 export const appFixtureSettings: SettingsSnapshot = { administrator: false, entries: SETTINGS.filter(definition => definition.scope === "person").map(definition => ({ definition, editable: definition.kind !== "owner", value: definition.id === "person.autoCollapse" ? { state: "set", value: true } : { state: "unset" } })) };
 const bootstrap = appFixtureBootstrap;
 export const appFixtureSettingsRoutes: readonly FixtureRoute[] = [
@@ -34,7 +34,7 @@ function full(resource: string, value: StreamSnapshot): StreamWireEvent {
 type AppCaseState = "empty" | "loading" | "failure" | "waiting-close" | "close-failure" | "undo-failure";
 function AppFixture({ state }: { state: AppCaseState }) {
   const at = Date.now();
-  const root: Session = { id: "ui-root", name: "Synthetic waiting parent", agentName: "Kenan", parentId: null, hasChildren: true, origin: "person", foreground: true,
+  const root: Session = { id: "ui-root", name: "Synthetic waiting parent", parentId: null, hasChildren: true, origin: "person", foreground: true,
     model: "openai/gpt-6.1-sol", provider: "openai", cwd: "/synthetic", workspaceName: "Synthetic", environment: "synthetic", state: "waiting", lifecycle: { kind: "waiting", target: "agents", since: at }, held: false, activity: "awaiting", activeTools: [],
     waitingOnAgents: { kind: "agents", threadIds: ["ui-worker"], after: {}, since: at },
     createdAt: new Date(at).toISOString(), updatedAt: new Date(at).toISOString(), revision: 1, idleUnread: false, queuedMessages: [], archivedAt: null };

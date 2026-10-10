@@ -30,8 +30,8 @@ test("complete background directory keeps old idle agents and groups immediate l
   expect(countAgents(backgroundAgents(directory))).toEqual({ total: 7, active: 1, waiting: 1, idle: 5 });
 });
 
-test("search includes launcher name and task; state filters do not hide waiting under idle", () => {
-  expect(groupAgents(directory, "Renian", "all").flatMap(group => group.agents.map(agent => agent.id))).toEqual(["active", "quiet"]);
+test("search uses task titles, not generated identities; filters retain waiting tasks", () => {
+  expect(groupAgents(directory, "Renian", "all").flatMap(group => group.agents.map(agent => agent.id))).toEqual([]);
   expect(groupAgents(directory, "Publish release", "idle").flatMap(group => group.agents.map(agent => agent.id))).toEqual(["quiet"]);
   expect(groupAgents(directory, "", "waiting").flatMap(group => group.agents.map(agent => agent.id))).toEqual(["waiting"]);
   expect(groupAgents(directory, "", "active").flatMap(group => group.agents.map(agent => agent.id))).toEqual(["active"]);
@@ -66,6 +66,6 @@ test("task purpose and owned activity are readable without agent identity or ope
   expect(html).toContain("Waiting for deployment");
   expect(html).toContain(">Working<");
   expect(html).not.toContain("Unnamed agent");
-  expect(html.indexOf("Fix account routing")).toBeLessThan(html.indexOf("Renian"));
+  expect(html).not.toContain("Renian");
   expect(groupAgents(agents, "new release", "all").flatMap(group => group.agents.map(agent => agent.id))).toEqual(["unnamed-task"]);
 });

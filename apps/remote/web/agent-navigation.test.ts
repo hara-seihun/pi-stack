@@ -16,8 +16,9 @@ test("Agents is a navigable directory and old worker home links redirect there",
   expect(TABS).toContain("agents");
 });
 
-test("notifications enter Attention without reintroducing another destination", () => {
-  expect(parseRoute("#/notifications")).toEqual({ tab: "attention" });
-  expect(TABS).not.toContain("notifications");
-  expect(TABS).not.toContain("workers");
+test("removed surfaces have no navigation or accepted route", () => {
+  for (const surface of ["attention", "notifications", "needs-you", "calendar"]) {
+    expect(TABS).not.toContain(surface);
+    expect(() => parseRoute(`#/${surface}`)).toThrow("Route tab");
+  }
 });

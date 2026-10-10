@@ -152,7 +152,7 @@ function CachedFixture({ mode }: { mode: CacheMode }) {
 function AgentsFixture({ mode }: { mode: "incoming" | "outgoing" | "new" | "closed" | "chips" }) {
   const [open, setOpen] = useState(mode !== "closed");
   const [opened, setOpened] = useState<string | null>(null);
-  const directory: ThreadDirectory = { name: id => id === peerId ? `Synthetic peer ${token}` : null, agentName: id => id === peerId ? "Peer" : id === sessionId ? "Kenan" : null, busy: id => id === peerId, open: setOpened, discover: noop, lookupError: id => id === requestId ? "Synthetic lookup unavailable" : null };
+  const directory: ThreadDirectory = { name: id => id === peerId ? `Synthetic peer ${token}` : null, busy: id => id === peerId, open: setOpened, discover: noop, lookupError: id => id === requestId ? "Synthetic lookup unavailable" : null };
   const self: RouteEnd = { kind: "self", threadId: sessionId };
   const peer: RouteEnd = mode === "new" ? { kind: "new", title: token } : { kind: "peer", threadId: peerId, name: "Peer" };
   return <Frame><div className="conversation-transcript"><ThreadDirectoryProvider value={directory}>{mode === "chips" ? <ThreadChips ids={[peerId, requestId, roomId]} /> : <AgentDisclosure open={open} onOpen={setOpen} route={<AgentRoute from={mode === "incoming" ? peer : self} to={mode === "incoming" ? self : peer} direction={mode === "incoming" ? "incoming" : "outgoing"} />}><Markdown source={`A synthetic agent message. ${unicode}\n\n${token}`} sessionId={sessionId} /></AgentDisclosure>}{opened && <p role="status">Opened synthetic thread {opened}.</p>}</ThreadDirectoryProvider></div></Frame>;

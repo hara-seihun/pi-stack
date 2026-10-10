@@ -10,7 +10,8 @@ import { toast } from "./toasts";
 const POLL_MS = 30_000;
 const NotificationContext = createContext({ enabled: false, error: "", enable: () => {} });
 type Environment = { id: string; name: string; baseUrl: string };
-type ToastNotification = NotificationTarget & { title: string; seq: number; body?: string };
+type ToastNotification = NotificationTarget & { title: string; seq: number; body?: string; manager?: boolean };
+type MainNotice = ToastNotification & { key: string };
 
 function openNotification(target: NotificationTarget) {
   retainNotificationTarget(target);
@@ -26,6 +27,14 @@ export function NotificationProvider({ sessionId, children }: { sessionId: strin
   const [environment, setEnvironment] = useState<Environment | null>(null);
   const [browserNotifications, setBrowserNotifications] = useState<ThreadNotifications | null>(null);
   const toastKeys = useRef(new Set<string>());
+  const [mainNotices, setMainNotices] = useState<MainNotice[]>([]);
+  const mainSeen = useRef(new Set<string>());
+  const showMainNotice = (item: ToastNotification) => {
+    const key = `${item.user}:${item.environment}:${item.seq}`;
+    if (mainSeen.current.has(key)) return;
+    mainSeen.current.add(key);
+    setMainNotices(current => [...current, { ...item, key }]);
+  };
   const selected = useRef({ sessionId, environment: environment?.id });
   selected.current = { sessionId, environment: environment?.id };
 
@@ -52,12 +61,15 @@ export function NotificationProvider({ sessionId, children }: { sessionId: strin
 
   // This owner stays mounted across tabs: permission controls are just a view of it.
   useEffect(() => {
+    mainSeen.current.clear();
+    setMainNotices([]);
     const clear = () => { for (const key of toastKeys.current) toast.dismiss(key); toastKeys.current.clear(); };
     if (nativePlatform) {
       const receive = (event: Event) => {
         const item = (event as CustomEvent<ToastNotification>).detail;
         if (item.user !== window.PiRemotePerson.get() || !window.PiRemotePerson.session()) return;
         if (!item.environment || !item.sessionId) return;
+        if (item.manager === true) { showMainNotice(item); return; }
         const key = threadNotificationKey(item.user, item.environment, item.sessionId);
         if (document.visibilityState === "visible" && selected.current.environment === item.environment && selected.current.sessionId === item.sessionId) {
           clearToast(key);
@@ -149,15 +161,19 @@ export function NotificationProvider({ sessionId, children }: { sessionId: strin
         }
         return;
       }
-      if (!enabled || !browserNotifications) return;
       for (const event of feed.notifications) {
         if (!current()) return;
+        if (event.manager === true) {
+          showMainNotice({ user, environment: source.id, sessionId: event.sessionId, title: "Kenaznia", body: event.body, seq: event.seq, manager: true });
+          if (document.visibilityState === "visible") continue;
+        }
+        if (!enabled || !browserNotifications) continue;
         const key = threadNotificationKey(user, source.id, event.sessionId);
         if (source.id === environment.id && selected.current.sessionId === event.sessionId && document.visibilityState === "visible") {
           clearToast(key);
           continue;
         }
-        await browserNotifications.show(key, `${source.name} · ${event.name}${event.kind === "question" ? " · Question" : ""}`, () => openNotification({ user, environment: source.id, sessionId: event.sessionId }), event.body);
+        await browserNotifications.show(key, event.manager === true ? "Kenaznia" : `${source.name} · ${event.name}${event.kind === "question" ? " · Question" : ""}`, () => openNotification({ user, environment: source.id, sessionId: event.sessionId }), event.body, event.manager === true);
       }
     };
     let streamDelivery = Promise.resolve();
@@ -238,7 +254,7 @@ export function NotificationProvider({ sessionId, children }: { sessionId: strin
         timers.add(timer);
       }
     };
-    if (!nativePlatform && enabled && browserNotifications) void loadEnvironments().then(sources => {
+    if (!nativePlatform) void loadEnvironments().then(sources => {
       if (!controller.signal.aborted) for (const source of sources) void poll(source);
     }).catch(cause => { if (current()) setError(String(cause)); });
     return () => {
@@ -250,7 +266,12 @@ export function NotificationProvider({ sessionId, children }: { sessionId: strin
     };
   }, [nativePlatform ? true : enabled, user, session, browserNotifications, environment]);
 
-  return <NotificationContext.Provider value={{ enabled, error, enable: () => void configure(true) }}>{children}</NotificationContext.Provider>;
+  const notice = mainNotices[0];
+  const dismissMain = () => setMainNotices(current => current.slice(1));
+  return <NotificationContext.Provider value={{ enabled, error, enable: () => void configure(true) }}>{children}{notice && <aside className="kenaznia-notice" role="alert" aria-live="assertive">
+    <button type="button" className="kenaznia-notice-open" onClick={() => { openNotification(notice); dismissMain(); }}><strong>Kenaznia{mainNotices.length > 1 ? ` · ${mainNotices.length} updates` : ""}</strong><span>{notice.body || notice.title}</span></button>
+    <button type="button" aria-label="Dismiss Kenaznia notification" onClick={dismissMain}>×</button>
+  </aside>}</NotificationContext.Provider>;
 }
 
 export function NotificationControl() {

@@ -10,7 +10,7 @@ function ShellFixture({ detail, single, badges, update }: { detail: boolean; sin
   const [active, setActive] = useState<Tab>("chats");
   return <Shell layout={layout} showDetail={detail} showTabs={single || !detail}
     nav={<TabNav layout={layout} active={active} onSelect={setActive}
-      badges={badges ? { chats: { count: 124 }, agents: { count: 12 }, attention: { count: 3, attention: true } } : {}}
+      badges={badges ? { chats: { count: 124, attention: true }, agents: { count: 12 } } : {}}
       update={update ? { visible: true, busy: false, status: "New version ready", onClick: () => setActive("settings") } : undefined} />}
     list={single ? null : <section className="empty-state"><strong>{active === "chats" ? "Chats" : active}</strong><span>No conversations yet</span></section>}
     detail={<section className="empty-state"><strong>{detail ? "Selected conversation" : "Choose a conversation"}</strong><span>{detail ? "Back returns to the inbox." : "Your conversations appear here."}</span></section>} />;
@@ -40,6 +40,6 @@ function NavigationFixture({ initial }: { initial: Tab }) {
   const layout = useLayout();
   const [active, setActive] = useState(initial);
   return <Shell layout={layout} showDetail showTabs list={null}
-    nav={<TabNav layout={layout} active={active} badges={{ chats: { count: 102 }, attention: { count: 3, attention: true }, agents: { count: 1 } }} onSelect={setActive} />}
+    nav={<TabNav layout={layout} active={active} badges={{ chats: { count: 102, attention: true }, agents: { count: 1 } }} onSelect={setActive} />}
     detail={<section className="empty-state"><strong>{active}</strong><span>Each section remains reachable by touch and keyboard.</span></section>} />;
 }

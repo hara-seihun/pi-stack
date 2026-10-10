@@ -8,8 +8,6 @@ import { createContext, useContext, useEffect, type ReactNode } from "react";
 export interface ThreadDirectory {
   /** The thread's name, or null while the client has not learned it. */
   name(id: string): string | null;
-  /** The thread's agent first name, or null when unknown or unnamed. */
-  agentName(id: string): string | null;
   /** True while that thread has work of its own. */
   busy(id: string): boolean;
   open(id: string): void;

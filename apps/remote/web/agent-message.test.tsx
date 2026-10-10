@@ -27,13 +27,15 @@ test("new incoming agent words retain immutable sender routes in toggle-controll
   const items = deriveTranscriptItems(context);
   const entries = entriesFromHeads(items.map(item => item.head));
   const incoming = entries.find(entry => entry.agentSender)!;
-  expect(incoming).toMatchObject({ kind: "user", label: "Kelana", text: message.text, agentSender: { threadId: sender, name: "Kelana" } });
+  expect(incoming).toMatchObject({ kind: "user", label: "Thread 7c925d87", text: message.text, agentSender: { threadId: sender, name: "Kelana" } });
   expect(JSON.parse(items[2].body)).toEqual({ kind: "user", text: message.text });
   expect(items[3].head).toMatchObject({ kind: "assistant", label: "Kenan" });
   expect(incoming.identity?.id).toBe("incoming");
   for (const autoCollapse of [true, false]) {
     const html = renderToStaticMarkup(<Transcript entries={entries} sessionId={recipient} home="/" images={null} autoCollapse={autoCollapse} onEdit={() => {}} onReply={() => {}} />);
-    expect(html).toMatch(/<span class="agent-route incoming"><span class="agent-route-name self">Kenan<\/span><svg[^>]*aria-label="from"><path d="M20 12H5m5-5-5 5 5 5"><\/path><\/svg><span class="agent-route-name peer">Kelana<\/span>/);
+    expect(html).toContain('agent-route-name self">Thread 303efcde</span>');
+    expect(html).toContain('agent-route-name peer">Thread 7c925d87</span>');
+    expect(html).not.toContain('>Kelana<');
     expect(html).toContain('class="message-label">KENAN</span>');
     const disclosures = html.match(/<details class="conversation-step agent-message-step"[^>]*>/g) ?? [];
     expect(disclosures).toHaveLength(1);
@@ -56,7 +58,7 @@ test("mono groups routed inputs, sends and spawns without exposing them in colla
     const mono = render(true);
     expect(mono.match(/class="message user/g)).toHaveLength(1);
     expect(mono.match(/class="message assistant/g)).toHaveLength(1);
-    expect(mono).toContain('<div data-transcript-seq="99"><article');
+    expect(mono).toContain('data-transcript-seq="99"');
     expect(mono).not.toContain("agent-route");
     expect(mono).not.toContain("agent-message-step");
     expect(mono).not.toContain("thread-chip");
@@ -83,28 +85,28 @@ test("old cached heads, new streamed heads and attachments share the body projec
   expect(projected.agentSender).toEqual(streamed.agentSender);
 });
 
-test("historical senders resolve to their known name, or an explicitly unidentified agent, never title or User", () => {
+test("historical sender identities do not leak generated names into current presentation", () => {
   const historical = formatThreadMessage({ ...message, senderName: undefined }, message.text);
   const context = { messages: [{ role: "user", content: historical }] };
   const known = entriesFromHeads(deriveTranscriptItems(context, id => id === sender ? "Renian" : undefined).map(item => item.head)).at(-1)!;
   const unknown = entriesFromHeads(deriveTranscriptItems(context).map(item => item.head)).at(-1)!;
-  expect(known.label).toBe("Renian");
-  expect(unknown.label).toBe("Agent · 7c925d87");
+  expect(known.label).toBe("Thread 7c925d87");
+  expect(unknown.label).toBe(known.label);
   expect(presentAgentMessage(entry(historical)).label).toBe(unknown.label);
   expect(unknown.text).toBe(message.text);
 });
 
-test("scheduled senders and recipients render by name just like UUID threads", () => {
+test("historical scheduled senders retain their transport identity without personal names", () => {
   const scheduled = { ...message, senderId: "schedule:digest:100000", threadId: "schedule:followup:100001" };
   const incoming = entriesFromHeads(deriveTranscriptItems({ messages: [{ role: "user", content: formatThreadMessage(scheduled, scheduled.text) }] }).map(item => item.head)).at(-1)!;
-  expect(incoming).toMatchObject({ label: "Kelana", text: scheduled.text, agentSender: { threadId: scheduled.senderId, name: "Kelana" } });
+  expect(incoming).toMatchObject({ label: "Thread schedule", text: scheduled.text, agentSender: { threadId: scheduled.senderId, name: "Kelana" } });
   expect(presentAgentMessage(entry(formatThreadMessage(scheduled, scheduled.text))).text).toBe(scheduled.text);
 });
 
 test("completion reports hide both transport and thread_idle JSON, retaining final words, errors and attachments", () => {
   const notice = { ...message, source: "notification" as const, text: '{"type":"thread_idle","outcome":"failed","finalText":"Here is the result.","error":"publish failed"}' };
   const incoming = presentAgentMessage(entry(formatThreadMessage(notice, notice.text) + "\n\n![Context image](/image)"));
-  expect(incoming.label).toBe("Kelana");
+  expect(incoming.label).toBe("Thread 7c925d87");
   expect(incoming.text).toBe("Here is the result.\n\npublish failed\n\n![Context image](/image)");
 });
 
@@ -155,7 +157,8 @@ test("sends and spawns read as this agent's own messages, routed to their recipi
   expect(html.match(/class="message assistant agent-outgoing"/g)).toHaveLength(3);
   expect(entries.filter(entry => entry.kind === "toolCall").map(entry => outgoingAgentMessage(entry)?.text)).toEqual([words.slice(0, 120) + "…", words.slice(0, 120) + "…", "Closed?"]);
   expect(html.match(/<footer class="message-expansion"><button type="button" class="message-expand-action">Load more<\/button><button[^>]*aria-label="Copy full message"/g)).toHaveLength(2);
-  expect(html).toMatch(/<span class="agent-route outgoing"><span class="agent-route-name self">Kenan<\/span><svg[^>]*><path[^>]*><\/path><\/svg><span class="agent-route-name peer">Thread 7c925d87<\/span>/);
+  expect(html).toContain('agent-route-name self">Thread 303efcde</span>');
+  expect(html).toContain('agent-route-name peer">Thread 7c925d87</span>');
   expect(html).toContain('class="agent-route-name new" title="Review">New agent</span>');
   expect(html).toContain('class="message-status failed">failed · Thread is closed</footer>');
   expect(html).not.toContain("tool-step");
@@ -201,9 +204,9 @@ test("copying untruncated outgoing words needs no body load", async () => {
 test("all three native user-role envelopes collapse without requiring explicit source metadata", () => {
   const prefix = "<agent_message>\nThis is an agent-to-agent message, not a user message.\n";
   const envelopes = [
-    { metadata: { senderThreadId: sender, senderName: "Kelana", recipientThreadId: recipient, messageId: "explicit", source: "explicit" }, words: "Explicit full update", label: "Kelana" },
-    { metadata: { senderThreadId: sender, senderName: "Kelana" }, words: '{"type":"thread_idle","outcome":"completed","finalText":"Completion full report"}', label: "Kelana" },
-    { metadata: { senderThreadId: "kenan-root" }, words: "Root full reply", label: "Agent · kenan-ro" },
+    { metadata: { senderThreadId: sender, senderName: "Kelana", recipientThreadId: recipient, messageId: "explicit", source: "explicit" }, words: "Explicit full update", label: "Thread 7c925d87" },
+    { metadata: { senderThreadId: sender, senderName: "Kelana" }, words: '{"type":"thread_idle","outcome":"completed","finalText":"Completion full report"}', label: "Thread 7c925d87" },
+    { metadata: { senderThreadId: "kenan-root" }, words: "Root full reply", label: "Thread kenan-ro" },
   ];
   for (const { metadata, words, label } of envelopes) {
     const raw = prefix + JSON.stringify(metadata) + "\n\n" + words + "\n</agent_message>";

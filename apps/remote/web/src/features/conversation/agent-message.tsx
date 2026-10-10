@@ -1,6 +1,5 @@
 import { useContext, useEffect, type ReactNode } from "react";
-import { agentFirstName, agentMessagePresentation, agentSenderLabel } from "pi-orchestrator/message-format";
-import { AGENT_NAME } from "../../../../server/agent-identity";
+import { agentMessagePresentation } from "pi-orchestrator/message-format";
 import type { ContextEntry, TranscriptItemBody } from "../../types";
 import { shortThreadName, ThreadDirectoryContext } from "./thread-chips";
 
@@ -10,7 +9,7 @@ export function presentAgentMessage(entry: ContextEntry): ContextEntry {
   const envelope = entry.agentSender || entry.text === undefined ? null : agentMessagePresentation(entry.text);
   const sender = entry.agentSender ?? envelope?.sender;
   if (!sender) return entry;
-  const label = agentSenderLabel(sender);
+  const label = shortThreadName(sender.threadId);
   const text = envelope ? envelope.text : entry.text;
   if (entry.agentSender && entry.label === label && entry.text === text) return entry;
   return { ...entry, label, text, agentSender: sender, signature: `${entry.signature}:agent:${JSON.stringify(sender)}:${label}` };
@@ -62,9 +61,9 @@ export function spawnedThread(body: TranscriptItemBody | undefined): { id: strin
   const text = body.result.content.find((block: { type?: unknown }) => block?.type === "text")?.text;
   if (typeof text !== "string") return null;
   try {
-    const parsed = JSON.parse(text) as { ok?: unknown; value?: { id?: unknown; agentName?: unknown } };
+    const parsed = JSON.parse(text) as { ok?: unknown; value?: { id?: unknown; title?: unknown } };
     if (parsed.ok !== true || typeof parsed.value?.id !== "string") return null;
-    return { id: parsed.value.id, name: typeof parsed.value.agentName === "string" ? agentFirstName(parsed.value.agentName) : null };
+    return { id: parsed.value.id, name: typeof parsed.value.title === "string" ? parsed.value.title : null };
   } catch { return null; }
 }
 
@@ -78,9 +77,9 @@ function RouteName({ end }: { end: RouteEnd }) {
   const id = end.kind === "new" ? null : end.threadId;
   useEffect(() => { if (directory && id && end.kind === "peer") directory.discover([id]); }, [directory, id, end.kind]);
   if (end.kind === "new") return <span className="agent-route-name new" title={end.title ?? undefined}>New agent</span>;
-  const known = directory?.agentName(end.threadId) ?? null;
-  if (end.kind === "self") return <span className="agent-route-name self">{known ?? AGENT_NAME}</span>;
-  const name = known ?? end.name ?? shortThreadName(end.threadId);
+  const known = directory?.name(end.threadId) ?? null;
+  if (end.kind === "self") return <span className="agent-route-name self">{known ?? shortThreadName(end.threadId)}</span>;
+  const name = known ?? shortThreadName(end.threadId);
   const title = directory?.name(end.threadId) ?? undefined;
   const error = directory?.lookupError(end.threadId);
   return directory

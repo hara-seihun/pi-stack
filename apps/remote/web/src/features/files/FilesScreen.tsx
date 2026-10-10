@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { API } from "../../../../server/api";
 import type { FileBrowserEntry } from "../../../../server/protocol";
 import { api } from "../../client";
-import { openPersonEditor } from "./editor-launch";
+import { openPersonEditor, type EditorLaunch } from "./editor-launch";
 import "./files.css";
 
 export interface FilesScreenProps {
@@ -11,14 +11,49 @@ export interface FilesScreenProps {
   onSelect(path: string | null): void;
   shortcuts: { label: string; path: string }[];
   onAttach?(path: string): void;
+  onEditorState?(open: boolean): void;
 }
 type Selection = { kind: "unset" } | { kind: "loading"; path: string } | { kind: "ready"; entry: FileBrowserEntry } | { kind: "error"; error: string };
 
-export function FilesScreen({ selectedPath, onSelect, shortcuts, onAttach }: FilesScreenProps) {
+function EditorFrame({ launch }: { launch: EditorLaunch }) {
+  const name = useRef(`pi-editor-${crypto.randomUUID()}`);
+  const submitted = useRef(false);
+  useEffect(() => {
+    if (submitted.current) return;
+    submitted.current = true;
+    const form = document.createElement("form");
+    form.method = "POST";
+    form.action = launch.url;
+    form.target = name.current;
+    form.hidden = true;
+    const ticket = document.createElement("input");
+    ticket.type = "hidden";
+    ticket.name = "ticket";
+    ticket.value = launch.ticket;
+    form.append(ticket);
+    document.body.append(form);
+    form.submit();
+    form.remove();
+  }, [launch]);
+  return <iframe className="editor-frame" name={name.current} title="VS Code" />;
+}
+
+export function FilesScreen({ selectedPath, onSelect, shortcuts, onAttach, onEditorState }: FilesScreenProps) {
   const [path, setPath] = useState(selectedPath ?? "");
   const [selection, setSelection] = useState<Selection>({ kind: "unset" });
   const [opening, setOpening] = useState(false);
+  const [editor, setEditor] = useState<EditorLaunch | null>(null);
   const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    const close = () => { setEditor(null); setSelection({ kind: "unset" }); };
+    window.addEventListener("pi-auth", close);
+    window.addEventListener("pi-person", close);
+    return () => { window.removeEventListener("pi-auth", close); window.removeEventListener("pi-person", close); };
+  }, []);
+  useEffect(() => {
+    onEditorState?.(editor !== null);
+    return () => onEditorState?.(false);
+  }, [editor, onEditorState]);
   useEffect(() => {
     setPath(selectedPath ?? "");
     if (!selectedPath) { setSelection({ kind: "unset" }); return; }
@@ -36,7 +71,9 @@ export function FilesScreen({ selectedPath, onSelect, shortcuts, onAttach }: Fil
     const result = await openPersonEditor(target, kind);
     setOpening(false);
     if (!result.ok) setError(result.error);
+    else setEditor(result.value);
   }
+  if (editor) return <EditorFrame launch={editor} />;
   const entry = selection.kind === "ready" ? selection.entry : null;
   const places = [...new Map(shortcuts.map(shortcut => [shortcut.path, shortcut])).values()];
   return <section className="files-screen" aria-label="Files">

@@ -11,7 +11,6 @@ import { AppUpdateStatus } from "../app-update";
 import { auth } from "../person";
 import { ensureUnlocked, registerAuthenticationBootstrap } from "../client";
 import { SETTINGS, type SettingEntry, type SettingsSnapshot } from "../../../shared/settings";
-import type { CalendarSnapshot } from "../../../server/calendar-protocol";
 import type { Session, ThreadSettings } from "../../../server/protocol";
 import { appStorageKey } from "../app-path";
 import "../features/settings/settings.css";
@@ -34,7 +33,7 @@ const updateMedia: AppUpdateState = { visible: true, busy: false, status: "Updat
 const updateError: AppUpdateState = { visible: true, busy: false, status: "Update needs retry. Tap Update to retry.", error: "The verified update could not be downloaded. The installed app is unchanged. Retry when this synthetic connection returns.", approval: false, onClick: () => undefined };
 const session: Session = { id: "synthetic-thread", name: "Synthetic thread with a long name to inspect model and execution settings", parentId: null, hasChildren: false, origin: "person", model: "synthetic-model", cwd: "/synthetic", workspaceName: "Synthetic", environment: "synthetic", state: "idle", lifecycle: { kind: "idle" }, held: false, activity: "idle", activeTools: [], provider: "synthetic", createdAt: "2026-10-09T00:00:00Z", updatedAt: "2026-10-09T00:00:00Z", revision: 1, idleUnread: false, queuedMessages: [], archivedAt: null };
 const threadSettings: ThreadSettings = { models: [{ id: "synthetic-model", name: "Synthetic model", provider: "synthetic", thinkingLevels: ["low", "high"], speedModes: ["standard", "priority"] }], model: { id: "synthetic-model", provider: "synthetic" }, thinkingLevels: ["low", "high"], thinkingLevel: "high", speedModes: ["standard", "priority"], speedMode: "standard", bashTimeoutSeconds: 60 };
-type SettingsVariant = "set" | "unset" | "unavailable" | "loading" | "error" | "administrator" | "long" | "thread" | "calendar-error";
+type SettingsVariant = "set" | "unset" | "unavailable" | "loading" | "error" | "administrator" | "long" | "thread";
 function snapshot(variant: SettingsVariant): SettingsSnapshot {
   const entries: SettingEntry[] = SETTINGS.filter(definition => variant === "administrator" || definition.scope === "person").map(definition => ({
     definition: variant === "long" ? { ...definition, owner: { ...definition.owner, location: `${definition.owner.location}/a-deliberately-long-unbroken-synthetic-owner-coordinate-to-check-overflow-and-wrapping` } } : definition,
@@ -48,12 +47,9 @@ function SettingsFixture({ variant, nativeUpdate }: { variant: SettingsVariant; 
   return <SettingsScreen sessions={variant === "thread" ? [session] : []} initialThreadId={variant === "thread" ? session.id : null} update={nativeUpdate ?? updateIdle} autoCollapse={collapse} onAutoCollapseChange={setCollapse} onOpenThread={() => undefined} />;
 }
 function settings(variant: SettingsVariant, nativeUpdate?: AppUpdateState) {
-  const calendar: CalendarSnapshot = variant === "unset" || variant === "unavailable" ? { zone: "", settingsError: "Timezone is not set. Set it before subscribing.", events: [], subscriptions: [] } : { zone: "Asia/Seoul", events: [], subscriptions: variant === "long" ? [{ id: "synthetic-subscription", name: "Synthetic read-only calendar with a deliberately long finite name for responsive layouts", url: "https://synthetic.invalid/calendar.ics", zone: "Asia/Seoul", refreshed: null, error: "Synthetic upstream calendar is unavailable. Existing imported events remain unchanged." }] : [] };
   configureFixtureTransport([...commonRoutes(),
     { method: "GET", path: "/v1/settings", reply: () => variant === "loading" ? pending() : variant === "error" ? failure("Synthetic settings service is disconnected. Retry to load the current values.") : Response.json(snapshot(variant)) },
-    { method: "GET", match: url => url.pathname === "/v1/calendar" && [...url.searchParams.keys()].sort().join(",") === "from,to" && ["from", "to"].every(key => Number.isFinite(Date.parse(url.searchParams.get(key)!))), reply: () => variant === "loading" ? pending() : variant === "calendar-error" ? failure("Synthetic calendar subscriptions could not be loaded.") : Response.json(calendar) },
     { method: "GET", path: "/v1/sessions/synthetic-thread/settings", reply: () => Response.json({ settings: threadSettings }) },
-    { method: "GET", path: "/v1/calendar/feed", reply: () => Response.json({ url: `${location.origin}/v1/calendar/feed/synthetic-only` }) },
   ]);
   return <SettingsFixture variant={variant} nativeUpdate={nativeUpdate} />;
 }
@@ -109,7 +105,7 @@ function network(variant: "collapsed" | "expanded" | "long" | "connected" | "abs
 }
 function item(id: string, title: string, component: string, contract: string, render: UiCase["render"], boundary: UiCase["boundary"] = "finite-variant"): UiCase { return { id, title, component, contract, boundary, render }; }
 export const settingsAuthCases: UiCase[] = [
-  ...(["set", "unset", "unavailable", "loading", "error", "administrator", "long", "thread", "calendar-error"] as const).map(variant => item(`settings-${variant}`, `Settings · ${variant}`, "SettingsScreen", "Real settings registry and nested controls; each value explicitly set, unset or unavailable; synthetic transport only.", () => settings(variant), variant === "long" ? "content-boundary" : "composition")),
+  ...(["set", "unset", "unavailable", "loading", "error", "administrator", "long", "thread"] as const).map(variant => item(`settings-${variant}`, `Settings · ${variant}`, "SettingsScreen", "Real settings registry and nested controls; each value explicitly set, unset or unavailable; synthetic transport only.", () => settings(variant), variant === "long" ? "content-boundary" : "composition")),
   item("settings-native-update-approval", "Native settings · installer approval", "SettingsScreen", "Android updater waits for installer approval.", () => settings("set", updateApproval), "composition"),
   item("settings-native-update-error", "Native settings · update error", "SettingsScreen", "Verified updater failed; installed app unchanged.", () => settings("set", updateError), "composition"),
   item("settings-native-updating", "Native settings · applying update", "SettingsScreen", "A verified web update is applying; additional update actions are disabled.", () => settings("set", updateApplying), "composition"),

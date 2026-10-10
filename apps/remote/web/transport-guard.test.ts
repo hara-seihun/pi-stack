@@ -30,7 +30,7 @@ test("every API request leaves through a native-owned reporting transport", () =
 });
 
 test("every page mounts the indicator and installs the door before anything can request", () => {
-  for (const [page, native, indicator] of [["main.tsx", '"./native"', "App"], ["voice-page.ts", '"./native"', "RequestIndicator"]] as const) {
+  for (const [page, native, indicator] of [["main.tsx", '"./native"', "App"]] as const) {
     const text = source.get(page)!;
     expect(text).toMatch(new RegExp(`import (\\{[^}]*\\} from )?${native.replace(/[./]/g, "\\$&")}`));
     expect(text).toContain(indicator);

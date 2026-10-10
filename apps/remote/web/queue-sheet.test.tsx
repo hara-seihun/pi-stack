@@ -3,51 +3,27 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { QueuedMessage } from "./src/types";
 import { QueueSheet, queueMessageStatus } from "./src/features/queue/QueueSheet";
-
-const message = (patch: Partial<QueuedMessage> = {}): QueuedMessage => ({
-  id: "message", text: "Do the next thing", delivery: "queue", state: "queued",
-  canSteer: true, canHardSteer: true, canCancel: true, createdAt: "", ...patch,
-});
-
+const message = (patch: Partial<QueuedMessage> = {}): QueuedMessage => ({ id: "message", text: "Next thing", state: "queued", delivery: "pending", canCancel: true, createdAt: "", ...patch });
 function render(messages: QueuedMessage[], held = false) {
-  return renderToStaticMarkup(createElement(QueueSheet, {
-    open: true, messages, held, pending: false, onClose() {}, onAction() {},
-  }));
+  return renderToStaticMarkup(createElement(QueueSheet, { open: true, messages, held, pending: false, onClose() {}, onAction() {} }));
 }
-
-test("queue wording is composed from delivery, dispatch and the thread's held state", () => {
-  expect(queueMessageStatus(message(), false)).toBe("Queued for after completion");
-  expect(queueMessageStatus(message({ delivery: "steer" }), false)).toBe("Steering after current tool calls");
-  expect(queueMessageStatus(message({ delivery: "hardSteer" }), false)).toBe("Interrupting current work");
+test("one mode: queued input waits for output boundary; a hold still owns resumption", () => {
+  expect(queueMessageStatus(message(), false)).toBe("Waiting for the next output boundary");
   expect(queueMessageStatus(message(), true)).toBe("Held until resumed");
-  expect(queueMessageStatus(message({ state: "dispatched" }), true)).toBe("Sent to agent");
 });
-
-test("delayed acknowledgements never claim failure or offer replay and late receipts restore sent status", () => {
-  const pending = message({ state: "dispatched", acknowledgement: "pending" });
-  expect(queueMessageStatus(pending, false)).toBe("Awaiting agent acknowledgement");
-  expect(queueMessageStatus({ ...pending, acknowledgement: "unconfirmed" }, false)).toBe("Acknowledgement unconfirmed — not resent");
-  expect(queueMessageStatus({ ...pending, acknowledgement: undefined }, false)).toBe("Sent to agent");
-  const markup = render([pending]);
-  expect(markup).not.toContain("Remove");
-  expect(markup).not.toContain("Hard steer");
+test("uncertain acknowledgement offers no replay, cancellation or editing", () => {
+  for (const acknowledgement of ["pending", "unconfirmed", undefined] as const) {
+    const value = message({ state: "dispatched", acknowledgement });
+    const markup = render([value]);
+    expect(markup).not.toContain("Remove");
+    expect(markup).not.toContain("Edit");
+    expect(markup).not.toContain("steer");
+  }
+  expect(queueMessageStatus(message({ state: "dispatched", acknowledgement: "unconfirmed" }), false)).toContain("not resent");
 });
-
-test("only queued messages offer actions, and held threads cannot steer", () => {
-  const queued = render([message()]);
-  expect(queued).toContain("Edit");
-  expect(queued).toContain("Make it steer");
-  expect(queued).toContain("Hard steer");
-  expect(queued).toContain("Remove");
-
-  const held = render([message()], true);
-  expect(held).toContain("Edit");
-  expect(held).toContain("Remove");
-  expect(held).not.toContain("Make it steer");
-  expect(held).not.toContain("Hard steer");
-
-  const dispatched = render([message({ state: "dispatched" })]);
-  expect(dispatched).toContain("Sent to agent");
-  expect(dispatched).not.toContain("Edit");
-  expect(dispatched).not.toContain("Remove");
+test("only owner-cancellable pending input can be edited or removed", () => {
+  expect(render([message()])).toContain("Edit");
+  expect(render([message()], true)).toContain("Remove");
+  expect(render([message({ canCancel: false })])).not.toContain("Remove");
+  expect(render([message()])).not.toContain("steer");
 });

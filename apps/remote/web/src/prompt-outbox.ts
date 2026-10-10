@@ -10,7 +10,7 @@ export type PromptOutboxScope = Readonly<{ person: string; environment: string; 
 export type PromptOutboxBody = Readonly<{
   requestId: string;
   text: string;
-  delivery: "queue" | "steer" | "hardSteer";
+  delivery?: "pending" | "queue" | "steer" | "hardSteer";
   replyTo?: string;
   includeMeetingImages?: boolean;
 }>;
@@ -47,7 +47,7 @@ function scopeKey(scope: PromptOutboxScope | null): string | null {
 function validBody(value: unknown): value is PromptOutboxBody {
   return object(value) && typeof value.requestId === "string" && uuid.test(value.requestId)
     && typeof value.text === "string" && !!value.text.trim()
-    && ["queue", "steer", "hardSteer"].includes(String(value.delivery))
+    && (value.delivery === undefined || ["pending", "queue", "steer", "hardSteer"].includes(String(value.delivery)))
     && (value.replyTo === undefined || typeof value.replyTo === "string" && !!value.replyTo)
     && (value.includeMeetingImages === undefined || typeof value.includeMeetingImages === "boolean")
     && Object.keys(value).every(key => ["requestId", "text", "delivery", "replyTo", "includeMeetingImages"].includes(key));
@@ -76,11 +76,10 @@ function publicEntry(entry: StoredEntry): PromptOutboxEntry {
 function reservedBytes(entry: StoredEntry): number {
   return new TextEncoder().encode(JSON.stringify({ ...entry, outcome: null })).byteLength + RETAINED_MESSAGE_BYTES;
 }
-function classify(response: { status: number; body: unknown }, bodyJson: string): PromptOutboxOutcome {
+function classify(response: { status: number; body: unknown }, _bodyJson: string): PromptOutboxOutcome {
   const { status, body } = response;
   if (status >= 200 && status < 300 && object(body) && body.accepted === true
-    && typeof body.workId === "string" && !!body.workId && body.workId.length <= 512
-    && body.delivery === JSON.parse(bodyJson).delivery) return { kind: "accepted", workId: body.workId };
+    && typeof body.workId === "string" && !!body.workId && body.workId.length <= 512) return { kind: "accepted", workId: body.workId };
   if (status >= 400 && status < 500 && object(body) && body.outcome === "rejected" && typeof body.error === "string" && !!body.error) {
     return { kind: "rejected", message: message(body.error) };
   }
@@ -171,7 +170,7 @@ export class PromptOutbox {
     let bodyJson: string;
     let requestId: string;
     try {
-      if (typeof sessionId !== "string" || !sessionId.trim() || !validBody(body)) return bad("invalid_prompt", "Save a nonempty prompt with a stable requestId and explicit delivery mode.");
+      if (typeof sessionId !== "string" || !sessionId.trim() || !validBody(body)) return bad("invalid_prompt", "Save a nonempty prompt with a stable requestId.");
       bodyJson = JSON.stringify(body);
       const frozen: unknown = JSON.parse(bodyJson);
       if (!validBody(frozen)) return bad("invalid_prompt", "The serialized prompt is invalid.");

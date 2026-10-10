@@ -108,9 +108,14 @@ test("status vocabulary covers every lifecycle and preserves unread", () => {
   expect(selectedAiId({ selectedChatId: "ai:same-id" })).toBe("same-id");
 });
 
-test("inbox rows show only the mutable topic title while preserving agent identity and state glyphs", () => {
+test("main Kenaznia attention ranks before every other thread", () => {
+  const rows = inboxRows([session("ordinary", { idleUnread: true, attentionSummary: "Needs you" }), session("manager", { manager: true, idleUnread: true, attentionSummary: "Main update" })], []);
+  expect(rows.map(row => row.chat.id)).toEqual(["ai:manager", "ai:ordinary"]);
+});
+
+test("inbox rows show only the mutable topic title and state glyphs", () => {
   const named = inboxRows([session("named", { agentName: "Tainetaimu Sizhukein", name: "Fix the inbox" })], [])[0]!;
-  expect(named.chat).toMatchObject({ kind: "ai", name: "Tainetaimu", title: "Fix the inbox" });
+  expect(named.chat).toMatchObject({ kind: "ai", name: null, title: "Fix the inbox" });
   const markup = renderToStaticMarkup(createElement(InboxRowView, { row: named, selected: false, compactSelected: false, place: "", onOpen() {}, onClose() {} }));
   expect(markup).toContain('class="inbox-title">Fix the inbox</span>');
   expect(markup).not.toContain("Tainetaimu");

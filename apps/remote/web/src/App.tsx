@@ -2,7 +2,6 @@ import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo,
 import { API } from "../../server/api";
 import { prioritizeQuestion } from "./features/conversation/question-drafts";
 import { assertNever } from "../../shared/explicit-state";
-import { voiceActionLabel, type VoiceState } from "./voice-state";
 import { validateSession, validateStreamSnapshot } from "../../shared/state-validation";
 import { appPath, appStorageKey } from "./app-path";
 import type { InlineImageSnapshot, StreamEvent, QuestionsResource } from "../../server/protocol";
@@ -20,7 +19,6 @@ import { useChatDrawing } from "./chat-drawing";
 import type { ReplyTarget } from "./message-reply";
 import { ReplyDrafts } from "./reply-drafts";
 import { inboxRows, reconcileDiscoveredSessions, selectedAiId, selectionAfterSync, type Chat, type ChatId } from "./chats";
-import { agentName } from "./agent-name";
 import { SignInDialog } from "./SignInDialog";
 import { DismissibleError } from "./dismissible-error";
 import { dismissServerError } from "./error-feedback";
@@ -50,17 +48,15 @@ import { useSystemBack } from "./app/system-back";
 import { back, currentRoute, navigate, routeChatId, routeHome, routeThreadId, useRoute, withoutPanel, type Panel, type Route, type Tab } from "./app/routes";
 import { observeArtifactActions, recordFeatureUsage, resetFeatureCollection } from "./feature-usage";
 import { Inbox } from "./features/chats/Inbox";
-import { ConversationScreen, type Delivery } from "./features/conversation/ConversationScreen";
+import { ConversationScreen } from "./features/conversation/ConversationScreen";
 import { ItemBodies, ItemBodiesContext } from "./features/conversation/item-bodies";
 import { createLiveText, visibleLiveText, type LiveTextStore } from "./features/conversation/live-text";
 import { ThreadDirectoryProvider, type ThreadDirectory } from "./features/conversation/thread-chips";
 import { ThreadDiscovery } from "./thread-discovery";
 import { entriesFromHeads, WAITING_ENTRY } from "./features/conversation/transcript-entries";
 import { applyTranscriptEvent, hasEarlier, hasNewer, loadEarlier, loadNewer, loadLatest, type VisibleTranscriptRange, type TranscriptWindow } from "./features/conversation/transcript-store";
-import type { QueueAction } from "./features/queue/delivery";
+import type { QueueAction } from "./features/queue/QueueSheet";
 import { threadStatus } from "./features/status/thread-status";
-import { speech } from "./speech";
-import { SpeechBar } from "./SpeechBar";
 import { parseSettingsEntry, parseSettingsSnapshot } from "../../shared/settings-wire";
 import { observeClientTimezone } from "./features/settings/client-timezone";
 import { managerNavigation, monoTranscript, type ManagerPreference } from "./app/mono";
@@ -72,7 +68,6 @@ const PasteTextDialog = lazy(() => import("./PasteTextDialog").then(module => ({
 const InspectorSheet = preloadView(() => import("./features/inspector/InspectorSheet").then(module => ({ default: module.InspectorSheet })));
 const QueueSheet = preloadView(() => import("./features/queue/QueueSheet").then(module => ({ default: module.QueueSheet })));
 const AgentsScreen = preloadView(() => import("./features/agents/AgentsScreen").then(module => ({ default: module.AgentsScreen })));
-const AttentionScreen = preloadView(() => import("./attention").then(module => ({ default: module.AttentionScreen })));
 const FilesScreen = preloadView(() => import("./features/files/FilesScreen").then(module => ({ default: module.FilesScreen })));
 const MachineTab = preloadView(() => import("./features/machine/MachineTab").then(module => ({ default: module.MachineTab })));
 const SettingsScreen = preloadView(() => import("./features/settings/SettingsScreen").then(module => ({ default: module.SettingsScreen })));
@@ -81,7 +76,6 @@ function prepareTab(tab: Tab) {
   switch (tab) {
     case "chats": return;
     case "agents": void AgentsScreen.preload(); return;
-    case "attention": void AttentionScreen.preload(); return;
     case "files": void FilesScreen.preload(); return;
     case "machine": void MachineTab.preload(); return;
     case "settings": void SettingsScreen.preload(); return;
@@ -219,7 +213,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   }, [bootstrapped, autoCollapseKey, person]);
   useEffect(() => {
     if (!bootstrapped) return;
-    const views = [{ preload: prepareChatPicker }, AgentsScreen, FilesScreen, MachineTab, SettingsScreen, InspectorSheet, QueueSheet, AttentionScreen];
+    const views = [{ preload: prepareChatPicker }, AgentsScreen, FilesScreen, MachineTab, SettingsScreen, InspectorSheet, QueueSheet];
     let cancelled = false;
     let next = 0;
     let cancelScheduled: (() => void) | null = null;
@@ -356,18 +350,15 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const replyRef = useRef<ReplyTarget | null>(null);
   const replyDrafts = useMemo(() => new ReplyDrafts(localStorage, replyKey), []);
   const [pending, setPending] = useState(false);
-  const [notificationVersion, setNotificationVersion] = useState(0);
   const [controlError, setControlError] = useState<{ sessionId: string; message: string } | null>(null);
   const [pendingQuestions, setPendingQuestions] = useState<({ sessionId: string } & QuestionsResource) | null>(null);
   const [pasteSessionId, setPasteSessionId] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<{ sessionId: string; message: string } | null>(null);
   const [fileDrag, setFileDrag] = useState(false);
+  const [editorOpen, setEditorOpen] = useState(false);
   const [pasteName, setPasteName] = useState("pasted-text.txt");
   const [pasteContent, setPasteContent] = useState("");
 
-  const [voiceState, setVoiceState] = useState<VoiceState>("idle");
-  const [voiceDetail, setVoiceDetail] = useState("");
-  const voice = useRef<VoiceSession | null>(null);
   const stream = useRef<StreamClient | null>(null);
   const initialLoad = useRef<(() => void) | null>(null);
   const sectionLoad = useRef<{ name: string; finish: () => void } | null>(null);
@@ -398,28 +389,6 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
       window.removeEventListener("pageshow", onVisible);
     };
   }, []);
-  useEffect(() => () => { void voice.current?.stop(); }, []);
-  useEffect(() => {
-    voice.current?.stop();
-    voice.current = null;
-    setVoiceState("idle");
-    setVoiceDetail("");
-  }, [aiId]);
-
-  const toggleVoice = async () => {
-    const session = selectedSession();
-    if (!session) return;
-    if (voice.current && ["connecting", "live"].includes(voiceState)) {
-      voice.current.stop(); voice.current = null; setVoiceState("idle"); return;
-    }
-    voice.current = window.PiRemoteVoice.create({
-      sessionId: session.id,
-      onState(next, detail) { setVoiceState(next); setVoiceDetail(detail || ""); },
-      onNotice(message) { setVoiceDetail(message); },
-    });
-    await voice.current.start();
-  };
-
   const cache = useMemo(() => {
     let scope: Promise<string> | undefined;
     return new ClientCache(() => scope ??= (async () => {
@@ -781,7 +750,6 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
           if (promptStorage.current?.state.kind !== "ready") void ensureOutbox();
           initialLoad.current?.();
           initialLoad.current = null;
-          speech.configure(event.bootstrap.speech);
           return;
         }
         case "state": {
@@ -836,7 +804,6 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
           return;
         case "notifications": {
           deliverIdleNotifications(event.feed);
-          if (event.feed.notifications.some(item => item.kind === "attention" || item.kind === "question")) setNotificationVersion(value => value + 1);
           stream.current?.remember({ notificationsAfter: event.feed.cursor });
           return;
         }
@@ -1135,7 +1102,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const stopThread = (session: Session) => requestStop(session, (id, descendants) => { void controlThread(id, "stop", descendants); });
 
   const sending = useRef(false);
-  const send = async (delivery: Delivery) => {
+  const send = async () => {
     const session = selectedSession();
     if (!session || pending || sending.current) return;
     const sessionAttachments = stateRef.current.attachments.filter((file) => file.sessionId === session.id);
@@ -1157,7 +1124,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
       else {
         const requestId = crypto.randomUUID();
         const entry: PromptOutboxEntry = { requestId, sessionId: session.id, createdAt: Date.now(),
-          bodyJson: JSON.stringify({ requestId, text: bodyText, delivery, ...(selectedReply ? { replyTo: selectedReply.identity.id } : {}) }),
+          bodyJson: JSON.stringify({ requestId, text: bodyText, ...(selectedReply ? { replyTo: selectedReply.identity.id } : {}) }),
           outcome: { kind: "pending", reason: "saved", message: "Saving and sending this message." } };
         localPromptDrafts.current.set(requestId, { sessionId: session.id, draft, replyVersion });
         updateLocalPrompt(entry);
@@ -1194,7 +1161,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const queueAction = async (message: QueuedMessage, action: QueueAction) => {
     const session = selectedSession();
     if (!session) return;
-    const route = action === "steer" ? API.queueSteer : action === "hardSteer" ? API.queueHardSteer : API.queueItem;
+    const route = API.queueItem;
     try {
       const result = await api(route.method, route.path({ sessionId: session.id, workId: message.id }), route.method === "POST" ? {} : undefined);
       if (action === "edit") {
@@ -1278,7 +1245,6 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const attentionCount = rows.filter(row => row.section === "attention").length;
   const badges = {
     chats: { count: attentionCount || rows.length, attention: attentionCount > 0 },
-    attention: { count: attentionCount, attention: attentionCount > 0 },
     machine: { count: state.ownerErrors.length + (state.offline ? 1 : 0), attention: true },
   };
   const [discoveryRevision, setDiscoveryRevision] = useState(0);
@@ -1312,7 +1278,6 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const discoverThreads = useCallback((ids: string[]) => getDiscovery().discover(ids), [getDiscovery]);
   const threadDirectory = useMemo<ThreadDirectory>(() => ({
     name: id => knownSessions.find(session => session.id === id)?.name || null,
-    agentName: id => { const session = knownSessions.find(item => item.id === id); return session ? agentName(session) : null; },
     busy: id => { const session = knownSessions.find(item => item.id === id); return session ? working(session) : false; },
     open: id => openThreadId(id),
     discover: discoverThreads,
@@ -1320,15 +1285,10 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   }), [knownSessions, openThreadId, discoverThreads, discoveryRevision]);
 
   const panel = "panel" in route ? route.panel : null;
-  const showDetail = route.tab === "agents" || route.tab === "attention" || route.tab === "machine" || route.tab === "settings" || route.tab === "files" || !!routeChat;
+  const showDetail = route.tab === "agents" || route.tab === "machine" || route.tab === "settings" || route.tab === "files" || !!routeChat;
 
   const picker = useMemo(() => <LazyChatPicker ref={chatPicker} starts={threadStarts} onSelect={selectChat} onCreated={id => openThreadId(id, "chats")} onSettled={kick} rooms={state.bootstrap?.rooms ? roomDirectory : undefined} onRoomCreated={id => openChat(`room:${id}`)} />,
     [threadStarts, selectChat, openThreadId, kick, state.bootstrap?.rooms, roomDirectory, openChat]);
-  const debugTools = <div className="inspector-debug">
-    <button type="button" className={voiceState === "idle" ? "" : voiceState} disabled={voiceState === "closing"} onClick={() => void toggleVoice()} title={voiceDetail || undefined}>{voiceActionLabel(voiceState)}</button>
-    {voiceState === "live" && <button type="button" onClick={() => void voice.current?.resumePlayback()}>Play Kenan audio</button>}
-    {voiceDetail && <p className="muted">{voiceDetail}</p>}
-  </div>;
 
   const conversation = roomId
     ? <RoomConversation key={roomId} id={roomId} people={roomDirectory.people} onBack={closeDetail} showBack={layout === "phone"} showIdentity={showConversationIdentity} onRefresh={roomDirectory.refresh} />
@@ -1336,7 +1296,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     ? <ItemBodiesContext.Provider value={bodies}><LiveConversation sentPromptId={sentPrompt?.sessionId === selected.id ? sentPrompt.requestId : undefined} onRetryPrompt={id => void submitSavedPrompt(id)} onDiscardPrompt={id => void discardSavedPrompt(id)} outbox={<PromptOutboxStatus entries={[]} busyRequestId={outboxBusy} storage={localPromptEntries.length ? undefined : { state: storageState, retry: () => void ensureOutbox() }} onRetry={id => void submitSavedPrompt(id)} onDiscard={id => void discardSavedPrompt(id)} />} live={liveText} session={selected} mono={mono && manager ? { hintSeen: manager.hintSeen, onClassic: () => void updateManager("classic"), onHintSeen: () => void updateManager("mono", true), saving: managerSaving } : undefined} ancestors={ancestors} entries={contextEntries} images={images} offline={state.offline} syncing={state.threadSyncing} pending={pending} home={home} prompt={prompt}
         onVisibleRange={onVisibleHeads} newerAvailable={hasNewer(state.transcript)} onShowNewer={() => void showNewer(false)} onJumpLatest={() => void showNewer(true)} earlierAvailable={hasEarlier(state.transcript)} loadingEarlier={state.loadingEarlier} earlierError={state.earlierError} onShowEarlier={showEarlier} onThinkingOpen={thinkingOpen} autoCollapse={autoCollapse}
         attachments={visibleAttachments.map(file => ({ id: file.localId, name: file.name, uploading: file.uploading }))} slashCommands={state.slashCommands} drawing={drawing} uploadError={uploadError?.sessionId === aiId ? uploadError.message : ""} controlError={controlError?.sessionId === aiId ? controlError.message : ""} questionsResource={pendingQuestions?.sessionId === aiId ? pendingQuestions : undefined} onRetryQuestions={retryQuestions} showBack={layout === "phone" || manager?.view === "mono"} showIdentity={showConversationIdentity}
-        onBack={closeDetail} onOpenInspector={() => openPanel("inspector")} onOpenAncestor={session => openThreadId(session.id)} onOpenQueue={() => openPanel("queue")} questions={pendingQuestions?.sessionId === selected.id ? prioritizeQuestion(pendingQuestions.questions, route.tab === "chats" ? route.questionId : undefined) : []} onQuestionAccepted={id => { setPendingQuestions(current => current?.sessionId === selected.id ? { ...current, questions: current.questions.filter(question => question.id !== id) } : current); }} onEdit={editFrom} reply={reply} onReply={target => { replyRef.current = target; setReply(target); replyDrafts.save(selected.id, target); }} onCancelReply={() => { replyRef.current = null; setReply(null); replyDrafts.save(selected.id, null); }} onPrompt={text => { promptDraft.current = text; setPrompt(text); if (aiId) saveDraft(aiId, text); }} onSend={delivery => void send(delivery)} onStop={() => stopThread(selected)} onResume={() => void controlThread(selected.id, "resume")} onReconnect={reconnect}
+        onBack={closeDetail} onOpenInspector={() => openPanel("inspector")} onOpenAncestor={session => openThreadId(session.id)} onOpenQueue={() => openPanel("queue")} questions={pendingQuestions?.sessionId === selected.id ? prioritizeQuestion(pendingQuestions.questions, route.tab === "chats" ? route.questionId : undefined) : []} onQuestionAccepted={id => { setPendingQuestions(current => current?.sessionId === selected.id ? { ...current, questions: current.questions.filter(question => question.id !== id) } : current); }} onEdit={editFrom} reply={reply} onReply={target => { replyRef.current = target; setReply(target); replyDrafts.save(selected.id, target); }} onCancelReply={() => { replyRef.current = null; setReply(null); replyDrafts.save(selected.id, null); }} onPrompt={text => { promptDraft.current = text; setPrompt(text); if (aiId) saveDraft(aiId, text); }} onSend={() => void send()} onStop={() => stopThread(selected)} onResume={() => void controlThread(selected.id, "resume")} onReconnect={reconnect}
         onRemoveAttachment={id => { const file = visibleAttachments.find(item => item.localId === id); if (file) void removeAttachment(file); }} onUpload={files => void uploadFiles(files)} onPaste={() => setPasteSessionId(aiId)} onDraw={() => drawing.open()} onDismissControlError={() => setControlError(null)} /></ItemBodiesContext.Provider>
     : routeChat && state.syncing
         ? <section className="empty-state"><strong>Opening…</strong></section>
@@ -1351,7 +1311,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
           {state.offline && <button type="button" className="accent" onClick={reconnect}>Reconnect</button>}
         </section>;
         return <Inbox rows={rows} selectedId={routeChat} showPlace={showPlace} compactSelected={layout !== "phone"} error={chatError || roomDirectory.error} onDismissError={dismissChatError} picker={picker} onOpen={openInboxChat} onPrefetch={prefetchChat} onClose={closeInboxChat} onSearchArchived={searchArchived} onSelectedVisibleChange={onSelectedVisibleChange} />;
-      case "agents": case "attention": case "machine": case "settings": case "files": return null;
+      case "agents": case "machine": case "settings": case "files": return null;
     }
     return assertNever(route, "App list route");
   })();
@@ -1363,13 +1323,12 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
       seen.add(session.cwd);
       return true;
     }).slice(0, 6).map(session => ({ label: session.name || session.cwd, path: session.cwd }))];
-    return <Suspense fallback={<Loading label="Loading files…" />}><FilesScreen layout={mode} selectedPath={route.tab === "files" ? route.path : null} shortcuts={shortcuts} onAttach={selectedAiId(stateRef.current) ? path => void attachPath(path) : undefined} onSelect={path => navigate({ tab: "files", path }, { replace: mode === "split" || !path })} /></Suspense>;
+    return <Suspense fallback={<Loading label="Loading files…" />}><FilesScreen onEditorState={setEditorOpen} layout={mode} selectedPath={route.tab === "files" ? route.path : null} shortcuts={shortcuts} onAttach={selectedAiId(stateRef.current) ? path => void attachPath(path) : undefined} onSelect={path => navigate({ tab: "files", path }, { replace: mode === "split" || !path })} /></Suspense>;
   }
 
   const detail = (() => {
     switch (route.tab) {
       case "agents": return <Suspense fallback={<Loading label="Loading agents…" />}><AgentsScreen liveSessions={state.sessions} fleet={state.fleet} onOpen={id => openThreadId(id, "chats")} /></Suspense>;
-      case "attention": return <Suspense fallback={<Loading label="Loading attention…" />}><AttentionScreen version={notificationVersion} /></Suspense>;
       case "machine": return <Suspense fallback={<Loading label="Loading the machine…" />}><MachineTab dashboard={dashboard} modelCounts={modelCounts} ownerErrors={state.ownerErrors} offline={state.offline} syncing={state.syncing} onDismissOwnerError={id => void dismissServerError(id)} onReconnect={reconnect} /></Suspense>;
       case "settings": return <Suspense fallback={<Loading label="Loading settings…" />}><SettingsScreen sessions={knownSessions} initialThreadId={selectedAiId(stateRef.current)} update={update} autoCollapse={autoCollapse} onAutoCollapseChange={updateAutoCollapse} onOpenThread={openThreadId} /></Suspense>;
       case "files": return filesScreen(layout === "phone" ? "stack" : "split");
@@ -1378,20 +1337,19 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     return assertNever(route, "App detail route");
   })();
 
-  const showTabs = route.tab === "agents" || route.tab === "attention" || route.tab === "machine" || route.tab === "settings" || (route.tab === "files" && !route.path) || !showDetail;
+  const showTabs = route.tab === "agents" || route.tab === "machine" || route.tab === "settings" || (route.tab === "files" && !route.path) || !showDetail;
   return <ClientCacheContext.Provider value={cache}><NotificationProvider sessionId={roomId ? `room:${roomId}` : routeThreadId(route)}>
-    <Shell layout={layout} mono={mono} nav={<TabNav layout={layout} active={route.tab} badges={badges} onSelect={selectTab} onPrepare={prepareTab} onMono={managerOwnerId && !managerSaving ? () => void updateManager("mono") : undefined} update={update} />} list={mono ? null : list} detail={detail} showDetail={showDetail} showTabs={showTabs}
+    <Shell layout={layout} mono={mono} bare={route.tab === "files" && editorOpen} nav={<TabNav layout={layout} active={route.tab} badges={badges} onSelect={selectTab} onPrepare={prepareTab} onMono={managerOwnerId && !managerSaving ? () => void updateManager("mono") : undefined} update={update} />} list={mono ? null : list} detail={detail} showDetail={showDetail} showTabs={showTabs}
       overlays={<>
         {managerError && <aside className="manager-error"><DismissibleError message={managerError} dismissLabel="Dismiss manager connection error" /><button type="button" onClick={() => setManagerRefresh(value => value + 1)}>Retry manager connection</button></aside>}
         <AppUpdateStatus update={update} />
-        <SpeechBar />
         <ToastViewport scope={`${person}:${state.bootstrap?.environmentId || ""}`} position={layout === "phone" && !showTabs ? "top-center" : "bottom-center"} />
         {fileDrag && aiId && <div className="file-drop-overlay" role="status">Drop files to attach to {selected?.name || "this conversation"}</div>}
         {/* The sheets and the paste dialog mount when they open, so their
             chunks arrive with the gesture that asks for them. */}
-        {!mono && selected && (panel === "inspector" || panel === "settings") && <Suspense fallback={null}><InspectorSheet key={selected.id} session={selected} sessions={knownSessions} open pending={pending} onClose={closePanel} onOpenThread={session => openThreadFromPanel(session.id)} onOpenThreadId={openThreadFromPanel} onArchive={() => { closePanel(); requestCloseChat({ id: `ai:${selected.id}`, kind: "ai", title: selected.name, name: agentName(selected), icon: "", label: "", session: selected }); }} onRestore={() => void selectThread(selected.id)} onBackground={() => {
+        {!mono && selected && (panel === "inspector" || panel === "settings") && <Suspense fallback={null}><InspectorSheet key={selected.id} session={selected} sessions={knownSessions} open pending={pending} onClose={closePanel} onOpenThread={session => openThreadFromPanel(session.id)} onOpenThreadId={openThreadFromPanel} onArchive={() => { closePanel(); requestCloseChat({ id: `ai:${selected.id}`, kind: "ai", title: selected.name, name: null, icon: "", label: "", session: selected }); }} onRestore={() => void selectThread(selected.id)} onBackground={() => {
           void api(API.sessionPlacement.method, API.sessionPlacement.path({ sessionId: selected.id }), { foreground: false }).then(() => { panelPushed.current = false; navigate({ tab: "chats", chat: null, panel: null }); kick(); }, cause => setControlError({ sessionId: selected.id, message: String(cause) }));
-        }} debug={debugTools} /></Suspense>}
+        }} /></Suspense>}
         {selected && panel === "queue" && <Suspense fallback={null}><QueueSheet open messages={selected.queuedMessages} held={selected.held} pending={pending} onClose={closePanel} onAction={(message, action) => void queueAction(message, action)} /></Suspense>}
         {pasteSessionId && <Suspense fallback={null}><PasteTextDialog name={pasteName} content={pasteContent} onNameChange={setPasteName} onContentChange={setPasteContent} onAttach={file => uploadFile(file, pasteSessionId)} onClose={() => setPasteSessionId(null)} /></Suspense>}
       </>} />

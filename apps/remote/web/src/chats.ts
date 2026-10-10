@@ -2,18 +2,17 @@ import type { ChatId } from "../../server/protocol";
 import type { Room } from "../../shared/rooms";
 export type { ChatId } from "../../server/protocol";
 import type { Session, ThreadStart } from "./types";
-import { agentName } from "./agent-name";
 import { conversationThreads } from "./thread-state";
 import { attentionRank, threadStatus, roomThreadStatus, type ThreadStatus } from "./features/status/thread-status";
 import { assertNever } from "../../shared/explicit-state";
 
 export type Chat =
-  | { id: `ai:${string}`; kind: "ai"; title: string; /** The agent's first name, or null for threads the service never named. */ name: string | null; icon: string; label: string; session: Session }
+  | { id: `ai:${string}`; kind: "ai"; title: string; /** No secondary identity: task titles identify threads. */ name: string | null; icon: string; label: string; session: Session }
   | { id: `room:${string}`; kind: "room"; title: string; icon: string; label: string; room: Room };
 
 export function aiChat(session: Session, starts: ThreadStart[]): Chat {
   const start = starts.find(candidate => candidate.id === session.environment);
-  return { id: `ai:${session.id}`, kind: "ai", title: session.name || "Agent", name: agentName(session), icon: start?.icon || (["openai", "anthropic"].includes(session.provider) ? session.provider : "cloud"), label: start?.label || session.provider, session };
+  return { id: `ai:${session.id}`, kind: "ai", title: session.name || "Agent", name: null, icon: start?.icon || (["openai", "anthropic"].includes(session.provider) ? session.provider : "cloud"), label: start?.label || session.provider, session };
 }
 
 export function roomChat(room: Room): Chat {
@@ -34,7 +33,7 @@ export function inboxRow(chat: Chat): InboxRow {
     const reported = threadStatus(chat.session);
     const notified = chat.session.idleUnread && Boolean(chat.session.attentionSummary);
     const status = notified ? { ...reported, attention: true } : reported;
-    const rank = notified ? Math.min(2, attentionRank(status)) : attentionRank(status);
+    const rank = chat.session.manager && status.attention ? -1 : notified ? Math.min(2, attentionRank(status)) : attentionRank(status);
     const section: InboxSection = status.attention ? "attention" : status.busy ? "working" : "quiet";
     return { chat, section, status, rank, updatedAt: Date.parse(chat.session.updatedAt) || 0,
       recencyAt: Date.parse(chat.session.lastUserMessageAt ?? chat.session.createdAt) };
