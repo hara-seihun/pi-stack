@@ -22,6 +22,24 @@ test("new worker/request UUID and changed wording cannot replay an accepted or u
     expect(f.actions.list()).toMatchObject({ ok: true, value: [{ id: first.value.id }] });
   } finally { f.close(); }
 });
+test("20k-character purpose remains complete in payload with bounded stable identity and single contact custody", () => {
+  const f = fixture();
+  try {
+    const thick = { ...brief, purpose: "Appointment detail. ".repeat(1000).padEnd(20_000, "x") };
+    const intent = phoneIntent(thick);
+    expect(intent.intentKey.length).toBeLessThan(1000);
+    expect(intent.intentKey).not.toContain("appointment detail");
+    expect(phoneIntent({ ...thick, purpose: `  ${thick.purpose.toUpperCase().replace(/ /g, "\t")}  ` }).intentKey).toBe(intent.intentKey);
+    const first = reservePhoneAction(f.actions, thick);
+    expect(first.ok).toBe(true); if (!first.ok) return;
+    const retained = f.actions.inspect(first.value.id);
+    expect(retained).toMatchObject({ ok: true, value: { payload: { purpose: thick.purpose } } });
+    expect(f.actions.submit(phoneIntent({ ...thick, requestId: "thick-retry" }))).toMatchObject({ ok: true, value: { disposition: "existing", action: { id: first.value.id } } });
+    expect(reservePhoneAction(f.actions, { ...thick, requestId: "thick-replay" })).toMatchObject({ ok: false, error: "action-already-owned" });
+    expect(f.actions.submit(phoneIntent({ ...thick, opening: "Changed payload", requestId: "thick-conflict" }))).toMatchObject({ ok: false, error: "payload-conflict" });
+    expect(f.actions.submit(phoneIntent({ ...thick, purpose: `${thick.purpose} Different purpose`, requestId: "thick-rephrase" }))).toMatchObject({ ok: false, error: "fenced" });
+  } finally { f.close(); }
+});
 test("prepared canonical action can claim once; restart retains no replay after uncertainty", () => {
   const f = fixture();
   try {

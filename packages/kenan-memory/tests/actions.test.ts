@@ -27,6 +27,19 @@ test("malformed authority success cannot grant a dispatch or partially populated
   expect(validActionResponse("inspect", { ok: true, value: { ...action, state: "unknown" } })).toBe(false);
 });
 
+test("oversized identities name the field and limit without limiting payload content", () => {
+  const s = store();
+  const fields = ["intentKey", "transport", "requestId", "threadId", "authenticatedThreadId"] as const;
+  for (const field of fields) {
+    const result = s.submit(input({ [field]: "x".repeat(1001) }));
+    expect(result).toMatchObject({ ok: false, error: "invalid-input", message: `${field} exceeds the 1000-character identity limit; keep the full content in payload` });
+  }
+  expect(s.submit(input({ recipients: ["x".repeat(1001)] }))).toMatchObject({ ok: false, error: "invalid-input", message: "recipients[0] exceeds the 1000-character identity limit; keep the full content in payload" });
+  expect(s.submit(input({ intentKey: "ﬃ".repeat(334) }))).toMatchObject({ ok: false, error: "invalid-input", message: "Normalized intentKey exceeds the 1000-character identity limit; keep the full content in payload" });
+  expect(value(s.list())).toHaveLength(0);
+  expect(s.submit(input({ intentKey: "x".repeat(1000), payload: { purpose: "x".repeat(20_000) } })).ok).toBe(true);
+});
+
 test("same business intent across workers/new UUIDs returns one result and rejects payload conflict", () => {
   const path = root(), a = store(path), b = store(path);
   const first = value(a.submit(input())).action;

@@ -1,10 +1,13 @@
+import { createHash } from "node:crypto";
 import { type ActionAuthority, type ActionTicket, type ActionEvidence } from "kenan-memory/actions";
 import type { CallBrief } from "./policy";
 
 /** Request IDs identify delivery attempts; the purpose and recipient identify contact intent. */
 export function phoneIntent(brief: CallBrief) {
   const { requestId: _request, followUpOf: _followup, ...payload } = brief;
-  return { intentKey: `telephone:${brief.purpose.normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " ")}`, recipients: [brief.to], transport: "telephone", payload, requestId: brief.requestId, threadId: "phone-service" };
+  const purpose = brief.purpose.normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " ");
+  const digest = createHash("sha256").update(purpose).digest("hex");
+  return { intentKey: `telephone:sha256:${digest}`, recipients: [brief.to], transport: "telephone", payload, requestId: brief.requestId, threadId: "phone-service" };
 }
 export function reservePhoneAction(actions: ActionAuthority, brief: CallBrief, approval?: { actionId: string; callId: string; reconciledAt: number; reason: string }) {
   const prior = approval ? actions.inspect(approval.actionId) : undefined;

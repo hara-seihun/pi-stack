@@ -101,11 +101,19 @@ export class ActionStore {
   inspect(id: string): ActionResult<ActionRecord> { return this.run(() => { const row = this.row(id); return row ? good(record(row)) : fail("not-found", "Action not found in this owner"); }); }
   list(): ActionResult<ActionRecord[]> { return this.run(() => good((this.db.query("SELECT * FROM external_actions WHERE owner=? ORDER BY created_at DESC LIMIT 100").all(this.owner) as Row[]).map(record))); }
   submit(input: ActionInput): ActionResult<ActionSubmission> {
+    if (input) {
+      const identities: [string, unknown][] = [["intentKey", input.intentKey], ["transport", input.transport], ["requestId", input.requestId], ["threadId", input.threadId], ["authenticatedThreadId", input.authenticatedThreadId]];
+      if (Array.isArray(input.recipients)) input.recipients.forEach((recipient, index) => identities.push([`recipients[${index}]`, recipient]));
+      for (const [field, identity] of identities) {
+        if (typeof identity === "string" && identity.length > 1000) return fail("invalid-input", `${field} exceeds the 1000-character identity limit; keep the full content in payload`);
+      }
+    }
     if (!input || !text(input.intentKey) || !text(input.transport) || !text(input.requestId) || !text(input.threadId) || input.authenticatedThreadId !== undefined && input.authenticatedThreadId !== null && !text(input.authenticatedThreadId) || !Array.isArray(input.recipients) || input.recipients.length < 1 || input.recipients.length > 100 || !input.recipients.every(text)) return fail("invalid-input", "Explicit intent, transport, recipients, request and thread identities required");
     let payload: string;
     try { payload = stable(input.payload); } catch { return fail("invalid-input", "Payload must be finite JSON"); }
     if (payload.length > 2_000_000) return fail("invalid-input", "Action payload too large");
     const key = input.intentKey.normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " ");
+    if (key.length > 1000) return fail("invalid-input", "Normalized intentKey exceeds the 1000-character identity limit; keep the full content in payload");
     const digest = createHash("sha256").update(stable({ transport: input.transport, payload: JSON.parse(payload) })).digest("hex");
     return this.run<ActionSubmission>(() => {
       const recipients = [...new Set(input.recipients.flatMap(recipient => this.aliases(recipient)))].sort(), encoded = JSON.stringify(recipients);
