@@ -16,7 +16,31 @@ This is cgroup isolation, not a promise about which process the OOM killer might
 
 `packages/orchestrator/tests/runner-browser-budget.test.ts` uses the actual native tool and two real Chromium trees on a static loopback fixture. It verifies browser UID/mount continuity, every Chrome PID in the tooling subtree, only Node in the controller cgroup, then forces a tooling-cgroup OOM and checks that twenty accepted native sessions still respond and settle once under the same PID. This is a browser-descendant/custody regression, not twenty production model contexts or producer completion. It skips explicitly without a user manager, native CLI or installed Chromium; `PI_TEST_CHROME_EXECUTABLE` may select a test binary without loading a personal browser profile.
 
-The native tool, commands, session state, cleanup and browser configuration remain upstream-owned. This entrypoint does not wrap tool calls or alter their schemas. The matched executable owns sensitive-form output protection; the release installer adds its policy to the native tool description and installed README/command/contract docs. Browser profiles and credentials stay in their existing locations outside the release.
+The native commands, session state, cleanup and browser configuration remain upstream-owned. The entrypoint adds the canonical external-action fence described below. The matched executable owns sensitive-form output protection; the release installer adds its policy to the native tool description and installed README/command/contract docs. Browser profiles and credentials stay in their existing locations outside the release.
+
+## Canonical external-action fence
+
+[`effects.mjs`](effects.mjs) wraps the registered native tool's executor **in place**, including its recursive script calls. Declared effects cross the existing [canonical action authority](../../../kenan-memory/src/actions.ts) through the asynchronous Node HTTP client; they never open another SQLite journal or block the supervisor event loop. Submit reserves the stable purpose/recipient contact, claim acquires its generation, and dispatch commits the one-shot fence before entering native execution. A changed tool-call UUID, replacement thread or reworded purpose cannot clear an unresolved recipient contact. The authority authenticates and routes the owner across hosts; the browser owns no independent manager selection.
+
+Use one `args` or `semanticAction` operation, with this additional top-level field:
+
+```json
+{
+  "semanticAction": { "action": "click", "locator": "text", "value": "Send" },
+  "externalAction": {
+    "intentKey": "booking:stable-business-purpose",
+    "recipients": ["mailto:actual-recipient@example.invalid"]
+  }
+}
+```
+
+Declared batch/job/script effects are refused before reservation: split the effect into its own call. Payload identity hashes the complete native input (without the declaration); plaintext form/credential contents are not copied into the action journal. A payload mismatch is an error, not a new dispatch. Existing canonical status is returned without repeating the native call. Dispatch/finish response loss, abort, timeout and even successful native gestures remain non-replayable: the browser marks the effect **uncertain**, because a gesture receipt cannot prove provider acceptance or rejection. Inspect the actual provider and reconcile the existing action through `action_inspect`/`action_reconcile` before another contact.
+
+Without a declaration, the wrapper refuses narrowly classifiable effect-prone commands: `chat`, `confirm`, WebMCP `invoke`/`result`/`cancel`, and `find ... click`/semantic click targets whose exact label matches the fence's send, submit, order, buy, pay, purchase, delete-account, transfer, publish, post or unsubscribe label set. Classification uses the matched native argv parser, batch precedence and semantic/job compilers; flagged commands, stdin/raw batches and recursive script commands share that path. Ordinary navigation, snapshots/getters and unclassified interactions remain available without consulting the authority.
+
+**Boundary:** this enforces entry to a declared/classified native invocation, not arbitrary website semantics or every HTTP request. CSS/ref clicks without a classified label, alternate/localized labels, fill/check/select/keypress autosubmission, eval/DOM code, script-generated opaque operations, GET/navigation side effects, page timers/workers/popups, profile startup/extensions, Electron and raw CLI/CDP/provider calls outside this registered tool are not universally classified or fenced. A single page gesture can itself initiate multiple requests. There is no claim of universal browser effect prevention or provider exactly-once delivery; declare known effects rather than treating an unclassified interaction as read-only proof.
+
+[`effects.test.mjs`](effects.test.mjs) uses the real canonical ActionStore behind a disposable loopback HTTP authority, with synthetic provider counters. It checks concurrent workers, new IDs, rephrased intent, payload conflict, lost dispatch/finish receipts, post-effect exceptions, ordinary reads without authority calls, classified batch/job inputs and aggregate refusal. Its actual native Chromium probe clicks a synthetic Send button once, refuses undeclared Send, new-ID/rephrased repeats and a classified script inner call, then closes the browser. It never uses live recipients, accounts, purchases or signed-in profiles.
 
 ## Sensitive form outputs
 

@@ -3,12 +3,18 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MessagingService } from "./messaging/service";
+import { ActionStore } from "kenan-memory/actions";
 import type { MessagingPlugin } from "./messaging/plugin";
 import { parseSignalArgs, runSignalCli, type SignalFetch } from "./signal-cli";
 
 test("send/react require a chosen stable request ID; parser never invents one", () => {
   for (const args of [["send", "chat", "hello"], ["react", "message", "👍"], ["send", "chat", "hello", "--request-id", "bad/id"], ["read", "chat", "--request-id", "id"], ["read", "chat", "--limit", "101"], ["call", "chat"], ["list", "--user", "bob"]]) expect(parseSignalArgs(args).ok).toBe(false);
   expect(parseSignalArgs(["send", "chat", "-", "--request-id", "durable-id", "--reply-to", "messaging/original", "--attachment", "file"], () => "hello")).toEqual({ ok: true, value: { path: "/v1/agent-signal/conversations/chat/messages", method: "POST", requestId: "durable-id", json: { requestId: "durable-id", text: "hello", attachmentIds: ["file"], replyTo: "messaging/original" } } });
+});
+
+test("purpose keys survive the CLI boundary independently of request IDs", () => {
+  expect(parseSignalArgs(["send", "chat", "hello", "--request-id", "new-id", "--intent-key", "appointment"])).toMatchObject({ ok: true, value: { json: { intentKey: "appointment" } } });
+  expect(parseSignalArgs(["react", "message", "👍", "--request-id", "new-id", "--intent-key", "acknowledge"])).toMatchObject({ ok: true, value: { json: { intentKey: "acknowledge" } } });
 });
 
 test("ambiguous transport preserves ID, makes one request, and does not retry", async () => {
@@ -28,7 +34,8 @@ test("CLI send uses the actual durable transport contract and reuses uncertain r
     async send(_conversation, message) { sends++; expect(message.text).toBe("hello"); expect(message.attachments).toEqual([]); return { ok: false, error: { code: "unknown", message: "May have delivered" } }; },
     async close() {},
   };
-  const service = new MessagingService(root, [{ id: "signal", plugin: "signal", label: "Signal" }], async () => plugin, undefined, undefined, { begin: () => null, finish: () => ({ ok: true }) });
+  const actions = new ActionStore(join(root, ".kenan-actions"), "fixture-alice");
+  const service = new MessagingService(root, [{ id: "signal", plugin: "signal", label: "Signal" }], async () => plugin, undefined, undefined, { begin: () => null, finish: () => ({ ok: true }) }, actions);
   try {
     await service.start(); const conversation = await service.open("signal", "+15551234567");
     const request: SignalFetch = async (url, init) => await service.handle(new Request(url, init)) ?? new Response(null, { status: 404 });
@@ -39,7 +46,7 @@ test("CLI send uses the actual durable transport contract and reuses uncertain r
     expect(sends).toBe(1);
     expect(output[1].message.status).toBe("unknown");
     expect(service.history(conversation.id).messages).toHaveLength(1);
-  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+  } finally { await service.close(); actions.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test("tool origin cannot select a network account, and 202 is not reported as delivery", async () => {

@@ -9,8 +9,8 @@ export const SIGNAL_HELP = `usage: pi-signal OPERATION [ARGS]
   list                                  Configured own-person Signal profiles and directory
   open PROFILE TARGET                   Resolve a contact/number/username/group
   read CONVERSATION [--before N] [--limit 1..100]
-  send CONVERSATION TEXT|- --request-id ID [--reply-to MESSAGE_ID] [--attachment ID ...]
-  react MESSAGE_ID EMOJI --request-id ID [--remove]
+  send CONVERSATION TEXT|- --request-id ID [--intent-key PURPOSE] [--reply-to MESSAGE_ID] [--attachment ID ...]
+  react MESSAGE_ID EMOJI --request-id ID [--intent-key PURPOSE] [--remove]
   upload CONVERSATION PATH               Stage an attachment in the encrypted own-person store
   download ATTACHMENT_ID --output PATH   Save owned attachment bytes
   remove-attachment ATTACHMENT_ID        Remove an unsent staged attachment
@@ -25,7 +25,12 @@ Send/react require a stable request ID chosen BEFORE dispatch. Reuse exactly the
 payload to inspect/recover a lost acknowledgement; changed payloads conflict. A 202 send means
 accepted into the durable outbox, not delivery. Read history for its sent/failed/unknown outcome.
 Unknown outcomes may have executed. Inspect first; never issue a new ID as an automatic retry.
-Outgoing actions are journaled by the encrypted transport owner, not duplicated by this CLI.
+Outgoing actions are reserved and fenced by the encrypted owner's shared action authority.
+Purpose keys identify the task independently of request IDs; absent keys use the effect digest.
+Successful dispatch retains the recipient slot until purpose resolution. Unknown effects never
+release it. Use pi-action inspect/reconcile for accountable evidence, not a new UUID or transport.
+A new authorized followup uses the HTTP followup object (actionId, revision, evidence) atomically.
+This agent-only route has no human-authored source override.
 `;
 
 type Invocation = { path: string; method: string; json?: Record<string, unknown>; file?: string; output?: string; requestId?: string };
@@ -37,7 +42,7 @@ export function parseSignalArgs(argv: string[], stdin = () => readFileSync(0, "u
     const value = argv[i]!;
     if (value === "--") { args.push(...argv.slice(i + 1)); break; }
     if (value === "--remove") { if (remove) return { ok: false, error: "Duplicate --remove" }; remove = true; continue; }
-    if (["--request-id", "--reply-to", "--attachment", "--before", "--limit", "--output"].includes(value)) {
+    if (["--request-id", "--intent-key", "--reply-to", "--attachment", "--before", "--limit", "--output"].includes(value)) {
       const next = argv[++i];
       if (!next || next.startsWith("--")) return { ok: false, error: `${value} requires a value` };
       if (value === "--attachment") attachments.push(next);
@@ -47,10 +52,12 @@ export function parseSignalArgs(argv: string[], stdin = () => readFileSync(0, "u
     else args.push(value);
   }
   const [operation, id, text] = args;
-  const allowedOptions: Record<string, string[]> = { list: [], open: [], read: ["--before", "--limit"], send: ["--request-id", "--reply-to"], react: ["--request-id"], upload: [], download: ["--output"], "remove-attachment": [], link: [], "cancel-link": [] };
+  const allowedOptions: Record<string, string[]> = { list: [], open: [], read: ["--before", "--limit"], send: ["--request-id", "--intent-key", "--reply-to"], react: ["--request-id", "--intent-key"], upload: [], download: ["--output"], "remove-attachment": [], link: [], "cancel-link": [] };
   if (!operation || !Object.hasOwn(allowedOptions, operation)) return { ok: false, error: "Unknown Signal operation" };
   if (Object.keys(options).some(option => !allowedOptions[operation]!.includes(option)) || (attachments.length > 0 && operation !== "send") || (remove && operation !== "react")) return { ok: false, error: "Option does not apply to this operation" };
   const requestId = options["--request-id"];
+  const intentKey = options["--intent-key"];
+  if (intentKey !== undefined && (!intentKey.trim() || intentKey.length > 1000)) return { ok: false, error: "--intent-key requires a nonempty purpose up to 1000 characters" };
   if (["send", "react"].includes(operation) && (!requestId || !/^[a-zA-Z0-9_-]{1,100}$/.test(requestId))) return { ok: false, error: "send/react require --request-id (1..100 letters, digits, - or _)" };
   const done = (value: Invocation): Parsed => ({ ok: true, value: { ...value, ...(requestId ? { requestId } : {}) } });
   if (operation === "list" && args.length === 1) return done({ path: API.messaging.path(), method: "GET" });
@@ -63,13 +70,13 @@ export function parseSignalArgs(argv: string[], stdin = () => readFileSync(0, "u
   }
   if (operation === "send" && args.length === 3 && text !== undefined) {
     if (!requestId) return { ok: false, error: "send requires --request-id" };
-    const input: MessagingSend = { requestId, text: text === "-" ? stdin() : text, attachmentIds: attachments, ...(options["--reply-to"] ? { replyTo: options["--reply-to"] } : {}) };
+    const input: MessagingSend = { requestId, text: text === "-" ? stdin() : text, attachmentIds: attachments, ...(intentKey !== undefined ? { intentKey } : {}), ...(options["--reply-to"] ? { replyTo: options["--reply-to"] } : {}) };
     return done({ path: API.messagingSend.path({ conversationId: id }), method: "POST", json: { ...input } });
   }
   if (operation === "react" && args.length === 3 && text) {
     const target = parseMessageReference(id);
     if (target && target.transport !== "messaging") return { ok: false, error: "Signal reactions require a Signal message ID" };
-    return done({ path: API.messagingReact.path({ messageId: target?.messageId ?? id }), method: "POST", json: { requestId, emoji: text, remove } });
+    return done({ path: API.messagingReact.path({ messageId: target?.messageId ?? id }), method: "POST", json: { requestId, emoji: text, remove, ...(intentKey !== undefined ? { intentKey } : {}) } });
   }
   if (operation === "upload" && args.length === 3 && text) return done({ path: API.messagingUpload.path({ conversationId: id }, { name: basename(text) }), method: "POST", file: text });
   if (operation === "download" && args.length === 2 && options["--output"]) return done({ path: API.messagingAttachment.path({ attachmentId: id }), method: "GET", output: options["--output"] });

@@ -9,6 +9,8 @@ import { sameToken, type CallFragment } from "./dispatcher";
 import { providerSelection, loadProvider } from "./provider";
 import { silentReply, silentBegin } from "./retell-transport";
 import { contactGuard } from "./contact-guard";
+import { ActionClient, type ActionTicket } from "kenan-memory/actions";
+import { phoneIntent, reservePhoneAction, settlePhoneAction } from "./action-admission";
 
 const config = JSON.parse(readFileSync(process.env.PI_STACK_PHONE_CONFIG ?? "/etc/pi-stack/phone.json", "utf8"));
 const state = process.env.PI_STACK_PHONE_STATE;
@@ -26,9 +28,10 @@ const owner = config.owner;
 const localPort = config.localPort, publicPort = config.publicPort;
 const voiceBase = config.voiceUrl, dispatcherBase = config.dispatcherUrl;
 if (typeof owner !== "string" || !owner || !Number.isInteger(localPort) || !Number.isInteger(publicPort) || typeof voiceBase !== "string" || typeof dispatcherBase !== "string") throw new Error("Explicit owner, listener ports, Voice and managed dispatcher URLs are required");
+const actions = new ActionClient(dispatcherBase, adminToken);
 const db = new Database(join(state, "calls.sqlite3"));
 db.exec(`PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS calls(id TEXT PRIMARY KEY,provider_id TEXT,voice_id TEXT,status TEXT NOT NULL,brief TEXT NOT NULL,started_at INTEGER NOT NULL,ended_at INTEGER,error TEXT,cleanup INTEGER NOT NULL DEFAULT 0); CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,call_id TEXT NOT NULL,at INTEGER NOT NULL,type TEXT NOT NULL,payload TEXT NOT NULL);`);
-for (const [name, type] of [["provider_kind", "TEXT"], ["dial_state", "TEXT NOT NULL DEFAULT 'none'"], ["provider_snapshot", "TEXT"], ["accepted_at", "INTEGER"], ["request_id", "TEXT"], ["dispatcher_closed", "INTEGER NOT NULL DEFAULT 0"]]) {
+for (const [name, type] of [["provider_kind", "TEXT"], ["dial_state", "TEXT NOT NULL DEFAULT 'none'"], ["provider_snapshot", "TEXT"], ["accepted_at", "INTEGER"], ["action_id", "TEXT"], ["action_ticket", "TEXT"], ["request_id", "TEXT"], ["dispatcher_closed", "INTEGER NOT NULL DEFAULT 0"]]) {
   if (!(db.query("PRAGMA table_info(calls)").all() as { name: string }[]).some(c => c.name === name)) db.exec(`ALTER TABLE calls ADD COLUMN ${name} ${type}`);
 }
 db.exec("CREATE UNIQUE INDEX IF NOT EXISTS call_approved_request ON calls(request_id) WHERE request_id IS NOT NULL");
@@ -41,7 +44,7 @@ let browser: Browser | undefined, launching: Promise<Browser> | undefined, stopp
 type Row = { id: string; provider_id: string | null; voice_id: string | null; provider_kind: string | null; dial_state: string; dispatcher_closed: number };
 type SocketData = { side: "browser"; call?: Call } | { side: "silent"; providerId: string };
 type Socket = import("bun").ServerWebSocket<SocketData>;
-type Call = { id: string; brief: CallBrief; token: string; page?: Page; media?: Socket; voiceId?: string; providerId?: string;
+type Call = { id: string; brief: CallBrief; token: string; actionTicket?: ActionTicket; page?: Page; media?: Socket; voiceId?: string; providerId?: string;
   dialState: "none" | "dispatching" | "accepted" | "uncertain" | "rejected"; timer: ReturnType<typeof setTimeout>;
   ready: Promise<void>; resolveReady: () => void; rejectReady: (e: Error) => void; audio: Promise<void>; resolveAudio: () => void;
   outputBytes: number; usageSeconds: number; offerPending: boolean; transportGranted: boolean; transportNotified: boolean; participantId?: string;
@@ -75,12 +78,30 @@ function send(call: Call, event: unknown) {
   try { if (call.media.send(JSON.stringify({ type: "live-event", event })) === 0) void finish(call, "failed", "Live control backpressure"); }
   catch { void finish(call, "failed", "Live control disconnected"); }
 }
+function settleAction(call: Call) {
+  if (!call.actionTicket) {
+    if (call.dialState !== "accepted" || !call.providerId) return;
+    const row = db.query("SELECT action_id FROM calls WHERE id=?").get(call.id) as { action_id: string | null } | null;
+    if (!row?.action_id) return;
+    const existing = actions.inspect(row.action_id);
+    if (existing.ok && existing.value.state === "uncertain") {
+      const confirmed = actions.reconcile(row.action_id, existing.value.revision, "effect-confirmed", { kind: "provider-receipt", reference: call.providerId, detail: "Late provider acceptance confirms original dial; no new contact" }, "phone-service");
+      if (!confirmed.ok) log(call.id, "action-settlement-pending", { error: confirmed.error });
+    }
+    return;
+  }
+  const result = settlePhoneAction(actions, call.actionTicket, call.id, call.dialState, call.providerId ?? null);
+  if (!result.ok) { log(call.id, "action-settlement-pending", { error: result.error }); return; }
+  db.query("UPDATE calls SET action_ticket=NULL WHERE id=?").run(call.id);
+  call.actionTicket = undefined;
+}
 async function finish(call: Call, status: string, reason: string) {
   if (call.finishing) return call.finishing;
   call.finishing = Promise.resolve().then(async () => {
     clearTimeout(call.timer); call.abort.abort();
     db.query("UPDATE calls SET status=?,ended_at=?,error=? WHERE id=?").run(status, Date.now(), reason, call.id);
     log(call.id, "ended", { status, reason });
+    settleAction(call);
     call.rejectReady(new Error(reason));
     try { call.media?.send(JSON.stringify({ type: "close" })); call.media?.close(); } catch { log(call.id, "media-close-failed", {}); }
     await call.page?.close().catch(() => log(call.id, "page-close-failed", {}));
@@ -89,13 +110,13 @@ async function finish(call: Call, status: string, reason: string) {
   });
   return call.finishing;
 }
-function create(brief: CallBrief): Call {
+function create(brief: CallBrief, actionTicket?: ActionTicket): Call {
   let resolveReady!: () => void, rejectReady!: (e: Error) => void, resolveAudio!: () => void;
   const ready = new Promise<void>((resolve, reject) => { resolveReady = resolve; rejectReady = reject; }); void ready.catch(() => {});
-  const call: Call = { id: randomUUID(), brief, token: randomBytes(32).toString("base64url"), dialState: "none", ready, resolveReady, rejectReady,
+  const call: Call = { id: randomUUID(), brief, actionTicket, token: randomBytes(32).toString("base64url"), dialState: "none", ready, resolveReady, rejectReady,
     audio: new Promise<void>(resolve => { resolveAudio = resolve; }), resolveAudio, outputBytes: 0, usageSeconds: 0, offerPending: false, transportGranted: false, transportNotified: false,
     abort: new AbortController(), transcript: [], seen: new Set(), delegations: new Set(), queue: Promise.resolve(), timer: setTimeout(() => void finish(call, "completed", "Maximum duration reached"), brief.maxSeconds * 1000) };
-  db.query("INSERT INTO calls(id,status,brief,started_at,provider_kind,dial_state,request_id) VALUES(?,?,?,?,?,?,?)").run(call.id, "preparing", JSON.stringify(brief), Date.now(), "retell-takeover", "none", brief.requestId);
+  db.query("INSERT INTO calls(id,status,brief,started_at,provider_kind,dial_state,request_id,action_id,action_ticket) VALUES(?,?,?,?,?,?,?,?,?)").run(call.id, "preparing", JSON.stringify(brief), Date.now(), "retell-takeover", "none", brief.requestId, actionTicket?.id ?? null, actionTicket ? JSON.stringify(actionTicket) : null);
   active.set(call.id, call); return call;
 }
 async function start(call: Call, shouldDial: boolean) {
@@ -117,10 +138,18 @@ async function start(call: Call, shouldDial: boolean) {
     const controller = setTimeout(() => call.rejectReady(new Error("Voice startup timed out")), 30_000);
     try { await call.ready; } finally { clearTimeout(controller); }
     if (!shouldDial || call.finishing) return;
+    if (!call.actionTicket) { await finish(call, "failed", "Durable action dispatch ticket missing; no dial"); return; }
     const ticket = actionJournal.begin({ action: "telephone.dial", actedFor: owner, recipients: [call.brief.to], summary: call.brief.purpose, externalId: call.id });
-    call.dialState = "dispatching";
-    db.query("UPDATE calls SET status='dialing',dial_state='dispatching',cleanup=0 WHERE id=?").run(call.id);
-    const result = await provider.client.dial(call.brief, call.id, call.abort.signal);
+    const result = await provider.client.dial(call.brief, call.id, call.abort.signal, () => {
+      if (call.finishing || !call.actionTicket) return { ok: false, error: "Phone action no longer owns dispatch" };
+      const contact = contactGuard(db, call.brief, config, Date.now(), undefined, call.id);
+      if (!contact.ok) return contact;
+      const permitted = actions.dispatch(call.actionTicket);
+      if (!permitted.ok) return { ok: false, error: permitted.message };
+      call.dialState = "dispatching";
+      db.query("UPDATE calls SET status='dialing',dial_state='dispatching',cleanup=0 WHERE id=?").run(call.id);
+      return { ok: true };
+    });
     const warning = journalWarning(actionJournal.finish(ticket, result.ok ? "confirmed" : "unconfirmed", result.ok ? "PSTN dial accepted; not proof of delivery" : result.error));
     if (warning) log(call.id, "journal-outcome-pending", { error: warning });
     if (!result.ok) {
@@ -130,6 +159,7 @@ async function start(call: Call, shouldDial: boolean) {
     }
     call.providerId = result.value.uuid; call.dialState = "accepted";
     db.query("UPDATE calls SET provider_id=?,dial_state='accepted',accepted_at=?,cleanup=0 WHERE id=?").run(call.providerId, Date.now(), call.id);
+    settleAction(call);
     if (call.finishing) { await cleanup(snapshot(call)); return; }
     // The monitor grant is available only after PSTN answers; the provider poll signals it.
   } catch { await finish(call, "failed", "Voice/PSTN startup failed"); }
@@ -194,6 +224,28 @@ const websocket = {
   },
   close(ws: Socket) { if (ws.data.side === "browser" && ws.data.call && !ws.data.call.finishing) void finish(ws.data.call, "completed", "Voice media disconnected"); },
 };
+// Import retained recent/uncertain effects before accepting new requests; this never dials.
+for (const row of db.query("SELECT id,brief,dial_state,provider_id FROM calls WHERE action_id IS NULL AND (dial_state IN ('dispatching','uncertain') OR (dial_state='accepted' AND COALESCE(accepted_at,started_at)>?)) ORDER BY started_at DESC").all(Date.now() - 2 * 60 * 60 * 1000) as { id: string; brief: string; dial_state: Call["dialState"]; provider_id: string | null }[]) {
+  const parsed = callBrief(JSON.parse(row.brief));
+  if (!parsed.ok) throw new Error("Retained phone brief is invalid; action import requires repair");
+  const submitted = actions.submit({ ...phoneIntent(parsed.value), requestId: `telephone-retained:${row.id}` });
+  if (!submitted.ok) throw new Error("Retained telephone action import unavailable");
+  if (submitted.value.disposition === "recipient-held") { log(row.id, "retained-action-recipient-fenced", { actionId: submitted.value.action.id }); continue; }
+  db.query("UPDATE calls SET action_id=? WHERE id=?").run(submitted.value.action.id, row.id);
+  if (submitted.value.action.state === "accepted") {
+    const claimed = actions.claim(submitted.value.action.id, "phone-service-retained-import");
+    if (!claimed.ok) throw new Error("Retained telephone effect could not acquire reconciliation custody");
+    db.query("UPDATE calls SET action_ticket=? WHERE id=?").run(JSON.stringify(claimed.value), row.id);
+    const settled = settlePhoneAction(actions, claimed.value, row.id, row.dial_state, row.provider_id);
+    if (!settled.ok) throw new Error("Retained telephone effect could not be recorded");
+    db.query("UPDATE calls SET action_ticket=NULL WHERE id=?").run(row.id);
+  }
+}
+for (const row of db.query("SELECT id,action_ticket,dial_state,provider_id FROM calls WHERE action_ticket IS NOT NULL").all() as { id: string; action_ticket: string; dial_state: Call["dialState"]; provider_id: string | null }[]) {
+  const result = settlePhoneAction(actions, JSON.parse(row.action_ticket), row.id, row.dial_state, row.provider_id);
+  if (result.ok) db.query("UPDATE calls SET action_ticket=NULL WHERE id=?").run(row.id);
+  else log(row.id, "action-recovery-pending", { error: result.error });
+}
 db.query("UPDATE calls SET status='interrupted',ended_at=?,error='Service restarted; never redial' WHERE ended_at IS NULL").run(Date.now());
 for (const row of db.query("SELECT * FROM calls WHERE cleanup=0 AND ended_at IS NOT NULL").all() as Row[]) await cleanup(row);
 const local = Bun.serve<SocketData>({ hostname: "127.0.0.1", port: localPort, maxRequestBodySize: 256 * 1024, websocket, async fetch(req, server) {
@@ -249,7 +301,15 @@ const local = Bun.serve<SocketData>({ hostname: "127.0.0.1", port: localPort, ma
     if (stopping || active.size >= 2) return error("Phone service busy", 409);
     const permitted = contactGuard(db, brief.value, config, Date.now());
     if (!permitted.ok) return json(permitted, permitted.code === "contact-policy-unavailable" ? 503 : 409);
-    const call = create(brief.value); void start(call, true); return json({ id: call.id, status: "preparing" }, 202);
+    let approval: { actionId: string; callId: string; reconciledAt: number; reason: string } | undefined;
+    if (permitted.approval) {
+      const prior = db.query("SELECT action_id FROM calls WHERE id=?").get(permitted.approval.callId) as { action_id: string | null } | null;
+      if (!prior?.action_id) return error("Prior call lacks durable action reconciliation; no follow-up permitted", 409);
+      approval = { ...permitted.approval, actionId: prior.action_id };
+    }
+    const reserved = reservePhoneAction(actions, brief.value, approval);
+    if (!reserved.ok) return json({ code: reserved.error, error: reserved.message, ...("action" in reserved && reserved.action ? { action: { id: reserved.action.id, state: reserved.action.state, result: reserved.action.result } } : {}) }, reserved.error === "unavailable" ? 503 : 409);
+    const call = create(brief.value, reserved.value); void start(call, true); return json({ id: call.id, status: "preparing" }, 202);
   }
   if (url.pathname === "/preflight" && req.method === "POST") {
     if (stopping || active.size) return error("Phone service busy", 409);

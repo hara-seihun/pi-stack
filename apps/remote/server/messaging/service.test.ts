@@ -4,12 +4,15 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ActionJournal } from "kenan-memory/journal";
+import { ActionStore } from "kenan-memory/actions";
 import type { MemoryClient, MemoryInput } from "kenan-memory/contract";
 import { MessagingService, messagingConfig } from "./service";
 import type { MessagingPlugin, MessagingPluginContext } from "./plugin";
 
 const roots: string[] = [];
 const services: MessagingService[] = [];
+const actionStores: ActionStore[] = [];
+function actionStore(root: string) { const store = new ActionStore(join(root, ".kenan-actions"), "fixture-alice"); actionStores.push(store); return store; }
 function directory() { const root = mkdtempSync(join(tmpdir(), "pi-signal-service-")); roots.push(root); return root; }
 const noJournal = new ActionJournal({ enabled: () => false });
 async function setup(root = directory(), journal: Pick<ActionJournal, "begin" | "finish"> = noJournal) {
@@ -22,12 +25,13 @@ async function setup(root = directory(), journal: Pick<ActionJournal, "begin" | 
     async send() { sends++; return { ok: true, value: { externalId: `sent-${sends}`, timestamp: Date.now() } }; },
     async close() {},
   };
-  const service = new MessagingService(root, [{ id: "personal", plugin: "signal", label: "Personal" }], async () => plugin, undefined, undefined, journal);
+  const actions = actionStore(root);
+  const service = new MessagingService(root, [{ id: "personal", plugin: "signal", label: "Personal" }], async () => plugin, undefined, undefined, journal, actions);
   services.push(service);
   await service.start();
   const conversation = await service.open("personal", "+15551230000");
   const chat = { id: conversation.externalId, title: conversation.title, kind: "direct" as const };
-  return { service, context, plugin, conversation, chat, sends: () => sends };
+  return { service, context, plugin, conversation, chat, actions, sends: () => sends };
 }
 async function incoming(fixture: Awaited<ReturnType<typeof setup>>, id = "incoming", timestamp = 123, text = "hello") {
   await fixture.context.message({ id, conversation: fixture.chat, direction: "incoming", sender: "friend", text, timestamp, attachments: [] });
@@ -35,6 +39,7 @@ async function incoming(fixture: Awaited<ReturnType<typeof setup>>, id = "incomi
 }
 afterEach(async () => {
   await Promise.all(services.splice(0).map(service => service.close()));
+  for (const store of actionStores.splice(0)) store.close();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -62,6 +67,7 @@ describe("agent Signal custody", () => {
     const admitted = fixture.service.accept(fixture.conversation.id, input);
     expect(admitted.message.status).toBe("sending");
     expect(fixture.service.accept(fixture.conversation.id, input).settled).toBe(admitted.settled);
+    expect(fixture.service.accept(fixture.conversation.id, { ...input, requestId: "concurrent-new-uuid" }).settled).toBe(admitted.settled);
     expect(() => fixture.service.accept(fixture.conversation.id, { ...input, text: "changed" })).toThrow("different message");
     await fixture.context.message({ id: "sent", conversation: fixture.chat, direction: "outgoing", sender: "self", text: input.text, timestamp: 500, attachments: [] });
     release();
@@ -90,6 +96,111 @@ describe("agent Signal custody", () => {
     expect((await restarted.service.send(fixture.conversation.id, input)).status).toBe("unknown");
     expect(restarted.sends()).toBe(0);
   });
+  test("new UUIDs, rephrased purposes, aliases and cross-transport contacts cannot duplicate an unresolved effect", async () => {
+    const fixture = await setup();
+    fixture.context.sender({ id: "aci:friend", aliases: ["+15551230000"], name: "Friend" });
+    const alias = await fixture.service.open("personal", "aci:friend");
+    const input = { requestId: "first", intentKey: "arrange appointment", text: "Meet Tuesday", attachmentIds: [] };
+    const first = await fixture.service.send(alias.id, input);
+    expect(first.status).toBe("sent");
+    expect((await fixture.service.send(fixture.conversation.id, { ...input, requestId: "another-uuid" })).id).toBe(first.id);
+    expect(fixture.sends()).toBe(1);
+    expect(() => fixture.service.accept(alias.id, { ...input, requestId: "rephrased", intentKey: "book visit", text: "Can we meet?" })).toThrow("unresolved");
+    const cross = fixture.actions.submit({ intentKey: "call instead", recipients: ["tel:+15551230000"], transport: "telephone", payload: { purpose: "book visit" }, requestId: "call-new-id", threadId: "fixture" });
+    expect(cross).toMatchObject({ ok: true, value: { disposition: "recipient-held", action: { id: first.actionId } } });
+  });
+  test("learning a telephone alias after sending does not free the original Signal contact slot", async () => {
+    const fixture = await setup();
+    const unknown = await fixture.service.open("personal", "aci:late-friend");
+    await fixture.service.send(unknown.id, { requestId: "before-alias", text: "hello", attachmentIds: [] });
+    fixture.context.sender({ id: "aci:late-friend", aliases: ["+15551230000"], name: "Friend" });
+    expect(() => fixture.service.accept(fixture.conversation.id, { requestId: "after-alias", text: "hello again", attachmentIds: [] })).toThrow("unresolved");
+    expect(fixture.sends()).toBe(1);
+    expect(fixture.actions.submit({ intentKey: "telephone-after-alias", recipients: ["tel:+15551230000"], transport: "telephone", payload: { purpose: "hello" }, requestId: "late-alias-call", threadId: "fixture" })).toMatchObject({ ok: true, value: { disposition: "recipient-held" } });
+  });
+  test("aliases revealing two unresolved effects hold every linked identity", async () => {
+    const fixture = await setup();
+    const unknown = await fixture.service.open("personal", "aci:conflict");
+    const first = await fixture.service.send(unknown.id, { requestId: "aci-contact", text: "one", attachmentIds: [] });
+    const second = await fixture.service.send(fixture.conversation.id, { requestId: "number-contact", text: "two", attachmentIds: [] });
+    fixture.context.sender({ id: "aci:conflict", aliases: ["+15551230000"], name: "Friend" });
+    for (const id of [first.actionId!, second.actionId!]) {
+      const action = fixture.actions.inspect(id);
+      if (!action.ok) throw new Error(action.message);
+      expect(fixture.actions.reconcile(id, action.value.revision, "resolve-purpose", { kind: "operator-observation", reference: "fixture", detail: "Known effect accounted for" }, "fixture").ok).toBe(true);
+    }
+    expect(() => fixture.service.accept(fixture.conversation.id, { requestId: "after-conflict", text: "new", attachmentIds: [] })).toThrow("held");
+    expect(fixture.sends()).toBe(2);
+  });
+  test("attachment UUIDs are not effect identity; immutable content is", async () => {
+    const fixture = await setup();
+    const upload = () => fixture.service.upload(new Request("http://local", { method: "PUT", body: "same bytes" }), fixture.conversation.id, "note.txt");
+    const one = await upload();
+    const first = await fixture.service.send(fixture.conversation.id, { requestId: "bytes-one", text: "", attachmentIds: [one.id] });
+    const two = await upload();
+    expect((await fixture.service.send(fixture.conversation.id, { requestId: "bytes-two", text: "", attachmentIds: [two.id] })).id).toBe(first.id);
+    expect(fixture.sends()).toBe(1);
+  });
+  test("crash after provider effect before authority receipt remains fenced after restart", async () => {
+    const root = directory();
+    const fixture = await setup(root);
+    const finish = fixture.actions.finish.bind(fixture.actions);
+    fixture.actions.finish = () => ({ ok: false, error: "unavailable", message: "synthetic receipt crash" });
+    const input = { requestId: "crashed", text: "effect happened", attachmentIds: [] };
+    const sent = await fixture.service.send(fixture.conversation.id, input);
+    expect(sent.error).toContain("Do not resend");
+    expect(fixture.actions.inspect(sent.actionId!)).toMatchObject({ ok: true, value: { state: "inflight" } });
+    fixture.actions.finish = finish;
+    await fixture.service.close();
+    const db = new Database(join(root, "messages.sqlite3"));
+    db.query("UPDATE messages SET status='sending',external_id=NULL WHERE id=?").run(input.requestId);
+    db.close();
+    const restarted = await setup(root);
+    expect((await restarted.service.send(fixture.conversation.id, { ...input, requestId: "new-after-crash" })).status).toBe("unknown");
+    expect(() => restarted.service.accept(fixture.conversation.id, { ...input, requestId: "new-purpose", text: "rephrase" })).toThrow("unresolved");
+    expect(restarted.sends()).toBe(0);
+  });
+  test("historical unknown native requests migrate without dispatch and fence new purposes", async () => {
+    const root = directory();
+    const fixture = await setup(root);
+    await fixture.service.close();
+    const db = new Database(join(root, "messages.sqlite3"));
+    for (const [id, status, timestamp] of [["old-unknown", "unknown", 10], ["newer-confirmed", "sent", 20]] as const) {
+      const input = { conversationId: fixture.conversation.id, text: id, attachmentIds: [] };
+      db.query("INSERT INTO messages(id,conversation_id,direction,sender,text,timestamp,status,request_body) VALUES(?,?,'outgoing','You',?,?,?,?)").run(id, fixture.conversation.id, id, timestamp, status, JSON.stringify(input));
+    }
+    db.close();
+    const restarted = await setup(root);
+    expect(restarted.actions.list()).toMatchObject({ ok: true, value: [{ state: "uncertain", resolved: false }] });
+    expect(() => restarted.service.accept(fixture.conversation.id, { requestId: "upgrade-new-id", text: "another purpose", attachmentIds: [] })).toThrow("unresolved");
+    expect(restarted.sends()).toBe(0);
+  });
+  test("known authority receipt repairs a lost message projection without sending", async () => {
+    const root = directory();
+    const fixture = await setup(root);
+    const input = { requestId: "known", text: "known result", attachmentIds: [] };
+    await fixture.service.send(fixture.conversation.id, input);
+    await fixture.service.close();
+    const db = new Database(join(root, "messages.sqlite3"));
+    db.query("UPDATE messages SET status='sending',external_id=NULL WHERE id=?").run(input.requestId);
+    db.close();
+    const restarted = await setup(root);
+    const receipt = await restarted.service.send(fixture.conversation.id, { ...input, requestId: "new-known-id" });
+    expect(receipt.status).toBe("sent");
+    expect(receipt.externalId).toBe("sent-1");
+    expect(restarted.sends()).toBe(0);
+  });
+  test("recipient holds and holds arriving during journal preparation prevent dispatch", async () => {
+    const fixture = await setup();
+    expect(fixture.actions.holdRecipient("tel:+15551230000", "stop contacting", "fixture").ok).toBe(true);
+    expect(() => fixture.service.accept(fixture.conversation.id, { requestId: "held", text: "hello", attachmentIds: [] })).toThrow("held");
+    expect(fixture.sends()).toBe(0);
+    const root = directory();
+    const actions = actionStore(root);
+    const mid = await setup(root, { begin: () => { actions.holdRecipient("+15551230000", "hold during preparation", "fixture"); return null; }, finish: () => ({ ok: true }) });
+    expect((await mid.service.send(mid.conversation.id, { requestId: "midhold", text: "hello", attachmentIds: [] })).status).toBe("unknown");
+    expect(mid.sends()).toBe(0);
+  });
   test("reaction receipts share a concurrent task, preserve exact outcomes and reject request reuse", async () => {
     const root = directory();
     const fixture = await setup(root);
@@ -104,30 +215,49 @@ describe("agent Signal custody", () => {
     };
     const pending = fixture.service.react(target.id, "❤️", false, "reaction-receipt");
     expect(fixture.service.react(target.id, "❤️", false, "reaction-receipt")).toBe(pending);
+    expect(fixture.service.react(target.id, "❤️", false, "concurrent-new-reaction-uuid")).toBe(pending);
     expect(await fixture.service.react(target.id, "👍", false, "reaction-receipt")).toMatchObject({ ok: false, error: { code: "request_conflict" } });
     await Promise.resolve();
     release();
     const receipt = await pending;
     expect(receipt).toMatchObject({ ok: true, value: [{ emoji: "❤️", own: true }] });
     expect(await fixture.service.react(target.id, "❤️", false, "reaction-receipt")).toEqual(receipt);
+    expect(await fixture.service.react(target.id, "❤️", false, "another-reaction-id")).toEqual(receipt);
     expect(reactions).toBe(1);
     await fixture.service.close();
     const restarted = await setup(root);
     restarted.plugin.react = async () => { throw new Error("must not dispatch"); };
     expect(await restarted.service.react(target.id, "❤️", false, "reaction-receipt")).toEqual(receipt);
   });
+  test("known reaction authority receipt repairs crash-before-native-receipt without reacting again", async () => {
+    const root = directory();
+    const fixture = await setup(root);
+    const target = await incoming(fixture);
+    fixture.plugin.react = async () => ({ ok: true, value: { timestamp: 130, sender: "self" } });
+    await fixture.service.react(target.id, "👍", false, "known-reaction");
+    await fixture.service.close();
+    const db = new Database(join(root, "messages.sqlite3"));
+    db.exec("DELETE FROM messaging_reactions; UPDATE messaging_reaction_requests SET receipt=NULL");
+    db.close();
+    const restarted = await setup(root);
+    let reactions = 0;
+    restarted.plugin.react = async () => { reactions++; return { ok: true, value: { timestamp: 140, sender: "self" } }; };
+    expect(await restarted.service.react(target.id, "👍", false, "known-reaction")).toMatchObject({ ok: true, value: [{ emoji: "👍" }] });
+    expect(await restarted.service.react(target.id, "👍", false, "new-reaction-uuid")).toMatchObject({ ok: true });
+    expect(reactions).toBe(0);
+  });
   test("unknown, failed, thrown and interrupted reactions remain durable non-replayable receipts", async () => {
     const root = directory();
     const fixture = await setup(root);
     const target = await incoming(fixture);
     let dispatches = 0;
-    for (const mode of ["unknown", "failed", "throw"] as const) {
+    for (const mode of ["failed", "throw"] as const) {
       fixture.plugin.react = async () => { dispatches++; if (mode === "throw") throw new Error("lost response"); return { ok: false, error: { code: mode, message: mode } }; };
-      const receipt = await fixture.service.react(target.id, "👍", false, mode);
+      const receipt = await fixture.service.react(target.id, "👍", false, mode, mode);
       expect(receipt).toMatchObject({ ok: false, error: { code: mode === "throw" ? "unknown" : mode } });
-      expect(await fixture.service.react(target.id, "👍", false, mode)).toEqual(receipt);
+      expect(await fixture.service.react(target.id, "👍", false, mode, mode)).toEqual(receipt);
     }
-    expect(dispatches).toBe(3);
+    expect(dispatches).toBe(2);
     await fixture.service.close();
     const db = new Database(join(root, "messages.sqlite3"));
     db.query("INSERT INTO messaging_reaction_requests(request_id,request_body) VALUES(?,?)").run("interrupted", JSON.stringify({ messageId: target.id, emoji: "👍", remove: false }));
@@ -135,9 +265,24 @@ describe("agent Signal custody", () => {
     const restarted = await setup(root);
     let retries = 0;
     restarted.plugin.react = async () => { retries++; return { ok: true, value: { timestamp: 140, sender: "self" } }; };
-    for (const requestId of ["unknown", "failed", "throw", "interrupted"]) expect(await restarted.service.react(target.id, "👍", false, requestId)).toMatchObject({ ok: false });
+    for (const requestId of ["failed", "throw", "interrupted"]) expect(await restarted.service.react(target.id, "👍", false, requestId, requestId === "interrupted" ? undefined : requestId)).toMatchObject({ ok: false });
     expect(await restarted.service.react(target.id, "👍", false, "interrupted")).toMatchObject({ ok: false, error: { code: "unknown" } });
     expect(retries).toBe(0);
+  });
+  test("HTTP followup is an accountable new effect, never an action-source bypass", async () => {
+    const fixture = await setup();
+    const input = { requestId: "original-contact", text: "original", attachmentIds: [] };
+    const first = await fixture.service.send(fixture.conversation.id, input);
+    const prior = fixture.actions.inspect(first.actionId!);
+    if (!prior.ok) throw new Error(prior.message);
+    const send = (body: unknown) => fixture.service.handle(new Request(`http://local/v1/agent-signal/conversations/${fixture.conversation.id}/messages`, { method: "POST", body: JSON.stringify(body) }));
+    expect((await send({ ...input, requestId: "pretend-human", text: "new", source: "human" }))?.status).toBe(400);
+    expect((await send({ ...input, requestId: "different-purpose", text: "new" }))?.status).toBe(409);
+    const next = { requestId: "authorized-followup", text: "followup", attachmentIds: [], followup: { actionId: first.actionId!, revision: prior.value.revision, evidence: "Owner authorized this distinct followup after reading the delivered original" } };
+    expect((await send(next))?.status).toBe(202);
+    expect((await fixture.service.send(fixture.conversation.id, next)).status).toBe("sent");
+    expect(fixture.actions.inspect(first.actionId!)).toMatchObject({ ok: true, value: { resolved: true } });
+    expect(fixture.sends()).toBe(2);
   });
   test("reaction HTTP validates request IDs and uses the agent-only route", async () => {
     const fixture = await setup();
@@ -148,6 +293,7 @@ describe("agent Signal custody", () => {
     expect((await react({ emoji: "👍" }))?.status).toBe(400);
     expect((await react({ requestId: "invalid", emoji: "plain text" }))?.status).toBe(400);
     expect((await react({ requestId: "invalid-remove", emoji: "👍", remove: "false" }))?.status).toBe(400);
+    expect((await react({ requestId: "fake-source", emoji: "👍", source: "human" }))?.status).toBe(400);
     const body = { requestId: "http-reaction", emoji: "👍" };
     const confirmed = await react(body);
     expect(confirmed?.status).toBe(200);
@@ -269,8 +415,12 @@ describe("agent Signal custody", () => {
     await fixture.service.send(fixture.conversation.id, input);
     await fixture.service.send(fixture.conversation.id, input);
     fixture.plugin.react = async () => ({ ok: true, value: { timestamp: Date.now(), sender: "self" } });
-    await fixture.service.react(input.requestId, "👍", false, "journal-react");
-    await fixture.service.react(input.requestId, "👍", false, "journal-react");
+    const sent = await fixture.service.send(fixture.conversation.id, input);
+    const prior = fixture.actions.inspect(sent.actionId!);
+    if (!prior.ok) throw new Error(prior.message);
+    const followup = { actionId: sent.actionId!, revision: prior.value.revision, evidence: "Authorized reaction as a new effect after confirmed message" };
+    await fixture.service.react(input.requestId, "👍", false, "journal-react", undefined, followup);
+    await fixture.service.react(input.requestId, "👍", false, "journal-react", undefined, followup);
     await journal.drain();
     expect(items.filter(item => item.source.action === "personal.message:confirmed")).toHaveLength(1);
     expect(items.filter(item => item.source.action === "personal.reaction:confirmed")).toHaveLength(1);
@@ -292,7 +442,7 @@ describe("agent Signal custody", () => {
     const drain = ActionJournal.prototype.drain;
     ActionJournal.prototype.drain = () => Promise.resolve({ ok: true });
     try {
-      const service = new MessagingService(root, [{ id: "personal", plugin: "signal", label: "Personal" }], async () => fixture.plugin);
+      const service = new MessagingService(root, [{ id: "personal", plugin: "signal", label: "Personal" }], async () => fixture.plugin, undefined, undefined, undefined, actionStore(root));
       services.push(service);
       await service.start();
       await service.send(fixture.conversation.id, { requestId: "always-journal", text: "local durable receipt", attachmentIds: [] });
@@ -315,7 +465,7 @@ describe("agent Signal custody", () => {
       async cancelLink() { return { status: "cancelled", uri: null, deviceName: "Agent", account: null, error: null, updatedAt: Date.now() }; },
       async openConversation(target) { return { ok: true, value: { id: target, title: target, kind: "direct" } }; },
       async send() { throw new Error("unused"); }, async close() {},
-    }), undefined, undefined, noJournal);
+    }), undefined, undefined, noJournal, actionStore(root));
     services.push(service);
     await service.start();
     await expect(service.startLink("signal", "\u0000")).rejects.toThrow("Device name");

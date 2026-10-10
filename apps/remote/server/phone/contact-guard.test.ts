@@ -41,7 +41,7 @@ test("operator approval binds exact next request, latest call, recipient and com
     const config = { followUpApprovalsFile: "/operator" };
     const approval = { followUpOf: priorId, to: brief.to, reconciledAt: 1500, reason: "Prior provider effects reconciled; operator approved follow-up" };
     const read = (_path: unknown, rootOnly: boolean) => { expect(rootOnly).toBe(true); return { [brief.requestId]: approval }; };
-    expect(contactGuard(f.db, { ...brief, followUpOf: priorId }, config, 2000, read)).toEqual({ ok: true });
+    expect(contactGuard(f.db, { ...brief, followUpOf: priorId }, config, 2000, read)).toEqual({ ok: true, approval: { callId: priorId, reconciledAt: 1500, reason: approval.reason } });
     expect(contactGuard(f.db, brief, config, 2000, read)).toMatchObject({ code: "recipient-cooldown" });
     expect(contactGuard(f.db, { ...brief, requestId: priorId, followUpOf: priorId }, config, 2000, read)).toMatchObject({ code: "recipient-cooldown" });
     approval.reconciledAt = 1000;

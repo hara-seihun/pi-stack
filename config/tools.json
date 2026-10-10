@@ -3,6 +3,8 @@
   "tools": [
     { "id": "agent-workspace", "commands": [{ "name": "agent-workspace", "entry": "main" }] },
     { "id": "mail-send", "commands": [{ "name": "pi-mail-send", "entry": "main" }] },
+    { "id": "external-actions", "commands": [{ "name": "pi-actions", "entry": "main" }] },
+    { "id": "raw-outbound-guard", "commands": [{ "name": "signal-cli", "entry": "main" }, { "name": "msmtp", "entry": "main" }, { "name": "sendmail", "entry": "main" }] },
     { "id": "codex-reset", "commands": [{ "name": "codex-reset", "entry": "main" }] },
     { "id": "claude-reset", "commands": [{ "name": "claude-reset", "entry": "main" }] },
     { "id": "fleet-errors", "commands": [{ "name": "fleet-errors", "entry": "main" }] },

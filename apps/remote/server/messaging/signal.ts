@@ -4,6 +4,7 @@ import { basename, join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import type { BackendAttachment, BackendConversation, BackendReply, MessagingPlugin, MessagingPluginContext, MessagingPluginFactory } from "./plugin";
 import type { MessagingBackendConfig, MessagingCapabilities, MessagingLink, MessagingResult } from "./protocol";
+import { resolveSignalProvider } from "./signal-provider";
 
 /** signal-cli's own provisioning deadline is shorter than this; it reports the expiry. */
 const LINK_SCAN_MS = 10 * 60_000;
@@ -100,7 +101,7 @@ class SignalRpc {
         this.child!.once("spawn", () => { this.log(`signal-cli started as pid ${this.child?.pid}`); resolve(success(undefined)); });
         this.child!.on("error", error => {
           const result = object(error).code === "ENOENT"
-            ? failure("unconfigured", `Signal is unavailable. Install signal-cli with its Java runtime, or set this profile's options.binary to its executable path (${options.binary}).`)
+            ? failure("unconfigured", `Signal is unavailable. Install signal-cli as the declared host provider with its Java runtime, or set this profile's options.rawExecutable to its absolute provider path (${options.binary}).`)
             : failure("connection", detail(error));
           this.abort(result.error.message, result.error.code);
           resolve(result);
@@ -238,7 +239,9 @@ class SignalPlugin implements MessagingPlugin {
     this.closeTask = undefined;
     const options = this.config.options ?? {};
     if (options.socket !== undefined || options.dataDir !== undefined) return failure("configuration", "Signal state must use this account's encrypted profile directory; external sockets and data directories are not supported");
-    const binary = text(options.binary) || "signal-cli";
+    const provider = await resolveSignalProvider(options);
+    if (!provider.ok) return provider;
+    const binary = provider.value;
     const dataDir = join(context.dataDir, "signal-cli");
     const timeout = positive(options.timeoutMs, 30_000);
     this.probeMs = positive(options.probeMs, PROBE_MS);
@@ -346,7 +349,9 @@ class SignalPlugin implements MessagingPlugin {
     if (this.link?.status === "waiting") return success(this.link);
     const name = deviceName.trim() || "PiStack";
     const options = this.config.options ?? {};
-    const binary = text(options.binary) || "signal-cli";
+    const provider = await resolveSignalProvider(options);
+    if (!provider.ok) return provider;
+    const binary = provider.value;
     const dataDir = join(context.dataDir, "signal-cli");
     try {
       for (const directory of [context.dataDir, dataDir, join(dataDir, "tmp"), join(dataDir, "config"), join(dataDir, "cache")]) {

@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { browserEffectEnvironment } from "./index.mjs";
 import { buildSync } from "esbuild";
 import { fork, spawnSync } from "node:child_process";
 import { once } from "node:events";
@@ -9,6 +11,21 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 const runtimeEntry = process.env.PI_TEST_RUNTIME_ENTRY ?? import.meta.resolve("@earendil-works/pi-coding-agent");
 const { createAgentSession, DefaultResourceLoader, RpcClient, SessionManager, SettingsManager } = await import(runtimeEntry);
+
+test("browser authority captures the owning session environment rather than the supervisor process", () => {
+  const key = Symbol.for("pi-stack.session-environment");
+  const previous = globalThis[key];
+  const sessions = new AsyncLocalStorage();
+  globalThis[key] = sessions;
+  try {
+    assert.equal(browserEffectEnvironment(), process.env);
+    const env = { PI_THREAD_ID: "synthetic-owner-thread", PI_REMOTE_CALLER_TOKEN: "synthetic-token" };
+    sessions.run(env, () => assert.equal(browserEffectEnvironment(), env));
+  } finally {
+    if (previous === undefined) delete globalThis[key];
+    else globalThis[key] = previous;
+  }
+});
 
 function release(root, version) {
   const path = join(root, version);
@@ -41,6 +58,7 @@ function release(root, version) {
   `);
   copyFileSync(new URL("package.json", import.meta.url), join(extension, "package.json"));
   copyFileSync(new URL("index.mjs", import.meta.url), join(extension, "index.mjs"));
+  copyFileSync(new URL("effects.mjs", import.meta.url), join(extension, "effects.mjs"));
   symlinkSync(dependencies, join(path, "node_modules"));
   return path;
 }

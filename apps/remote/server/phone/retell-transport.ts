@@ -90,12 +90,14 @@ export class RetellTakeover {
     if (!record(number.value) || number.value.phone_number !== s.callerId || number.value.phone_number_type !== "retell-twilio") return { ok: false, error: "Retell caller number ownership or managed carrier does not match" };
     return { ok: true, value: { agentId: s.agentId, agentVersion: s.agentVersion, callerId: s.callerId } };
   }
-  async dial(brief: CallBrief, id: string, lifecycle: AbortSignal): Promise<DialResult> {
+  async dial(brief: CallBrief, id: string, lifecycle: AbortSignal, enterDispatch: () => { ok: true } | { ok: false; error: string }): Promise<DialResult> {
     const parsed = callBrief(brief);
     if (!parsed.ok || !boundedId(id) || brief.maxSeconds < 60) return { ok: false, error: parsed.ok ? "A bounded local call ID and 60–1800 second call duration are required" : parsed.error, uncertain: false };
     const verified = await this.verify();
     if (!verified.ok) return { ...verified, uncertain: false };
     if (lifecycle.aborted) return { ok: false, error: "Call cancelled before dial dispatch", uncertain: false };
+    const permitted = enterDispatch();
+    if (!permitted.ok) return { ...permitted, uncertain: false };
     const s = this.settings;
     const result = await this.request("/v2/create-phone-call", "POST", { from_number: s.callerId, to_number: brief.to, override_agent_id: s.agentId, override_agent_version: s.agentVersion, idempotency_key: id, agent_override: { agent: { max_call_duration_ms: brief.maxSeconds * 1000 } }, metadata: { local_call_id: id, approved_request_id: brief.requestId } }, lifecycle);
     if (!result.ok) return result;
