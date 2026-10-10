@@ -391,7 +391,7 @@ test("preparation still refuses dirty source", () => {
   } finally { f.close(); }
 });
 
-test("runtime dependency cache tracks compaction recovery and both Kenan packages", () => {
+test("runtime dependency cache tracks its recipe, compaction recovery and both Kenan packages", () => {
   const f = fixture();
   try {
     const runtime = readFileSync(join(root, "deploy/runtime"), "utf8");
@@ -399,6 +399,7 @@ test("runtime dependency cache tracks compaction recovery and both Kenan package
     assert.ok(hashScript.startsWith("dependency_hash=$("));
     const inputs = [...hashScript.matchAll(/^\s+sha256sum (.+)\n/gm)].flatMap(match => match[1].split(" "));
     const changedInputs = [
+      "deploy/runtime",
       "packages/runtime/extensions/codex-compaction/retry.mjs",
       ...["kenan-memory", "kenan-root"].flatMap(name => [
         `packages/${name}/src/nested/fixture.ts`,
@@ -411,7 +412,7 @@ test("runtime dependency cache tracks compaction recovery and both Kenan package
     ];
     for (const name of new Set([...inputs, ...changedInputs])) {
       mkdirSync(dirname(join(f.repo, name)), { recursive: true });
-      writeFileSync(join(f.repo, name), "original\n");
+      if (!existsSync(join(f.repo, name))) writeFileSync(join(f.repo, name), "original\n");
     }
     function hash() {
       const result = spawnSync("bash", ["-euo", "pipefail", "-c", `${hashScript}\nprintf '%s' "$dependency_hash"`], {
@@ -424,9 +425,12 @@ test("runtime dependency cache tracks compaction recovery and both Kenan package
     const original = hash();
     assert.equal(hash(), original, "unchanged inputs reuse dependencies");
     for (const name of changedInputs) {
-      writeFileSync(join(f.repo, name), "changed\n");
+      const path = join(f.repo, name);
+      const contents = readFileSync(path);
+      writeFileSync(path, "changed\n");
       assert.notEqual(hash(), original, `${name} must invalidate dependencies`);
-      writeFileSync(join(f.repo, name), "original\n");
+      writeFileSync(path, contents);
+      assert.equal(hash(), original, `${name} restoration must restore the original key`);
     }
     for (const name of ["kenan-memory", "kenan-root"]) {
       const added = join(f.repo, "packages", name, "src/added.ts");
@@ -446,10 +450,11 @@ for (const signal of ["TERM", "INT", "HUP", "failure"]) {
       for (const name of ["package.json", "package-lock.json", "vendor/pi/package.tgz"]) writeFileSync(join(f.repo, name), "{}\n");
       const runtimeSource = readFileSync(join(root, "deploy/runtime"), "utf8");
       const hashInputs = [...runtimeSource.matchAll(/^\s+sha256sum (.+)\n/gm)].flatMap(match => match[1].split(" "));
-      for (const name of hashInputs.filter((name) => name !== "package.json" && name !== "package-lock.json")) {
+      for (const name of hashInputs) {
         mkdirSync(dirname(join(f.repo, name)), { recursive: true });
-        writeFileSync(join(f.repo, name), "\n");
+        if (!existsSync(join(f.repo, name))) writeFileSync(join(f.repo, name), "\n");
       }
+      assert.equal(readFileSync(join(f.repo, "deploy/runtime"), "utf8"), runtimeSource);
       for (const name of ["kenan-memory", "kenan-root"]) mkdirSync(join(f.repo, "packages", name, "src"), { recursive: true });
       f.executable(join(f.bin, "npm"), 'mkdir -p node_modules/.bin; printf "{}\\n" > node_modules/.package-lock.json');
       f.executable(join(f.bin, "node"), 'exit 0');
