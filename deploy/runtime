@@ -254,6 +254,8 @@ dependency_hash=$({
   find packages/kenan-memory/src packages/kenan-root/src -type f -print0 | sort -z | xargs -0 sha256sum
   sha256sum packages/kenan-memory/package.json packages/kenan-memory/tsconfig.json packages/kenan-memory/discretion.md packages/kenan-memory/person.md
   sha256sum packages/kenan-root/package.json packages/kenan-root/tsconfig.json packages/kenan-root/instructions.md
+  # The closure recipe below (bundling aliases, copied sources, links) is part of its identity.
+  sha256sum deploy/runtime
   printf '%s\n' workspace-production-closure-v3-kenan-root-atomic-settings-writes-v1-durable-sessions-v1
 } | sha256sum | cut -d' ' -f1)
 dependency_release="$dependencies_root/$dependency_hash"
@@ -274,7 +276,7 @@ if [[ ! -x $dependency_release/node_modules/.bin/pi ]]; then
   rsync -a packages/kenan-root/src packages/kenan-root/dist packages/kenan-root/instructions.md "$stage/packages/kenan-root/"
   (cd "$stage" && npm ci --omit=dev --ignore-scripts --prefer-offline --no-audit --no-fund)
   install -d "$stage/capacity"
-  node "$root/node_modules/esbuild/bin/esbuild" "$root/packages/orchestrator/src/threads/native-session.ts" --bundle --platform=node --format=esm --packages=external --alias:pi-orchestrator/history="$root/packages/orchestrator/src/threads/history.mjs" --outfile="$stage/capacity/native-session.js"
+  node "$root/node_modules/esbuild/bin/esbuild" "$root/packages/orchestrator/src/threads/native-session.ts" --bundle --platform=node --format=esm --packages=external --alias:pi-orchestrator/history="$root/packages/orchestrator/src/threads/history.mjs" --alias:pi-orchestrator/anthropic-narration="$root/packages/orchestrator/src/threads/anthropic-narration.mjs" --outfile="$stage/capacity/native-session.js"
   install -m 644 packages/runtime/managed-agent.mjs "$stage/managed-agent.mjs"
   install -m 644 packages/runtime/native-host.mjs packages/runtime/native-recovery.mjs packages/runtime/native-guardian.mjs "$stage/"
   install -m 755 packages/runtime/stack-pi.mjs "$stage/stack-pi.mjs"

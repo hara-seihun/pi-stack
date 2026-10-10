@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import { DatabaseSync, backup } from "node:sqlite";
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, realpathSync } from "node:fs";
 import { chmod, mkdir, open, realpath, rename, stat, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 const TABLES = ["session_contexts", "session_context_patches", "captured_context_unavailable", "captured_context_usage", "captured_transcript_generations"];
 const RECORD_LIMIT = 64 * 1024 * 1024;
@@ -366,7 +366,13 @@ function parseArguments(args) {
   }
   return options;
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+// Operators invoke this through the /srv/pi/pi-remote release pointer; compare
+// real paths so a symlinked invocation never exits 0 without running.
+const invokedDirectly = (() => {
+  try { return Boolean(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); }
+  catch { return false; }
+})();
+if (invokedDirectly) {
   let result;
   try { result = await migrateNativeHistory(parseArguments(process.argv.slice(2))); }
   catch (error) { result = { ok: false, error: errorData(error) }; }

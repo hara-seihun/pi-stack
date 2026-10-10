@@ -46,6 +46,27 @@ test("meeting census protects production and development rooms and rejects unkno
   assert.equal(census({ SUPERVISOR_STATE: "inactive" }).stdout.trim(), "alice:1", "a development listener still owns its rooms");
 });
 
+test("a supervisor retired by native-history maintenance has no rooms; any other silent active supervisor stays unknown", t => {
+  const f = fixture(t);
+  f.put("persons/alice.json", JSON.stringify({ user: "alice", port: 1234, environment: { PI_REMOTE_DATA: "/home/alice/work/.pi-remote" } }));
+  const command = (name, text) => writeFileSync(join(f.state, "bin", name), `#!/bin/sh\n${text}\n`, { mode: 0o700 });
+  command("systemctl", 'case "$*" in *MainPID*) printf "%s\\n" "${MAIN_PID:-4242}" ;; *pi-remote-dev-supervisor@*) printf "%s\\n" "${DEV_STATE:-inactive}" ;; *) printf "%s\\n" "${SUPERVISOR_STATE:-active}" ;; esac');
+  command("id", 'echo 1010');
+  command("nsenter", 'printf "%s\\n" "$*" >> "$NSENTER_LOG"; [ "${RECEIPT_FAIL:-0}" = 0 ] || exit 1; printf "%s\\n" "${PHASE:-migrated}"');
+  const census = extra => f.run("bash", [join(root, "deploy/meeting-census")], { PROBE_FAIL: "1", NSENTER_LOG: join(f.state, "nsenter"), ...extra });
+  for (const phase of ["migrated", "owners-closed", "migration-pending"]) {
+    const result = census({ PHASE: phase });
+    assert.equal(result.status, 0, `${phase}: ${result.stderr}`);
+    assert.equal(result.stdout.trim(), "");
+  }
+  assert.match(readFileSync(join(f.state, "nsenter"), "utf8"), /-t 4242 -m -S 1010 -G 1010 jq -er \.phase \| strings \/home\/alice\/work\/\.pi-remote\/native-history-maintenance\.json/);
+  for (const extra of [{ PHASE: "draining" }, { PHASE: "restored" }, { RECEIPT_FAIL: "1" }, { MAIN_PID: "0" }, { DEV_STATE: "active" }, { SUPERVISOR_STATE: "activating" }]) {
+    assert.notEqual(census(extra).status, 0, JSON.stringify(extra));
+  }
+  f.put("persons/alice.json", JSON.stringify({ user: "alice", port: 1234 }));
+  assert.notEqual(census({}).status, 0, "no data directory means no proof");
+});
+
 test("restart admission permits independent meeting runtimes but protects the first upgrade and unknown health", t => {
   const f = fixture(t);
   const census = extra => f.run("bash", [join(root, "deploy/meeting-census"), "--restart-blockers"], extra);

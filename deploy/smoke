@@ -15,6 +15,8 @@ base=${1:-http://127.0.0.1:${PI_REMOTE_ROUTER_PORT:-8788}}
   exit 64
 }
 failures=0
+# The host administrator is the fleet user (apps/remote/server/people-usage.ts).
+administrator=$(pi_stack_fleet_user)
 fail() { echo "smoke: $*" >&2; failures=$((failures + 1)); }
 get() { curl -sS -o "$2" -w '%{http_code}' --max-time 10 "${@:3}" "$base$1" 2>/dev/null || echo 000; }
 
@@ -94,6 +96,12 @@ for file in "$persons_dir"/*.json; do
     port=$(pi_stack_as_root jq -r '.port' "$file")
     [[ $port =~ ^[0-9]+$ ]] || { fail "$user: invalid supervisor port"; continue; }
     for path in /v1/health /v1/environment /v1/sessions /v1/actions /v1/workspaces /v1/voice /v1/meet; do
+      if [[ $path == /v1/actions && $user != "$administrator" ]]; then
+        # System actions are the host administrator's; everyone else is refused.
+        code=$(pi_stack_as_root curl -sS -o "$body" -w '%{http_code}' --max-time 10 "http://127.0.0.1:$port$path" 2>/dev/null || echo 000)
+        [[ $code == 403 ]] || fail "$user: private GET $path returned $code, expected 403 for a non-administrator"
+        continue
+      fi
       if ! pi_stack_as_root curl -fsS --max-time 10 "http://127.0.0.1:$port$path" > "$body"; then
         fail "$user: private GET $path failed"
         continue
@@ -124,7 +132,9 @@ for file in "$persons_dir"/*.json; do
   fi
   for path in /v1/health /v1/environment /v1/lock-status /v1/environments /v1/sessions /v1/actions /v1/workspaces; do
     code=$(get "$path" "$body" -H "@$headers" -H "x-pi-remote-user: $user" -H 'origin: http://localhost' -D "$body.headers")
-    [[ $code == 200 ]] || fail "$user: GET $path returned $code"
+    expected=200
+    [[ $path == /v1/actions && $user != "$administrator" ]] && expected=403
+    [[ $code == "$expected" ]] || fail "$user: GET $path returned $code, expected $expected"
     grep -qi '^access-control-allow-origin:' "$body.headers" 2>/dev/null || fail "$user: GET $path carries no CORS header"
     rm -f "$body.headers"
   done

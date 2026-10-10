@@ -446,7 +446,7 @@ for (const signal of ["TERM", "INT", "HUP", "failure"]) {
       for (const name of ["package.json", "package-lock.json", "vendor/pi/package.tgz"]) writeFileSync(join(f.repo, name), "{}\n");
       const runtimeSource = readFileSync(join(root, "deploy/runtime"), "utf8");
       const hashInputs = [...runtimeSource.matchAll(/^\s+sha256sum (.+)\n/gm)].flatMap(match => match[1].split(" "));
-      for (const name of hashInputs.filter((name) => name !== "package.json" && name !== "package-lock.json")) {
+      for (const name of hashInputs.filter((name) => name !== "package.json" && name !== "package-lock.json" && name !== "deploy/runtime")) {
         mkdirSync(dirname(join(f.repo, name)), { recursive: true });
         writeFileSync(join(f.repo, name), "\n");
       }

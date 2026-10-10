@@ -27,6 +27,29 @@ test('preparation proofs retain exact candidates and reject missing or changed a
   assert.equal(preparedComponents(root, commit, 'verify').error.code, 'prepared-artifact-changed');
   assert.equal(preparedComponents(root, 'unset', 'record').error.code, 'prepared-input-invalid');
 });
+test('record is immutable: identical preparation reuses custody and changed bytes require a new source generation', t => {
+  const root = fixture(t);
+  const recorded = preparedComponents(root, commit, 'record');
+  assert.equal(recorded.ok, true);
+  const receipt = recorded.value.receipt;
+  const original = readFileSync(receipt, 'utf8');
+  assert.equal(preparedComponents(root, commit, 'record').ok, true);
+  writeFileSync(join(root, 'remote', commit, 'artifact'), 'retained phone repair');
+  assert.equal(preparedComponents(root, commit, 'record').error.code, 'prepared-artifact-changed');
+  assert.equal(readFileSync(receipt, 'utf8'), original, 'record must not recertify modified bytes under the old source');
+  assert.equal(preparedComponents(root, commit, 'verify').error.code, 'prepared-artifact-changed');
+
+  const next = 'b'.repeat(40);
+  for (const component of ['runtime', 'orchestrator', 'remote', 'tools']) {
+    const directory = join(root, component, next);
+    mkdirSync(directory);
+    writeFileSync(join(directory, '.pi-stack-commit'), next + '\n');
+    copyFileSync(join(root, component, commit, 'artifact'), join(directory, 'artifact'));
+  }
+  assert.equal(preparedComponents(root, next, 'record').ok, true);
+  assert.equal(preparedComponents(root, next, 'verify').ok, true);
+  assert.equal(readFileSync(receipt, 'utf8'), original);
+});
 test('scratch publication and final selection are separate effects', t => {
   const root = fixture(t);
   const stage = join(root, 'stage'); mkdirSync(stage);
