@@ -1,5 +1,12 @@
 .conversation-screen { position: relative; min-width: 0; min-height: 0; height: 100%; display: flex; flex-direction: column; background: var(--bg); }
 .conversation-header { flex: 0 0 auto; display: flex; align-items: center; gap: var(--space-1); min-height: 56px; padding: max(0px, env(safe-area-inset-top)) var(--space-1) 0 var(--space-1); background: var(--bg); }
+.chat-header { gap: 8px; padding-inline: 12px; border-bottom: 1px solid var(--border); }
+.chat-header .conversation-avatar { width: 34px; height: 34px; margin: 0; }
+.chat-header .conversation-title { padding: 0; min-width: 5.5ch; }
+.chat-header .conversation-title-text { font-size: 17px; font-weight: 650; }
+.chat-header > .conversation-status { flex: 0 1 auto; max-width: 55%; margin-left: auto; text-align: right; }
+.chat-header .conversation-state { justify-content: flex-end; }
+.chat-header .header-chip { padding-inline: 8px; background: transparent; color: var(--muted); font-weight: 500; }
 .mono-conversation .conversation-header { touch-action: manipulation; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 .mono-hint { flex: 0 0 auto; display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-3); background: var(--surface-2); color: var(--muted); font-size: var(--text-sm); }
 .mono-hint span { flex: 1; }
@@ -42,6 +49,13 @@
 .delivery-menu button[data-mode="hardSteer"] strong { color: var(--danger); }
 .header-chip { flex: 0 0 auto; min-height: var(--touch); padding: 0 var(--space-3); border-radius: 999px; color: var(--text); background: var(--surface-3); font-size: var(--text-xs); font-weight: 700; white-space: nowrap; }
 .header-action { flex: 0 0 auto; min-height: var(--touch); padding: 0 var(--space-3); border-radius: var(--radius-2); color: var(--bg); background: var(--accent); font-size: var(--text-sm); font-weight: 700; }
+@media (max-width: 600px) {
+  .chat-header { gap: 4px; padding-inline: 8px; }
+  .chat-header .status-elapsed { display: none; }
+  .chat-header .status-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .manager-conversation .questions-composer { max-height: 35dvh; }
+  .manager-conversation .question-form .composer { max-height: calc(35dvh - 40px); }
+}
 @media (max-width: 899px) {
   .conversation-title-line { flex-direction: column; align-items: stretch; gap: 2px; }
   .conversation-title-line > .conversation-agent-meta { flex: 0 1 auto; }

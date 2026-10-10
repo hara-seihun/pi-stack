@@ -34,7 +34,7 @@ function render(patch: Partial<typeof props> = {}) {
 }
 
 function header(html: string) {
-  return html.match(/<header class="conversation-header"[^>]*>.*?<\/header>/s)?.[0] ?? "";
+  return html.match(/<header class="conversation-header[^"]*"[^>]*>.*?<\/header>/s)?.[0] ?? "";
 }
 
 test("mono keeps the shared composer and message view, suppresses live wake work, and acknowledges its first-use hint", () => {
@@ -208,15 +208,31 @@ test("manager chat sides follow sender identity without reordering canonical mes
   expect(render({ entries })).not.toContain("manager-conversation");
 });
 
-test("automatic manager context shows only owner-selected names and no manual deselection", () => {
+test("manager has one contact header with avatar and state, without automatic context UI", () => {
   const automatic = { ...session, manager: true, contextSelection: { mode: "all" as const, files: ["AGENTS.md", "notes.md"] } };
-  const html = render({ session: automatic });
-  expect(html).toContain("All context · 2 files");
-  expect(html).toContain("Selected automatically");
-  expect(html).toContain("AGENTS.md");
-  expect(html).not.toContain('type="checkbox"');
-  expect(render({ session: { ...automatic, contextSelection: undefined } })).not.toContain("All context");
-  expect(render({ session: { ...automatic, contextSelection: { mode: "manual", files: [] } } })).not.toContain("All context");
+  for (const contextSelection of [automatic.contextSelection, undefined, { mode: "manual" as const, files: [] }]) {
+    const html = render({ session: { ...automatic, contextSelection } });
+    expect(html).not.toContain("All context");
+    expect(html).not.toContain("AGENTS.md");
+    expect(html).not.toContain("Selected automatically");
+    expect(header(html)).toContain('class="conversation-avatar"');
+    expect(header(html)).toContain('class="status-label">Idle</span>');
+    expect(header(html).indexOf('</div>')).toBeLessThan(header(html).indexOf('class="conversation-status"'));
+  }
+});
+
+test("manager buffers the exact silent token and its streaming prefixes without hiding ordinary text", () => {
+  for (const liveText of ["<", "<s", "<silent/>"]) {
+    expect(render({ session: { ...session, manager: true }, liveText })).not.toContain('class="live-answer"');
+  }
+  expect(render({ session: { ...session, manager: true }, liveText: "The token is <silent/>." })).toContain('class="live-answer"');
+  expect(render({ liveText: "<silent/>" })).toContain('class="live-answer"');
+  const html = render({ session: { ...session, manager: true }, entries: [
+    { key: "machine", signature: "machine", kind: "user", inputOrigin: "machine", text: "A worker settled" },
+    { key: "quiet", signature: "quiet", kind: "assistant", text: "<silent/>" },
+  ] });
+  expect(html).not.toContain("chat-bubble");
+  expect(html).not.toContain("A worker settled");
 });
 
 test("canonical manager always has Send, never a stop control, while ordinary worker controls remain unchanged", () => {

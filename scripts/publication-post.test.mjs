@@ -11,12 +11,12 @@ const publication = new URL('../deploy/publication', import.meta.url).href;
 function fixture(t, hostId) {
   const root = mkdtempSync(join(tmpdir(), 'publication-post-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const source = join(root, 'source');
+  const source = join(root, 'integrations', 'a'.repeat(40));
   const bin = join(root, 'bin');
   const alerts = join(root, 'alerts');
   for (const directory of [source, bin, alerts, join(root, 'requests')]) mkdirSync(directory, { recursive: true });
   for (const [command, code] of [['bash', 9], ['npm', 12], ['ssh', 9]]) writeFileSync(join(bin, command),
-    `#!/bin/sh\nprintf '%s\\n' '${command}' >> "$COMMAND_LOG"\nexit ${code}\n`, { mode: 0o700 });
+    `#!/bin/sh\nprintf '%s %s\\n' '${command}' "$PWD" >> "$COMMAND_LOG"\nexit ${code}\n`, { mode: 0o700 });
   const request = { requestId: 'PUB-0123456789abcdef01234567', sourceSha: 'a'.repeat(40), integrationSha: 'a'.repeat(40),
     status: 'published', step: 'complete', attempt: 1, sourceSelection: { status: 'pinned' },
     checks: { status: 'deferred', phase: 'post-serving', androidPlan: { kind: 'native', identity: { revision: 'a'.repeat(40) } } },
@@ -36,7 +36,7 @@ function fixture(t, hostId) {
     return spawnSync(process.execPath, ['--input-type=module', '-e',
       `import { executePostServing } from ${JSON.stringify(publication)}; executePostServing(${JSON.stringify(lane.inputPath)});`], {
       encoding: 'utf8', timeout: 5000, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, COMMAND_LOG: commandLog,
-        PI_STACK_PUBLICATION_CONFIG: publicationConfig(root, source), PI_STACK_PUBLICATION_CHECKOUT: source,
+        PI_STACK_PUBLICATION_CONFIG: publicationConfig(root, source),
         PI_STACK_PUBLICATION_STATE: root, PI_STACK_PUBLICATION_ALERT_INBOX: alerts },
     });
   }
@@ -59,7 +59,8 @@ for (const hostId of ['gmktec', 'converge']) test(`${hostId} post-serving failur
   if (hostId === 'gmktec') {
     assert.equal(receipt.results.checks.exitCode, 9);
     assert.equal(receipt.results.androidTests.exitCode, 12);
-    assert.match(commands, /npm/);
+    assert.ok(commands.includes(`bash ${join(f.root, 'integrations', f.request.integrationSha)}`));
+    assert.ok(commands.includes(`npm ${join(f.root, 'integrations', f.request.integrationSha)}`));
   } else {
     assert.equal(receipt.results.checks, undefined);
     assert.equal(receipt.results.androidTests, undefined);

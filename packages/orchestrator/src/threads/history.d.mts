@@ -25,13 +25,15 @@ export type RecordDescriptor = Readonly<{
   length: number;
   line: number;
   digest: string;
-  /** Manager wake input stays hidden; the rest of its turn is visible only when it contains assistant text. */
+  /** Manager quiet turns are hidden without changing native records or display counts. */
   monoVisibility?: "hidden" | "visible";
   timestamp?: number | null;
   /** Native custom-data entry discriminator; bodies are not retained. */
   customType?: string;
   /** Native USER identity proven by preceding thread_landed ancestry; absent when unknown. */
   inputId?: string;
+  /** Origin owned by the native input receipt or authenticated controller ledger. */
+  inputOrigin?: "human" | "machine";
 }>;
 export type MessageRecordDescriptor = RecordDescriptor & Readonly<{
   type: "message" | "custom_message";
@@ -58,6 +60,8 @@ export type NativeHistorySource = Readonly<{
 }>;
 export type IndexedThreadHistory = Readonly<{
   source: NativeHistorySource;
+  /** Presentation options have their own identity; they never rewrite native source identity. */
+  presentationRevision: string;
   /** All active-path records except the session header, in parent-chain order. */
   entries: readonly RecordDescriptor[];
   messages: readonly MessageRecordDescriptor[];
@@ -67,8 +71,10 @@ export const MAX_HISTORY_RECORD_BYTES: number;
 export const MAX_HISTORY_INDEX_BYTES: number;
 export const MAX_HISTORY_INDEXES: number;
 export type IndexedThreadHistoryOptions = Readonly<{
-  /** Annotate manager wake turns without changing native records or standalone display counts. */
+  /** Annotate manager wake and exact silent-sentinel turns. */
   managerWakeVisibility?: boolean;
+  /** Authenticated controller classifications for inputs written before native origin receipts. */
+  inputOrigins?: Readonly<Record<string, "human" | "machine">>;
 }>;
 export function indexedThreadHistory(path: string, leafId?: string, options?: IndexedThreadHistoryOptions): ThreadHistoryResult<IndexedThreadHistory>;
 /** Synchronous projection, with at most three fresh append snapshots; scoped readers expire on return. */

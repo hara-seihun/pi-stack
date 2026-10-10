@@ -190,11 +190,12 @@ function visitTranscriptItems(context: any, accept: (item: DerivedItem) => void,
   };
 
   const attachIdentity = (message: any, from: number) => {
-    if (!message.identity?.id && !message.inputId) return;
+    if (!message.identity?.id && !message.inputId && !message.inputOrigin) return;
     for (let i = items.length - 1; i >= from; i--) {
       const head = items[i]!.head;
       if (head.kind !== "user" && head.kind !== "assistant") continue;
       if (message.inputId) { head.inputId = message.inputId; head.inputState = message.inputState; }
+      if (head.kind === "user" && message.inputOrigin) head.inputOrigin = message.inputOrigin;
       if (!message.identity?.id) break;
       head.identity = message.identity;
       head.reactions = message.reactions ?? [];
@@ -268,12 +269,12 @@ function visitTranscriptItems(context: any, accept: (item: DerivedItem) => void,
     if (role === "toolResult" && paired.has(message)) continue;
     const text = contentMarkdown(message?.content);
     if (role === "user") {
-      const agent = agentMessagePresentation(text);
+      const agent = message.inputOrigin === "human" ? null : agentMessagePresentation(text);
       if (agent) {
         const name = agent.sender.name ?? resolveAgentName?.(agent.sender.threadId);
         const sender = { threadId: agent.sender.threadId, ...(name ? { name } : {}) };
         add(`user:${identity}`, { kind: "user", label: agentSenderLabel(sender), text: agent.text, agentSender: sender, ...(stamp ? { timestamp: stamp } : {}) }, { kind: "user", text: agent.text });
-      } else inline("user", `user:${identity}`, "User", text, stamp);
+      } else inline("user", `user:${identity}`, message.inputOrigin === "machine" ? "Machine" : "User", text, stamp);
     }
     else if (role === "assistant") {
       if (text.trim()) inline("assistant", `assistant:${identity}`, AGENT_NAME, text, stamp);

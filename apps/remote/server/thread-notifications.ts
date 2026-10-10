@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import type { ThreadApi, Thread, ThreadSettlement, ManagerNotificationPolicy } from "pi-orchestrator/api";
 import { CLASSIC_NOTIFICATION_POLICY, humanNotification } from "./notification-policy";
 import { recordIdleNotification } from "./database";
+import { isSilentAssistant } from "pi-orchestrator/manager-turn";
 
 type Completion = Pick<ThreadSettlement, "executionId" | "threadId" | "time">;
 type NotificationApi = Pick<ThreadApi, "settlements" | "questionEvents" | "attentionEvents" | "questions" | "list">;
@@ -15,8 +16,9 @@ async function routeManagerNotice(directory: NotificationDirectory, policy: Mana
   if (!result.ok) throw new Error(result.error.message);
 }
 
-function hasReply(item: ThreadSettlement): boolean {
+function hasReply(item: ThreadSettlement, thread: Thread): boolean {
   const message = item.finalMessage;
+  if (thread.metadata?.manager === true && isSilentAssistant(message)) return false;
   if (item.outcome !== "complete" || message?.role !== "assistant") return false;
   const content = message.content;
   return typeof content === "string" ? content.trim().length > 0 : Array.isArray(content)
@@ -69,7 +71,7 @@ export async function projectThreadNotifications(db: Database, owner: string, ap
           JSON.stringify({ type: "thread_settled", threadId: thread.id, title: thread.title, outcome: item.outcome, finalMessage: item.finalMessage, error: item.error }));
       }
       pending.delete(item.threadId);
-      if (humanNotification(policy, thread.id, "idle") && hasReply(item) && conversation(thread)) {
+      if (humanNotification(policy, thread.id, "idle") && hasReply(item, thread) && conversation(thread)) {
         pending.set(item.threadId, { executionId: item.executionId, threadId: item.threadId, time: item.time });
       }
     }

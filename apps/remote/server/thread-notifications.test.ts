@@ -28,6 +28,20 @@ function database(): Database { const db = new Database(":memory:"); ensureSuper
 function count(db: Database): number { return (db.query("SELECT count(*) n FROM idle_notifications").get() as { n: number }).n; }
 function changes(db: Database): number { return (db.query("SELECT total_changes() n").get() as { n: number }).n; }
 
+test("exact manager silent completion never creates notifications or unread, but classic ordinary and literal inline replies do", async () => {
+  for (const [manager, text, expected] of [[true, "<silent/>", 0], [true, "Use <silent/> inline", 1], [false, "<silent/>", 1]] as const) {
+    const db = database();
+    const agent = thread("agent", { metadata: { foreground: true, ...(manager ? { manager: true } : {}) } });
+    db.query("INSERT INTO thread_views(id,idle_unread) VALUES('agent',0)").run();
+    const receipt = settlement("agent", 1, { finalMessage: { role: "assistant", content: [{ type: "text", text }] } });
+    await projectThreadNotifications(db, "person", apiFor([agent], [receipt]));
+    expect(count(db)).toBe(expected);
+    expect(db.query("SELECT idle_unread FROM thread_views WHERE id='agent'").get()).toEqual({ idle_unread: expected });
+    expect(receipt.finalMessage!.content).toEqual([{ type: "text", text }]);
+    db.close();
+  }
+});
+
 test("quiet fresh and initialized projections mutate no durable rows", async () => {
   const db = database();
   const api = apiFor([]);

@@ -45,6 +45,10 @@
       "types": "./src/threads/anthropic-narration.d.mts",
       "default": "./src/threads/anthropic-narration.mjs"
     },
+    "./manager-turn": {
+      "types": "./src/threads/manager-turn.d.mts",
+      "default": "./src/threads/manager-turn.mjs"
+    },
     "./history": {
       "types": "./src/threads/history.d.mts",
       "default": "./src/threads/history.mjs"

@@ -92,7 +92,7 @@ test("mono keeps assistant text plain after tools and before an unsettled wait, 
     for (const tail of [[], [wait]]) {
       const html = render({ mono: true, autoCollapse, entries: [user, ...work, final, ...tail], thinkingActive: true, liveThinking: "Live private reasoning" });
       expect(html.match(/class="message assistant/g)).toHaveLength(1);
-      expect(html).toContain('<div data-transcript-seq="20"><article');
+      expect(html).toContain('class="transcript-message-agent" data-transcript-seq="20"');
       expect(html.match(/class="work-card(?: running)?"/g)).toHaveLength(1);
       expect(html).toContain('class="work-card-header" aria-expanded="false"');
       expect(html).not.toContain("work-latest");
@@ -105,7 +105,7 @@ test("mono keeps assistant text plain after tools and before an unsettled wait, 
   }
   const classic = render({ entries });
   expect(classic.match(/class="message assistant/g)).toHaveLength(1);
-  expect(classic).toContain('<div data-transcript-seq="20"><article');
+  expect(classic).toContain('class="transcript-message-agent" data-transcript-seq="20"');
   expect(classic).toContain("work-card");
   expect(JSON.stringify(entries)).toBe(before);
 });

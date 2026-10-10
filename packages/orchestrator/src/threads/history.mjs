@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { TextDecoder } from "node:util";
 import { projectAnthropicNarrationMessage } from "./anthropic-narration.mjs";
+import { isSilentAssistant } from "./manager-turn.mjs";
 
 export const MAX_HISTORY_RECORD_BYTES = 8 * 1024 * 1024;
 export const MAX_HISTORY_INDEX_BYTES = 64 * 1024 * 1024;
@@ -19,6 +20,8 @@ const sameFile = (a, b) => a.dev === b.dev && a.ino === b.ino;
 const nonempty = value => typeof value === "string" && value.length > 0 && value.length <= 4096;
 const managerWakeInput = Symbol("managerWakeInput");
 const humanFacingText = Symbol("humanFacingText");
+const silentAssistant = Symbol("silentAssistant");
+const inputReceiptOrigin = Symbol("inputReceiptOrigin");
 const landedWorkId = Symbol("landedWorkId");
 const inputAssociationBarriers = new Set(["thread_stop", "thread_stopped", "thread_settled", "thread_rejected", "thread_deferred", "thread_resume", "thread_branch"]);
 const AGENT_MESSAGE_PREFIX = "<agent_message>\nThis is an agent-to-agent message, not a user message.\n";
@@ -40,25 +43,30 @@ function isManagerWakeInput(content) {
     && ["thread-wake:", "manager-questions:", "manager-custody:"].some(prefix => metadata.messageId.startsWith(prefix));
 }
 
-function annotateManagerWakeTurns(records) {
-  let wakeStart = -1;
-  let hasText = false;
+function annotateManagerTurns(records) {
+  let turnStart = -1, hasText = false, silent = false;
   const annotated = [...records];
   const finish = end => {
-    if (wakeStart < 0) return;
-    for (let index = wakeStart; index < end; index++) {
+    if (turnStart < 0) return;
+    const input = records[turnStart];
+    const wake = input[managerWakeInput] && input.inputOrigin !== "human";
+    const quiet = silent || wake && !hasText;
+    if (!quiet && !wake) return;
+    for (let index = turnStart; index < end; index++) {
       const record = records[index];
-      annotated[index] = Object.freeze({ ...record, monoVisibility: index === wakeStart || !hasText ? "hidden" : "visible" });
+      const hidden = index === turnStart ? wake || quiet && input.inputOrigin === "machine" : quiet;
+      annotated[index] = Object.freeze({ ...record, monoVisibility: hidden ? "hidden" : "visible" });
     }
   };
   for (let index = 0; index < records.length; index++) {
     const record = records[index];
     if (record.role === "user") {
       finish(index);
-      wakeStart = record[managerWakeInput] ? index : -1;
-      hasText = false;
-    } else if (wakeStart >= 0 && record[humanFacingText]) {
-      hasText = true;
+      turnStart = index; hasText = false; silent = false;
+    } else if (record.role === "assistant") {
+      silent = record[silentAssistant];
+      if (record[humanFacingText] && !silent) hasText = true;
+      if (turnStart < 0 && silent) annotated[index] = Object.freeze({ ...record, monoVisibility: "hidden" });
     }
   }
   finish(records.length);
@@ -97,11 +105,18 @@ function recordMetadata(entry, raw, path, line, offset) {
   if (entry.type === "custom" && entry.customType != null && !nonempty(entry.customType)) {
     return failure("invalid-record", path, `Invalid native custom entry type at line ${line}`, { line, offset });
   }
+  if (entry.type === "custom" && entry.customType === "thread_input" && entry.data?.inputOrigin !== undefined
+    && entry.data.inputOrigin !== "human" && entry.data.inputOrigin !== "machine") {
+    return failure("invalid-record", path, `Invalid native input origin at line ${line}`, { line, offset });
+  }
   const base = { id: entry.id, parentId: entry.parentId ?? null, type: entry.type, offset, length: raw.length, line,
     timestamp: timestampMs(entry.timestamp) ?? null, digest: createHash("sha256").update(raw).digest("hex"),
     ...(entry.type === "custom" && entry.customType != null ? { customType: entry.customType } : {}),
     ...(entry.type === "custom" && entry.customType === "thread_landed" && nonempty(entry.data?.workId)
-      ? { [landedWorkId]: entry.data.workId } : {}) };
+      ? { [landedWorkId]: entry.data.workId } : {}),
+    ...(entry.type === "custom" && entry.customType === "thread_input" && nonempty(entry.data?.workId)
+      && (entry.data.inputOrigin === "human" || entry.data.inputOrigin === "machine")
+      ? { [inputReceiptOrigin]: { workId: entry.data.workId, origin: entry.data.inputOrigin } } : {}) };
   if (entry.type !== "message" && entry.type !== "custom_message") return ok(Object.freeze(base));
   const nativeMessage = entry.type === "custom_message" ? { role: "custom", content: entry.content, timestamp: entry.timestamp } : entry.message;
   const message = nativeMessage && typeof nativeMessage === "object" ? projectAnthropicNarrationMessage(nativeMessage) : nativeMessage;
@@ -143,14 +158,15 @@ function recordMetadata(entry, raw, path, line, offset) {
     ...(typeof message.rootConsent === "boolean" ? { rootConsent: message.rootConsent } : {}),
     ...(typeof message.questionId === "string" ? { questionId: message.questionId } : {}),
     ...(message.role === "user" ? { [managerWakeInput]: isManagerWakeInput(message.content) } : {}),
-    ...(message.role === "assistant" ? { [humanFacingText]: typeof message.content === "string" ? Boolean(message.content.trim())
+    ...(message.role === "assistant" ? { [silentAssistant]: isSilentAssistant(message), [humanFacingText]: typeof message.content === "string" ? Boolean(message.content.trim())
       : (message.content ?? []).some(block => block.type === "text" && typeof block.text === "string" && Boolean(block.text.trim())) } : {}) }));
 }
 
 function associateInputIds(records) {
-  const pending = new Map(), consumed = new Set();
+  const pending = new Map(), consumed = new Set(), origins = new Map();
   let addedMetadataBytes = 0;
   const associated = records.map(record => {
+    if (record[inputReceiptOrigin]) origins.set(record[inputReceiptOrigin].workId, record[inputReceiptOrigin].origin);
     if (record.type === "custom") {
       pending.set(record.id, record.customType === "thread_landed" ? (record[landedWorkId] ? record : null)
         : inputAssociationBarriers.has(record.customType) ? null : pending.get(record.parentId) ?? null);
@@ -160,8 +176,9 @@ function associateInputIds(records) {
     if (!receipt || consumed.has(receipt.id)) return record;
     // Stored order consumes a receipt once, even when a later fork reuses its ancestry.
     consumed.add(receipt.id);
-    if (record.inputId === receipt[landedWorkId]) return record;
-    const annotated = Object.freeze({ ...record, inputId: receipt[landedWorkId] });
+    const inputId = receipt[landedWorkId], inputOrigin = origins.get(inputId);
+    if (record.inputId === inputId && record.inputOrigin === inputOrigin) return record;
+    const annotated = Object.freeze({ ...record, inputId, ...(inputOrigin ? { inputOrigin } : {}) });
     addedMetadataBytes += metadataBytes(annotated) - metadataBytes(record);
     return annotated;
   });
@@ -170,7 +187,7 @@ function associateInputIds(records) {
 
 function metadataBytes(record) {
   const stringBytes = text => typeof text === "string" ? 32 + text.length * 2 : 0;
-  let bytes = 512 + [record.id, record.parentId, record.type, record.digest, record.role, record.questionId, record.toolResultId, record.customType, record.inputId, record[landedWorkId]]
+  let bytes = 512 + [record.id, record.parentId, record.type, record.digest, record.role, record.questionId, record.toolResultId, record.customType, record.inputId, record.inputOrigin, record[inputReceiptOrigin]?.workId, record[inputReceiptOrigin]?.origin, record[landedWorkId]]
     .reduce((sum, text) => sum + stringBytes(text), 0);
   for (const block of record.blocks ?? []) {
     bytes += 256 + stringBytes(block.type) + stringBytes(block.toolCallId) + stringBytes(block.name) + stringBytes(block.namespace);
@@ -235,7 +252,7 @@ function hashRange(fd, path, hash, start, end) {
   return ok(hash);
 }
 
-function branchRecords(cache, path, leafId, managerWakeVisibility) {
+function branchRecords(cache, path, leafId, managerWakeVisibility, inputOrigins) {
   const byId = cache.byId;
   let leaf = leafId === undefined ? cache.records.at(-1) : byId.get(leafId);
   if (leafId !== undefined && !leaf) return failure("invalid-branch", path, `Session entry not found: ${leafId}`, { entryId: leafId });
@@ -247,7 +264,14 @@ function branchRecords(cache, path, leafId, managerWakeVisibility) {
     leaf = byId.get(leaf.parentId);
   }
   chain.reverse();
-  const entries = managerWakeVisibility ? annotateManagerWakeTurns(chain) : chain;
+  const classified = [];
+  for (const record of chain) {
+    const inputOrigin = record.inputId && inputOrigins && Object.hasOwn(inputOrigins, record.inputId) ? inputOrigins[record.inputId] : undefined;
+    if (inputOrigin !== undefined && inputOrigin !== "human" && inputOrigin !== "machine") return failure("invalid-record", path, "Invalid controller input origin", { entryId: record.id });
+    if (inputOrigin !== undefined && record.inputOrigin !== undefined && inputOrigin !== record.inputOrigin) return failure("invalid-record", path, "Native and controller input origin disagree", { entryId: record.id });
+    classified.push(inputOrigin && inputOrigin !== record.inputOrigin ? Object.freeze({ ...record, inputOrigin }) : record);
+  }
+  const entries = managerWakeVisibility ? annotateManagerTurns(classified) : classified;
   const messages = entries.filter(record => record.type === "message" || record.type === "custom_message");
   const results = new Map(messages.filter(record => record.role === "toolResult").map(record => [record.toolResultId, record]));
   const paired = new Set();
@@ -384,17 +408,18 @@ export function indexedThreadHistory(path, leafId, options) {
       indexes.delete(path); indexes.set(path, cache);
     }
     const managerWakeVisibility = options?.managerWakeVisibility === true;
-    const snapshotKey = JSON.stringify([leafId ?? null, managerWakeVisibility]);
+    const inputOrigins = options?.inputOrigins;
+    const snapshotKey = JSON.stringify([leafId ?? null, managerWakeVisibility, inputOrigins ?? null]);
     const known = cache.snapshots.get(snapshotKey);
     if (known) {
       if (stamp(statSync(path, { bigint: true })) !== revision) return failure("stale-source", path, "Session changed during indexing");
       cache.snapshots.delete(snapshotKey); cache.snapshots.set(snapshotKey, known);
       return ok(known.value);
     }
-    const branch = branchRecords(cache, path, leafId, managerWakeVisibility);
+    const branch = branchRecords(cache, path, leafId, managerWakeVisibility, inputOrigins);
     if (!branch.ok) return branch;
     if (stamp(statSync(path, { bigint: true })) !== revision) return failure("stale-source", path, "Session changed during indexing");
-    const bytes = snapshotBytes(branch.value);
+    const bytes = snapshotBytes(branch.value) + snapshotKey.length * 2;
     if (cache.recordMetadataBytes + bytes > MAX_HISTORY_INDEX_BYTES)
       return failure("oversized-index", path, `Session metadata and branch snapshot exceed ${MAX_HISTORY_INDEX_BYTES} estimated bytes`, { limit: MAX_HISTORY_INDEX_BYTES });
     while (cache.snapshots.size >= MAX_HISTORY_INDEXES || cache.metadataBytes + bytes > MAX_HISTORY_INDEX_BYTES) {
@@ -405,7 +430,8 @@ export function indexedThreadHistory(path, leafId, options) {
     }
     const source = Object.freeze({ kind: "native-jsonl", path, generation: cache.generation, revision, size, leafId: branch.value.leafId });
     const descriptors = new Set(branch.value.entries);
-    const value = Object.freeze({ source, entries: branch.value.entries, messages: branch.value.messages,
+    const presentationRevision = createHash("sha256").update(snapshotKey).digest("hex");
+    const value = Object.freeze({ source, presentationRevision, entries: branch.value.entries, messages: branch.value.messages,
       read: descriptor => readIndexedRecord(source, descriptors, descriptor) });
     snapshotDescriptors.set(value, descriptors);
     cache.snapshots.set(snapshotKey, { value, bytes });

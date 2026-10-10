@@ -13,6 +13,7 @@ import { AGENT_NAME } from "../../../../server/agent-identity";
 import { useItemBody } from "./item-bodies";
 import { completeMessageEntry, loadMessageEntry } from "./message-body";
 import { InputStatus } from "./input-status";
+import { bubbleGroups, type BubbleGroup } from "./chat-group";
 import { ThreadChips, threadIdsOf } from "./thread-chips";
 import { appendLiveThinking, buildStableTranscript, emptyAssistantEntry, visibleKind, type TranscriptItem } from "./transcript-model";
 import { VirtualTranscript } from "./VirtualTranscript";
@@ -28,6 +29,7 @@ const transcriptMessageIds = (item: RenderedTranscriptItem): readonly string[] =
 export interface TranscriptProps {
   entries: ContextEntry[];
   mono?: boolean;
+  messenger?: boolean;
   liveThinking?: string;
   /** The thread is thinking now, so the live step exists before any text does. */
   thinkingActive?: boolean;
@@ -96,16 +98,18 @@ function useElapsed<T extends HTMLElement>(startedAt: number | undefined, runnin
   return { ref, elapsed: startedAt ? Math.max(0, now - startedAt) : undefined };
 }
 
-const MessageEntry = memo(function MessageEntry({ entry, sessionId, autoCollapse, mono, onEdit, onReply }: {
+const MessageEntry = memo(function MessageEntry({ entry, sessionId, autoCollapse, mono, bubble, onEdit, onReply }: {
   entry: ContextEntry;
   sessionId: string;
   autoCollapse: boolean;
   mono: boolean;
+  bubble?: BubbleGroup;
   onEdit(entry: ContextEntry): void;
   onReply(target: ReplyTarget): void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [receiptOpen, setReceiptOpen] = useState(false);
   const [open, setOpen] = useState(!autoCollapse);
   useEffect(() => setOpen(!autoCollapse), [autoCollapse]);
   const incoming = presentAgentMessage(entry).agentSender;
@@ -130,6 +134,7 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, autoCollapse
   if (emptyAssistantEntry(presented)) return null;
   const content = <><ChatMessage
     kind={entry.kind}
+    appearance={bubble ? "bubble" : undefined}
     label={entry.kind === "assistant" ? AGENT_NAME : presented.label || entry.kind}
     heading={route}
     avatar={entry.kind === "assistant" ? agentAvatar() : undefined}
@@ -143,9 +148,12 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, autoCollapse
     responseMetrics={!mono && entry.kind === "assistant" ? entry.responseMetrics : undefined}
     contentFormat="markdown"
     renderMarkdown={source => <Markdown source={source} sessionId={sessionId} streaming={entry.streaming} assistant={entry.kind === "assistant"} />}
-    menu={entry.kind === "user" && !presented.agentSender && Number(entry.messageTimestamp) > 0 ? [{ label: "Edit and resend from here", onSelect: edit }] : []}
+    menu={[
+      ...(entry.kind === "user" && !presented.agentSender && Number(entry.messageTimestamp) > 0 ? [{ label: "Edit and resend from here", onSelect: edit }] : []),
+      ...(bubble && entry.inputId ? [{ label: "Delivery details", onSelect: () => setReceiptOpen(value => !value) }] : []),
+    ]}
   />
-    {entry.kind === "user" && entry.inputId && <InputStatus inputId={entry.inputId} input={entry.inputState} />}
+    {entry.kind === "user" && entry.inputId && (!bubble || receiptOpen || entry.inputState?.state !== "done" || entry.inputState.outcome !== "complete") && <InputStatus inputId={entry.inputId} input={entry.inputState} />}
     {partial && <footer className="message-expansion">
       <button type="button" className="message-expand-action" disabled={body.loading} onClick={() => { setExpanded(true); void body.load(); }}>
         {body.loading ? "Loading full message…" : body.error ? "Retry loading full message" : "Load more"}
@@ -154,10 +162,15 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, autoCollapse
     </footer>}
     {(body.error || loaded && !loaded.ok || actionError) && <p className="step-loading step-failed" role="status">{actionError || body.error || loaded && !loaded.ok && loaded.error.message}</p>}
   </>;
-  return <div className={entry.kind === "user" && !sender ? "transcript-message-human" : "transcript-message-agent"} data-transcript-seq={entry.seq} data-transcript-source={entry.key}>{sender
+  const message = <div className={entry.kind === "user" && !sender ? "transcript-message-human" : "transcript-message-agent"} data-transcript-seq={entry.seq} data-transcript-source={entry.key}>{sender
     ? <AgentDisclosure route={route} open={open} onOpen={setOpen}>{content}</AgentDisclosure>
-    : content}</div>;
-}, (before, after) => before.entry.signature === after.entry.signature && before.sessionId === after.sessionId && before.autoCollapse === after.autoCollapse && before.mono === after.mono && before.onEdit === after.onEdit && before.onReply === after.onReply);
+    : content}
+    {bubble?.timestamp && <time className="chat-group-time" dateTime={new Date(bubble.timestamp).toISOString()}>{new Date(bubble.timestamp).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}</time>}
+  </div>;
+  return bubble ? <div className="chat-row" data-side={entry.kind} data-group-start={bubble.starts} data-group-end={bubble.ends}>
+    {bubble.day && <div className="chat-day" role="separator" aria-label={bubble.day}>{bubble.day}</div>}{message}
+  </div> : message;
+}, (before, after) => before.entry.signature === after.entry.signature && before.sessionId === after.sessionId && before.autoCollapse === after.autoCollapse && before.mono === after.mono && JSON.stringify(before.bubble) === JSON.stringify(after.bubble) && before.onEdit === after.onEdit && before.onReply === after.onReply);
 
 const OutgoingEntry = memo(function OutgoingEntry({ entry, sessionId, autoCollapse }: { entry: ContextEntry; sessionId: string; autoCollapse: boolean }) {
   const preview = outgoingAgentMessage(entry);
@@ -419,7 +432,7 @@ const WorkCard = memo(function WorkCard({ item, newest, sessionId, home, mono, e
   && before.item.entries.length === after.item.entries.length
   && before.item.entries.every((entry, index) => entry.signature === after.item.entries[index]?.signature));
 
-export function Transcript({ entries, liveThinking, thinkingActive, autoCollapse = true, mono = false, sessionId, home, images, earlierAvailable, loadingEarlier, earlierError, onShowEarlier, newerAvailable, onShowNewer, onVisibleRange, onThinkingOpen, onEdit, onReply }: TranscriptProps) {
+export function Transcript({ entries, liveThinking, thinkingActive, autoCollapse = true, mono = false, messenger = false, sessionId, home, images, earlierAvailable, loadingEarlier, earlierError, onShowEarlier, newerAvailable, onShowNewer, onVisibleRange, onThinkingOpen, onEdit, onReply }: TranscriptProps) {
   const [expandedWork, setExpandedWork] = useState<ReadonlySet<string>>(() => new Set());
   const onExpanded = useCallback((key: string, expanded: boolean) => {
     setExpandedWork(previous => {
@@ -444,6 +457,7 @@ export function Transcript({ entries, liveThinking, thinkingActive, autoCollapse
     }
     return expanded;
   }, [grouped, retainedEntries, autoCollapse, mono]);
+  const bubbles = useMemo(() => bubbleGroups(items.flatMap(item => item.kind === "user" || item.kind === "assistant" ? [item.entry] : [])), [items]);
   const ref = useVisibleHeads(items, onVisibleRange);
   const visible = items;
   const newestWork = items.findLastIndex(item => item.kind === "work");
@@ -459,7 +473,7 @@ export function Transcript({ entries, liveThinking, thinkingActive, autoCollapse
           ? <Step entry={item.entry} sessionId={sessionId} home={home} forceExpanded onThinkingOpen={onThinkingOpen} />
           : item.kind === "outgoing"
             ? <OutgoingEntry entry={item.entry} sessionId={sessionId} autoCollapse={autoCollapse} />
-            : <MessageEntry entry={item.entry} sessionId={sessionId} autoCollapse={autoCollapse} mono={mono} onEdit={onEdit} onReply={onReply} />} />
+            : <MessageEntry entry={item.entry} sessionId={sessionId} autoCollapse={autoCollapse} mono={mono} bubble={messenger && (item.kind === "user" || item.kind === "assistant") ? bubbles.get(item.entry.key) : undefined} onEdit={onEdit} onReply={onReply} />} />
       {newerAvailable && <button type="button" className="context-earlier context-newer" disabled={loadingEarlier} onClick={onShowNewer}>{loadingEarlier ? "Loading newer…" : "Show 60 newer"}</button>}
     </div>
   </InlineImagesContext.Provider>;

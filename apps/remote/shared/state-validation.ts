@@ -131,6 +131,10 @@ export function validateTranscriptHead(value: unknown): void {
   requireState(head.kind, TRANSCRIPT_KINDS, "Transcript kind");
   if (head.sourceKey !== undefined && !stateString(head.sourceKey, "Transcript source identity").trim()) throw new Error("Transcript source identity: empty");
   if (head.inputId !== undefined) stateString(head.inputId, "Transcript input identity");
+  if (head.inputOrigin !== undefined) {
+    requireState(head.inputOrigin, { human: true, machine: true }, "Transcript input origin");
+    if (head.kind !== "user") throw new Error("Transcript input origin belongs only to user-role inputs");
+  }
   if (head.inputState !== undefined) {
     validateInputState(head.inputState);
     if (stateObject(head.inputState, "Transcript input receipt").id !== head.inputId) throw new Error("Transcript input receipt identity mismatch");

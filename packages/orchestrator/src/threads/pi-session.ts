@@ -432,6 +432,7 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
             return;
           }
           if (inputCommands.has(command.type)) {
+            if (command.inputOrigin !== undefined && command.inputOrigin !== "human" && command.inputOrigin !== "machine") { response(false, "Invalid native input origin"); return; }
             if (execution.blocked || replacing) { response(false, "Local execution has not confirmed cancellation"); return; }
             if (command.workId) {
               const workId = String(command.workId);
@@ -475,7 +476,8 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
               const workId = String(command.workId);
               const original = branch().some(entry => entry.type === "custom" && entry.customType === "thread_input" && (entry.data as { workId?: string }).workId === workId);
               runtime.session.sessionManager.appendCustomEntry(original ? "thread_redelivery" : "thread_input", original ? { workId }
-                : { workId, message: command.message, images: command.images, delivery: command.type, receiptVersion: 2 });
+                : { workId, message: command.message, images: command.images, delivery: command.type, receiptVersion: 2,
+                  ...(command.inputOrigin === undefined ? {} : { inputOrigin: command.inputOrigin }) });
               if (executionStart === undefined) executionStart = runtime.session.sessionManager.getLeafId();
               activeWork.add(workId);
               checkpointPiSession(runtime.session.sessionManager);

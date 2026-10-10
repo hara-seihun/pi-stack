@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { agentAvatar, ChatMessage } from "../../chat-message";
+import { managerLiveText } from "pi-orchestrator/manager-turn";
 import { CachedImage } from "../../cached-media";
 import { ReplyComposer, type ReplyTarget } from "../../message-reply";
 import { AGENT_NAME } from "../../../../server/agent-identity";
@@ -18,7 +19,6 @@ import { DELIVERY_LABELS } from "../queue/delivery";
 import { Transcript } from "./Transcript";
 import type { VisibleTranscriptRange } from "./transcript-store";
 import { ConversationModelMeta } from "./ContextTokens";
-import { ManagerContextSelection } from "./manager-context-selection";
 import { QuestionsComposer } from "./questions";
 import type { ThreadQuestion, QuestionsResource } from "../../../../server/protocol";
 import "./conversation.css";
@@ -31,16 +31,17 @@ export function BackIcon() { return <svg viewBox="0 0 24 24" aria-hidden="true">
 function InfoIcon() { return <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 11v5m0-8v.2" /></svg>; }
 function ChevronIcon() { return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>; }
 
-export function ConversationHeader({ title, subtitle, status, onBack, onOpenInspector, trailing, meta, avatar, showIdentity = true, onLongPress }: { onLongPress?(): void; title: string; /** A second identity line, such as an agent's task under its name. */ subtitle?: string; /** Readable conversation state, beneath its identity. */ status?: ReactNode; onBack: (() => void) | null; onOpenInspector: (() => void) | null; trailing?: ReactNode; meta?: ReactNode; /** The contact's picture next to the title. */ avatar?: string; showIdentity?: boolean }) {
+export function ConversationHeader({ title, subtitle, status, onBack, onOpenInspector, trailing, meta, avatar, showIdentity = true, compact = false, onLongPress }: { compact?: boolean; onLongPress?(): void; title: string; /** A second identity line, such as an agent's task under its name. */ subtitle?: string; /** Readable conversation state, beneath its identity. */ status?: ReactNode; onBack: (() => void) | null; onOpenInspector: (() => void) | null; trailing?: ReactNode; meta?: ReactNode; /** The contact's picture next to the title. */ avatar?: string; showIdentity?: boolean }) {
   const longPress = useLongPress(onLongPress);
-  return <header className="conversation-header" {...longPress} title={onLongPress ? "Long-press to return to classic view" : undefined}>
+  return <header className={`conversation-header${compact ? " chat-header" : ""}`} {...longPress} title={onLongPress ? "Long-press to return to classic view" : undefined}>
     {onBack && <button type="button" className="header-icon" aria-label="Back" onClick={onBack}><BackIcon /></button>}
     {avatar && showIdentity && <CachedImage className="conversation-avatar" src={avatar} alt="" decoding="async" />}
     <div className="conversation-title">
       {showIdentity ? <span className="conversation-title-line"><span className="conversation-title-text">{title}</span>{meta}</span> : meta}
       {showIdentity && subtitle && <span className="conversation-subtitle" title={subtitle}>{subtitle}</span>}
-      {status && <span className="conversation-status">{status}</span>}
+      {!compact && status && <span className="conversation-status">{status}</span>}
     </div>
+    {compact && status && <span className="conversation-status">{status}</span>}
     {trailing}
     {onOpenInspector && <button type="button" className="header-icon" aria-label={`${title}. Thread details`} onClick={onOpenInspector}><InfoIcon /></button>}
   </header>;
@@ -101,6 +102,7 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
   onDraw(): void;
   onDismissControlError(): void;
 }) {
+  const visibleLiveText = session.manager ? managerLiveText(liveText ?? "") : liveText;
   const status = mono ? monoThreadStatus(session) : threadStatus(session);
   const connection: ConversationConnection = offline ? { kind: "disconnected", reason: offline } : syncing ? { kind: "syncing" } : { kind: "connected" };
   const running = session.state === "running";
@@ -124,7 +126,7 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
   const slashToken = prompt.startsWith("/") && !/\s/.test(prompt) ? prompt.slice(1).toLowerCase() : null;
   const visibleCommands = slashToken === null ? [] : slashCommands.filter(command => command.source === "skill" && !command.name.toLowerCase().includes("mcp") && command.name.toLowerCase().startsWith(slashToken));
   return <div className={`conversation-screen${mono ? " mono-conversation" : ""}${session.manager ? " manager-conversation" : ""}`}>
-    <ConversationHeader title={mono ? AGENT_NAME : session.name || "Agent"} onLongPress={mono?.onClassic} status={<ConversationStatus status={status} connection={connection} />} meta={session.manager && session.contextSelection?.mode === "all" ? <ManagerContextSelection selection={session.contextSelection} /> : mono ? undefined : <ConversationModelMeta session={session} />} showIdentity={mono ? true : showIdentity} onBack={!mono && showBack ? onBack : null} onOpenInspector={mono ? null : onOpenInspector}
+    <ConversationHeader title={mono || session.manager ? AGENT_NAME : session.name || "Agent"} compact={session.manager === true} avatar={session.manager ? agentAvatar() : undefined} onLongPress={mono?.onClassic} status={<ConversationStatus status={status} connection={connection} />} meta={session.manager || mono ? undefined : <ConversationModelMeta session={session} />} showIdentity={mono || session.manager ? true : showIdentity} onBack={!mono && showBack ? onBack : null} onOpenInspector={mono ? null : onOpenInspector}
       trailing={<>{!session.manager && questions.length > 0 && (cancelAction === "stop" || cancelAction === "cancel_wait") && <button type="button" className="header-action" disabled={pending} onClick={onStop}>{cancelAction === "stop" ? "Cancel work" : mono ? "Cancel request" : "Cancel wait"}</button>}{queued > 0 && <button type="button" className="header-chip" onClick={onOpenQueue} aria-label={`${queued} queued. Open the queue`}>{queued} queued</button>}{offline && <button type="button" className="header-action" onClick={onReconnect}>Reconnect</button>}</>} />
     {mono && !mono.hintSeen && <aside className="mono-hint" role="status"><span>Long-press this header to return to classic view. Long-press Chats to come back here.</span><button type="button" disabled={mono.saving} onClick={mono.onHintSeen} aria-label="Dismiss mono view hint">Got it</button></aside>}
     {!mono && ancestors.length > 0 && <nav className="ancestry" aria-label="Launched by">{ancestors.map(ancestor => <button key={ancestor.id} type="button" title={ancestor.name || undefined} onClick={() => onOpenAncestor(ancestor)}>{agentName(ancestor) ?? (ancestor.name || ancestor.id)}</button>)}</nav>}
@@ -132,9 +134,9 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
     {outbox}
     <ConversationView key={session.id} active newerAvailable={newerAvailable} onJumpLatest={onJumpLatest} label={`Chat with ${mono ? AGENT_NAME : session.name || "Agent"}`} drawing={drawing} transcript={<InlineImagesContext.Provider value={images}>
       {(syncing || offline) && entries.length === 0 && <div className="conversation-loading" role={offline ? "alert" : "status"}><strong>{offline ? "Conversation unavailable" : "Opening conversation…"}</strong><span>{offline || "Waiting for the selected environment to return its history."}</span></div>}
-      <Transcript entries={entries} mono={!!mono} liveThinking={liveThinking} thinkingActive={thinkingActive} autoCollapse={autoCollapse} sessionId={session.id} home={home} images={images}
+      <Transcript entries={entries} mono={!!mono || session.manager === true} messenger={session.manager === true} liveThinking={liveThinking} thinkingActive={thinkingActive} autoCollapse={autoCollapse} sessionId={session.id} home={home} images={images}
         earlierAvailable={earlierAvailable} loadingEarlier={loadingEarlier} earlierError={earlierError} onShowEarlier={onShowEarlier} newerAvailable={newerAvailable} onShowNewer={onShowNewer} onVisibleRange={onVisibleRange} onThinkingOpen={onThinkingOpen} onEdit={onEdit} onReply={onReply} />
-      {liveText && <div className="live-answer"><ChatMessage kind="assistant" label={AGENT_NAME} avatar={agentAvatar()} text={liveText} contentFormat="markdown" renderMarkdown={text => <Markdown source={text} sessionId={session.id} streaming assistant />} /></div>}
+      {visibleLiveText && <div className="live-answer"><ChatMessage kind="assistant" appearance={session.manager ? "bubble" : undefined} label={AGENT_NAME} avatar={agentAvatar()} text={visibleLiveText} contentFormat="markdown" renderMarkdown={text => <Markdown source={text} sessionId={session.id} streaming assistant />} /></div>}
     </InlineImagesContext.Provider>}>
       <DismissibleError className="conversation-error" dismissLabel="Dismiss upload error" message={uploadError} resetKey={session.id} />
       {questionsResource?.state === "failed" && <div className="conversation-error" role="alert">Could not load questions: {questionsResource.error}. {questions.length > 0 ? "Showing previous questions; their status may have changed." : "Chat remains available."} <button type="button" onClick={onRetryQuestions}>Retry questions</button></div>}

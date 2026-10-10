@@ -2,6 +2,7 @@ import type { ContextEntry } from "../../types";
 import { assertNever } from "../../../../shared/explicit-state";
 import { monoMessage } from "../../app/mono";
 import { outgoingAgentMessage } from "./agent-message";
+import { SILENT_TURN_TEXT } from "pi-orchestrator/manager-turn";
 
 export interface WorkSummary {
   toolCalls: number;
@@ -34,7 +35,7 @@ export function emptyAssistantEntry(entry: ContextEntry): boolean {
 export function visibleKind(entry: ContextEntry, mono = false): "user" | "assistant" | "outgoing" | undefined {
   switch (entry.kind) {
     case "user": return !mono || entry.monoVisibility !== "hidden" && monoMessage(entry) ? "user" : undefined;
-    case "assistant": return mono && entry.monoVisibility === "hidden" ? undefined : "assistant";
+    case "assistant": return mono && (entry.monoVisibility === "hidden" || entry.text === SILENT_TURN_TEXT) ? undefined : "assistant";
     case "toolCall": return !mono && outgoingAgentMessage(entry) ? "outgoing" : undefined;
     case "system": case "tool": case "thinking": case "notice": return undefined;
   }
@@ -155,7 +156,7 @@ export function buildStableTranscript(entries: ContextEntry[], mono = false): Tr
   };
 
   for (const entry of entries) {
-    if (emptyAssistantEntry(entry)) continue;
+    if (emptyAssistantEntry(entry) || mono && entry.kind === "assistant" && entry.text === SILENT_TURN_TEXT) continue;
     const kind = visibleKind(entry, mono);
     if (!mono) {
       if (kind) {
