@@ -148,6 +148,10 @@ JS
       exit 0
     fi
   fi
+  if [[ -L $root/node_modules ]]; then
+    echo "Dependency refresh requires an isolated build checkout; borrowed node_modules is immutable: $root" >&2
+    exit 65
+  fi
   rm -f "$stamp" || exit
   (cd "$root" && npm ci --ignore-scripts --prefer-offline --no-audit --no-fund) || exit
   hidden_hash=$(sha256sum "$hidden_lock" | cut -d' ' -f1) || exit
