@@ -2967,9 +2967,10 @@ export function drain() {
   }
 }
 
-function locked(name, operation, args = [], optional = false) {
+function locked(name, operation, args = [], optional = false, admissionSeconds = 0) {
   ensureState();
-  const result = spawnSync("flock", ["--nonblock", "--conflict-exit-code", "75", "--close", join(stateRoot, `${name}.lock`),
+  const admission = admissionSeconds === 0 ? ['--nonblock'] : ['--wait', String(admissionSeconds)];
+  const result = spawnSync("flock", [...admission, "--conflict-exit-code", "75", "--close", join(stateRoot, `${name}.lock`),
     process.execPath, self, `_${operation}`, ...args], { stdio: "inherit" });
   if (result.status !== 0 && !(optional && result.status === 75)) throw new Error(`${operation}: ${result.status === 75 ? "publication owner is busy" : `exit ${result.status}`}`);
   return result.status === 0;
@@ -3025,7 +3026,7 @@ function main() {
   if (operation === "repair" && args.length === 1) return locked("worker", "repair", args);
   if (operation === "_repair" && args.length === 1) return requestRepair(args[0]);
   if (operation === "continue-source" && args.length === 4) {
-    locked('worker', 'continue-source', args);
+    locked('worker', 'continue-source', args, false, 5);
     return checked('systemctl', ['--user', 'start', '--no-block', 'pi-stack-publication.service'], { timeoutSeconds: 5 });
   }
   if (operation === "_continue-source" && args.length === 4) return continueSource(...args);
