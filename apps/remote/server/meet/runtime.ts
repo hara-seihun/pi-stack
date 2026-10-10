@@ -104,7 +104,8 @@ export async function connectRuntime(data = meetData(), revision = runtimeRevisi
   if (!reachable.ok && reachable.kind !== "transport") return reachable;
   let started = startWorker(data, socket);
   if (!started.ok) return started;
-  const deadline = Date.now() + 5000;
+  const startupBudgetMs = 60_000;
+  const deadline = Date.now() + startupBudgetMs;
   let last: MeetResult<RuntimeStatus> = { ok: false, error: "Meet runtime did not become ready" };
   while (Date.now() < deadline) {
     last = await runtimeStatus(socket, Math.min(500, Math.max(1, deadline - Date.now())));
@@ -117,5 +118,5 @@ export async function connectRuntime(data = meetData(), revision = runtimeRevisi
       if (!started.ok) return started;
     }
   }
-  return { ok: false, error: `Meet runtime startup exceeded five seconds: ${last.ok ? last.value.phase : last.error}` };
+  return { ok: false, error: `Meet runtime startup exceeded ${startupBudgetMs / 1000} seconds: ${last.ok ? last.value.phase : last.error}` };
 }
