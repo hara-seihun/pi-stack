@@ -197,6 +197,32 @@ test("the namespace launcher migrates before its supervisor command and does not
   assert.equal(command, "/release/server/main.ts");
 });
 
+test("the launcher runs the gate and migrator when invoked through a release pointer symlink", async t => {
+  // Production runs /srv/pi/pi-remote/server/pi-remote-launch, where /srv/pi/pi-remote
+  // points at the sealed release directory. Every entry module must still run.
+  const f = await fixture(t);
+  const release = join(f.root, "releases", "candidate");
+  for (const directory of ["server", "scripts"]) await mkdir(join(release, directory), { recursive: true });
+  for (const name of ["pi-remote-launch", "pi-remote-supervise", "native-history-startup.mjs", "native-history-startup-legacy.mjs"]) {
+    await copyFile(fileURLToPath(new URL(name, import.meta.url)), join(release, "server", name));
+    await chmod(join(release, "server", name), 0o700);
+  }
+  await copyFile(f.options.migratorPath, join(release, "scripts/migrate-native-history.mjs"));
+  const pointer = join(f.root, "pi-remote");
+  await symlink(release, pointer);
+  const launched = spawnSync("bash", [join(pointer, "server/pi-remote-launch"), "/usr/bin/printf", "%s\\n", "/release/server/main.ts"], {
+    env: { ...process.env, PI_REMOTE_CONFIG: f.options.configPath, PI_REMOTE_DATA: f.root }, encoding: "utf8", timeout: 5_000,
+  });
+  assert.equal(launched.status, 0, launched.stderr + launched.stdout);
+  const [receipt, command] = launched.stdout.trim().split("\n");
+  assert.equal(JSON.parse(receipt).value.state, "migrated");
+  assert.equal(command, "/release/server/main.ts");
+
+  const direct = spawnSync(process.execPath, [join(pointer, "scripts/migrate-native-history.mjs")], { encoding: "utf8", timeout: 5_000 });
+  assert.equal(direct.status, 1, "a symlinked migrator invocation must run and report its argument error");
+  assert.equal(JSON.parse(direct.stdout.trim()).ok, false);
+});
+
 test("Remote's release contains the owner-local gate, migrator and operating instructions", () => {
   for (const path of ["server/native-history-startup.mjs", "server/native-history-startup-legacy.mjs", "scripts/migrate-native-history.mjs", "docs/native-history-migration.md"]) {
     assert.ok(remoteRequiredFiles.includes(path), `Missing required release asset: ${path}`);
