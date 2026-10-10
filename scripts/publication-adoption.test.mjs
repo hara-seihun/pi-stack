@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -94,6 +95,72 @@ test("code-only repairs retain source and cannot be overwritten by unrelated own
   assert.match(dirty.stderr, /Commit deployment source/);
   assert.equal(f.checked("git", ["-C", repository, "rev-parse", ownerRef]), repairSha);
   assert.equal(readFileSync(f.installed, "utf8"), owner);
+});
+
+for (const retainedState of ['pinned', 'checked', 'selection-failed']) test(`resumed ${retainedState} publication reselects its own integration after another request moved the checkout`, t => {
+  const f = fixture(t);
+  const adopted = f.adopt();
+  assert.equal(adopted.status, 0, adopted.stderr);
+  const repository = join(f.state, 'repository');
+  writeFileSync(join(f.source, 'deploy/concurrent-request'), 'another request selected this source\n');
+  f.checked('git', ['-C', f.source, 'add', '.']);
+  f.checked('git', ['-C', f.source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test',
+    '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'Concurrent request']);
+  const movedSha = f.checked('git', ['-C', f.source, 'rev-parse', 'HEAD']);
+  f.checked('git', ['-C', repository, 'fetch', '--quiet', f.source, movedSha]);
+  f.checked('git', ['-C', repository, 'checkout', '--quiet', '--detach', movedSha]);
+  f.checked('git', ['-C', f.source, 'checkout', '--quiet', '--detach', f.sha]);
+  const proof = join(f.root, 'delivered.json');
+  writeFileSync(proof, '{}\n');
+  const host = { status: 'passed', integrationSha: f.sha, proof,
+    sha256: createHash('sha256').update(readFileSync(proof)).digest('hex') };
+  const requestId = 'PUB-0123456789abcdef01234567';
+  const request = { version: 3, requestId, sourceSha: f.sha,
+    sourceRef: `refs/heads/pi-stack-publications/${requestId}`, integrationSha: f.sha, baseSha: f.sha,
+    status: 'queued', step: 'waiting-for-hosts', waiting: { kind: 'hosts' }, attempt: 1,
+    integratedAt: new Date().toISOString(), failures: [],
+    checks: retainedState === 'checked' ? { status: 'passed' } : { status: 'deferred', phase: 'post-serving' },
+    ...(retainedState === 'checked' ? {} : { sourceSelection: { status: 'pinned', sourceSha: f.sha } }),
+    hosts: { gmktec: host, converge: host },
+    reservations: { gmktec: { state: 'released' }, converge: { state: 'released' } } };
+  writeFileSync(join(f.state, 'requests', `${requestId}.json`), JSON.stringify(request));
+  writeFileSync(join(f.root, 'bin/git'), `#!${process.execPath}
+const { appendFileSync } = require('node:fs');
+const { spawnSync } = require('node:child_process');
+const args = process.argv.slice(2);
+appendFileSync(${JSON.stringify(join(f.root, 'git.log'))}, args.join(' ') + '\\n');
+if (args.includes('+refs/heads/main:refs/remotes/origin/main')) process.exit(0);
+if (args.includes('cat-file') && args.at(-1).endsWith(':deploy/android-update')) process.exit(1);
+if (${retainedState === 'selection-failed'} && args.includes('checkout') && args.at(-1) === ${JSON.stringify(f.sha)}) {
+  process.stderr.write('retained integration selection refused\\n'); process.exit(42);
+}
+const result = spawnSync('/usr/bin/git', args, { stdio: 'inherit' });
+process.exit(result.status ?? 1);
+`, { mode: 0o700 });
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e',
+    `import { processRequest } from ${JSON.stringify(pathToFileURL(f.installed).href)};
+     processRequest(${JSON.stringify(request)});`], { env: f.env, encoding: 'utf8', timeout: 10_000 });
+  assert.equal(result.status, 0, result.error?.message ?? result.stderr);
+  const resumed = JSON.parse(readFileSync(join(f.state, 'requests', `${requestId}.json`), 'utf8'));
+  assert.equal(resumed.status, retainedState === 'selection-failed' ? 'failed' : 'published', JSON.stringify(resumed.failure));
+  assert.equal(resumed.integrationSha, f.sha);
+  assert.deepEqual(resumed.checks, request.checks);
+  assert.deepEqual(resumed.hosts, request.hosts);
+  assert.equal(resumed.attempt, request.attempt);
+  assert.equal(readFileSync(proof, 'utf8'), '{}\n');
+  const commands = readFileSync(join(f.root, 'git.log'), 'utf8');
+  assert.doesNotMatch(commands, /fetch-submitted|push|reset --hard [a-f0-9]{40}/);
+  if (retainedState === 'selection-failed') {
+    assert.equal(resumed.failure.step, 'select-retained-integration');
+    assert.equal(resumed.failure.message, 'retained integration selection exited 42');
+    assert.match(resumed.failure.excerpt, /retained integration selection refused/);
+    assert.equal(resumed.failure.progress.command, 'git');
+    assert.doesNotMatch(commands, /worktree add/);
+  } else {
+    assert.equal(f.checked('git', ['-C', repository, 'rev-parse', 'HEAD']), f.sha);
+    assert.match(commands, new RegExp(`checkout --quiet --detach ${f.sha}`));
+    assert.equal(readFileSync(f.installed, 'utf8'), readFileSync(f.candidate, 'utf8'));
+  }
 });
 
 test("adoption rejects the wrong source identity and missing candidate dependencies without replacing the owner", t => {

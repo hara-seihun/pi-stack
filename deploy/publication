@@ -2322,6 +2322,9 @@ export function processRequest(request) {
       delete request.integratedAt;
       result = createIntegration(request, logPath);
       if (!result.ok) throw new Error(result.stderr.trim() || `${request.step} exited ${result.status}`);
+    } else {
+      result = runLogged(request, 'select-retained-integration', 'git', ['-C', checkout, 'checkout', '--quiet', '--detach', request.integrationSha], 30, logPath);
+      if (!result.ok) throw new Error(result.stderr.trim() || `retained integration selection exited ${result.status}`);
     }
 
     request.meetingRuntimeProtocol = meetingRuntimeProtocol(request.integrationSha);
