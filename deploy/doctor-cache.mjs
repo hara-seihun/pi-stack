@@ -1,9 +1,49 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, realpathSync, statSync, readdirSync, mkdirSync, writeFileSync, renameSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync, lstatSync, readdirSync, mkdirSync, writeFileSync, renameSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { hostname, release, arch, platform } from 'node:os';
 import { pathToFileURL } from 'node:url';
-import { digest } from './prepared-components.mjs';
+export function doctorDigest(directory, cache) {
+  const signature = createHash('sha256');
+  const visited = new Map(), records = [];
+  function scan(path, relative) {
+    const info = lstatSync(path, { bigint: true });
+    signature.update(JSON.stringify([path, String(info.dev), String(info.ino), String(info.mode), String(info.size), String(info.mtimeNs), String(info.ctimeNs)]));
+    if (info.isSymbolicLink()) {
+      records.push([relative, 'link']);
+      scan(realpathSync(path), `${relative}/target`);
+      return;
+    }
+    if (visited.has(path)) { records.push([relative, 'reference', visited.get(path)]); return; }
+    visited.set(path, relative);
+    if (info.isDirectory()) {
+      records.push([relative, 'directory', Number(info.mode & 0o777n)]);
+      for (const name of readdirSync(path).sort()) {
+        if (name === '.pi-stack-commit') continue;
+        scan(join(path, name), `${relative}/${name}`);
+      }
+    } else if (info.isFile()) records.push([relative, 'file', Number(info.mode & 0o777n), path]);
+    else throw new Error(`Unsupported doctor input: ${path}`);
+  }
+  scan(realpathSync(directory), '.');
+  const generation = signature.digest('hex');
+  const receipt = join(cache, `closure-${createHash('sha256').update(directory).digest('hex')}.json`);
+  if (existsSync(receipt)) {
+    const saved = JSON.parse(readFileSync(receipt, 'utf8'));
+    if (saved.protocol === 'pi-doctor-content-v1' && saved.generation === generation && /^[a-f0-9]{64}$/.test(saved.sha256)) return saved.sha256;
+  }
+  const content = createHash('sha256').update('pi-doctor-content-v1');
+  for (const [relative, kind, mode, path] of records) {
+    content.update(JSON.stringify([relative, kind, mode]));
+    if (kind === 'file') content.update(readFileSync(path));
+  }
+  const sha256 = content.digest('hex');
+  mkdirSync(cache, { recursive: true, mode: 0o755 });
+  const temporary = `${receipt}.${process.pid}.tmp`;
+  writeFileSync(temporary, JSON.stringify({ protocol: 'pi-doctor-content-v1', generation, sha256 }));
+  renameSync(temporary, receipt);
+  return sha256;
+}
 
 export function captureDoctorBindings(phase, runtime, home, control) {
   if (!['browser', 'model'].includes(phase)) throw new Error('doctor phase is required');
@@ -24,7 +64,7 @@ export function doctorKey(phase, runtime, home, control, bindings = captureDocto
   if (bindings.protocol !== 'pi-doctor-bindings-v1' || bindings.phase !== phase || bindings.home !== resolve(home) || bindings.control !== realpathSync(control) || !Array.isArray(bindings.packages)) throw new Error('invalid doctor input bindings');
   runtime = bindings.runtime;
   if (realpathSync(runtime) !== runtime) throw new Error('doctor runtime binding must remain immutable');
-  const hash = createHash('sha256').update(JSON.stringify(['pi-doctor-cache-v2', phase, hostname(), release(), arch(), platform(), process.version, home]));
+  const hash = createHash('sha256').update(JSON.stringify(['pi-doctor-cache-v3', phase, hostname(), release(), arch(), platform(), process.version, home]));
   hash.update(readFileSync(new URL('./doctor-cache.mjs', import.meta.url)));
   hash.update(readFileSync(join(control, 'deploy/runtime-doctors')));
   const closure = realpathSync(join(runtime, 'node_modules'));
@@ -38,10 +78,10 @@ export function doctorKey(phase, runtime, home, control, bindings = captureDocto
     ...(phase === 'browser' ? ['agent-browser', 'pi-agent-browser-native', 'react', 'react-dom', 'scheduler'] : [])];
   for (const name of packagesToProve) {
     const path = join(closure, name);
-    hash.update(name).update(existsSync(path) ? digest(realpathSync(path), cache) : 'unset');
+    hash.update(name).update(existsSync(path) ? doctorDigest(realpathSync(path), cache) : 'unset');
   }
   const executable = phase === 'browser' ? join(closure, '.bin/agent-browser') : join(closure, '.bin/pi-model-selection-doctor');
-  hash.update(existsSync(executable) ? digest(realpathSync(executable), cache) : 'unset');
+  hash.update(existsSync(executable) ? doctorDigest(realpathSync(executable), cache) : 'unset');
   const dependencyLock = join(closure, '.package-lock.json');
   hash.update(existsSync(dependencyLock) ? readFileSync(dependencyLock) : 'unset');
   if (phase === 'browser') {
@@ -57,7 +97,7 @@ export function doctorKey(phase, runtime, home, control, bindings = captureDocto
     if (typeof target !== 'string') throw new Error('doctor bound package source is required');
     if (/^(npm:|git:|https?:)/.test(target)) continue;
     if (realpathSync(target) !== target) throw new Error('doctor package binding must remain immutable');
-    hash.update(digest(target, cache));
+    hash.update(doctorDigest(target, cache));
   }
   for (const directory of [join(home, '.cache/ms-playwright'), join(home, '.cache/agent-browser'), process.env.PLAYWRIGHT_BROWSERS_PATH].filter(Boolean)) {
     hash.update(directory);

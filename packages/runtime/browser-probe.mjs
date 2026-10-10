@@ -46,16 +46,7 @@ export async function probeBrowser(tool, { url, title, visibleTextCheck, frameVa
   const ownerArgs = ["--session", ownerName];
   const attachedArgs = () => ["--session", attachedName, "--cdp", cdpUrl];
   const batch = async (phase, prefix, steps) => {
-    let details;
-    if (phase === "download-and-frames") {
-      const data = []; let artifactVerification;
-      for (const [index, step] of steps.entries()) {
-        const row = await execute(`${phase}/${index}:${step[0]}`, { args: [...prefix, "batch", "--bail"], stdin: JSON.stringify([step]) });
-        assert.equal(row.data.length, 1); data.push(row.data[0]);
-        if (step[0] === "download") artifactVerification = row.artifactVerification;
-      }
-      details = { data, artifactVerification };
-    } else details = await execute(phase, { args: [...prefix, "batch", "--bail"], stdin: JSON.stringify(steps) });
+    const details = await execute(phase, { args: [...prefix, "batch", "--bail"], stdin: JSON.stringify(steps) });
     assert.equal(details.data.length, steps.length, `${phase}: every command must finish`);
     for (const row of details.data) assert.equal(row.success, true, JSON.stringify(row));
     return details;
