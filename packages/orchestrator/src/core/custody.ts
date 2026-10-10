@@ -1,12 +1,13 @@
 import { existsSync, realpathSync, statSync } from "node:fs";
-import { dirname, isAbsolute, resolve, sep } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { createSharedPiSessionOpener } from "../threads/runner-transport.js";
 import type { CoreResult } from "./config.js";
 import type { CoreScope } from "./contracts.js";
 import { CustodyResources } from "./custody-resources.js";
 import { createCoreInProcessRuntime, type CoreInProcessRuntime } from "./native-session.js";
+import { createImageReader } from "./image-read.js";
 
-export type CoreRuntime = (ReturnType<typeof createSharedPiSessionOpener> | CoreInProcessRuntime) & { path(logicalPath: string): string };
+export type CoreRuntime = (ReturnType<typeof createSharedPiSessionOpener> | CoreInProcessRuntime) & { path(logicalPath: string): string; readImage: ReturnType<typeof createImageReader> };
 export type CoreRuntimeFactory = (scope: CoreScope) => Promise<CoreResult<CoreRuntime>>;
 export const createCoreCustodyRuntime: CoreRuntimeFactory = scope => createCoreCustodyFactory(null)(scope);
 
@@ -32,10 +33,11 @@ export function createCoreCustodyFactory(consultationScopeIds: string | readonly
         sameView(directory);
         if (!statSync(directory).isDirectory()) throw new Error("Registered resource directory is not a directory");
       }
+      const inside = (root: string, logical: string) => { const suffix = relative(root, logical); return suffix === "" || suffix !== ".." && !suffix.startsWith("../") && !isAbsolute(suffix); };
       const path = (logical: string) => {
         pinned.assert();
         if (!isAbsolute(logical) || resolve(logical) !== logical || logical.includes("\0")) throw new Error("Noncanonical core resource path");
-        const root = directories.find(directory => logical === directory || logical.startsWith(directory + sep));
+        const root = directories.find(directory => inside(directory, logical));
         if (!exact.has(logical) && root === undefined) throw new Error("Unregistered core resource path");
         let existing = logical;
         while (!existsSync(existing)) {
@@ -46,14 +48,20 @@ export function createCoreCustodyFactory(consultationScopeIds: string | readonly
         sameView(existing);
         if (root !== undefined) {
           const realRoot = realpathSync(root), actual = realpathSync(existing);
-          if (actual !== realRoot && !actual.startsWith(realRoot + sep)) throw new Error("Core resource symlink escapes its registered directory");
+          if (!inside(realRoot, actual)) throw new Error("Core resource symlink escapes its registered directory");
         }
         return logical;
       };
       for (const logical of exact) path(logical);
       const runtime = privateScopes.has(scope.id) ? createCoreInProcessRuntime()
         : createSharedPiSessionOpener({ dataDir: scope.custody.dataDir, durable: true, custody: scope.custody, resources });
+      const readImage = createImageReader(pinned);
       return { ok: true, value: { ...runtime, path,
+        readImage: async (logical, allowedRoots, signal) => {
+          try { path(logical); for (const root of allowedRoots) path(root); }
+          catch (cause) { return { ok: false, error: { code: "unavailable", message: `Image resource custody: ${String(cause)}` } }; }
+          return readImage(logical, allowedRoots, signal);
+        },
         detach() {
           runtime.detach();
           if ("register" in runtime) void (runtime as CoreInProcessRuntime).drain().then(() => pinned.close());
