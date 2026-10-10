@@ -27,21 +27,32 @@ export function parseGatewayConfig(transport: unknown, bindings: unknown, princi
         || route.path.split("/").some(part => part === "." || part === "..") || route.kind === "prefix" && !route.path.endsWith("/")) return invalid();
       const match = /^\/v1\/scopes\/([^/]+)\/(projection|events|update|thread-owner(?:\/.*)?|images(?:\/.*)?)$/.exec(route.path);
       const providerAnalytics = route.kind === "exact" && route.method === "GET" && ["/v1/providers/people-usage", "/v1/model-broker/v1/usage"].includes(route.path);
-      if (!(match && binding.scopeIds.includes(match[1])) && !providerAnalytics) return invalid();
+      const owner = /^\/v1\/providers\/owners\/([a-zA-Z0-9_.-]+)\/v1\/(.*)$/.exec(route.path);
+      const ownerRoute = owner && owner[1] !== "." && owner[1] !== ".." && providerOwnerRoute(route.method, route.kind, owner[2]!);
+      if (!(match && binding.scopeIds.includes(match[1])) && !providerAnalytics && !ownerRoute) return invalid();
     }
     ids.add(binding.gatewayId);
   }
   return { ok: true, value: { transport: transport as GatewayTransportConfig, bindings: bindings as GatewayBinding[] } };
 }
+function providerOwnerRoute(method: unknown, kind: unknown, path: string): boolean {
+  if (kind === "prefix") return path === "completions/" && ["GET", "PUT", "POST"].includes(String(method))
+    || path === "accounts/" && ["GET", "PUT", "DELETE"].includes(String(method));
+  if (method === "GET") return /^(status|plans|accounts|completions\/openapi\.json|completions\/[^/]+(?:\/attempts)?|accounts\/[^/]+(?:\/reservation)?)$/.test(path);
+  if (method === "POST") return /^(control|accounts|accounts\/capabilities|completions\/[^/]+\/(retry|cancel))$/.test(path);
+  if (method === "PUT") return /^(completions\/[^/]+|accounts\/[^/]+\/(enabled|use|reservation))$/.test(path);
+  if (method === "DELETE") return /^accounts\/[^/]+(?:\/reservation)?$/.test(path);
+  return false;
+}
 export function assertGatewayRequest(binding: GatewayBinding, request: Pick<Request, "method" | "url">): CoreResult<void> {
   let path: string;
   try {
     path = new URL(request.url).pathname;
-    const scoped = /^\/v1\/scopes\/([^/]+)(\/.*)$/.exec(path);
+    const scoped = /^(\/v1\/(?:scopes|providers\/owners)\/)([^/]+)(\/.*)$/.exec(path);
     if (scoped) {
-      const scope = decodeURIComponent(scoped[1]!);
-      if (!/^[a-zA-Z0-9_.:-]+$/.test(scope) || scope === "." || scope === "..") return denied("Invalid gateway scope identifier");
-      path = `/v1/scopes/${scope}${scoped[2]}`;
+      const id = decodeURIComponent(scoped[2]!);
+      if (!/^[a-zA-Z0-9_.:-]+$/.test(id) || id === "." || id === "..") return denied("Invalid gateway owner identifier");
+      path = `${scoped[1]}${id}${scoped[3]}`;
     }
   } catch { return denied("Invalid gateway route"); }
   return binding.routeCeiling.some(route => route.method === request.method && (route.kind === "exact" ? route.path === path : path.startsWith(route.path)))

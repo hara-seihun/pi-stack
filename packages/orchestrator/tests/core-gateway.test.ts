@@ -36,6 +36,21 @@ test("gateway configuration cannot invent principals, scopes, route authority or
   expect(parseGatewayConfig(transport, [{ ...binding, scopeIds: ["bob"] }], principals, scopes).ok).toBe(false);
   expect(parseGatewayConfig(transport, [{ ...binding, routeCeiling: [{ method: "POST", kind: "prefix", path: "/v1/" }] }], principals, scopes).ok).toBe(false);
 });
+test("original provider owner ceilings preserve exact operations without a general provider grant", () => {
+  const principals = [{ kind: "person" as const, id: "alice", person: "alice" }], scopes = [{ id: "alice", principalId: "alice" }];
+  const transport = { kind: "unix", socketDir: "/run/pi-stack/gateways" };
+  const owner: GatewayBinding = { ...binding, routeCeiling: [
+    { method: "GET", kind: "exact", path: "/v1/providers/owners/alice-fleet/v1/status" },
+    { method: "GET", kind: "prefix", path: "/v1/providers/owners/alice-fleet/v1/completions/" },
+    { method: "POST", kind: "prefix", path: "/v1/providers/owners/alice-fleet/v1/completions/" },
+  ] };
+  expect(parseGatewayConfig(transport, [owner], principals, scopes).ok).toBe(true);
+  expect(assertGatewayRequest(owner, new Request("http://core.local/v1/providers/owners/alice-fleet/v1/status")).ok).toBe(true);
+  expect(assertGatewayRequest(owner, new Request("http://core.local/v1/providers/owners/alice-fleet/v1/completions/exact-id/cancel", { method: "POST" })).ok).toBe(true);
+  expect(assertGatewayRequest(owner, new Request("http://core.local/v1/providers/owners/bob-fleet/v1/status")).ok).toBe(false);
+  expect(assertGatewayRequest(owner, new Request("http://core.local/v1/providers/owners/alice-fleet/v1/accounts", { method: "POST" })).ok).toBe(false);
+  expect(parseGatewayConfig(transport, [{ ...owner, routeCeiling: [{ method: "GET", kind: "prefix", path: "/v1/providers/owners/alice-fleet/v1/" }] }], principals, scopes).ok).toBe(false);
+});
 test("encoded canonical scope IDs share the declared ceiling without decoding separators", () => {
   const scoped: GatewayBinding = { ...binding, scopeIds: ["person:alice"], routeCeiling: [{ method: "GET", kind: "exact", path: "/v1/scopes/person:alice/projection" }] };
   expect(assertGatewayRequest(scoped, new Request("http://core.local/v1/scopes/person%3Aalice/projection")).ok).toBe(true);
