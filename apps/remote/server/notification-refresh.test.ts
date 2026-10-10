@@ -29,10 +29,6 @@ function harness(owners: string[]) {
   if (start < 0 || end < 0) throw new Error("Notification refresh owner was not found");
   const program = new Bun.Transpiler({ loader: "ts" }).transformSync(source.slice(start, end) + "\nreturn refreshThreadNotifications;");
   const refresh = new Function("directory", "db", "projectThreadNotifications", "notificationFeedback", "notificationErrors", "signalSync", "pushNotifications", program)(
-<<<<<<< HEAD
-    { owners: owners.map(id => ({ id, api: {} })), managerNotificationPolicy: () => ({ ok: true, value: { view: "classic" } }) }, {},
-    (_db: unknown, owner: string) => { const work = deferred(); rounds.push({ owner, work }); return work.promise; },
-=======
     { owners: owners.map(id => ({ id, api: {} })), managerNotificationPolicy: async () => policyFailure === null
       ? { ok: true, value: CLASSIC_NOTIFICATION_POLICY } : { ok: false, error: { message: policyFailure } } }, {},
     (_db: unknown, owner: string, _api: unknown, _directory: unknown, _published: unknown, policy: unknown) => {
@@ -40,7 +36,6 @@ function harness(owners: string[]) {
       started.get(rounds.length)?.resolve();
       return work.promise;
     },
->>>>>>> ffe03030
     (owner: string, message: string | null) => feedback.push({ owner, message }),
     new Map(), () => {}, () => {},
   ) as (cause?: "read" | "change") => Promise<void>;
@@ -51,25 +46,15 @@ test("read-only request bursts join one owner projection and a later read starts
   const { refresh, rounds, policies, waitForRound } = harness(["person"]);
   const first = refresh("read");
   const readers = Array.from({ length: 20 }, () => refresh("read"));
-<<<<<<< HEAD
-  await tick();
-  expect(rounds).toHaveLength(1);
-  rounds[0]!.work.resolve(); await tick();
-=======
   await waitForRound(1);
   expect(rounds).toHaveLength(1);
   expect(policies).toEqual([CLASSIC_NOTIFICATION_POLICY]);
   rounds[0]!.work.resolve(); await Promise.resolve();
->>>>>>> ffe03030
   expect(rounds).toHaveLength(1);
   await Promise.all([first, ...readers]);
   expect(rounds).toHaveLength(1);
   const later = refresh("read");
-<<<<<<< HEAD
-  await tick();
-=======
   await waitForRound(2);
->>>>>>> ffe03030
   expect(rounds).toHaveLength(2);
   rounds[1]!.work.resolve(); await later;
 });
@@ -78,16 +63,6 @@ test("real events during projection request catchup; readers during catchup do n
   const { refresh, rounds, waitForRound } = harness(["person"]);
   const first = refresh("read");
   const events = Array.from({ length: 10 }, () => refresh("change"));
-<<<<<<< HEAD
-  await tick();
-  rounds[0]!.work.resolve();
-  await tick();
-  expect(rounds).toHaveLength(2);
-  const readers = Array.from({ length: 10 }, () => refresh("read"));
-  const nextEvent = refresh("change");
-  await tick();
-  rounds[1]!.work.resolve(); await tick();
-=======
   await waitForRound(1);
   rounds[0]!.work.resolve();
   await waitForRound(2);
@@ -95,7 +70,6 @@ test("real events during projection request catchup; readers during catchup do n
   const readers = Array.from({ length: 10 }, () => refresh("read"));
   const nextEvent = refresh("change");
   rounds[1]!.work.resolve(); await waitForRound(3);
->>>>>>> ffe03030
   expect(rounds).toHaveLength(3);
   const lastReader = refresh("read");
   await tick();
@@ -123,11 +97,7 @@ test("owners project independently and failed refresh keeps feedback and permits
   const { refresh, rounds, feedback, waitForRound } = harness(["person", "fleet"]);
   const first = refresh("read");
   const joiner = refresh("read");
-<<<<<<< HEAD
-  await tick();
-=======
   await waitForRound(2);
->>>>>>> ffe03030
   expect(rounds.map(round => round.owner)).toEqual(["person", "fleet"]);
   rounds[0]!.work.reject(new Error("Owner unavailable"));
   rounds[1]!.work.resolve(); await tick();
@@ -135,11 +105,7 @@ test("owners project independently and failed refresh keeps feedback and permits
   await Promise.all([first, joiner]);
   expect(feedback).toContainEqual({ owner: "person", message: "Owner unavailable" });
   const retry = refresh("read");
-<<<<<<< HEAD
-  await tick();
-=======
   await waitForRound(4);
->>>>>>> ffe03030
   expect(rounds.map(round => round.owner)).toEqual(["person", "fleet", "person", "fleet"]);
   rounds[2]!.work.resolve(); rounds[3]!.work.resolve(); await retry;
   expect(feedback.at(-2)).toEqual({ owner: "person", message: null });
