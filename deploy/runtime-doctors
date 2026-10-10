@@ -5,7 +5,7 @@ source "$control/deploy/lib"
 case $phase in browser|model) ;; *) exit 64;; esac
 runtime=${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}
 cache=${PI_STACK_DOCTOR_CACHE_ROOT:-$(dirname "$runtime")/.pi-stack-doctors}/$user
-bindings=$(mktemp)
+bindings=$(pi_stack_as_root mktemp)
 trap 'pi_stack_as_root rm -f "$bindings"' EXIT
 runtime=$(pi_stack_as_root node "$control/deploy/doctor-cache.mjs" capture "$phase" "$runtime" "$(pi_stack_home "$user")" "$control" "$bindings")
 pi_stack_as_root chown "$user" "$bindings"

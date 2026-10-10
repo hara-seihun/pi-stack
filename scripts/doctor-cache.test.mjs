@@ -52,6 +52,27 @@ test('selection rollback does not rebind a running doctor; next invocation prove
   assert.equal(readdirSync(f.cache).length,1);
 });
 
+test('privileged capture transfers a private capsule to the doctor account and removes it after proof', t => {
+  if (process.getuid() !== 0 && spawnSync('sudo', ['-n', 'true']).status !== 0) { t.skip('root or passwordless sudo required for UID-crossing proof'); return; }
+  const f=fixture(t, `import assert from 'node:assert/strict'; import {readFileSync,statSync,appendFileSync} from 'node:fs';
+    const path=process.env.PI_STACK_DOCTOR_BINDINGS, info=statSync(path);
+    assert.equal(info.uid,process.getuid());assert.equal(info.mode&0o777,0o600);
+    assert.equal(JSON.parse(readFileSync(path)).runtime,process.env.PI_STACK_RUNTIME_DEST);
+    appendFileSync(process.env.TRACE,path+'\\n');process.exit(Number(process.env.TEST_EXIT));`);
+  mkdirSync(f.cache,{recursive:true});
+  const env={PI_STACK_DEPLOY_NO_SUDO:'0'};
+  const result=f.run(0,env);
+  assert.equal(result.status,0,result.stderr);
+  const capsule=readFileSync(f.trace,'utf8').trim();
+  assert.equal(existsSync(capsule),false,'successful proof removes private capsule');
+  const reused=f.run(42,env);assert.equal(reused.status,0,reused.stderr);assert.match(reused.stdout,/proof reused/);
+  writeFileSync(f.probe,readFileSync(f.probe,'utf8')+'\n// new proof input\n');
+  const failed=f.run(42,env);assert.equal(failed.status,42,failed.stderr);
+  const failedCapsule=readFileSync(f.trace,'utf8').trim().split('\n')[1];
+  assert.equal(existsSync(failedCapsule),false,'failed proof also removes private capsule');
+  assert.equal(readdirSync(f.cache).length,1,'failure cannot acquire another receipt');
+});
+
 test('mutating bytes of the captured package refuses successful-command proof', t => {
   const f=fixture(t, `import {readFileSync,writeFileSync} from 'node:fs';
     const bound=JSON.parse(readFileSync(process.env.PI_STACK_DOCTOR_BINDINGS));
