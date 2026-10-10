@@ -4,7 +4,7 @@ import { Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, fsyncSync, lstatSync, openSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
-import { indexedThreadHistory } from "../packages/orchestrator/src/threads/history.mjs";
+import { captureNativeHistoryWatermark } from "../packages/orchestrator/src/threads/history.mjs";
 
 type ObjectValue = Record<string, any>;
 type Identity = { path: string; dev: string; ino: string };
@@ -153,13 +153,12 @@ export function captureAuxiliary(plan: AuxiliaryPlan) {
           imageSources = [];
           for (const thread of imageThreads) {
             need(thread.sessionRoots.some(root => isAbsolute(root) && (resolve(thread.session_file) === resolve(root) || resolve(thread.session_file).startsWith(resolve(root) + sep))), "Native source escapes registered session roots");
-            const indexed = indexedThreadHistory(thread.session_file);
+            const indexed = captureNativeHistoryWatermark(thread.session_file);
             if (!indexed.ok) {
-              if (indexed.error.code === "missing") { imageSources.push({ threadId: thread.id, path: thread.session_file, revision: "unstarted", lastOffset: -1, lastDigest: "" }); continue; }
+              if (indexed.error.code === "missing") { imageSources.push({ threadId: thread.id, path: thread.session_file, revision: "unstarted", lastOffset: -1, lastDigest: "", priorSource: { kind: "absent", observedAt: new Date().toISOString() } }); continue; }
               throw new Error(`Native watermark unavailable: ${indexed.error.code}`);
             }
-            const last = indexed.value.entries.at(-1);
-            imageSources.push({ threadId: thread.id, path: thread.session_file, revision: indexed.value.source.revision, lastOffset: last?.offset ?? -1, lastDigest: last?.digest ?? "" });
+            imageSources.push({ threadId: thread.id, path: thread.session_file, ...indexed.value });
           }
           liveOwner(scope.liveOwner);
         } else {
@@ -171,7 +170,7 @@ export function captureAuxiliary(plan: AuxiliaryPlan) {
           for (const thread of imageThreads) if (!initialIds.has(thread.id)) {
             need(Number.isFinite(thread.created_at) && thread.created_at >= Date.parse(prior!.startedAt), "New source lacks post-baseline creation evidence");
             need(thread.sessionRoots.some(root => isAbsolute(root) && resolve(thread.session_file).startsWith(resolve(root) + sep)), "New native source escapes registered roots");
-            imageSources!.push({ threadId: thread.id, path: thread.session_file, revision: "created-after-baseline", lastOffset: -1, lastDigest: "" });
+            imageSources!.push({ threadId: thread.id, path: thread.session_file, revision: "created-after-baseline", lastOffset: -1, lastDigest: "", priorSource: { kind: "created-after-baseline", createdAt: new Date(thread.created_at).toISOString(), baselineStartedAt: prior!.startedAt } });
           }
         }
       } else need(!supervisorTables.has("inline_images") || plan.scopes.some(candidate => candidate.id !== scope.id && candidate.images?.databasePath === scope.supervisor?.path), "Original image registry requires an explicit owner; cannot disable it");

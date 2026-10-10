@@ -55,6 +55,20 @@ test("image baseline records bounded native offsets under a live ingress owner",
   scope.sessionRoots = ["/not-the-owner"];
   expect(() => captureAuxiliary(plan)).toThrow("escapes registered");
 });
+test("watermark captures oversized historical records without parsing or exporting their bodies", () => {
+  const { plan, supervisorPath, dir, session } = fixture();
+  const scope = plan.scopes[0]!;
+  const ui = new Database(supervisorPath); ui.exec("CREATE TABLE inline_images(id TEXT); CREATE TABLE inline_image_versions(id TEXT); CREATE TABLE inline_image_messages(id TEXT)"); ui.close();
+  scope.images = { scopeId: scope.id, databasePath: supervisorPath, artifactRoot: join(dir, "images"), relatedThreadScopeIds: [] };
+  const proc = readFileSync(`/proc/${process.pid}/stat`, "utf8");
+  scope.liveOwner = { pid: process.pid, startTicks: proc.slice(proc.lastIndexOf(")") + 2).split(" ")[19]! };
+  writeFileSync(session, JSON.stringify({ type: "message", id: "large-tool", message: { role: "toolResult", content: "z".repeat(9 * 1024 * 1024) } }) + "\n");
+  const source = captureAuxiliary(plan).evidence[0]!.nativeImageSources[0];
+  expect(source.size).toBeGreaterThan(8 * 1024 * 1024);
+  expect(source.closedOffset).toBe(source.size);
+  expect(source.prefixDigest).toMatch(/^[a-f0-9]{64}$/);
+  expect(JSON.stringify(source).length).toBeLessThan(1500);
+});
 test("one declared image registry captures related fleet sources sharing its Remote projection", () => {
   const f = fixture(), related = fixture();
   const scope = f.plan.scopes[0]!, fleet = related.plan.scopes[0]!;
@@ -115,8 +129,8 @@ test("watch custody can share the exact thread database without being attributed
   writeFileSync(scope.detachedReceiptPath, JSON.stringify({ state: "detached", scopeId: scope.id, databasePath: scope.threads!.path, databaseIdentity: scope.threads, previousOwner: { identity: "fixture-owner", detachedAt: new Date().toISOString() } }), { mode: 0o600 });
   const final = captureAuxiliary(plan);
   expect(final.evidence[0]!.nativeImageSources.find((r: any) => r.threadId === "manager")).toEqual(initial.evidence[0]!.nativeImageSources.find((r: any) => r.threadId === "manager"));
-  expect(final.evidence[0]!.nativeImageSources.find((r: any) => r.threadId === "new-thread")).toMatchObject({ lastOffset: -1, revision: "created-after-baseline" });
-  expect(final.evidence[0]!.nativeImageSources.find((r: any) => r.threadId === "unstarted")).toMatchObject({ lastOffset: -1, revision: "unstarted" });
+  expect(final.evidence[0]!.nativeImageSources.find((r: any) => r.threadId === "new-thread")).toMatchObject({ lastOffset: -1, revision: "created-after-baseline", priorSource: { kind: "created-after-baseline", baselineStartedAt: initial.startedAt } });
+  expect(final.evidence[0]!.nativeImageSources.find((r: any) => r.threadId === "unstarted")).toMatchObject({ lastOffset: -1, revision: "unstarted", priorSource: { kind: "absent", observedAt: expect.any(String) } });
   expect(final.scopes[0]!.managerRouting.notices.adoptedCursors.settlements).toBe(13);
   expect(JSON.stringify(final)).not.toContain("AFTER_BASELINE_PRIVATE");
   writeFileSync(plan.baselinePath, bytes + " ");
