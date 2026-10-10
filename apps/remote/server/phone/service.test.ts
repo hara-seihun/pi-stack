@@ -65,7 +65,7 @@ mock.module(${JSON.stringify(Bun.resolveSync("playwright-core", new URL(".", imp
 },async close(){ws?.close()}}},async close(){}}}}}));
 await import(${JSON.stringify(new URL("./service.ts", import.meta.url).href)});
 `);
-  const child = Bun.spawn([process.execPath, join(root, "runner.ts")], { env: { ...process.env, PI_STACK_PHONE_CONFIG: join(root, "config"), PI_STACK_PHONE_STATE: join(root, "state"), MOCK_ORIGIN: `http://127.0.0.1:${mockServer.port}` }, stdout: "ignore", stderr: "pipe" });
+  const child = Bun.spawn([process.execPath, join(root, "runner.ts")], { env: { ...process.env, PI_STACK_PHONE_CONFIG: join(root, "config"), PI_STACK_PHONE_STATE: join(root, "state"), PI_REMOTE_PRIVATE_DIR: root, PI_KENAN_ACTION_JOURNAL_DIR: join(root, ".kenan-actions"), MOCK_ORIGIN: `http://127.0.0.1:${mockServer.port}` }, stdout: "ignore", stderr: "pipe" });
   const stderr = new Response(child.stderr).text();
   const request = (path: string, method = "GET", body?: unknown, ownerToken = admin) => fetch(`http://127.0.0.1:${localPort}${path}`, { method, headers: { authorization: `Bearer ${ownerToken}`, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const close = async () => { release(); child.kill("SIGTERM"); const timer = setTimeout(() => child.kill("SIGKILL"), 1500); await child.exited; clearTimeout(timer); mockServer.stop(true); rmSync(root, { recursive: true, force: true }); };
@@ -115,6 +115,16 @@ test("uncertain irreversible dial is retained and an approved identity is never 
     const retry = await (await f.request("/calls", "POST", brief)).json(); expect(retry.id).toBe(first.id); expect(retry.replayed).toBe(false);
     expect((await f.request("/calls", "POST", { ...brief, purpose: "Different purpose" })).status).toBe(409);
     expect(f.requests.filter(r => r.path === "/v2/create-phone-call")).toHaveLength(1);
+  } finally { await f.close(); }
+});
+test("hold installed during async verification fences the actual provider request", async () => {
+  const f = await fixture("cancel");
+  try {
+    const first = await (await f.request("/calls", "POST", brief)).json();
+    await eventually(async () => f.requests.some(r => r.path === "/get-agent/agent_synthetic") ? true : undefined);
+    f.hold({ [brief.to]: "Operator paused this contact" }); f.release();
+    await eventually(async () => { const v = await (await f.request(`/calls/${first.id}`)).json(); return v.call.ended_at ? true : undefined; });
+    expect(f.requests.filter(r => r.path === "/v2/create-phone-call")).toHaveLength(0);
   } finally { await f.close(); }
 });
 test("owner cancellation during provider verification cannot dispatch a late call", async () => {
