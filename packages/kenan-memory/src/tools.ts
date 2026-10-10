@@ -5,6 +5,7 @@ import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { memoryClient } from "./client.js";
 import { rootRequestResponse } from "./root-transport.js";
 import { registerLifeTools } from "./life-tools.js";
+import { ACTION_TOOL_NAMES, registerActionTools } from "./action-tools.js";
 import { LIFE_TOOL_NAMES, type LifeClient } from "./life-contract.js";
 import { oneKenanEnabled } from "./config.js";
 import { isMemoryRole, memoryRole, stateValue } from "./explicit-state.js";
@@ -38,7 +39,7 @@ export function memoryExtension(options: MemoryToolOptions) {
       initialized = true;
     }
     pi.on("before_agent_start", async event => {
-      const names = new Set([...MEMORY_TOOL_NAMES, ...LIFE_TOOL_NAMES, "ask_kenan"]);
+      const names = new Set([...MEMORY_TOOL_NAMES, ...LIFE_TOOL_NAMES, ...ACTION_TOOL_NAMES, "ask_kenan"]);
       if (!oneKenanEnabled(options.env)) {
         if (initialized) pi.setActiveTools(pi.getActiveTools().filter(name => !names.has(name)));
         return;
@@ -137,6 +138,7 @@ function registerMemoryTools(options: MemoryToolOptions, pi: ExtensionAPI) {
       }));
     }
     if (room && !root) return;
+    registerActionTools(pi, options.env);
     const policyPrompt = registerLifeTools(pi, { env: options.env, root, ensureSession, client: options.lifeClient });
     let turnId = randomUUID();
     pi.on("turn_start", () => { turnId = randomUUID(); });

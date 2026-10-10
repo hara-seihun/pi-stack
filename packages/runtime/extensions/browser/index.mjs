@@ -10,7 +10,12 @@ const browserPackage = require.resolve("agent-browser/package.json");
 const bin = realpathSync(join(dirname(dirname(browserPackage)), ".bin"));
 const nativeEntry = require.resolve("pi-agent-browser-native/dist/extensions/agent-browser/index.js");
 
+export function browserEffectEnvironment() {
+  return globalThis[Symbol.for("pi-stack.session-environment")]?.getStore() ?? process.env;
+}
+
 export default async function browser(pi) {
+  const effectEnvironment = browserEffectEnvironment();
   const scoped = process.platform === "linux" && process.env.PI_THREAD_RESOURCE_BOUNDARY;
   const front = scoped ? join(dirname(entry), "bin") : bin;
   if (scoped) process.env.PI_STACK_BROWSER_EXECUTABLE = realpathSync(join(bin, "agent-browser"));
@@ -25,13 +30,13 @@ export default async function browser(pi) {
   ]).then(parts => Object.assign({}, ...parts));
   const createAuthority = async () => {
     const { ActionHttpClient } = await import("kenan-memory/action-http-client");
-    return new ActionHttpClient(process.env);
+    return new ActionHttpClient(effectEnvironment);
   };
   return initialize(new Proxy(pi, {
     get(target, key) {
       if (key !== "registerTool") return Reflect.get(target, key);
       return tool => {
-        if (tool.name === "agent_browser") installBrowserEffectFence(tool, { loadContract, createAuthority, env: process.env });
+        if (tool.name === "agent_browser") installBrowserEffectFence(tool, { loadContract, createAuthority, env: effectEnvironment });
         return target.registerTool(tool);
       };
     },

@@ -54,7 +54,7 @@ class BoundaryTests(unittest.TestCase):
         config.write_text('{"oneKenan":false}')
         env = {"PATH": os.environ["PATH"], "HOME": str(directory), "USER": "fixture-mail",
                "PI_KENAN_MEMORY_PERSON": "fixture-mail", "PI_KENAN_PERSON": "fixture-mail",
-               "PI_KENAN_ACTION_JOURNAL_DIR": str(directory / "actions"),
+               "PI_KENAN_ACTION_JOURNAL_DIR": str(directory / "actions"), "PI_ACTION_AUTHORITY_LOCAL_FIXTURE": "1",
                "PI_KENAN_ACTION_CLI": str(CLI), "PI_STACK_HOST_CONFIG": str(config)}
         self.enterContext(patch.dict(os.environ, env, clear=True))
         self.enterContext(patch.object(mail, "creds", return_value=("sender@example.test", "synthetic-only")))

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $# == 1 && $1 == --help ]]; then
+  printf '%s\n' 'pi-actions OPERATION: JSON stdin, typed JSON receipt from canonical owner authority' 'submit inspect list claim dispatch finish reconcile recover retry followup hold-recipient release-recipient link-recipients' 'Submit reserves only; inflight/uncertain effects never replay'
+  exit 0
+fi
+exec bun /srv/pi/runtime/node_modules/kenan-memory/src/actions-cli.ts "$@"

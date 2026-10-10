@@ -1,0 +1,85 @@
+#!/usr/bin/env bun
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { createHash } from "node:crypto";
+import assert from "node:assert/strict";
+
+const args = process.argv.slice(2);
+const option = (name: string) => { const index = args.indexOf(name); return index < 0 ? undefined : args[index + 1]; };
+const source = option("--source-root");
+const installed = option("--root") ?? "/srv/pi";
+const modulePath = source ? resolve(source, "packages/kenan-memory/src/actions.ts") : resolve(installed, "runtime/node_modules/kenan-memory/src/actions.ts");
+const remote = source ? resolve(source, "apps/remote/server") : resolve(installed, "pi-remote/server");
+const { ActionStore } = await import(pathToFileURL(modulePath).href);
+const { externalActionsEndpoint } = await import(pathToFileURL(join(remote, "external-actions.ts")).href);
+const { reservePhoneAction, settlePhoneAction } = await import(pathToFileURL(join(remote, "phone/action-admission.ts")).href);
+const root = mkdtempSync(join(tmpdir(), "pi-actions-installed-"));
+const proofs: string[] = [];
+const stores: any[] = [];
+const servers: ReturnType<typeof Bun.serve>[] = [];
+const get = (result: any) => { assert.equal(result.ok, true, JSON.stringify(result)); return result.value; };
+const make = (dir: string, owner = "synthetic-alice") => { const store = new ActionStore(join(root, dir), owner); stores.push(store); return store; };
+const intent = (changes = {}) => ({ intentKey: "synthetic:order-status", recipients: ["+12025550123"], transport: "synthetic", payload: { purpose: "Synthetic acceptance only" }, requestId: crypto.randomUUID(), threadId: "synthetic-worker", ...changes });
+const accepted = { kind: "provider-receipt", reference: "synthetic-provider:1", detail: "Synthetic effect accepted" };
+const observation = { kind: "operator-observation", reference: "synthetic-sender-retired", detail: "Synthetic retired sender; provider evidence inspected" };
+try {
+  const actions = make("canonical");
+  const first = get(actions.submit(intent())).action;
+  const again = get(actions.submit(intent())); assert.equal(again.action.id, first.id);
+  assert.equal(actions.submit(intent({ payload: { changed: true } })).error, "payload-conflict");
+  proofs.push("same-intent-new-request-ids-and-payload-conflict");
+  const ticket = get(actions.claim(first.id, "synthetic-sender")); get(actions.dispatch(ticket));
+  assert.equal(actions.dispatch(ticket).error, "fenced");
+  assert.equal(get(actions.submit(intent({ intentKey: "rephrased", transport: "email.send" }))).disposition, "recipient-held");
+  proofs.push("one-shot-dispatch-and-cross-transport-contact-fence");
+  const reopened = make("canonical"); assert.equal(reopened.claim(first.id, "restarted").error, "fenced");
+  const unknown = get(reopened.recover(first.id, ticket.revision, observation, "owning-operator"));
+  assert.equal(unknown.state, "uncertain"); assert.equal(reopened.retryNoEffect(first.id, unknown.revision, observation, "operator").ok, false);
+  const done = get(reopened.reconcile(first.id, unknown.revision, "effect-confirmed", accepted, "operator"));
+  assert.equal(done.state, "succeeded");
+  proofs.push("crash-after-effect-before-receipt-and-evidence-reconciliation");
+  const bob = make("canonical", "synthetic-bob"); assert.equal(bob.inspect(first.id).error, "not-found"); get(bob.submit(intent()));
+  proofs.push("synthetic-owner-isolation");
+  const held = make("held"); get(held.holdRecipient("+12025550123", "Synthetic hold", "operator"));
+  const blocked = get(held.submit(intent())).action; assert.equal(blocked.state, "held"); assert.equal(held.claim(blocked.id, "worker").error, "fenced");
+  proofs.push("held-recipient");
+  const aliases = make("aliases"); get(aliases.submit(intent({ recipients: ["signal:synthetic-aci"] }))); get(aliases.linkRecipients(["signal:synthetic-aci", "+12025550123"], "verified-provider"));
+  assert.equal(get(aliases.submit(intent({ intentKey: "phone:new" }))).disposition, "recipient-held");
+  proofs.push("late-verified-signal-phone-alias-coordination");
+  const phone = make("phone");
+  const brief = { requestId: crypto.randomUUID(), to: "+12025550123", purpose: "Synthetic phone acceptance", opening: "Synthetic only", facts: [], constraints: [], maxSeconds: 60 };
+  const pt = get(reservePhoneAction(phone, brief)); get(phone.dispatch(pt)); get(settlePhoneAction(phone, pt, "synthetic-call", "accepted", "synthetic-provider-call"));
+  assert.equal(reservePhoneAction(phone, { ...brief, requestId: crypto.randomUUID() }).ok, false);
+  proofs.push("installed-telephone-adapter-never-redials-existing-contact");
+  const authority = make("http"); let dispatches = 0;
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
+    const body = await req.clone().json(); const result = await externalActionsEndpoint(req, authority, true, true);
+    if (body.operation === "dispatch" && result.ok) dispatches++;
+    return result;
+  } }); servers.push(server);
+  const clientPath = source ? resolve(source, "packages/kenan-memory/src/action-client.ts") : resolve(installed, "runtime/node_modules/kenan-memory/src/action-client.ts");
+  const script = `import {ActionClient} from ${JSON.stringify(clientPath)}; const c=new ActionClient('http://127.0.0.1:${server.port}'); const a=c.submit({...${JSON.stringify(intent())},requestId:crypto.randomUUID()}); if(a.ok && a.value.disposition!=='recipient-held' && a.value.action.state==='accepted'){const t=c.claim(a.value.action.id,'synthetic-worker'); if(t.ok){const d=c.dispatch(t.value); if(!d.ok)throw Error(d.message);}}`;
+  const children = Array.from({ length: 12 }, () => Bun.spawn([process.execPath, "--eval", script], { stdout: "pipe", stderr: "pipe" }));
+  await Promise.all(children.map(async child => { const stderr = await new Response(child.stderr).text(); assert.equal(await child.exited, 0, stderr); }));
+  assert.equal(dispatches, 1); assert.equal(get(authority.list()).length, 1);
+  proofs.push("twelve-independent-http-clients-one-synthetic-effect");
+  const commit = source ? Bun.spawnSync(["git", "-C", source, "rev-parse", "HEAD"]).stdout.toString().trim() : readFileSync(join(installed, "pi-remote/.pi-stack-commit"), "utf8").trim();
+  const runtimeCommit = source ? commit : readFileSync(join(installed, "runtime/.pi-stack-commit"), "utf8").trim();
+  assert.equal(runtimeCommit, commit, "Remote and runtime must select the same installed action implementation");
+  if (!source) {
+    const { ActionClient } = await import(pathToFileURL(clientPath).href);
+    const actual = new ActionClient(process.env.PI_REMOTE_SERVER_URL ?? `http://127.0.0.1:${process.env.PI_REMOTE_ROUTER_PORT ?? "8788"}`, undefined, process.env.PI_REMOTE_SERVER_URL ? process.env.PI_THREAD_TOKEN : undefined);
+    const noRecord = actual.inspect(`synthetic-not-found:${crypto.randomUUID()}`);
+    assert.equal(noRecord.ok, false); assert.equal(noRecord.error, "not-found", JSON.stringify(noRecord));
+    proofs.push("real-owner-router-canonical-readonly-probe-no-state-mutation");
+  }
+  const receipt = { ok: true, scope: source ? "source-synthetic" : "installed-synthetic-and-readonly-route", commit, runtimeCommit, modulePath, sourceHash: createHash("sha256").update(readFileSync(modulePath)).digest("hex"), realRecipientsContacted: 0, tests: proofs, at: new Date().toISOString() };
+  const output = option("--output"); if (output) writeFileSync(output, JSON.stringify(receipt, null, 2) + "\n", { mode: 0o600 });
+  console.log(JSON.stringify(receipt));
+} finally {
+  for (const server of servers) await server.stop(true);
+  for (const store of stores) store.close();
+  rmSync(root, { recursive: true, force: true });
+}

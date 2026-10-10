@@ -15,7 +15,9 @@
     "./private-store": { "types": "./dist/private-store.d.ts", "bun": "./src/private-store.ts", "default": "./dist/private-store.js" },
     "./tools": { "types": "./dist/tools.d.ts", "bun": "./src/tools.ts", "default": "./dist/tools.js" },
     "./session": { "types": "./dist/session.d.ts", "bun": "./src/session.ts", "default": "./dist/session.js" },
-    "./journal": { "types": "./dist/journal.d.ts", "bun": "./src/journal.ts", "default": "./dist/journal.js" }
+    "./journal": { "types": "./dist/journal.d.ts", "bun": "./src/journal.ts", "default": "./dist/journal.js" },
+    "./actions": { "types": "./dist/actions.d.ts", "bun": "./src/actions.ts", "default": "./dist/actions.js" },
+    "./action-http-client": { "types": "./dist/action-http-client.d.ts", "bun": "./src/action-http-client.ts", "default": "./dist/action-http-client.js" }
   },
   "scripts": { "build": "tsc -p tsconfig.json", "test": "bun test tests", "start": "bun src/main.ts" },
   "peerDependencies": { "@earendil-works/pi-coding-agent": ">=0.87.1 <0.88.0", "typebox": "^1.3.16" }

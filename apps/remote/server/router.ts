@@ -19,6 +19,7 @@ import { Rooms, ROOM_CUSTODIAN } from "./rooms";
 import { loopbackPeer } from "pi-orchestrator/api";
 import { handleAgentRooms, roomPersonUids } from "./agent-rooms";
 import { handleAgentSignal, isSignalProductPath } from "./agent-signal";
+import { handleAgentActions } from "./agent-actions";
 import { handleAgentManager } from "./agent-manager";
 import { oneKenanEnabled } from "kenan-memory/config";
 import { oneKenanConfig, custodyAuthenticate, custodyStatus } from "./one-kenan";
@@ -478,6 +479,10 @@ async function route(req: Request, url: URL, peer?: { uid: number }): Promise<Re
     user => grants.get(user) ?? [], ENVIRONMENT_ID,
     (person, origin, request, target, upstream, sourceEnvironment) => proxy(person, origin, request, target, request.signal, upstream, sourceEnvironment));
   if (/^\/v1\/(?:manager-relay|remotes\/[^/]+\/v1\/manager-relay)(?:\/|$)/.test(url.pathname)) return Response.json({ error: "Use the account-bound manager relay" }, { status: 403 });
+  if (url.pathname === "/v1/external-actions") return handleAgentActions(req, peer, roomPeople, user => byUser.get(user),
+    user => grants.get(user) ?? [], ENVIRONMENT_ID,
+    (person, origin, request, target, upstream, sourceEnvironment) => proxy(person, origin, request, target, request.signal, upstream, sourceEnvironment));
+  if (/^\/v1\/remotes\/[^/]+\/v1\/external-actions(?:\/|$)/.test(url.pathname)) return Response.json({ ok: false, error: "unavailable", message: "External actions require the account-bound local authority" }, { status: 403 });
   if (/^\/v1\/agent-signal(?:\/|$)/.test(url.pathname)) return handleAgentSignal(req, peer, roomPeople, user => byUser.get(user),
     (person, request, target) => proxy(person, `http://127.0.0.1:${person.port}`, request, target, request.signal));
   if (isSignalProductPath(url.pathname)) return Response.json({ error: "Signal is an agent tool, not an app endpoint", code: "forbidden" }, { status: 403 });
@@ -583,7 +588,7 @@ Bun.serve<ProxySocketData>({
     if (url.pathname.startsWith("/v1/auth/")) return oauthRoute(req, url);
     if (req.method === "OPTIONS" && url.pathname.startsWith("/v1/")) return preflight();
     if (req.headers.get("upgrade")?.toLowerCase() === "websocket") return websocketRoute(req, url, server);
-    const socket = /^\/v1\/(?:agent-rooms|agent-signal|agent-manager)(?:\/|$)/.test(url.pathname) ? server.requestIP(req) : null;
+    const socket = /^\/v1\/(?:agent-rooms|agent-signal|agent-manager|external-actions)(?:\/|$)/.test(url.pathname) ? server.requestIP(req) : null;
     const peer = socket?.address === "127.0.0.1" && HOST === "127.0.0.1"
       ? loopbackPeer({ address: socket.address, port: socket.port, localAddress: HOST, localPort: PORT }, "/proc", false) : undefined;
     const response = await route(req, url, peer);

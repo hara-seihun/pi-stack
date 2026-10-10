@@ -93,6 +93,9 @@ def main(name, args, providers, execute=os.execv):
 
 
 def entry():
+    if pathlib.Path(sys.argv[0]).name == 'main' and sys.argv[1:] == ['--help']:
+        print('Raw outbound guard: invoke as signal-cli, msmtp or sendmail. Reads use declared providers; dispatch requires pi-signal/pi-mail-send canonical authority.')
+        return 0
     try:
         providers = json.loads(CONFIG.read_text())
         if not isinstance(providers, dict):

@@ -121,6 +121,8 @@ import { SourceTranscripts, type SourceResult } from "./source-transcripts";
 import { refreshTranscriptProjection } from "./transcript-refresh";
 import { MachineActions } from "./machine-actions";
 import { createMessagingService } from "./messaging";
+import { ActionStore, ActionClient } from "kenan-memory/actions";
+import { externalActionsEndpoint, ownedPhoneActionCaller } from "./external-actions";
 import { PiReactions, nativeMessageExists, reactToMessage } from "./reactions";
 import { parseMessageReference } from "./message-protocol";
 import { decodeMessageReply, encodeMessageReply, replyFromNativeEntry } from "./message-replies";
@@ -1711,7 +1713,11 @@ if (!meetingRuntime.ok) throw new Error(`Meeting runtime unavailable: ${meetingR
 const meet = meetingRuntime.value;
 
 
-const messaging = createMessagingService(DATA, PRIVATE_DIR, ENVIRONMENT_REQUIRES_UNLOCK, () => { trackFeature("signal", "agent"); });
+const externalActions = ENVIRONMENT_REQUIRES_UNLOCK
+  ? MANAGER_ENVIRONMENT_ID === ENVIRONMENT_ID ? new ActionStore(join(PRIVATE_DIR, ".kenan-actions"), MESSAGE_OWNER.id)
+    : new ActionClient(`http://127.0.0.1:${process.env.PI_REMOTE_ROUTER_PORT ?? "8788"}`)
+  : null;
+const messaging = createMessagingService(DATA, PRIVATE_DIR, ENVIRONMENT_REQUIRES_UNLOCK, () => { trackFeature("signal", "agent"); }, externalActions ?? undefined);
 const calendar = new CalendarStore(DATA, process.env.PI_REMOTE_SENDER_ID ?? process.env.USER ?? "user", process.env.PI_REMOTE_CALENDAR_FEED_BASE);
 if (process.env.PI_PERSON_TIMEZONE_FILE) {
   if (!calendar.timezoneMigration.ok) throw new Error(`Owner timezone migration unavailable: ${calendar.timezoneMigration.error.message}`);
@@ -1787,6 +1793,14 @@ const server = Bun.serve<SocketData>({
       if (!parsed.ok) return json(parsed, 400);
       const result = featureUsage.record(parsed.value, resolved.kind === "person" ? "human" : "agent");
       return json(result, result.ok ? 200 : 503);
+    }
+    if (url.pathname === "/v1/external-actions") {
+      if (MANAGER_ENVIRONMENT_ID !== ENVIRONMENT_ID) return json({ ok: false, error: "unavailable", message: "This environment does not own canonical actions; use the account-bound router, never a local fallback ledger" }, 409);
+      const resolved = callers.resolve(caller);
+      const admitted = !("error" in resolved) && phoneCallerAllowed(resolved, process.getuid?.() ?? -1);
+      const phone = ownedPhoneActionCaller(req, MESSAGE_OWNER.id, peer?.address === "127.0.0.1" || peer?.address === "::1");
+      const canReconcile = phone || !("error" in resolved) && (resolved.kind === "person" || resolved.kind === "process" && resolved.uid === process.getuid?.() || resolved.kind === "thread" && resolved.threadId === manager?.snapshot().managerThreadId);
+      return externalActionsEndpoint(req, externalActions, admitted || phone, canReconcile);
     }
     if (url.pathname.startsWith("/v1/telephone/")) {
       const destination = meetingDestination();
@@ -1975,6 +1989,10 @@ const server = Bun.serve<SocketData>({
     if (/^\/v1\/agent-signal(?:\/|$)/.test(url.pathname)) {
       const resolved = callers.resolve(caller);
       if ("error" in resolved || !phoneCallerAllowed(resolved, process.getuid?.() ?? -1)) return error("Signal tools require this person's authorized local caller", 403);
+      if (req.method === "POST") {
+        const body = await req.clone().json().catch(() => null);
+        if (body?.followup && resolved.kind === "thread" && resolved.threadId !== manager?.snapshot().managerThreadId) return error("Contact followup requires the managing thread or owning operator", 403);
+      }
       httpServer.timeout(req, 65);
       return await messaging.handle(req) ?? error("Unknown Signal tool operation", 404);
     }
@@ -2784,7 +2802,7 @@ const supervisorRelease = new SupervisorRelease({
     runner.detach();
   },
   detach: () => threads.detach(),
-  closeImages: async () => { await calendar.close(); await watchList.close(); speech?.close(); await messaging.close(); await closeImageGeneration(); },
+  closeImages: async () => { await calendar.close(); await watchList.close(); speech?.close(); await messaging.close(); externalActions?.close(); await closeImageGeneration(); },
   stopServer: () => { server.stop(true); },
   closeDatabase: () => db.close(),
   exit: code => process.exit(code),
