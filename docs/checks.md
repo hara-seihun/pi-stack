@@ -2,7 +2,7 @@
 
 ## Delivery policy
 
-Publication ships the submitted exact SHA; later `main` cannot replace or requalify an in-flight candidate. kenan-server builds and deploys with service-start recovery only, running zero tests, doctors, qualification, warm-up or browser gates in its delivery path. Converge independently runs the minimal builds/tests relevant to changed source and a host health check. Its results cannot delay or roll back kenan-server. Tests, proofs and doctors outside that minimal remote lane run after serving; receipts report passed, failed, pending or not run truthfully, separately from host delivery. Neither a complete check graph nor a fleet-wide green result is required before local serving.
+Publication ships the submitted exact SHA; later `main` cannot replace or requalify an in-flight candidate. kenan-server builds and deploys with service-start recovery only, running zero tests, doctors, qualification, warm-up or browser gates in its delivery path. Converge independently runs `minimal` changed-source builds and actual service/source health. `PI_STACK_RELEASE_MODE=immediate|minimal|qualified` selects the host path; publication uses `immediate` locally and `qualified` for post-serving diagnostics. Its results cannot delay or roll back kenan-server. Tests, proofs and doctors outside that minimal remote lane run after serving; receipts report passed, failed, pending or not run truthfully, separately from host delivery. Neither a complete check graph nor a fleet-wide green result is required before local serving.
 
 ## Check graph and reuse
 

@@ -25,7 +25,7 @@ There is no GitHub Actions workflow or self-hosted runner attached to this publi
 
 Submit the exact committed source to the configured publication owner. That SHA is the delivery candidate; a later `main` neither replaces it nor requires it to qualify again. Source-history admission still protects public roots, retained owner repairs and each host's selected history.
 
-On kenan-server, publication builds the required artifacts and deploys immediately, with service-start recovery only: zero tests, doctors, qualification, warm-up or browser gates. Converge owns an independent lane with the minimal changed-source builds/tests and host health check. It cannot delay or roll back kenan-server. Tests, proofs and doctors outside that minimal remote lane run after serving and record their actual outcomes, not a global success gate. [Checks](checks.md) describes source-bound verdict reuse; [deployment](deployment.md#publication-owner) owns delivery and repair.
+On kenan-server, publication builds the required artifacts and deploys immediately, with service-start recovery only: zero tests, doctors, qualification, warm-up or browser gates. Converge owns an independent `minimal` lane with changed-source builds and actual service/source health; kenan-server uses `immediate` mode and full post-serving diagnostics use `qualified` mode. It cannot delay or roll back kenan-server. Tests, proofs and doctors outside that minimal remote lane run after serving and record their actual outcomes, not a global success gate. [Checks](checks.md) describes source-bound verdict reuse; [deployment](deployment.md#publication-owner) owns delivery and repair.
 
 ## Client before server activation
 
