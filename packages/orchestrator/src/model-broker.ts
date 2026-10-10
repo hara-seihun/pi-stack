@@ -9,7 +9,7 @@ import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { createParser } from "eventsource-parser";
 import { Store } from "./store.js";
 import { CompletionService } from "./completion.js";
-import { isCompletionInput, isCompletionRequestId } from "./completion-contract.js";
+import { completionHttpStatus, isCompletionInput, isCompletionRequestId } from "./completion-contract.js";
 import { catalogModel, modelDrainsMeter } from "./catalog.js";
 import { allowsAccountUse, type UsageComponent } from "./domain.js";
 import { imageAuth } from "./image-service.js";
@@ -24,6 +24,7 @@ import { BROKER_ROUTES, validateBrokerBody, type BrokerFamily } from "./model-br
 import { anthropicMeterReadings } from "./extension/usage-logger.js";
 import { forwardVoiceRequest } from "./voice-broker.js";
 import { attachMeetRecognitionBroker } from "./meet-recognition-broker.js";
+import { ModelAvailabilityStore, modelAvailabilityPath, sharedModelRefusal, type SharedModelRefusal } from "./threads/model-availability.js";
 
 export interface BrokerListener {
   principal: string;
@@ -66,6 +67,12 @@ const json = (res: ServerResponse, status: number, error: string) => {
   res.end(JSON.stringify({ error: { message: error, type: "model_broker_error" } }));
 };
 
+const refuseModel = (res: ServerResponse, refusal: SharedModelRefusal) => {
+  if (res.headersSent) { res.destroy(); return; }
+  res.writeHead(completionHttpStatus(refusal.code), { "content-type": "application/json" });
+  res.end(JSON.stringify({ error: { ...refusal, type: "model_broker_error" } }));
+};
+
 interface DispatchReceipt {
   id: string; requestId: string; principal: string; accountId: string; model: string;
   serviceTier: string; at: number; updatedAt: number; httpStatus?: number;
@@ -74,7 +81,7 @@ interface DispatchReceipt {
 const dispatchKey = (principal: string) => `broker-dispatches:${principal}`;
 
 export type BrokerTransport = (url: string, init: RequestInit) => Promise<Response>;
-export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTransport = fetch) {
+export function createModelBroker(config: ModelBrokerConfig, availability: ModelAvailabilityStore, transport: BrokerTransport = fetch) {
   const store = Store.open(config.ledgerPath);
   // Grants are desired state the broker owns for every consumer of the ledger, including daemon
   // admission of completions this broker queued earlier. Reloading the grant file republishes them.
@@ -150,6 +157,8 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
       } catch { return error(400, "invalid-request", "Invalid completion JSON."); }
       if (!isCompletionInput(input)) return error(400, "invalid-request", "Invalid completion input.");
       const model = catalogModel(input.model)!;
+      const unavailable = sharedModelRefusal(availability, `${model.provider}/${model.model}`);
+      if (unavailable) return reply(completionHttpStatus(unavailable.code), { error: { code: unavailable.code, message: unavailable.message } });
       if (!grant.models.includes(`${model.provider}/${model.model}`)) return error(403, "invalid-request", "This model is not shared with your Unix account.");
       const refusal = completions.get(ownedId) ? null : overAllowance(listener.principal);
       if (refusal) return error(403, "invalid-state", refusal);
@@ -195,6 +204,8 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
       catch { json(res, 400, "Invalid JSON"); return; }
       const invalid = validateBrokerBody(family, body);
       if (invalid) { json(res, 400, invalid); return; }
+      const unavailable = sharedModelRefusal(availability, `${family}/${body.model}`);
+      if (unavailable) { refuseModel(res, unavailable); return; }
       if (!grant.models.includes(`${family}/${body.model}`)) { json(res, 403, "This model is not shared with your Unix account"); return; }
       const ultrafast = body.service_tier === "ultrafast";
       if (ultrafast && !modelSpeedModes(family, body.model).includes("ultrafast")) { json(res, 400, "Ultrafast is only available for Codex Astra or Sol models"); return; }
@@ -394,7 +405,7 @@ export function loadBrokerConfig(path: string): ModelBrokerConfig {
 
 export async function runModelBroker(path: string): Promise<void> {
   const config = loadBrokerConfig(path);
-  const broker = createModelBroker(config);
+  const broker = createModelBroker(config, new ModelAvailabilityStore(modelAvailabilityPath()));
   await broker.listen();
   const topology = (listeners: readonly BrokerListener[]) => listeners.map(listener => `${listener.principal}:${listener.port}`).sort().join(",");
   // An edited grant file reaches queued completions and live routing without cancelling active

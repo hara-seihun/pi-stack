@@ -613,6 +613,14 @@
                                 {
                                   "type": "string",
                                   "const": "rate-limited"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "model-disabled"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "model-policy-unavailable"
                                 }
                               ]
                             },
@@ -705,6 +713,14 @@
                                 {
                                   "type": "string",
                                   "const": "rate-limited"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "model-disabled"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "model-policy-unavailable"
                                 }
                               ]
                             },
@@ -797,6 +813,14 @@
                                 {
                                   "type": "string",
                                   "const": "rate-limited"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "model-disabled"
+                                },
+                                {
+                                  "type": "string",
+                                  "const": "model-policy-unavailable"
                                 }
                               ]
                             },
@@ -1280,6 +1304,14 @@
                       {
                         "type": "string",
                         "const": "rate-limited"
+                      },
+                      {
+                        "type": "string",
+                        "const": "model-disabled"
+                      },
+                      {
+                        "type": "string",
+                        "const": "model-policy-unavailable"
                       }
                     ]
                   },
@@ -1410,6 +1442,14 @@
                       {
                         "type": "string",
                         "const": "rate-limited"
+                      },
+                      {
+                        "type": "string",
+                        "const": "model-disabled"
+                      },
+                      {
+                        "type": "string",
+                        "const": "model-policy-unavailable"
                       }
                     ]
                   },
@@ -1540,6 +1580,14 @@
                       {
                         "type": "string",
                         "const": "rate-limited"
+                      },
+                      {
+                        "type": "string",
+                        "const": "model-disabled"
+                      },
+                      {
+                        "type": "string",
+                        "const": "model-policy-unavailable"
                       }
                     ]
                   },
@@ -1752,6 +1800,14 @@
                   {
                     "type": "string",
                     "const": "rate-limited"
+                  },
+                  {
+                    "type": "string",
+                    "const": "model-disabled"
+                  },
+                  {
+                    "type": "string",
+                    "const": "model-policy-unavailable"
                   }
                 ]
               },

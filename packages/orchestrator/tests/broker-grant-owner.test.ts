@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/store.js";
 import { createModelBroker, validateBrokerConfig } from "../src/model-broker.js";
+import { noModelPolicy } from "./fixtures/model-availability.js";
 
 const cleanup: (() => Promise<void> | void)[] = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
@@ -22,7 +23,7 @@ test("independent root broker never replaces ordinary grants, even across reload
   f.store.publishBrokerGrants([grant("alice")]);
   const root = createModelBroker({ ledgerPath: f.ledgerPath, authPath: f.authPath, grantOwner: "one-kenan", listeners: [{
     ...grant("pi-kenan"), port: 0, maxInFlight: 2,
-  }] });
+  }] }, noModelPolicy);
   cleanup.push(() => root.close());
   const [port] = await root.listen();
   expect(port).toBeGreaterThan(0);

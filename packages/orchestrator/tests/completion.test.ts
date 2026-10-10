@@ -10,6 +10,7 @@ import { reconcileCompletionReceipts, saveCompletionReceipt } from "../src/host/
 import { Store } from "../src/store.js";
 import { loadConfig } from "../src/config.js";
 import { assignCompletion } from "../src/policy.js";
+import { noModelPolicy } from "./fixtures/model-availability.js";
 
 const input: CompletionInput = { model: "luna", prompt: "  exact user\n", systemPrompt: "exact system", metadata: { application: "test", nested: { b: 2, a: 1 } } };
 const execution: CompletionExecution = { state: "completed", result: { text: "  exact result\n", provider: "openai-codex", model: "gpt-6-luna", responseId: "resp-provider", usage: { input: 10, output: 4, cacheRead: 2, cacheWrite: 0, totalTokens: 16, reasoning: 1 }, stopReason: "stop" } };
@@ -61,14 +62,14 @@ describe("durable completions", () => {
       store.upsertAccount({ id: "account", provider: "openai-codex" });
       store.recordMeter("account", "weekly", 1, Date.now() + 60_000);
       const record = value(service.submit("thinking", { ...input, model, thinkingLevel }));
-      const first = assignCompletion(store, record.runId, model, config).assignment!;
+      const first = assignCompletion(store, record.runId, model, config, noModelPolicy).assignment!;
       expect(first).toMatchObject({ model: `gpt-6-${model}`, thinking: expected });
       expect(store.assignRun(record.runId, { ...first, unit: "completion", releasePath: "/release" })).toBe(true);
       expect(store.run(record.runId)?.thinking).toBe(expected);
       value(service.claim(record.runId, "rejected"));
       const queued = value(service.settle(record.runId, "rejected", { state: "failed", error: { code: "rate-limited", httpStatus: 429, message: "rejected", retryAfterMs: 1000 } }));
       const changed = { ...config, profiles: { [model]: [{ provider: "openai-codex", model: "gpt-6-astra", thinking: "low" }] } };
-      const retry = assignCompletion(store, record.runId, model, changed, queued.retryAt! + 1).assignment!;
+      const retry = assignCompletion(store, record.runId, model, changed, noModelPolicy, queued.retryAt! + 1).assignment!;
       expect(retry).toMatchObject({ model: first.model, thinking: expected });
       expect(store.assignRun(record.runId, { ...retry, unit: "retry", releasePath: "/next-release" })).toBe(true);
       expect(store.run(record.runId)?.thinking).toBe(expected);

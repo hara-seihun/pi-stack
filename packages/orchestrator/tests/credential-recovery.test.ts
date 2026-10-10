@@ -8,6 +8,7 @@ import { isCredentialError, isRejectedTokenError } from "../src/provider-errors.
 import { meterCredential } from "../src/auth/meter-credential.js";
 import { eligibleInteractiveAccounts } from "../src/auth/account-selection.js";
 import { accountCapacity, assignCompletion } from "../src/policy.js";
+import { noModelPolicy } from "./fixtures/model-availability.js";
 import { loadConfig } from "../src/config.js";
 import { Store } from "../src/store.js";
 
@@ -48,7 +49,7 @@ test.each(["definitive", "network", "unchanged"] as const)("failed repair exclud
   const config = { ...loadConfig(), authPath: f.path };
   expect(eligibleInteractiveAccounts(store, auth, "openai-codex")).toHaveLength(0);
   expect(accountCapacity(store, alias, "live", config).state).toBe("unavailable");
-  expect(assignCompletion(store, "blocked-completion", "luna", config).refusals).toContainEqual(expect.objectContaining({ accountId: alias, reason: expect.stringMatching(/shared OAuth credential/) }));
+  expect(assignCompletion(store, "blocked-completion", "luna", config, noModelPolicy).refusals).toContainEqual(expect.objectContaining({ accountId: alias, reason: expect.stringMatching(/shared OAuth credential/) }));
   f.advance();
   f.refresh.mockResolvedValue({ ...f.credential, access: "recovered", refresh: "new" });
   if (kind === "network") expect((await auth.credential(alias, signal)).access).toBe("recovered");

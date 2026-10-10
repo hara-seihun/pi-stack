@@ -8,6 +8,7 @@ import { Store } from "../src/store.js";
 import { CompletionService } from "../src/completion.js";
 import { loadConfig } from "../src/config.js";
 import { assignCompletion } from "../src/policy.js";
+import { noModelPolicy } from "./fixtures/model-availability.js";
 import { recordCompletionRejection, recordCompletionSuccess, completionFeedbackRefusal } from "../src/completion-feedback.js";
 import type { CompletionExecution, CompletionOutcome } from "../src/completion-contract.js";
 const input={model:"luna" as const,prompt:"exact original",systemPrompt:"distinct instructions",metadata:{caller:"omniscience",purpose:"regulatory-atlas-tagging"}};
@@ -23,7 +24,7 @@ it("retries only rejected execution with the same IDs and immutable attempt rece
     value(service.claim(first.runId,"first"));const queued=value(service.settle(first.runId,"first",rejected));
     expect(queued).toMatchObject({state:"queued",requestId:"stable",runId:first.runId,attemptCount:1});
     expect(store.activeLeases()).toHaveLength(0);
-    expect(assignCompletion(store,first.runId,"luna",loadConfig("/missing")).assignment).toBeUndefined();
+    expect(assignCompletion(store,first.runId,"luna",loadConfig("/missing"),noModelPolicy).assignment).toBeUndefined();
     expect(value(service.settle(first.runId,"first",rejected))).toEqual(queued);
     store.close();store=Store.open(path);service=new CompletionService(store,root);
     assign(store,first.runId);expect(value(service.claim(first.runId,"first")).execute).toBe(false);

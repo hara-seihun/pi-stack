@@ -9,6 +9,8 @@ import { Store } from "../src/store.js";
 import { CompletionClient } from "../src/completion-client.js";
 import { CompletionService } from "../src/completion.js";
 import { assignCompletion } from "../src/policy.js";
+import { noModelPolicy } from "./fixtures/model-availability.js";
+import { ModelAvailabilityStore } from "../src/threads/model-availability.js";
 import { brokerProvider, modelBrokerUrl, validateBrokerBody } from "../src/model-broker-contract.js";
 import { createModelBroker, validateBrokerConfig, type BrokerTransport } from "../src/model-broker.js";
 import { createSharedImageGenerationService } from "../src/image-service.js";
@@ -27,6 +29,7 @@ async function fixture(transport: BrokerTransport) {
   const root = mkdtempSync(join(tmpdir(), "pi-broker-"));
   cleanup.push(() => rm(root, { recursive: true, force: true }));
   const ledgerPath = join(root, "ledger.sqlite3"), authPath = join(root, "auth.json");
+  const availability = new ModelAvailabilityStore(join(root, "model-availability.json"));
   vi.stubEnv("PI_ORCHESTRATOR_CONFIG", join(root, "config.json"));
   const store = Store.open(ledgerPath);
   cleanup.push(async () => store.close());
@@ -35,13 +38,13 @@ async function fixture(transport: BrokerTransport) {
   store.upsertAccount({ id: "anthropic-shared", provider: "anthropic", enabled: true });
   const ownerToken = `test.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "owner-account" } })).toString("base64url")}.signature`;
   writeFileSync(authPath, JSON.stringify(Object.fromEntries(["shared", "owner-only", "anthropic-shared"].map(id => [id, { type: "oauth", access: id === "owner-only" ? ownerToken : token, refresh: "fixture-refresh", accountId: id === "owner-only" ? "owner-account" : "shared-account", expires: Date.now() + 3600000 }]))));
-  const broker = createModelBroker({ ledgerPath, authPath, listeners: [{ principal: "sybil", port: 0, accounts: ["shared", "anthropic-shared"], models: ["openai-codex/gpt-6-luna", `anthropic/${anthropicModel.id}`], maxInFlight: 2 }] }, transport);
+  const broker = createModelBroker({ ledgerPath, authPath, listeners: [{ principal: "sybil", port: 0, accounts: ["shared", "anthropic-shared"], models: ["openai-codex/gpt-6-luna", `anthropic/${anthropicModel.id}`], maxInFlight: 2 }] }, availability, transport);
   cleanup.push(() => broker.close());
   const [port] = await broker.listen();
   const url = `http://127.0.0.1:${port}`;
   const regrant = (accounts: string[], models = ["openai-codex/gpt-6-luna"], weeklyUsd?: number) => broker.applyGrants([{ principal: "sybil", port: 0, accounts, models, maxInFlight: 2, ...(weeklyUsd === undefined ? {} : { weeklyUsd }) }]);
   const post = (data: unknown, path = "/backend-api/codex/responses") => fetch(`${url}${path}`, { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer attacker", "chatgpt-account-id": "owner-only", cookie: "owner-cookie", session_id: "kenan-session" }, body: JSON.stringify(data) });
-  return { root, store, token, post, url, regrant };
+  return { root, store, token, post, url, regrant, availability };
 }
 
 const modelBody = (model: string, tier?: string) => ({ ...body(), model, ...(tier ? { service_tier: tier } : {}) });
@@ -238,6 +241,83 @@ test("model-only routes inject granted credentials, namespace affinity and retai
   expect(f.store.usageSince(0).reduce((sum, row) => sum + row.tokens, 0)).toBe(17);
 });
 
+const FABLE = "anthropic/claude-fable-5-1";
+const anthropicPost = (url: string, model: string) => fetch(`${url}/v1/messages`, {
+  method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model, stream: true, messages: [] }),
+});
+
+test("a globally disabled model is refused through the broker even when granted, naming the model and policy", async () => {
+  const transport = vi.fn(async () => new Response("ok"));
+  const f = await fixture(transport);
+  f.regrant(["anthropic-shared"], ["anthropic/claude-opus-5-5", FABLE]);
+  expect(f.availability.set("fable", false).ok).toBe(true);
+  const refused = await anthropicPost(f.url, "claude-fable-5-1");
+  expect(refused.status).toBe(403);
+  expect(await refused.json()).toEqual({ error: {
+    type: "model_broker_error", code: "model-disabled", model: FABLE, policy: f.availability.path,
+    message: `${FABLE} is disabled by the household model availability policy (${f.availability.path}); a model grant does not override it. An administrator can enable it in Machine \u2192 Models.`,
+  } });
+  expect(transport).not.toHaveBeenCalled();
+  expect(f.store.activeLeases()).toHaveLength(0);
+  // The refusal does not consume the principal's in-flight ceiling.
+  for (let attempt = 0; attempt < 3; attempt++) expect((await anthropicPost(f.url, "claude-fable-5-1")).status).toBe(403);
+  // An enabled granted sibling is unaffected.
+  const opus = await anthropicPost(f.url, "claude-opus-5-5");
+  expect(opus.status).toBe(200);
+  await opus.text();
+  expect(transport).toHaveBeenCalledOnce();
+});
+
+test("an enabled granted model is allowed through the broker", async () => {
+  const transport = vi.fn(async () => new Response("ok"));
+  const f = await fixture(transport);
+  f.regrant(["anthropic-shared"], [FABLE]);
+  expect(f.availability.set("astra", false).ok).toBe(true);
+  const response = await anthropicPost(f.url, "claude-fable-5-1");
+  expect(response.status).toBe(200);
+  await response.text();
+  expect(transport).toHaveBeenCalledOnce();
+});
+
+test("a disable applied while the broker runs reaches the next request and queued completions without a restart", async () => {
+  const transport = vi.fn(async () => sse({}));
+  const f = await fixture(transport);
+  const now = Date.now();
+  for (const id of ["shared", "owner-only"]) f.store.recordMeter(id, "primary", 10, now + 60_000, now);
+  const queued = await new CompletionClient({ baseUrl: f.url }).submit("queued-before-disable", { model: "luna", prompt: "title this" });
+  expect(queued.ok).toBe(true);
+  if (!queued.ok) return;
+  const admit = () => assignCompletion(f.store, queued.value.runId, "luna", loadConfig(undefined, f.store.path), f.availability);
+  expect(admit().assignment?.accountId).toBe("shared");
+  const before = await f.post(body());
+  expect(before.status).toBe(200);
+  await before.text();
+  expect(f.availability.set("luna", false).ok).toBe(true);
+  const after = await f.post(body());
+  expect(after.status).toBe(403);
+  expect((await after.json()).error).toMatchObject({ code: "model-disabled", model: "openai-codex/gpt-6-luna", policy: f.availability.path });
+  expect(admit()).toEqual({ refusals: [{ accountId: "*", reason: expect.stringMatching(/^openai-codex\/gpt-6-luna is disabled by the household model availability policy/) }] });
+  const fresh = await new CompletionClient({ baseUrl: f.url }).submit("submitted-after-disable", { model: "luna", prompt: "title this" });
+  expect(fresh).toEqual({ ok: false, error: { code: "model-disabled", message: expect.stringContaining(f.availability.path) } });
+  expect(f.store.runs()).toHaveLength(1);
+  expect(transport).toHaveBeenCalledOnce();
+  expect(f.availability.set("luna", true).ok).toBe(true);
+  const restored = await f.post(body());
+  expect(restored.status).toBe(200);
+  await restored.text();
+  expect(admit().assignment?.accountId).toBe("shared");
+});
+
+test("an unreadable household policy fails closed at the broker with a typed error", async () => {
+  const transport = vi.fn(async () => sse({}));
+  const f = await fixture(transport);
+  writeFileSync(f.availability.path, "broken policy\n");
+  const response = await f.post(body());
+  expect(response.status).toBe(503);
+  expect((await response.json()).error).toMatchObject({ code: "model-policy-unavailable", model: "openai-codex/gpt-6-luna" });
+  expect(transport).not.toHaveBeenCalled();
+});
+
 test("Fable scoped exhaustion blocks Fable but leaves Opus on shared weekly quota", async () => {
   const transport = vi.fn(async () => new Response("ok"));
   const f = await fixture(transport);
@@ -429,7 +509,7 @@ test.each(["title", "remote-name:thread-1:2"])("durable completion %s retains id
   expect(await (await fetch(`${f.url}/v1/completions/${requestId}`)).json()).toEqual(submitted.value);
   const now = Date.now();
   for (const id of ["shared", "owner-only"]) f.store.recordMeter(id, "primary", id === "shared" ? 50 : 0, now + 60000, now);
-  const assignment = assignCompletion(f.store, submitted.value.runId, "luna", loadConfig(undefined, f.store.path));
+  const assignment = assignCompletion(f.store, submitted.value.runId, "luna", loadConfig(undefined, f.store.path), noModelPolicy);
   expect(assignment.assignment?.accountId).toBe("shared");
   expect(transport).not.toHaveBeenCalled();
 });
@@ -441,7 +521,7 @@ test("a waiting completion follows the principal's current grant, not the pool i
   if (!submitted.ok) return;
   const now = Date.now();
   for (const id of ["shared", "owner-only"]) f.store.recordMeter(id, "primary", 10, now + 60_000, now);
-  const admit = () => assignCompletion(f.store, submitted.value.runId, "luna", loadConfig(undefined, f.store.path));
+  const admit = () => assignCompletion(f.store, submitted.value.runId, "luna", loadConfig(undefined, f.store.path), noModelPolicy);
   expect(admit().assignment?.accountId).toBe("shared");
   f.regrant(["owner-only"]);
   expect(await new CompletionClient({ baseUrl: f.url }).submit("remote-name:thread-7:3", { model: "luna", prompt: "title this" })).toEqual(submitted);

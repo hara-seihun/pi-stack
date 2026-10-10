@@ -17,6 +17,30 @@ export function modelAvailabilityKey(model: string): string {
   return known ? `${known.provider}/${known.model}` : separator < 0 ? model : `${provider}/${physical}`;
 }
 
+/** The household's decision about one model. Thread start and the model broker both ask for it,
+ * so neither can admit a model the other would refuse. `key` is the canonical provider/model. */
+export type ModelAvailability =
+  | { state: "enabled"; model: string; key: string }
+  | { state: "disabled"; model: string; key: string; policy: string };
+
+/** Why a shared (granted) model request is refused. A grant shares a model; it never re-enables
+ * one the household has disabled. The model broker and brokered completion admission use this. */
+export type SharedModelRefusal =
+  | { code: "model-disabled"; model: string; policy: string; message: string }
+  | { code: "model-policy-unavailable"; model: string; message: string };
+export function sharedModelRefusal(availability: Pick<ModelAvailabilityStore, "decide">, model: string): SharedModelRefusal | null {
+  const decision = availability.decide(model);
+  if (!decision.ok) return { code: "model-policy-unavailable", model, message: decision.error.message };
+  switch (decision.value.state) {
+    case "enabled": return null;
+    case "disabled": {
+      const { key, policy } = decision.value;
+      return { code: "model-disabled", model: key, policy,
+        message: `${key} is disabled by the household model availability policy (${policy}); a model grant does not override it. An administrator can enable it in Machine → Models.` };
+    }
+  }
+}
+
 const failure = (cause: unknown): Result<never> => ({ ok: false, error: { code: "unavailable", message: `Could not read or save model availability: ${cause instanceof Error ? cause.message : String(cause)}` } });
 
 export class ModelAvailabilityStore {
@@ -37,10 +61,19 @@ export class ModelAvailabilityStore {
     } catch (cause) { return failure(cause); }
   }
 
-  admit(model: string): Result<void> {
+  /** Re-reads the policy on every call: a disable reaches the next decision without a restart. */
+  decide(model: string): Result<ModelAvailability> {
     const policy = this.disabled();
     if (!policy.ok) return policy;
-    return policy.value.has(modelAvailabilityKey(model))
+    const key = modelAvailabilityKey(model);
+    return { ok: true, value: policy.value.has(key) ? { state: "disabled", model, key, policy: this.path } : { state: "enabled", model, key } };
+  }
+
+  /** Thread-start admission. */
+  admit(model: string): Result<void> {
+    const decision = this.decide(model);
+    if (!decision.ok) return decision;
+    return decision.value.state === "disabled"
       ? { ok: false, error: { code: "invalid_request", message: `${model} is disabled for new threads. Enable it in Machine → Models.` } }
       : { ok: true, value: undefined };
   }
