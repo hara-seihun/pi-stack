@@ -1,5 +1,5 @@
 import { Temporal } from "@js-temporal/polyfill";
-import type { CalendarEvent } from "./calendar-protocol";
+import type { CalendarEvent } from "./calendar-contract.js";
 
 export const calendarOverlaps = (e: CalendarEvent, from: string, to: string) => e.allDay ? e.end > from.slice(0, 10) && e.start < to.slice(0, 10) : Date.parse(e.end) > Date.parse(from) && Date.parse(e.start) < Date.parse(to);
 const wall = (e: CalendarEvent, value: string) => e.allDay ? Temporal.PlainDate.from(value).toPlainDateTime() : Temporal.Instant.from(value).toZonedDateTimeISO(e.zone).toPlainDateTime();

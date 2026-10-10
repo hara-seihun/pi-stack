@@ -11,6 +11,7 @@ import { CustodyResources } from "./custody-resources.js";
 import type { CoreScope } from "./contracts.js";
 import { readTimezoneProjection } from "../person-timezone.js";
 import { roomAudienceResolver } from "./room-audience.js";
+import { createCoreCalendar, parseCoreCalendarConfig, type CoreCalendarConfig, type CoreCalendarData } from "./calendar.js";
 
 export type CoreMemoryIdentity = { principalId: string } & (
   | { kind: "person-role"; person: string; role: "person" | "root"; threadId: string | null }
@@ -31,13 +32,14 @@ export type CoreMemoryConfig = { kind: "disabled" } | {
   identities: CoreMemoryIdentity[];
   resources: Resource[];
   routes: CoreMemoryRoute[];
+  datasets: CoreCalendarConfig[];
 };
 export type CoreMemoryAdapter = { request(request: IncomingMessage, response: ServerResponse): void; close(): Promise<void> };
 const invalid = (message: string): CoreResult<never> => ({ ok: false, error: { code: "invalid-config", message } });
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
 const id = (value: unknown): value is string => typeof value === "string" && /^[a-zA-Z0-9_.:-]+$/.test(value);
 const absolute = (value: unknown): value is string => typeof value === "string" && isAbsolute(value) && !/[\0\r\n]/.test(value);
-const memoryActions: Record<string, PermissionAction> = { write: "write", search: "read", read: "read", forget: "delete", "log-disclosure": "write", disclosures: "read", "finalize-turn": "disclose" };
+const memoryActions: Record<string, PermissionAction> = { write: "write", search: "read", read: "read", forget: "delete", "log-disclosure": "write", disclosures: "read", "finalize-turn": "disclose", data: "execute" };
 const endpointActions: Record<string, PermissionAction> = { "/v1/sessions": "execute", "/v1/root/admit": "dispatch", "/v1/root/finalize-reply": "disclose", "/v1/root/resume-consent": "dispatch", "/v1/root/log-consent": "write", "/v1/root/authorize-request": "read", "/v1/root/authenticate-caller": "read", "/v1/root/resume-request": "read", "/v1/root/log-notification": "disclose", "/v1/root/log-request-status": "write" };
 const routes = new Set(["/v1/memory", "/v1/sessions", "/v1/root/admit", "/v1/root/finalize-reply", "/v1/root/resume-consent", "/v1/root/log-consent", "/v1/root/authorize-request", "/v1/root/authenticate-caller", "/v1/root/resume-request", "/v1/root/log-notification", "/v1/root/log-request-status"]);
 const key = (identity: CoreMemoryIdentity) => identity.kind === "person-role" ? JSON.stringify([identity.kind, identity.person, identity.role, identity.threadId]) : identity.kind === "supervisor" ? JSON.stringify([identity.kind, identity.person]) : identity.kind;
@@ -49,7 +51,7 @@ function matches(identity: CoreMemoryIdentity, caller: MemoryPrincipal): boolean
 export function parseCoreMemoryConfig(value: unknown, principals: readonly Principal[]): CoreResult<CoreMemoryConfig> {
   if (!object(value)) return invalid("Core memory must be explicitly configured or disabled");
   if (value.kind === "disabled" && Object.keys(value).length === 1) return { ok: true, value: { kind: "disabled" } };
-  if (value.kind !== "configured" || !id(value.id) || !id(value.custodyScopeId) || !Number.isSafeInteger(value.uid) || Number(value.uid) < 0 || !absolute(value.databasePath) || !absolute(value.adoptionReceiptPath) || !absolute(value.authFile) || !Array.isArray(value.identities) || !Array.isArray(value.resources) || !Array.isArray(value.routes)) return invalid("Memory requires existing database/auth paths and explicit identities, resources and routes");
+  if (value.kind !== "configured" || !id(value.id) || !id(value.custodyScopeId) || !Number.isSafeInteger(value.uid) || Number(value.uid) < 0 || !absolute(value.databasePath) || !absolute(value.adoptionReceiptPath) || !absolute(value.authFile) || !Array.isArray(value.identities) || !Array.isArray(value.resources) || !Array.isArray(value.routes) || !Array.isArray(value.datasets)) return invalid("Memory requires existing database/auth paths and explicit identities, resources and routes");
   if (!object(value.roomAudience) || !(value.roomAudience.kind === "none" || value.roomAudience.kind === "registry" && absolute(value.roomAudience.databasePath) && id(value.roomAudience.custodian))) return invalid("Memory room audience requires explicit none or an existing registry and custodian");
   if (!object(value.timezones) || !["none", "auth-files"].includes(String(value.timezones.kind))) return invalid("Memory timezones require explicit none or existing authenticated supervisor files");
   const identities: CoreMemoryIdentity[] = [];
@@ -87,10 +89,17 @@ export function parseCoreMemoryConfig(value: unknown, principals: readonly Princ
     if (mapped.some(prior => prior.principalId === item.principalId && prior.route === item.route && prior.operation === item.operation)) return invalid("Memory principal/endpoint/operation mapping must be unique");
     mapped.push(item as CoreMemoryRoute);
   }
-  return { ok: true, value: { kind: "configured", id: value.id, uid: Number(value.uid), custodyScopeId: value.custodyScopeId, databasePath: value.databasePath, adoptionReceiptPath: value.adoptionReceiptPath, authFile: value.authFile, roomAudience: value.roomAudience as Extract<CoreMemoryConfig, { kind: "configured" }>["roomAudience"], timezones: value.timezones as Extract<CoreMemoryConfig, { kind: "configured" }>["timezones"], identities, resources, routes: mapped } };
+  const datasets: CoreCalendarConfig[] = [];
+  for (const input of value.datasets) {
+    const parsed = parseCoreCalendarConfig(input);
+    if (!parsed.ok) return parsed;
+    if (datasets.some(dataset => dataset.id === parsed.value.id || dataset.databasePath === parsed.value.databasePath) || parsed.value.databasePath === value.databasePath) return invalid("Memory datasets require distinct identifiers and existing custody databases");
+    datasets.push(parsed.value);
+  }
+  return { ok: true, value: { kind: "configured", id: value.id, uid: Number(value.uid), custodyScopeId: value.custodyScopeId, databasePath: value.databasePath, adoptionReceiptPath: value.adoptionReceiptPath, authFile: value.authFile, roomAudience: value.roomAudience as Extract<CoreMemoryConfig, { kind: "configured" }>["roomAudience"], timezones: value.timezones as Extract<CoreMemoryConfig, { kind: "configured" }>["timezones"], identities, resources, routes: mapped, datasets } };
 }
 
-export function createCoreMemory(options: {
+export async function createCoreMemory(options: {
   config: CoreMemoryConfig;
   principals: readonly Principal[];
   policy: PermissionPolicy;
@@ -98,7 +107,7 @@ export function createCoreMemory(options: {
   scopes: readonly CoreScope[];
   owner: (scopeId: string) => CoreResult<{ runtime: { path(logicalPath: string): string } }>;
   releaseCommit?: string;
-}): CoreResult<CoreMemoryAdapter> {
+}): Promise<CoreResult<CoreMemoryAdapter>> {
   const parsed = parseCoreMemoryConfig(options.config, options.principals);
   if (!parsed.ok) return parsed;
   const policy = validatePermissionPolicy(options.policy);
@@ -112,6 +121,7 @@ export function createCoreMemory(options: {
   let store: MemoryStore | undefined;
   let ownership: ScopeOwnership | undefined;
   let resources: CustodyResources | undefined;
+  const datasets: CoreCalendarData[] = [];
   try {
     resources = new CustodyResources(scope.custody);
     const allowed = new Set([config.databasePath, config.authFile, config.adoptionReceiptPath, ...(config.roomAudience.kind === "registry" ? [config.roomAudience.databasePath] : [])]);
@@ -150,7 +160,7 @@ export function createCoreMemory(options: {
       if (file === undefined) return { ok: false, error: { code: "unavailable", message: "Authenticated person has no declared timezone projection" } };
       return readTimezoneProjection(path(file));
     };
-    const owned = acquireDatabaseOwnership({ id: config.id, databasePath: config.databasePath, adoptionReceiptPath: config.adoptionReceiptPath, uid: config.uid }, path);
+    const owned = acquireDatabaseOwnership({ id: config.id, databasePath: config.databasePath, adoptionReceiptPath: config.adoptionReceiptPath, uid: config.uid, namespaces: { data: scope.custody.namespace, retained: scope.custody.retainedRunnerNamespace } }, path);
     if (!owned.ok) { resources.close(); return owned; }
     ownership = owned.value;
     const existing = openSqlite(databasePath, true);
@@ -159,7 +169,24 @@ export function createCoreMemory(options: {
       if (["memories", "disclosures", "sessions", "root_runs", "dedup"].some(table => !tables.has(table))) throw new Error("Adopted memory ledger is missing its existing schema");
     } finally { existing.close(); }
     store = new MemoryStore(databasePath);
+    for (const datasetConfig of config.datasets) {
+      const dataset = createCoreCalendar({ config: datasetConfig, scopes: options.scopes, owner: options.owner, policy: options.policy });
+      if (!dataset.ok) {
+        await Promise.all(datasets.map(dataset => dataset.close()));
+        store.close(); ownership.close(); resources.close();
+        return dataset;
+      }
+      datasets.push(dataset.value);
+    }
     const server = memoryService({ store, auth, enabled: options.enabled, roomAudience, timezone, releaseCommit: options.releaseCommit,
+      data: async ({ caller, request }) => {
+        const identities = config.identities.filter(identity => matches(identity, caller));
+        const principal = identities.length === 1 ? options.principals.find(principal => principal.id === identities[0]!.principalId) : undefined;
+        if (!principal) return { ok: false, error: "unauthenticated", message: "Memory data requires its unique registered principal" };
+        const dataset = datasets.find(dataset => dataset.id === request.dataset);
+        if (!dataset) return { ok: false, error: "unauthenticated", message: "Memory data is unavailable to this principal" };
+        return dataset.execute(principal, request.requestId, request.command);
+      },
       authorize: ({ caller, route, input, record }) => {
         const identities = config.identities.filter(identity => matches(identity, caller));
         if (identities.length !== 1) return { ok: false, error: { code: "denied", message: "Memory credential has no unique registered principal" } };
@@ -169,7 +196,9 @@ export function createCoreMemory(options: {
         const mapping = config.routes.find(mapping => mapping.principalId === principal.id && mapping.route === route && mapping.operation === operation);
         if (!mapping) return { ok: false, error: { code: "denied", message: "Memory action has no explicit resource mapping" } };
         const resource = config.resources.find(resource => resource.id === mapping.resourceId)!;
-        if (record && (!Array.isArray(record.about) || record.about.length === 0 || record.about.some(subject => !resource.subjects.includes(subject)) || resource.privacy === "public" && record.obviouslyPrivate !== false)) return { ok: false, error: { code: "denied", message: "The actual memory records are outside this resource's granted subject/privacy scope" } };
+        const dataset = operation === "data" && object(input) ? config.datasets.find(dataset => dataset.id === input.dataset) : undefined;
+        const actual = record ?? (dataset ? { about: dataset.resource.subjects, obviouslyPrivate: true } : undefined);
+        if (operation === "data" && !dataset || actual && (!Array.isArray(actual.about) || actual.about.length === 0 || actual.about.some(subject => !resource.subjects.includes(subject)) || resource.privacy === "public" && actual.obviouslyPrivate !== false)) return { ok: false, error: { code: "denied", message: "The actual memory records are outside this resource's granted subject/privacy scope" } };
         return authorize(options.policy, { principal, resource, action: mapping.action, now: Date.now() });
       },
     });
@@ -194,6 +223,7 @@ export function createCoreMemory(options: {
         closed = true;
         closePromise = (async () => {
           if (active > 0) await new Promise<void>(resolve => { finish = resolve; });
+          await Promise.all(datasets.map(dataset => dataset.close()));
           store!.close();
           ownership!.close();
           resources!.close();
@@ -202,6 +232,7 @@ export function createCoreMemory(options: {
       },
     } };
   } catch {
+    await Promise.all(datasets.map(dataset => dataset.close()));
     store?.close();
     ownership?.close();
     resources?.close();

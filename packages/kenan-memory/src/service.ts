@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import type { PersonTimezone, SettingsResult } from "pi-orchestrator/person-timezone";
 import type { Authorization, PermissionResult } from "pi-orchestrator/permissions";
 import type { RootAdmission } from "./contract.js";
-import { KENAN_REQUEST_ID_PATTERN, MEMORY_TOKEN_HEADER, type MemoryRequest, type MemoryResult, type MemoryRole, type MemoryValue, type RoomAudienceResolver, type MemoryItem, type Disclosure, type RootResumeConsent, type RootLogConsent, type RootLogNotification, type RootLogRequestStatus } from "./contract.js";
+import { KENAN_REQUEST_ID_PATTERN, MEMORY_TOKEN_HEADER, type MemoryRequest, type MemoryResult, type MemoryRole, type MemoryValue, type RoomAudienceResolver, type MemoryItem, type Disclosure, type MemoryDataRequest, type MemoryDataProjection, type RootResumeConsent, type RootLogConsent, type RootLogNotification, type RootLogRequestStatus } from "./contract.js";
 import { MemoryStore } from "./store.js";
 import { validateRequest } from "./validation.js";
 import { unreachable } from "./explicit-state.js";
@@ -21,6 +21,7 @@ export interface MemoryServiceOptions {
   store: MemoryStore;
   auth: MemoryAuth;
   authorize: MemoryAuthorizer;
+  data?: (request: { caller: MemoryPrincipal; request: MemoryDataRequest }) => Promise<MemoryResult<MemoryDataProjection>>;
   enabled: () => boolean;
   peerUid?: (request: IncomingMessage) => number | undefined;
   roomAudience?: RoomAudienceResolver;
@@ -202,6 +203,16 @@ export function memoryService(options: MemoryServiceOptions) {
       const role = caller.kind === "person" ? caller.role : "root";
       const setting = operation.operation === "write" ? operation.item.setting : operation.operation === "log-disclosure" ? operation.disclosure.setting : undefined;
       if (setting && setting.person !== person || caller.kind === "person" && caller.threadId && ((setting && setting.threadId !== caller.threadId) || "context" in operation && operation.context.threadId !== caller.threadId)) return denied("The memory setting does not match this connection");
+      if (operation.operation === "data") {
+        if (caller.kind !== "person" || !options.data) return send(503, { ok: false, error: "unavailable", message: "Structured memory data is not configured" });
+        const audience = caller.threadId ? await options.roomAudience?.(caller.person, caller.threadId) : undefined;
+        if (caller.role === "person" && (caller.person === "pi-rooms" || audience)) return denied("Rooms use private consultation for structured memory data");
+        const data = await options.data({ caller, request: operation });
+        if (!data.ok) return send(data.error === "unauthenticated" ? 403 : data.error === "not-found" ? 404 : data.error === "conflict" ? 409 : data.error === "unavailable" ? 503 : 400, data);
+        const subjects = data.value.subjects;
+        if (!Array.isArray(subjects) || subjects.length === 0 || subjects.some(subject => typeof subject !== "string" || !subject.trim()) || !options.authorize({ caller, route: request.url!, input, record: { about: subjects, obviouslyPrivate: data.value.obviouslyPrivate } }).ok) return denied("Structured memory data is outside the granted subject scope");
+        return send(200, { ok: true, value: options.store.reportData(person, operation.context, data.value.value.dataset, data.value.subjects, data.value.value) });
+      }
       if (role === "person") {
         if (operation.operation === "disclosures" && operation.about && operation.about !== person) return denied("Cross-person accountability belongs to ask_kenan");
         if (operation.operation === "search" && operation.about?.some(id => id !== person)) return denied("Cross-person search belongs to ask_kenan");
@@ -233,6 +244,7 @@ function dispatch(store: MemoryStore, person: string, role: MemoryRole, request:
     case "log-disclosure": return store.disclose(person, request.disclosure);
     case "disclosures": return store.disclosures(person, request.context, request.limit, role, request.about, permit);
     case "finalize-turn": return store.finalize(person, request.context, request.reply);
+    case "data": throw new Error("Structured memory data must dispatch through its installed data owner");
   }
   return unreachable(request);
 }

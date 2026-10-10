@@ -48,7 +48,11 @@ export interface MemoryReadReport extends ReadContext {
   about: PersonId[];
 }
 export interface MemoryRead<T> { value: T; readReport: MemoryReadReport }
+export type MemoryDataRequest = { operation: "data"; dataset: string; requestId: string; command: unknown; context: ReadContext };
+export type MemoryDataValue = { dataset: string; data: unknown };
+export type MemoryDataProjection = { value: MemoryDataValue; subjects: readonly string[]; obviouslyPrivate: boolean };
 export type MemoryRequest =
+  | MemoryDataRequest
   | { operation: "write"; item: MemoryInput }
   | { operation: "search"; query: string; about?: PersonId[]; limit?: number; context: ReadContext }
   | { operation: "read"; ids: string[]; context: ReadContext }
@@ -56,8 +60,8 @@ export type MemoryRequest =
   | { operation: "log-disclosure"; disclosure: DisclosureInput }
   | { operation: "disclosures"; context: ReadContext; limit?: number; about?: PersonId }
   | { operation: "finalize-turn"; context: ReadContext; reply: string }; 
-export type MemoryValue = { finalized: string[] } | { id: string; forgotten: true } | MemoryItem | MemoryRead<MemoryItem[]> | Disclosure | MemoryRead<Disclosure[]> | { forgotten: string[]; mode: ForgetMode };
-export type MemoryError = "disabled" | "unauthenticated" | "invalid-request" | "unavailable";
+export type MemoryValue = MemoryRead<MemoryDataValue> | { finalized: string[] } | { id: string; forgotten: true } | MemoryItem | MemoryRead<MemoryItem[]> | Disclosure | MemoryRead<Disclosure[]> | { forgotten: string[]; mode: ForgetMode };
+export type MemoryError = "disabled" | "unauthenticated" | "invalid-request" | "unavailable" | "not-found" | "conflict";
 export type MemoryResult<T = MemoryValue> = { ok: true; value: T } | { ok: false; error: MemoryError; message: string };
 /** person comes from the verified connection, never the request body. */
 export interface MemoryClient { request<T = MemoryValue>(request: MemoryRequest): Promise<MemoryResult<T>> }

@@ -9,6 +9,9 @@
     "./service": { "types": "./dist/service.d.ts", "bun": "./src/service.ts", "default": "./dist/service.js" },
     "./store": { "types": "./dist/store.d.ts", "bun": "./src/store.ts", "default": "./dist/store.js" },
     "./markdown": { "types": "./dist/markdown.d.ts", "bun": "./src/markdown.ts", "default": "./dist/markdown.js" },
+    "./calendar-data": { "types": "./dist/calendar-data.d.ts", "bun": "./src/calendar-data.ts", "default": "./dist/calendar-data.js" },
+    "./calendar-format": { "types": "./dist/calendar-format.d.ts", "bun": "./src/calendar-format.ts", "default": "./dist/calendar-format.js" },
+    "./calendar-contract": { "types": "./dist/calendar-contract.d.ts", "bun": "./src/calendar-contract.ts", "default": "./dist/calendar-contract.js" },
     "./adoption": { "types": "./dist/adoption.d.ts", "bun": "./src/adoption.ts", "default": "./dist/adoption.js" },
     "./config": { "types": "./dist/config.d.ts", "bun": "./src/config.ts", "default": "./dist/config.js" },
     "./diagnostics": { "types": "./dist/diagnostics.d.ts", "bun": "./src/diagnostics.ts", "default": "./dist/diagnostics.js" },
@@ -20,5 +23,6 @@
     "./action-http-client": { "types": "./dist/action-http-client.d.ts", "bun": "./src/action-http-client.ts", "default": "./dist/action-http-client.js" }
   },
   "scripts": { "build": "tsc -p tsconfig.json", "test": "bun test tests", "start": "bun src/main.ts" },
+  "dependencies": { "@js-temporal/polyfill": "^0.5.1", "ical.js": "^2.2.1", "timezones-ical-library": "^2.3.2" },
   "peerDependencies": { "@earendil-works/pi-coding-agent": ">=0.87.1 <0.88.0", "typebox": "^1.3.16" }
 }

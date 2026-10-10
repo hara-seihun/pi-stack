@@ -289,6 +289,10 @@ export class MemoryStore {
     this.db.query("UPDATE disclosures SET body=? WHERE id=?").run(JSON.stringify({ ...disclosure, finalReply: reply, finalizedAt: new Date().toISOString() }), id);
     return { finalized: [id] };
   }
+  reportData<T>(person: string, context: ReadContext, dataset: string, about: readonly string[], value: T): MemoryRead<T> {
+    const report = this.report(person, context, [{ id: `data:${dataset}`, about: [...about] }]);
+    return { value, readReport: report.readReport };
+  }
   private readLogId(person: string, context: ReadContext) {
     return `read-${createHash("sha256").update(`${person}\0${context.threadId}\0${context.turnId}`).digest("hex")}`;
   }

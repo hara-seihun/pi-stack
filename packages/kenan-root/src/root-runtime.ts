@@ -30,7 +30,7 @@ export type RootSessionFactory = (spec: RootSessionSpec) => Promise<RootSession>
 export type RootExecution = { reply: string; subjects: string[] };
 export type RootExecutionResult = MemoryResult<RootExecution> | { ok: false; error: "capacity-unavailable"; message: string; retryAt: number };
 export type RootExecutor = (admission: RootAdmission, request: string, onExecution?: () => void) => Promise<RootExecutionResult>;
-export const ROOT_TOOLS = ["read", "write", "edit", "bash", "memory_search", "memory_read", "memory_write", "memory_forget", "memory_disclosures", "memory_log_disclosure", "action_inspect", "action_submit", "action_reconcile", "root_request_consent", "root_notify", "root_reply"];
+export const ROOT_TOOLS = ["read", "write", "edit", "bash", "memory_search", "memory_read", "memory_write", "memory_forget", "memory_disclosures", "memory_log_disclosure", "memory_data", "action_inspect", "action_submit", "action_reconcile", "root_request_consent", "root_notify", "root_reply"];
 
 export function readRootConfig(path = process.env.PI_KENAN_ROOT_CONFIG ?? "/etc/pi-stack/kenan-root.json"): RootConfig {
   const config = JSON.parse(readFileSync(path, "utf8")) as RootConfig;

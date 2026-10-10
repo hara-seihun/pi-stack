@@ -6,7 +6,7 @@ Pi Stack runs persistent agents through [Pi](https://github.com/badlogic/pi-mono
 
 - [`packages/runtime`](packages/runtime/README.md) pins Pi and owns the runtime extensions.
 - [`packages/orchestrator`](packages/orchestrator/README.md) schedules and hosts persistent agent work.
-- [`packages/kenan-memory`](packages/kenan-memory/README.md) owns optional shared host memory, discretion tools and the disclosure log. The [life model](docs/life-model.md) owns versioned per-person authority, goals, commitments, preferences, steering history and Remote's Needs-you projection.
+- [`packages/kenan-memory`](packages/kenan-memory/README.md) owns granted Markdown memory, structured calendar data, discretion tools and independent action/disclosure/consent custody. The core's explicit principal/resource/action grants govern access.
 - [`apps/remote`](apps/remote/README.md) contains the Pi Remote supervisor, shared client, and context mirror extension. [Per-person VS Code](docs/editor.md) owns Files editing, isolated origins and provisioning.
 - [`apps/kenan`](apps/kenan/README.md) packages the shared client for Android.
 - [Feature use](docs/feature-usage.md) records own-person metadata for actual feature actions and observed availability.
@@ -55,4 +55,4 @@ Browser and Android clients switch endpoints through same-origin `/v1/remotes/<i
 
 [Kena: one agent model](docs/agents.md) owns named agents, foreground/background placement, protected peer dependencies and the shared execution budget. [Unified threads](docs/threads.md) describes the persistent conversation API, shared Pi execution, messaging, cancellation and model defaults. Remote, fleet lanes and agents use the same thread operations. The [personal watch list](docs/watch-list.md) lets agents maintain persistent checks and wakes an Opus 5.5 thread only when work is due.
 
-[`docs/architecture.md`](docs/architecture.md) describes repository boundaries, environment identity, Android state isolation, and the work-thread cutover. [One Kenan per machine](docs/one-kenan.md) owns the optional root runtime, fixture staging and reversible cutover. The flag-gated [action journal](docs/action-journal.md) captures outbound sends into Kenan's shared memory.
+[`docs/architecture.md`](docs/architecture.md) describes repository boundaries, environment identity, Android state isolation, and the work-thread cutover. [Shared core deployment](docs/core-host.md) owns scope grants, exact-store adoption and fixed [custody](docs/core-custody.md). [One Kenan per machine](docs/one-kenan.md) describes the identity and authorization boundaries. The flag-gated [action journal](docs/action-journal.md) captures outbound sends into Kenan's shared memory.

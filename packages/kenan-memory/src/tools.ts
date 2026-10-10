@@ -17,7 +17,7 @@ const rootReceiptStates = {
   failed: { message: terminalReceiptMessage, isError: true },
   interrupted: { message: terminalReceiptMessage, isError: true },
 } satisfies Record<KenanRequestStatus, { message: string; isError: boolean }>;
-export const MEMORY_TOOL_NAMES = ["memory_search", "memory_read", "memory_write", "memory_forget", "memory_disclosures", "memory_log_disclosure"];
+export const MEMORY_TOOL_NAMES = ["memory_search", "memory_read", "memory_write", "memory_forget", "memory_disclosures", "memory_log_disclosure", "memory_data"];
 // Mirrors validation.ts: every string field the service checks as text() must be non-blank and at most 100000 characters.
 const nonBlank = (description?: string) => Type.String({ minLength: 1, maxLength: 100_000, pattern: "\\S", ...(description ? { description } : {}) });
 const strings = Type.Array(nonBlank(), { minItems: 1, maxItems: 100 });
@@ -162,13 +162,22 @@ function registerMemoryTools(options: MemoryToolOptions, pi: ExtensionAPI) {
       const report = result.ok && result.value && "readReport" in result.value ? (result.value as MemoryRead<unknown>).readReport : undefined;
       return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: { memoryResult: result, ...(report ? { [MEMORY_READ_DETAIL]: report } : {}) }, isError: !result.ok };
     };
+    pi.registerTool(defineTool({ name: "memory_data", label: "Structured memory data",
+      description: "Use a granted structured dataset linked from the Markdown memory folder. Supply the dataset ID and its typed command (currently calendar: snapshot/records/export-ics/create/update/delete/restore/subscribe/unsubscribe/refresh/receipt). Refresh needs an explicit from/to range and is finite; there is no calendar UI or scheduler. Updates/deletes require an explicit series or occurrence target. If a mutation's outcome is unavailable, inspect its returned requestId with a receipt command before repeating it.",
+      parameters: Type.Object({ dataset: nonBlank(), command: Type.Unknown() }),
+      execute: async (id, input) => {
+        const requestId = `data-${createHash("sha256").update(JSON.stringify([threadId, id])).digest("hex")}`;
+        const result = await request({ operation: "data", dataset: input.dataset, requestId, command: input.command, context: context() });
+        return { ...result, content: [{ type: "text" as const, text: JSON.stringify({ requestId, result: result.details.memoryResult }) }], details: { ...result.details, memoryDataRequestId: requestId } };
+      },
+    }));
     pi.registerTool(defineTool({ name: "memory_search", label: "Search Kenan's memory",
-      description: root ? "Search unrestricted host memory for root Kenan's discretion. Ranked tolerant natural terms; about uses registered person IDs; empty query lists recent items. Stopped items excluded." : "Search your person's own memory and recipient-relevant action records. Ranked natural terms; about must be your verified person ID. Empty query lists accessible items. Use ask_kenan for cross-person questions; this direct view is not the whole account.",
+      description: root ? "Search the actual subjects/privacy scope granted to this admitted consultation. Ranked tolerant natural terms; about uses registered person IDs; empty query lists accessible recent items. Stopped items excluded. Consultation role never grants access by itself." : "Search your person's own memory and recipient-relevant action records. Ranked natural terms; about must be your verified person ID. Empty query lists accessible items. Use ask_kenan for cross-person questions; this direct view is not the whole account.",
       parameters: Type.Object({ query: Type.String({ maxLength: 10_000 }), about: Type.Optional(strings), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }),
       execute: async (_id, input) => request({ operation: "search", ...input, context: context() }),
     }));
     pi.registerTool(defineTool({ name: "memory_read", label: "Read Kenan's memory",
-      description: root ? "Read host memory for privileged Kenan's judgment; access is not permission to repeat private content." : "Read accessible own-person memory/action records by ID. Other-person or shared facts require ask_kenan.", parameters: Type.Object({ ids: strings }),
+      description: root ? "Read records within this admitted consultation's explicit grants. Access is not permission to repeat private content." : "Read accessible own-person memory/action records by ID. Other-person or shared facts require ask_kenan.", parameters: Type.Object({ ids: strings }),
       execute: async (_id, input) => request({ operation: "read", ...input, context: context() }),
     }));
     pi.registerTool(defineTool({ name: "memory_write", label: "Remember",

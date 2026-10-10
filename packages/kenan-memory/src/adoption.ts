@@ -114,7 +114,7 @@ export function adoptMarkdown(options: AdoptionOptions): AdoptionResult {
     for (const [name, entries] of notes) {
       if (!entries.length) continue;
       const target = join(folder, `${name}.md`);
-      if (!existsSync(target) && install(target, `# ${name}\n\nAdopted exact source records. Maintain the current facts and decisions in this note; preserve originals as provenance. Superseded, retracted, stopped or expired records supply no active work or authority.\n\n${entries.join("\n")}\n`) === "conflict") return fail("destination-conflict", "An owning note changed during adoption");
+      if (!existsSync(target) && install(target, `# ${name}\n\n${name === "calendar" ? `Structured memory dataset: ${JSON.stringify(source.resource.id)}. Use memory_data with this configured dataset ID; snapshot and saved-source refresh require explicit from/to instants. Updates/deletes select series or occurrence explicitly. Original settings/ICS/undo remain in adopted custody.\n\n` : ""}Adopted exact source records. Maintain the current facts and decisions in this note; preserve originals as provenance. Superseded, retracted, stopped or expired records supply no active work or authority.\n\n${entries.join("\n")}\n`) === "conflict") return fail("destination-conflict", "An owning note changed during adoption");
     }
     const recordFd = openSync(recordFolder, "r");
     try { fsyncSync(recordFd); } finally { closeSync(recordFd); }
