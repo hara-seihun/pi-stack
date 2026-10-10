@@ -247,7 +247,13 @@ async function connectTransport(callId) {
   if (grant.callId !== callId) throw new Error('Retell call identity mismatch');
   // sdkFetch routes SDK control calls by path only; the base URL matters for the gateway transport's direct WebRTC signaling.
   const client = new RetellClient({ key: token, baseURL: 'https://api.retellai.com', fetch: sdkFetch });
-  monitor = client.monitorCall({ call_id: grant.callId, transcript: false, hooks: { onError: fail, onEnd: close } });
+  monitor = client.monitorCall({ call_id: grant.callId, transcript: false, hooks: {
+    onError: fail,
+    onEnd: event => {
+      send({ type: 'transport-ended', reason: typeof event?.disconnection_reason === 'string' ? event.disconnection_reason : null, diagnostics: window.telephoneMediaDiagnostics() });
+      close();
+    },
+  } });
   await monitor.ready;
   await monitor.listen();
   ensureOpen();
@@ -256,6 +262,16 @@ async function connectTransport(callId) {
     const pc = monitor.transport?.pc;
     if (!pc || typeof pc.getReceivers !== 'function') throw new Error('Retell gateway peer connection unavailable');
     if (monitor.transport.audioEl) monitor.transport.audioEl.muted = true;
+    const control = monitor.transport.dc;
+    if (!control) throw new Error('Retell gateway control channel unavailable');
+    const receive = control.onmessage;
+    control.onmessage = event => {
+      try {
+        const message = JSON.parse(event.data);
+        if (message?.type === 'status') send({ type: 'transport-status', state: message.state, reason: typeof message.disconnection_reason === 'string' ? message.disconnection_reason : null });
+      } catch (error) { fail(error); return; }
+      receive?.call(control, event);
+    };
     const attachGateway = () => {
       for (const receiver of pc.getReceivers()) {
         const track = receiver.track;

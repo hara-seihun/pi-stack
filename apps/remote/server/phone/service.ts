@@ -205,6 +205,14 @@ const websocket = {
       send(call, { type: "session.instructions.append", event_id: randomUUID(), delegation_id: null, content: "The telephone connection is now live. Deliver the approved opening and listen." }); return;
     }
     if (m.type === "audio-proof" && Number.isSafeInteger(m.bytes) && m.bytes > 0) { call.outputBytes += m.bytes; call.resolveAudio(); return; }
+    if (m.type === "transport-status") {
+      if (typeof m.state !== "string" || m.state.length > 100 || !(m.reason === null || typeof m.reason === "string" && m.reason.length <= 200)) { void finish(call, "failed", "Invalid transport lifecycle event"); return; }
+      log(call.id, "transport-status", { state: m.state, reason: m.reason }); return;
+    }
+    if (m.type === "transport-ended") {
+      log(call.id, "transport-ended", { reason: m.reason, diagnostics: m.diagnostics });
+      void finish(call, "completed", "Telephone media transport ended"); return;
+    }
     if (m.type === "error") { log(call.id, "media-error", { error: typeof m.error === "string" ? m.error.slice(0, 1000) : null }); void finish(call, "failed", "Media transport failed"); return; }
     if (m.type !== "live-event" || typeof m.event?.type !== "string") { void finish(call, "failed", "Unknown media control"); return; }
     const e = m.event;
@@ -222,7 +230,7 @@ const websocket = {
       if (e.type === "session.closed") void finish(call, "completed", "Voice session closed");
     } else if (e.type === "error") void finish(call, "failed", "Voice protocol error");
   },
-  close(ws: Socket) { if (ws.data.side === "browser" && ws.data.call && !ws.data.call.finishing) void finish(ws.data.call, "completed", "Voice media disconnected"); },
+  close(ws: Socket) { if (ws.data.side === "browser" && ws.data.call && !ws.data.call.finishing) void finish(ws.data.call, "failed", "Voice media disconnected unexpectedly"); },
 };
 // Import retained recent/uncertain effects before accepting new requests; this never dials.
 for (const row of db.query("SELECT id,brief,dial_state,provider_id FROM calls WHERE action_id IS NULL AND (dial_state IN ('dispatching','uncertain') OR (dial_state='accepted' AND COALESCE(accepted_at,started_at)>?)) ORDER BY started_at DESC").all(Date.now() - 2 * 60 * 60 * 1000) as { id: string; brief: string; dial_state: Call["dialState"]; provider_id: string | null }[]) {

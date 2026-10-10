@@ -77,7 +77,7 @@ async function browser(options: { takeoverFails?: boolean; deferTakeover?: boole
         assert.equal(config.transcript, false);
         const api = this.config.fetch;
         const monitor = {
-          ready: Promise.resolve(), status: 'monitoring', transport: options.gateway ? { pc: gatewayPeer, audioEl: gatewayAudio } : { room },
+          ready: Promise.resolve(), status: 'monitoring', transport: options.gateway ? { pc: gatewayPeer, audioEl: gatewayAudio, dc: { onmessage() {} } } : { room },
           async listen() { const response = await api('http://localhost:8799/v2/listen-live-call/call-1', { method: 'POST', body: '{}' }); assert.equal((await response.json()).access_token, 'join-token'); this.status = 'listening'; },
           async takeOver() {
             const probe = await devices.getUserMedia({ audio: true } as never) as any;
