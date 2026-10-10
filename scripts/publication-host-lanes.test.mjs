@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { hostLaneInputPath, hostLaneLockPath, hostWaitKind, mergeHostLanes, readHostLane, rollForwardHosts, runHostLane, runHostLaneRecovery, reconcileHostLaneObservation, resetHostLaneForRepair } from "../deploy/publication-hosts.mjs";
+import { hostLaneInputPath, hostLaneLockPath, hostWaitKind, mergeHostLanes, readHostLane, rollForwardHosts, runHostLane, runHostLaneRecovery, reconcileHostLaneObservation, resetHostLaneForRepair, hostLaneRetryPolicy } from "../deploy/publication-hosts.mjs";
 
 const targets = [{ id: "kenan-server" }, { id: "converge" }];
 const requestId = "PUB-0123456789abcdef01234567";
@@ -29,6 +29,7 @@ runHostLane(input, {
     if (local.reservations[hostId].state !== 'restore-required') throw new Error('Lost reservation custody');
     writeFileSync(process.env.RECOVERY_PROOF, JSON.stringify(local.reservations[hostId]));
     local.reservations[hostId].state = 'released';
+    local.nativeHistory.hosts[hostId].state = 'released';
     checkpoint(local);
   },
   deliver(local) {
@@ -59,9 +60,11 @@ function harness(t, outcomes = {}) {
   const children = new Map();
   const launches = [];
   const saves = [];
+  let time = Date.now();
   t.after(() => { for (const child of children.values()) if (child.exitCode === null) child.kill("SIGKILL"); rmSync(root, { recursive: true, force: true }); });
   const operations = {
     laneRoot,
+    clock: () => time,
     active(target) { const child = children.get(target.id); return !!child && child.exitCode === null && child.signalCode === null; },
     launch(target, inputPath) {
       launches.push(target.id);
@@ -83,7 +86,7 @@ function harness(t, outcomes = {}) {
     },
     save(request) { saves.push(structuredClone(request)); },
   };
-  return { root, laneRoot, children, launches, saves, operations };
+  return { root, laneRoot, children, launches, saves, operations, advance: () => { time += hostLaneRetryPolicy.cooldownMs; } };
 }
 
 async function release(child) { child.stdin.end(); const result = await child.completion; assert.equal(result.code, 0, child.errors); }
@@ -126,18 +129,140 @@ test("host workers overlap; independent custody and receipt merges lose no peer 
   assert.equal(h.launches.length, 2);
 });
 
-test("failed host does not terminalize the request while its peer owns live custody", async t => {
+test("failed host exhausts bounded retries independently while passed peer is untouched", async t => {
   const h = harness(t, { "kenan-server": "failed" });
   const request = initial();
   rollForwardHosts(request, targets, h.operations);
   await Promise.all([...h.children.values()].map(child => child.ready));
   await release(h.children.get("kenan-server"));
-  assert.deepEqual(rollForwardHosts(request, targets, h.operations), { status: "waiting", hosts: ["converge"] });
-  assert.equal(request.hosts["kenan-server"].failure.message, "activation failed");
+  assert.deepEqual(rollForwardHosts(request, targets, h.operations), { status: "waiting", hosts: ["kenan-server", "converge"] });
+  const queued = readHostLane(h.laneRoot, requestId, integrationSha, "kenan-server");
+  assert.equal(queued.history.at(-1).outcome.failure.message, "activation failed");
+  assert.equal(queued.fields[1].value.state, "restore-required", "queueing does not discard failed custody");
   assert.equal(request.reservations.converge.state, "restore-required");
+  assert.deepEqual(h.launches, ["kenan-server", "converge"], "cooldown does not launch early");
   await release(h.children.get("converge"));
+  const peer = readFileSync(join(h.laneRoot, requestId, integrationSha, "converge", "journal.json"), "utf8");
+  for (let attempt = 2; attempt <= hostLaneRetryPolicy.maxAttempts; attempt++) {
+    h.advance();
+    assert.equal(rollForwardHosts(request, targets, h.operations).status, "waiting");
+    const child = h.children.get("kenan-server");
+    await child.ready;
+    assert.equal(JSON.parse(readFileSync(join(h.root, "kenan-server-recovered.json"))).state, "restore-required");
+    await release(child);
+    if (attempt < hostLaneRetryPolicy.maxAttempts) assert.equal(rollForwardHosts(request, targets, h.operations).status, "waiting");
+  }
   assert.deepEqual(rollForwardHosts(request, targets, h.operations), { status: "failed", hosts: ["kenan-server"] });
   assert.equal(request.hosts.converge.status, "passed");
+  const exhausted = readHostLane(h.laneRoot, requestId, integrationSha, "kenan-server");
+  assert.equal(exhausted.attempt, 3);
+  assert.equal(exhausted.history.length, 2);
+  assert.ok(exhausted.history.every(item => item.outcome.failure.message === "activation failed"));
+  assert.equal(readFileSync(join(h.laneRoot, requestId, integrationSha, "converge", "journal.json"), "utf8"), peer);
+  rollForwardHosts(request, targets, h.operations);
+  assert.deepEqual(h.launches, ["kenan-server", "converge", "kenan-server", "kenan-server"]);
+});
+
+for (const recovery of ["released", "held", "throws"]) test(`automatic retry ${recovery} recovery is fenced before delivery and survives coordinator restart`, t => {
+  const h = harness(t);
+  let request = initial();
+  let checkpoint;
+  const calls = [];
+  const operations = { ...h.operations, active: () => false, launch(target, inputPath) {
+    runHostLane(inputPath, {
+      bind(local, save) { checkpoint = save; },
+      recover(local) {
+        calls.push(`recover:${target.id}`);
+        assert.equal(local.reservations[target.id].state, "restore-required");
+        assert.equal(local.reservations.converge, undefined, "recovery cannot touch passed peer custody");
+        if (recovery === "throws") throw new Error("restore unavailable");
+        if (recovery === "released") local.reservations[target.id].state = "released";
+        checkpoint(local);
+      },
+      deliver(local, previous) {
+        calls.push(`deliver:${target.id}`);
+        if (target.id === "converge") return { status: "passed", integrationSha };
+        if (calls.filter(call => call === `deliver:${target.id}`).length > 1) {
+          assert.equal(previous, undefined, "causal failure is retained in history, not replayed as readiness");
+          assert.equal(local.reservations[target.id].state, "released");
+          return { status: "passed", integrationSha };
+        }
+        local.reservations = { [target.id]: { state: "restore-required", integrationSha } };
+        checkpoint(local);
+        return { status: "failed", failure: { message: "activation failed" } };
+      },
+    });
+    return { ok: true };
+  } };
+  assert.deepEqual(rollForwardHosts(request, targets, operations), { status: "waiting", hosts: ["kenan-server"] });
+  const original = readHostLane(h.laneRoot, requestId, integrationSha, "kenan-server");
+  const peer = readFileSync(join(h.laneRoot, requestId, integrationSha, "converge", "journal.json"), "utf8");
+  rollForwardHosts(request, targets, operations);
+  const queued = readHostLane(h.laneRoot, requestId, integrationSha, "kenan-server");
+  assert.notEqual(queued.token, original.token);
+  assert.equal(queued.retry.failedToken, original.token);
+  request = initial();
+  rollForwardHosts(request, targets, operations);
+  assert.deepEqual(calls, ["deliver:kenan-server", "deliver:converge"], "restart cannot erase cooldown");
+  assert.equal(readHostLane(h.laneRoot, requestId, integrationSha, "kenan-server").token, queued.token);
+  for (let attempt = 2; attempt <= 3; attempt++) {
+    h.advance();
+    const result = rollForwardHosts(request, targets, operations);
+    if (recovery === "released") {
+      assert.equal(result.status, "passed");
+      break;
+    }
+    assert.equal(request.hosts["kenan-server"].failure.kind, recovery === "held" ? "host-retry-custody-held" : "host-recovery-failed");
+    assert.equal(request.reservations["kenan-server"].state, "restore-required");
+    assert.equal(result.status, attempt === 3 ? "failed" : "waiting");
+    if (attempt < 3) rollForwardHosts(request, targets, operations);
+  }
+  assert.equal(calls.filter(call => call.startsWith("deliver:kenan-server")).length, recovery === "released" ? 2 : 1);
+  const final = readHostLane(h.laneRoot, requestId, integrationSha, "kenan-server");
+  assert.equal(final.history[0].outcome.failure.message, "activation failed");
+  assert.equal(final.recoveries.at(-1).status, recovery === "released" ? "completed" : "failed");
+  assert.equal(readFileSync(join(h.laneRoot, requestId, integrationSha, "converge", "journal.json"), "utf8"), peer);
+});
+
+for (const stop of ["cancelled-status", "cancelled-reason", "explicitStop"]) test(`${stop} stops a queued automatic retry without changing passed peer`, t => {
+  const h = harness(t);
+  const request = initial();
+  const calls = [];
+  const operations = { ...h.operations, active: () => false, launch(target, inputPath) {
+    calls.push(target.id);
+    runHostLane(inputPath, { bind() {}, recover() { assert.fail("Stopped retry must not recover"); }, deliver() {
+      return target.id === "converge" ? { status: "passed", integrationSha } : { status: "failed", failure: { message: "activation failed" } };
+    } });
+    return { ok: true };
+  } };
+  rollForwardHosts(request, targets, operations);
+  rollForwardHosts(request, targets, operations);
+  const before = readHostLane(h.laneRoot, requestId, integrationSha, "kenan-server");
+  if (stop === "cancelled-status") request.status = "cancelled";
+  if (stop === "cancelled-reason") request.failure = { reason: "cancelled" };
+  if (stop === "explicitStop") request.explicitStop = true;
+  h.advance();
+  assert.deepEqual(rollForwardHosts(request, targets, operations), { status: "failed", hosts: ["kenan-server"] });
+  assert.deepEqual(calls, ["kenan-server", "converge"]);
+  assert.deepEqual(readHostLane(h.laneRoot, requestId, integrationSha, "kenan-server"), before);
+  assert.equal(request.hosts.converge.status, "passed");
+});
+
+test("worker cancellation outcome never authorizes an automatic retry", t => {
+  const h = harness(t);
+  const request = initial();
+  let launches = 0;
+  const operations = { ...h.operations, active: () => false, launch(target, inputPath) {
+    launches++;
+    runHostLane(inputPath, { bind() {}, recover() {}, deliver() {
+      return { status: "failed", failure: { reason: "cancelled", message: "explicit stop" } };
+    } });
+    return { ok: true };
+  } };
+  assert.deepEqual(rollForwardHosts(request, [targets[0]], operations), { status: "failed", hosts: ["kenan-server"] });
+  h.advance();
+  assert.equal(rollForwardHosts(request, [targets[0]], operations).status, "failed");
+  assert.equal(launches, 1);
 });
 
 test("SIGKILL retains pre-effect custody; restart recovers only the interrupted host before replay", async t => {
@@ -176,6 +301,35 @@ test("launch failure retains immutable queued input and does not gate peer launc
   assert.equal(inputs.length, 4);
   assert.equal(inputs[0], inputs[2]);
   assert.equal(readFileSync(retained, "utf8"), snapshot);
+  assert.equal(request.hostDelivery[targets[0].id].launchError, "unit manager unavailable");
+});
+
+test("failed but still active worker and failed activity probe retain their token until custody is released", t => {
+  const h = harness(t);
+  const request = initial();
+  let activity = false;
+  let calls = 0;
+  const operations = { ...h.operations, active() {
+    if (activity === "error") throw new Error("activity unavailable");
+    return activity;
+  }, launch(target, inputPath) {
+    calls++;
+    runHostLane(inputPath, { bind() {}, recover() {}, deliver() {
+      return { status: "failed", failure: { message: "activation failed" } };
+    } });
+    return { ok: true };
+  } };
+  rollForwardHosts(request, [targets[0]], operations);
+  const failed = readHostLane(h.laneRoot, requestId, integrationSha, targets[0].id);
+  for (activity of [true, "error"]) {
+    assert.equal(rollForwardHosts(request, [targets[0]], operations).status, "waiting");
+    assert.equal(readHostLane(h.laneRoot, requestId, integrationSha, targets[0].id).token, failed.token);
+  }
+  assert.equal(request.hostDelivery[targets[0].id].launchError, "activity unavailable");
+  activity = false;
+  rollForwardHosts(request, [targets[0]], operations);
+  assert.equal(readHostLane(h.laneRoot, requestId, integrationSha, targets[0].id).state, "queued");
+  assert.equal(calls, 1);
 });
 
 for (const kind of ["live-meeting", "live-telephone", "native-source", "native-history", "host-lock"]) {

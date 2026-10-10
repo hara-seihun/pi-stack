@@ -17,7 +17,7 @@ export function recordCommandTiming(request, progress) {
 export function publicationTimings(request, proofs = {}) {
   const hosts = Object.fromEntries(Object.entries(request.hosts ?? {}).map(([id, outcome]) => {
     const proof = proofs[id];
-    const servingAt = outcome.status === 'passed' ? proof?.verifiedAt ?? outcome.android?.verifiedAt : null;
+    const servingAt = outcome.status === 'passed' ? proof?.servingAt ?? proof?.verifiedAt ?? outcome.android?.verifiedAt : null;
     const lane = request.hostDelivery?.[id];
     return [id, {
       status: outcome.status, servingAt,

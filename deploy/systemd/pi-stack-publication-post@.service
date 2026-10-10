@@ -1,0 +1,20 @@
+[Unit]
+Description=Post-serving Pi Stack diagnostics %i
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=30min
+StartLimitBurst=3
+
+[Service]
+Type=exec
+ExecStart=@PUBLICATION_COMMAND@ post-run %i
+RuntimeMaxSec=25min
+TimeoutStopSec=10s
+Restart=on-failure
+RestartSec=5s
+KillMode=control-group
+UMask=0077
+Environment=PATH=@PUBLICATION_PATH@
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

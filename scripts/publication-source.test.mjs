@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { publicationConfig } from "./publication-fixture.mjs";
-import { progressBudgetExhausted } from '../deploy/publication-control.mjs';
 
 const publication = new URL("../deploy/publication", import.meta.url).href;
 
@@ -214,14 +213,17 @@ function integrationFixture(t) {
   const request = { requestId: "PUB-0123456789abcdef01234567", sourceSha: integrationSha,
     sourceRef: "refs/heads/submission", baseSha: f.commit, integrationSha, attempt: 1,
     status: "running", checks: { status: "passed", log: "/retained/checks.log" },
-    android: { directory: "/retained/android", release: { revision: integrationSha } }, failures: [] };
-  function publish(requeue = false, environment = {}) {
+    android: { directory: "/retained/android", release: { revision: integrationSha } },
+    hosts: { gmktec: { status: "passed", integrationSha } },
+    reservations: { converge: { state: "reserved", integrationSha } },
+    nativeHistory: { hosts: { converge: { state: "sealed", integrationSha } } },
+    actionJournal: { source: { state: "completed", integrationSha } }, failures: [] };
+  function publish(environment = {}) {
     const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
-      import { publishIntegration, requeueMovedIntegration } from ${JSON.stringify(publication)};
+      import { publishIntegration } from ${JSON.stringify(publication)};
       const request = ${JSON.stringify(request)};
       const log = ${JSON.stringify(join(f.root, "integration.log"))};
       const result = publishIntegration(request, log);
-      if (${requeue} && result.kind === "main-moved") requeueMovedIntegration(request, result.remoteMain, log);
       console.log(JSON.stringify({ result, request }));
     `], { encoding: "utf8", timeout: 5000, env: { ...process.env, PI_STACK_PUBLICATION_STATE: f.root, PI_STACK_PUBLICATION_CONFIG: publicationConfig(f.root, f.source), ...environment } });
     assert.equal(result.status, 0, result.stderr);
@@ -230,33 +232,51 @@ function integrationFixture(t) {
   return { ...f, remote, contender, integrationSha, request, publish };
 }
 
-for (const timing of ["before-refresh", "during-push"]) test(`main movement ${timing} retains proof and queues rechecking without overwriting either writer`, t => {
+function assertPublishedSource(f, result, request) {
+  assert.equal(result.ok, true, result.stderr);
+  assert.equal(request.status, "running", "main contention must not requeue source work");
+  assert.equal(request.step, "integrated");
+  assert.ok(Number.isFinite(Date.parse(request.integratedAt)));
+  for (const key of ["sourceSha", "sourceRef", "baseSha", "integrationSha", "attempt", "checks", "android", "hosts", "reservations", "nativeHistory", "actionJournal", "failures"]) {
+    assert.deepEqual(request[key], f.request[key], `${key} survives main contention`);
+  }
+  assert.equal(request.mainMovements, undefined);
+  assert.deepEqual(request.deliverySource, {
+    sourceSha: f.integrationSha,
+    sourceRef: `refs/heads/pi-stack-publications/${request.requestId}-delivery-${f.integrationSha}`,
+  });
+  const ref = request.deliverySource.sourceRef;
+  assert.equal(f.git(f.remote, "rev-parse", ref), f.integrationSha);
+  assert.equal(f.git(f.remote, "show", `${ref}:submission`), "submitted work");
+  assert.deepEqual(JSON.parse(readFileSync(join(f.root, "requests", `${request.requestId}.json`), "utf8")), request);
+  return ref;
+}
+
+for (const timing of ["before-publish", "during-push"]) test(`main movement ${timing} preserves immutable integration and checked serving evidence`, t => {
   const f = integrationFixture(t);
   f.request.attemptLimit = f.request.attempt;
-  if (timing === "before-refresh") f.git(f.remote, "update-ref", "refs/heads/main", f.contender);
-  else writeFileSync(join(f.checkout, ".git/hooks/pre-push"), `#!/bin/sh\ngit -C '${f.remote}' update-ref refs/heads/main ${f.contender}\n`, { mode: 0o700 });
+  if (timing === "before-publish") f.git(f.remote, "update-ref", "refs/heads/main", f.contender);
+  else writeFileSync(join(f.checkout, ".git/hooks/pre-push"), `#!/bin/sh
+while read local_ref local_sha remote_ref remote_sha; do
+  if [ "$remote_ref" = refs/heads/main ]; then git -C '${f.remote}' update-ref refs/heads/main ${f.contender}; fi
+done
+`, { mode: 0o700 });
   assert.equal(f.git(f.checkout, "rev-parse", "origin/main"), f.commit);
-  const { result, request } = f.publish(true);
-  assert.deepEqual(result, { ok: false, kind: "main-moved", remoteMain: f.contender });
-  assert.equal(request.status, "queued");
-  assert.equal(request.step, "main-moved-recheck-required");
-  assert.equal(progressBudgetExhausted(request), false, 'retained passed integration gets a bounded contention recheck even on the final source-repair attempt');
-  for (const key of ["checks", "integrationSha", "baseSha", "android", "hosts", "integratedAt"]) assert.equal(request[key], undefined);
-  assert.equal(request.sourceSha, f.integrationSha);
-  assert.equal(request.sourceRef, f.request.sourceRef);
-  assert.equal(request.attempt, 1);
-  assert.deepEqual(request.failures, []);
-  const [retained] = request.mainMovements;
-  assert.equal(retained.integrationSha, f.integrationSha);
-  assert.deepEqual(retained.checks, f.request.checks);
-  assert.deepEqual(retained.android, f.request.android);
-  assert.equal(f.git(f.checkout, "rev-parse", retained.ref), f.integrationSha);
+  const { result, request } = f.publish();
+  const ref = assertPublishedSource(f, result, request);
+  assert.equal(request.mainPublication.status, "not-advanced");
+  assert.equal(request.mainPublication.sourceSha, f.integrationSha);
+  assert.ok(request.mainPublication.message);
   assert.equal(f.git(f.remote, "rev-parse", "main"), f.contender);
-  assert.equal(f.git(f.checkout, "show", `${retained.ref}:submission`), "submitted work");
-  assert.deepEqual(JSON.parse(readFileSync(join(f.root, "requests", `${request.requestId}.json`), "utf8")), request);
+  rmSync(f.checkout, { recursive: true, force: true });
+  rmSync(f.source, { recursive: true, force: true });
+  mkdirSync(f.checkout);
+  f.git(f.checkout, "init", "--quiet");
+  f.git(f.checkout, "fetch", "--quiet", f.remote, ref);
+  assert.equal(f.git(f.checkout, "rev-parse", "FETCH_HEAD"), f.integrationSha, "a host can recover the immutable source without the worker checkout");
 });
 
-test("requeue restores both hosts and retains their restoration plans", t => {
+test("main movement does not restore or release either host's active custody", t => {
   const f = integrationFixture(t);
   f.git(f.remote, "update-ref", "refs/heads/main", f.contender);
   f.request.bootstrap = { hosts: {} };
@@ -268,30 +288,24 @@ test("requeue restores both hosts and retains their restoration plans", t => {
   const bin = join(f.root, "bin");
   mkdirSync(bin);
   for (const command of ["bash", "ssh"]) writeFileSync(join(bin, command), '#!/bin/sh\ncat >> "$RESTORE_LOG"\n', { mode: 0o700 });
-  const { request } = f.publish(true, { PATH: `${bin}:${process.env.PATH}`, RESTORE_LOG: join(f.root, "restore.log") });
-  assert.equal(request.status, "queued");
-  for (const kind of ["bootstrap", "maintenance"]) for (const host of ["gmktec", "converge"]) {
-    assert.equal(request[kind].hosts[host].state, "restored");
-    assert.deepEqual(request[kind].hosts[host].plan, f.request[kind].hosts[host].plan);
-    assert.deepEqual(request.mainMovements[0][kind], request[kind]);
-  }
-  assert.ok(readFileSync(join(f.root, "restore.log"), "utf8").length > 0);
+  const restoreLog = join(f.root, "restore.log");
+  const { result, request } = f.publish({ PATH: `${bin}:${process.env.PATH}`, RESTORE_LOG: restoreLog });
+  assertPublishedSource(f, result, request);
+  for (const key of ["bootstrap", "maintenance"]) assert.deepEqual(request[key], f.request[key]);
+  assert.equal(existsSync(restoreLog), false, "publishing source must not run host restoration commands");
 });
 
-for (const alreadyIntegrated of [false, true]) test(`confirmed exact integration is recorded, already integrated=${alreadyIntegrated}`, t => {
+for (const alreadyIntegrated of [false, true]) test(`exact source is retained and main fast-forwards, already integrated=${alreadyIntegrated}`, t => {
   const f = integrationFixture(t);
-  if (alreadyIntegrated) {
-    f.git(f.source, "push", "--quiet", "origin", `${f.integrationSha}:refs/heads/main`);
-    writeFileSync(join(f.checkout, ".git/hooks/pre-push"), "#!/bin/sh\nexit 99\n", { mode: 0o700 });
-  }
+  if (alreadyIntegrated) f.git(f.source, "push", "--quiet", "origin", `${f.integrationSha}:refs/heads/main`);
   const { result, request } = f.publish();
-  assert.equal(result.ok, true);
-  assert.equal(request.step, "integrated");
-  assert.ok(request.integratedAt);
+  assertPublishedSource(f, result, request);
+  assert.equal(request.mainPublication.status, "advanced");
+  assert.equal(request.mainPublication.sourceSha, f.integrationSha);
   assert.equal(f.git(f.remote, "rev-parse", "main"), f.integrationSha);
 });
 
-test("main advancing after an accepted push still requires checks of the new tip", t => {
+test("main advancing after an accepted push preserves the checked immutable source", t => {
   const f = integrationFixture(t);
   f.git(f.source, "checkout", "--quiet", "--detach", f.integrationSha);
   writeFileSync(join(f.source, "next"), "later integration\n");
@@ -299,37 +313,55 @@ test("main advancing after an accepted push still requires checks of the new tip
   f.git(f.source, "commit", "--quiet", "-m", "Next main");
   const next = f.git(f.source, "rev-parse", "HEAD");
   f.git(f.source, "push", "--quiet", "origin", "HEAD:refs/heads/next");
-  writeFileSync(join(f.remote, "hooks/post-receive"), `#!/bin/sh\ngit update-ref refs/heads/main ${next}\n`, { mode: 0o700 });
-  const { result, request } = f.publish(true);
-  assert.equal(result.kind, "main-moved");
-  assert.equal(result.remoteMain, next);
-  assert.equal(request.status, "queued");
-  assert.equal(request.checks, undefined);
+  writeFileSync(join(f.remote, "hooks/post-receive"), `#!/bin/sh
+while read old new ref; do
+  if [ "$ref" = refs/heads/main ]; then git update-ref refs/heads/main ${next}; fi
+done
+`, { mode: 0o700 });
+  const { result, request } = f.publish();
+  assertPublishedSource(f, result, request);
+  assert.equal(request.mainPublication.status, "advanced", "main accepted the source even though a subsequent writer advanced it");
+  assert.equal(request.mainPublication.sourceSha, f.integrationSha);
   assert.equal(f.git(f.remote, "rev-parse", "main"), next);
 });
 
-test("unavailable main fails before a push or requeue", t => {
+test("unavailable origin cannot claim durable integration", t => {
   const f = integrationFixture(t);
   f.git(f.checkout, "remote", "set-url", "origin", join(f.root, "absent.git"));
-  const { result, request } = f.publish(true);
+  const { result, request } = f.publish();
   assert.equal(result.ok, false);
-  assert.equal(result.kind, undefined);
-  assert.equal(request.step, "refresh-integration-base");
+  assert.equal(request.integratedAt, undefined);
   assert.equal(request.mainMovements, undefined);
   assert.equal(request.integrationSha, f.integrationSha);
+  assert.deepEqual(request.checks, f.request.checks);
   assert.equal(f.git(f.remote, "rev-parse", "main"), f.commit);
 });
 
-test("a rejected push with unchanged main remains a failure, not a rebuild", t => {
+test("rejected immutable ref is a source publication failure", t => {
   const f = integrationFixture(t);
   writeFileSync(join(f.remote, "hooks/pre-receive"), "#!/bin/sh\necho 'repository policy rejects push' >&2\nexit 1\n", { mode: 0o700 });
-  const { result, request } = f.publish(true);
+  const { result, request } = f.publish();
   assert.equal(result.ok, false);
-  assert.equal(result.kind, undefined);
-  assert.equal(request.step, "integrate-main");
+  assert.equal(request.integratedAt, undefined);
   assert.equal(request.mainMovements, undefined);
   assert.equal(request.integrationSha, f.integrationSha);
   assert.match(readFileSync(join(f.root, "integration.log"), "utf8"), /repository policy rejects push/);
+  assert.equal(f.git(f.remote, "rev-parse", "main"), f.commit);
+});
+
+test("rejected main-only update still succeeds with an immutable source and truthful status", t => {
+  const f = integrationFixture(t);
+  writeFileSync(join(f.remote, "hooks/pre-receive"), `#!/bin/sh
+while read old new ref; do
+  if [ "$ref" = refs/heads/main ]; then echo 'main policy rejects push' >&2; exit 1; fi
+done
+`, { mode: 0o700 });
+  const { result, request } = f.publish();
+  assertPublishedSource(f, result, request);
+  assert.equal(request.mainPublication.status, "not-advanced");
+  assert.equal(request.mainPublication.sourceSha, f.integrationSha);
+  assert.ok(request.mainPublication.message);
+  assert.match(readFileSync(join(f.root, "integration.log"), "utf8"), /main policy rejects push/);
   assert.equal(f.git(f.remote, "rev-parse", "main"), f.commit);
 });
 

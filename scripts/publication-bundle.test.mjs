@@ -5,8 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { freezeSourceBundle, sourceOnlyQueued, sourceBundleMembers, resolveSourceBundle } from "../deploy/publication-bundle.mjs";
+import { repairSourceRef } from "../deploy/publication-continuation.mjs";
 import { publicationConfig } from "./publication-fixture.mjs";
 
+const publication = new URL("../deploy/publication", import.meta.url).href;
 const request = digit => ({ requestId: `PUB-${digit.repeat(24)}`, sourceSha: digit.repeat(40), sourceRef: `refs/heads/pi-stack-publications/PUB-${digit.repeat(24)}`,
   status: "queued", step: "queued", attempt: 0, failures: [] });
 const ready = () => true;
@@ -17,13 +19,7 @@ const freeze = (leader, requests) => {
 };
 const follower = (source, owner) => ({ ...source, step: "awaiting-source-bundle", sourceBundleOwner: { requestId: owner.requestId, bundleId: owner.sourceBundle.id } });
 
-const root = mkdtempSync(join(tmpdir(), "publication-bundle-"));
-process.env.PI_STACK_PUBLICATION_CONFIG = publicationConfig(root);
-process.env.PI_STACK_PUBLICATION_STATE = root;
-const { integrateSourceBundle, freezeQueuedSources, reconcileSourceBundles } = await import("../deploy/publication");
-process.on("exit", () => rmSync(root, { recursive: true, force: true }));
-
-test("one frozen cohort excludes repairs, nonready requests and any live or historical host effects", () => {
+test("a frozen cohort excludes nonready requests, repairs and live or historical host effects", () => {
   const leader = request("1"), other = request("2");
   const excluded = [
     { ...request("3"), status: "running" }, { ...request("4"), repairOf: leader.requestId },
@@ -36,7 +32,7 @@ test("one frozen cohort excludes repairs, nonready requests and any live or hist
   assert.equal(freezeSourceBundle(excluded[0], [leader], ready).error.kind, "ineligible-leader");
 });
 
-test("cohort identities bind exact immutable source refs and reject tampering", () => {
+test("cohort identities bind immutable source refs and reject tampering", () => {
   const owner = freeze(request("1"), [request("2")]);
   assert.equal(sourceBundleMembers(owner).ok, true);
   const tampered = structuredClone(owner);
@@ -47,7 +43,7 @@ test("cohort identities bind exact immutable source refs and reject tampering", 
   assert.equal(resolveSourceBundle(follower(request("2"), owner), undefined).error.kind, "missing-bundle-owner");
 });
 
-test("source evidence becomes reusable only after passing checks and integration, independently of host waits or failures", () => {
+test("checked immutable source evidence is reusable independently of host waits or failures", () => {
   const original = freeze(request("1"), [request("2")]);
   const consumer = follower(request("2"), original);
   assert.equal(resolveSourceBundle(consumer, original).state, "pending");
@@ -81,73 +77,195 @@ function git(path, ...args) {
   return result.stdout.trim();
 }
 
-test("integration fetches the cohort once and retains every branch ancestry; moved immutable refs fail before merging", () => {
-  const remote = join(root, "remote");
-  mkdirSync(remote);
-  git(remote, "init", "--quiet", "-b", "main");
-  git(remote, "config", "user.name", "Fixture");
-  git(remote, "config", "user.email", "fixture@example.test");
-  writeFileSync(join(remote, "base"), "base");
-  git(remote, "add", ".");
-  git(remote, "commit", "--quiet", "-m", "base");
-  const baseSha = git(remote, "rev-parse", "HEAD");
-  const sources = [request("1"), request("2")].map((source, index) => {
-    git(remote, "checkout", "--quiet", "-B", `source-${index}`, baseSha);
-    writeFileSync(join(remote, `source-${index}`), String(index));
-    git(remote, "add", ".");
-    git(remote, "commit", "--quiet", "-m", `source-${index}`);
-    source.sourceSha = git(remote, "rev-parse", "HEAD");
-    git(remote, "update-ref", source.sourceRef, source.sourceSha);
-    return source;
-  });
-  git(remote, "checkout", "--quiet", "main");
-  const clone = spawnSync("git", ["clone", "--quiet", remote, join(root, "repository")], { encoding: "utf8", timeout: 5_000 });
-  assert.equal(clone.status, 0, clone.stderr);
+function fixture(t) {
+  const root = mkdtempSync(join(tmpdir(), "publication-bundle-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const work = join(root, "source"), remote = join(root, "remote.git"), checkout = join(root, "repository");
+  mkdirSync(work);
+  git(root, "init", "--quiet", "--bare", remote);
+  git(work, "init", "--quiet", "-b", "main");
+  git(work, "config", "user.name", "Fixture");
+  git(work, "config", "user.email", "fixture@example.test");
+  writeFileSync(join(work, "base"), "base\n");
+  git(work, "add", ".");
+  git(work, "commit", "--quiet", "-m", "base");
+  const baseSha = git(work, "rev-parse", "HEAD");
+  git(work, "remote", "add", "origin", remote);
+  git(work, "push", "--quiet", "origin", "HEAD:refs/heads/main");
+  git(root, "clone", "--quiet", "--branch", "main", remote, checkout);
+  const config = publicationConfig(root);
   mkdirSync(join(root, "requests"));
-  for (const source of sources) writeFileSync(join(root, "requests", `${source.requestId}.json`), JSON.stringify(source));
-  const owner = freeze(sources[0], sources);
-  const log = join(root, "bundle.log");
-  const integration = integrateSourceBundle(owner, log);
-  assert.equal(integration.ok, true, integration.stderr);
-  assert.equal(integration.baseSha, baseSha);
-  for (const source of sources) git(join(root, "repository"), "merge-base", "--is-ancestor", source.sourceSha, "HEAD");
-  const steps = readFileSync(log, "utf8");
-  assert.equal(steps.match(/\] fetch-submitted-sources/g).length, 1);
-  assert.equal(steps.match(/\] merge-source/g).length, 2);
-  assert.equal(/\] checks/.test(steps), false);
-  git(remote, "update-ref", sources[1].sourceRef, baseSha);
-  const moved = integrateSourceBundle(owner, join(root, "moved.log"));
-  assert.equal(moved.ok, false);
-  assert.match(moved.stderr, /source ref moved/);
-  assert.equal(/create-integration/.test(readFileSync(join(root, "moved.log"), "utf8")), false);
-
-  for (const source of sources) {
-    source.updatedAt = "2026-10-09T00:00:00Z";
-    source.queuedAt = "2026-10-09T00:00:00Z";
-    writeFileSync(join(root, "requests", `${source.requestId}.json`), JSON.stringify(source));
+  const path = source => join(root, "requests", `${source.requestId}.json`);
+  const persist = source => writeFileSync(path(source), JSON.stringify(source));
+  const read = source => JSON.parse(readFileSync(path(source), "utf8"));
+  function commit(name, parent = baseSha) {
+    git(work, "checkout", "--quiet", "--detach", parent);
+    writeFileSync(join(work, name), `${name}\n`);
+    git(work, "add", ".");
+    git(work, "commit", "--quiet", "-m", name);
+    return git(work, "rev-parse", "HEAD");
   }
-  freezeQueuedSources(sources[0]);
-  const followerPath = join(root, "requests", `${sources[1].requestId}.json`);
-  const bound = JSON.parse(readFileSync(followerPath));
-  assert.equal(bound.sourceBundleOwner.requestId, sources[0].requestId);
-  assert.equal(bound.integrationSha, undefined);
-  writeFileSync(followerPath, JSON.stringify(sources[1]));
-  reconcileSourceBundles();
-  assert.deepEqual(JSON.parse(readFileSync(followerPath)).sourceBundleOwner, bound.sourceBundleOwner, "restarts repair a partially persisted cohort binding");
+  function source(digit, parent = baseSha) {
+    const submitted = { ...request(digit), sourceSha: commit(`source-${digit}`, parent) };
+    git(work, "push", "--quiet", "origin", `${submitted.sourceSha}:${submitted.sourceRef}`);
+    persist(submitted);
+    return submitted;
+  }
+  function repair(owner, name, parent) {
+    const sourceSha = commit(name, parent);
+    const retained = { sourceSha, sourceRef: repairSourceRef(owner.requestId, sourceSha) };
+    git(work, "push", "--quiet", "origin", `${sourceSha}:${retained.sourceRef}`);
+    return retained;
+  }
+  function moveMain(parent = baseSha) {
+    const main = commit("concurrent-main", parent);
+    git(work, "push", "--quiet", "origin", `${main}:refs/heads/main`);
+    git(checkout, "fetch", "--quiet", "origin");
+    return main;
+  }
+  function run(script) {
+    return spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import { integrateSourceBundle, freezeQueuedSources, reconcileSourceBundles } from ${JSON.stringify(publication)};
+      ${script}
+    `], { encoding: "utf8", timeout: 5_000,
+      env: { ...process.env, PI_STACK_PUBLICATION_CONFIG: config, PI_STACK_PUBLICATION_STATE: root } });
+  }
+  function integrate(owner, name = "integration") {
+    const log = join(root, `${name}.log`);
+    const result = run(`console.log(JSON.stringify(integrateSourceBundle(${JSON.stringify(owner)}, ${JSON.stringify(log)})));`);
+    assert.equal(result.status, 0, result.stderr);
+    return { result: JSON.parse(result.stdout), log };
+  }
+  return { root, work, remote, checkout, baseSha, source, repair, moveMain, persist, read, run, integrate };
+}
 
-  const checkedOwner = { ...sources[0], status: "failed", integrationSha: git(join(root, "repository"), "rev-parse", "HEAD"), baseSha,
+function assertExactSelection(f, expected, log) {
+  assert.equal(git(f.checkout, "rev-parse", "HEAD"), expected, "integration must never synthesize a new commit");
+  const steps = readFileSync(log, "utf8");
+  assert.equal(/\] (merge-source|merge-repair-source|checks)\b/.test(steps), false);
+}
+
+test("integration selects the exact submitted SHA, not concurrent main", t => {
+  const f = fixture(t), owner = f.source("1");
+  const main = f.moveMain();
+  assert.notEqual(main, owner.sourceSha);
+  const { result, log } = f.integrate(owner);
+  assert.equal(result.ok, true, result.stderr);
+  assert.equal(result.baseSha, owner.sourceSha);
+  assertExactSelection(f, owner.sourceSha, log);
+  assert.equal(git(f.checkout, "rev-parse", "origin/main"), main);
+  const absent = spawnSync("git", ["-C", f.checkout, "cat-file", "-e", "HEAD:concurrent-main"], { timeout: 5_000 });
+  assert.notEqual(absent.status, 0, "latest main must not leak into the submitted tree");
+});
+
+test("same-request continuation selects the last retained repair SHA exactly", t => {
+  const f = fixture(t), owner = f.source("1");
+  const first = f.repair(owner, "repair-one", owner.sourceSha);
+  const last = f.repair(owner, "repair-two", first.sourceSha);
+  owner.repairSources = [first, last];
+  f.persist(owner);
+  f.moveMain();
+  const { result, log } = f.integrate(owner);
+  assert.equal(result.ok, true, result.stderr);
+  assert.equal(result.baseSha, owner.sourceSha);
+  assertExactSelection(f, last.sourceSha, log);
+  for (const source of [owner, first]) git(f.checkout, "merge-base", "--is-ancestor", source.sourceSha, "HEAD");
+  assert.equal(f.read(owner).sourceSha, owner.sourceSha, "continuation keeps the original request source binding");
+});
+
+test("readiness can freeze only queued ancestors covered by the leader's exact SHA", t => {
+  const f = fixture(t), ancestor = f.source("2"), leader = f.source("1", ancestor.sourceSha), divergent = f.source("3");
+  const frozen = freezeSourceBundle(leader, [ancestor, divergent], candidate => {
+    const proof = spawnSync("git", ["-C", f.work, "merge-base", "--is-ancestor", candidate.sourceSha, leader.sourceSha], { timeout: 5_000 });
+    assert.ok(proof.status === 0 || proof.status === 1);
+    return proof.status === 0;
+  });
+  assert.equal(frozen.ok, true);
+  assert.deepEqual(frozen.bundle.sources.map(source => source.requestId), [leader.requestId, ancestor.requestId]);
+});
+
+test("retained ancestor bundles validate once without changing the selected commit, and restart bindings preserve separate custody", t => {
+  const f = fixture(t), ancestor = f.source("2"), owner = freeze(f.source("1", ancestor.sourceSha), [ancestor]);
+  f.persist(owner);
+  f.moveMain();
+  const { result, log } = f.integrate(owner);
+  assert.equal(result.ok, true, result.stderr);
+  assertExactSelection(f, owner.sourceSha, log);
+  git(f.checkout, "merge-base", "--is-ancestor", ancestor.sourceSha, "HEAD");
+  assert.equal(readFileSync(log, "utf8").match(/\] fetch-submitted-sources/g).length, 1);
+  let bound = f.run(`freezeQueuedSources(${JSON.stringify(owner)});`);
+  assert.equal(bound.status, 0, bound.stderr);
+  assert.equal(f.read(ancestor).sourceBundleOwner.requestId, owner.requestId);
+  assert.equal(f.read(ancestor).integrationSha, undefined);
+  f.persist(ancestor);
+  bound = f.run("reconcileSourceBundles();");
+  assert.equal(bound.status, 0, bound.stderr);
+  assert.deepEqual(f.read(ancestor).sourceBundleOwner, follower(ancestor, owner).sourceBundleOwner, "restart repairs partially persisted retained bindings");
+
+  const checkedOwner = { ...owner, status: "failed", integrationSha: owner.sourceSha, baseSha: owner.sourceSha,
     checks: { status: "passed", log }, integratedAt: "2026-10-09T00:01:00Z", hosts: { converge: { status: "failed" } },
     nativeHistory: { hosts: { converge: { state: "repair-required" } } } };
-  writeFileSync(join(root, "requests", `${checkedOwner.requestId}.json`), JSON.stringify(checkedOwner));
-  reconcileSourceBundles();
-  const hydrated = JSON.parse(readFileSync(followerPath));
-  assert.equal(hydrated.integrationSha, checkedOwner.integrationSha);
+  f.persist(checkedOwner);
+  const reconciled = f.run("reconcileSourceBundles();");
+  assert.equal(reconciled.status, 0, reconciled.stderr);
+  const hydrated = f.read(ancestor);
+  assert.equal(hydrated.integrationSha, owner.sourceSha);
   assert.equal(hydrated.status, "queued");
   assert.equal(hydrated.step, "source-bundle-ready");
   assert.equal(hydrated.nativeHistory, undefined);
   assert.equal(hydrated.hosts, undefined);
-  assert.equal(JSON.parse(readFileSync(join(root, "requests", `${checkedOwner.requestId}.json`))).nativeHistory.hosts.converge.state, "repair-required");
-  writeFileSync(join(root, "requests", `${sources[1].requestId}.cancel`), "cancel");
-  assert.throws(() => integrateSourceBundle(checkedOwner, join(root, "cancelled.log")), /Source bundle member .* cancelled/);
-  assert.throws(() => integrateSourceBundle(hydrated, join(root, "cancelled-follower.log")), /Publication cancelled/);
+  assert.equal(f.read(owner).nativeHistory.hosts.converge.state, "repair-required");
+  writeFileSync(join(f.root, "requests", `${ancestor.requestId}.cancel`), "cancel");
+  const cancelledOwner = f.run(`integrateSourceBundle(${JSON.stringify(checkedOwner)}, ${JSON.stringify(join(f.root, "cancelled.log"))});`);
+  assert.notEqual(cancelledOwner.status, 0);
+  assert.match(cancelledOwner.stderr, /Source bundle member .* cancelled/);
+  const cancelledFollower = f.run(`integrateSourceBundle(${JSON.stringify(hydrated)}, ${JSON.stringify(join(f.root, "cancelled-follower.log"))});`);
+  assert.notEqual(cancelledFollower.status, 0);
+  assert.match(cancelledFollower.stderr, /Publication cancelled/);
+});
+
+test("an uncovered retained bundle member fails instead of merging a different commit", t => {
+  const f = fixture(t), leader = f.source("1"), unrelated = f.source("2"), owner = freeze(leader, [unrelated]);
+  f.persist(owner);
+  const { result, log } = f.integrate(owner);
+  assert.equal(result.ok, false);
+  assert.match(result.stderr, /omits/);
+  assert.ok(result.stderr.includes(unrelated.sourceSha));
+  assertExactSelection(f, leader.sourceSha, log);
+});
+
+test("the selected repair must cover earlier retained repairs", t => {
+  const f = fixture(t), owner = f.source("1");
+  const first = f.repair(owner, "repair-one", owner.sourceSha);
+  const fork = f.repair(owner, "repair-fork", owner.sourceSha);
+  owner.repairSources = [first, fork];
+  f.persist(owner);
+  const { result, log } = f.integrate(owner);
+  assert.equal(result.ok, false);
+  assert.ok(result.stderr.includes(first.sourceSha));
+  assertExactSelection(f, fork.sourceSha, log);
+});
+
+for (const repairMoved of [false, true]) test(`a moved immutable ${repairMoved ? "repair" : "submission"} ref fails instead of selecting its new target`, t => {
+  const f = fixture(t), owner = f.source("1");
+  let retained = owner;
+  if (repairMoved) {
+    retained = f.repair(owner, "repair", owner.sourceSha);
+    owner.repairSources = [retained];
+    f.persist(owner);
+  }
+  git(f.remote, "update-ref", retained.sourceRef, f.baseSha);
+  const { result, log } = f.integrate(owner);
+  assert.equal(result.ok, false);
+  assert.match(result.stderr, /source ref moved|repair source ref changed/i);
+  assertExactSelection(f, f.baseSha, log);
+});
+
+test("queued requests do not automatically become a new cohort", t => {
+  const f = fixture(t), ancestor = f.source("2"), leader = f.source("1", ancestor.sourceSha);
+  const frozen = f.run(`freezeQueuedSources(${JSON.stringify(leader)});`);
+  assert.equal(frozen.status, 0, frozen.stderr);
+  assert.equal(f.read(leader).sourceBundle, undefined);
+  assert.equal(f.read(ancestor).sourceBundleOwner, undefined);
+  assert.equal(f.read(ancestor).step, "queued");
 });

@@ -23,6 +23,11 @@ const ownedPaths = [
   ["maintenance", "hosts"], ["android", "hosts"],
 ];
 const terminal = new Set(["passed", "waiting", "failed"]);
+export const hostLaneRetryPolicy = Object.freeze({ maxAttempts: 3, cooldownMs: 5_000 });
+const stopped = request => request.explicitStop === true || request.status === "cancelled" || request.failure?.reason === "cancelled";
+const laneAttempt = lane => lane.attempt ?? 1 + lane.history.filter(item => item.state === "failed").length;
+const retryable = (request, lane) => lane?.state === "failed" && !stopped(request)
+  && lane.outcome.failure?.reason !== "cancelled" && laneAttempt(lane) < hostLaneRetryPolicy.maxAttempts;
 const now = () => new Date().toISOString();
 const clone = value => structuredClone(value);
 const read = path => JSON.parse(readFileSync(path, "utf8"));
@@ -65,6 +70,9 @@ export function readHostLane(root, requestId, integrationSha, hostId) {
     || !Number.isSafeInteger(lane.revision) || lane.revision < 1
     || !["queued", "running", "recovering", "passed", "waiting", "failed"].includes(lane.state)
     || terminal.has(lane.state) && lane.outcome?.status !== lane.state
+    || lane.attempt !== undefined && (!Number.isSafeInteger(lane.attempt) || lane.attempt < 1)
+    || lane.retry !== undefined && (typeof lane.retry.failedToken !== "string" || !Number.isSafeInteger(lane.retry.failedAttempt)
+      || lane.retry.failedAttempt < 1 || !Number.isFinite(Date.parse(lane.retry.notBefore)))
     || !Array.isArray(lane.history) || !Array.isArray(lane.fields) || lane.fields.length !== ownedPaths.length) {
     throw new Error(`Invalid host lane journal: ${path}`);
   }
@@ -128,6 +136,7 @@ export function mergeHostLanes(request, root, targets) {
       queuedAt: lane.queuedAt, startedAt: lane.startedAt, updatedAt: lane.updatedAt,
       step: lane.step, progress: clone(lane.progress), worker: clone(lane.worker),
       timings: clone(lane.timings), recovery: clone(lane.recovery), recoveries: clone(lane.recoveries),
+      attempt: laneAttempt(lane), retry: clone(lane.retry),
     };
     for (const receipt of lane.nativeHistoryRecoveries ?? []) {
       const retained = request.nativeHistoryRecoveries ??= [];
@@ -149,7 +158,7 @@ export function mergeHostLanes(request, root, targets) {
   return request;
 }
 
-function queueLane(request, root, hostId, previousLane, repairReset) {
+function queueLane(request, root, hostId, previousLane, repairReset, retry) {
   const token = randomUUID();
   const inputPath = join(directory(root, request.requestId, request.integrationSha, hostId), `input-${token}.json`);
   const local = isolate(request, hostId);
@@ -157,21 +166,23 @@ function queueLane(request, root, hostId, previousLane, repairReset) {
   const lane = { version: 1, requestId: request.requestId, integrationSha: request.integrationSha, hostId,
     token, inputPath, revision: (previousLane?.revision ?? 0) + 1,
     state: "queued", queuedAt: at, updatedAt: at, fields: capture(local, hostId),
-    ...(repairReset ? { repairReset } : {}), nativeHistoryRecoveries: clone(previousLane?.nativeHistoryRecoveries ?? []),
+    attempt: repairReset || !previousLane ? 1 : laneAttempt(previousLane) + (retry ? 1 : 0),
+    ...(retry ? { retry } : {}), ...(repairReset ? { repairReset } : {}), nativeHistoryRecoveries: clone(previousLane?.nativeHistoryRecoveries ?? []),
     step: local.step ?? null, progress: local.progress ?? null, timings: {}, worker: null,
     history: previousLane ? [...previousLane.history, { token: previousLane.token, state: previousLane.state,
       outcome: previousLane.outcome ?? null, inputPath: previousLane.inputPath, updatedAt: previousLane.updatedAt,
       fields: previousLane.fields, timings: previousLane.timings, recoveries: previousLane.recoveries ?? [],
       nativeHistoryRecoveries: previousLane.nativeHistoryRecoveries ?? [], observations: previousLane.observations ?? [],
-      repairReset: previousLane.repairReset ?? null }] : [],
+      repairReset: previousLane.repairReset ?? null, retry: previousLane.retry ?? null, attempt: laneAttempt(previousLane) }] : [],
   };
   atomicWrite(inputPath, { version: 1, token, root, request: local, hostId });
   atomicWrite(journalPath(root, request.requestId, request.integrationSha, hostId), lane);
   return lane;
 }
 
-function summarize(request, targets) {
-  const waiting = targets.filter(({ id }) => !["passed", "failed"].includes(request.hosts[id]?.status)).map(({ id }) => id);
+function summarize(request, targets, root) {
+  const waiting = targets.filter(({ id }) => !["passed", "failed"].includes(request.hosts[id]?.status)
+    || retryable(request, readHostLane(root, request.requestId, request.integrationSha, id))).map(({ id }) => id);
   if (waiting.length) return { status: "waiting", hosts: waiting };
   const failed = targets.filter(({ id }) => request.hosts[id]?.status === "failed").map(({ id }) => id);
   return failed.length ? { status: "failed", hosts: failed } : { status: "passed" };
@@ -180,15 +191,27 @@ function summarize(request, targets) {
 // launch acknowledges systemd custody, not completion. The source coordinator never waits for delivery.
 export function rollForwardHosts(request, targets, operations) {
   const { laneRoot, launch, active, save } = operations;
-  if (typeof laneRoot !== "string" || !laneRoot || typeof launch !== "function" || typeof active !== "function" || typeof save !== "function") {
+  const clock = operations.clock === undefined ? Date.now : operations.clock;
+  if (typeof clock !== "function" || typeof laneRoot !== "string" || !laneRoot || typeof launch !== "function" || typeof active !== "function" || typeof save !== "function") {
     throw new Error("Host lanes require laneRoot, launch, active and save");
   }
   mergeHostLanes(request, laneRoot, targets);
   request.hosts ??= {};
+  if (stopped(request)) return { status: "failed", hosts: targets.filter(({ id }) => request.hosts[id]?.status !== "passed").map(({ id }) => id) };
+  const launchErrors = new Map();
+  function queueRetry(target, lane) {
+    const next = queueLane(request, laneRoot, target.id, lane, undefined, {
+      failedToken: lane.token, failedAttempt: laneAttempt(lane),
+      notBefore: new Date(clock() + hostLaneRetryPolicy.cooldownMs).toISOString(),
+    });
+    mergeHostLanes(request, laneRoot, targets);
+    save(request);
+    return next;
+  }
   for (const target of targets) {
     let lane = readHostLane(laneRoot, request.requestId, request.integrationSha, target.id);
     const previous = request.hosts[target.id];
-    if (previous?.status === "passed" || previous?.status === "failed") continue;
+    if (previous?.status === "passed" || previous?.status === "failed" && !retryable(request, lane)) continue;
     if (previous?.status === "waiting" && previous.ready === false) continue;
     let isActive;
     let probeError;
@@ -197,6 +220,9 @@ export function rollForwardHosts(request, targets, operations) {
       if (typeof isActive !== "boolean") throw new Error(`Invalid host worker activity for ${target.id}`);
     } catch (error) { probeError = error instanceof Error ? error.message : String(error); }
     if (!isActive) {
+      if (probeError && retryable(request, lane)) { launchErrors.set(target.id, probeError); continue; }
+      if (retryable(request, lane)) lane = queueRetry(target, lane);
+      if (lane?.retry && clock() < Date.parse(lane.retry.notBefore)) continue;
       // An inactive running lane keeps its token and custody: the worker must recover before replay.
       if (!lane || terminal.has(lane.state)) lane = queueLane(request, laneRoot, target.id, lane);
       let result;
@@ -207,6 +233,7 @@ export function rollForwardHosts(request, targets, operations) {
       }
       if (!result || typeof result.ok !== "boolean") throw new Error(`Invalid host launch result for ${target.id}`);
       if (!result.ok) {
+        launchErrors.set(target.id, String(result.error));
         request.hosts[target.id] = { status: "waiting", waiting: { kind: "host-delivery", host: target.id, at: lane.queuedAt,
           reason: `Host worker launch failed: ${result.error}`, inputPath: lane.inputPath } };
         (request.hostDelivery ??= {})[target.id] = { state: lane.state, revision: lane.revision, launchError: String(result.error) };
@@ -219,8 +246,9 @@ export function rollForwardHosts(request, targets, operations) {
   }
   // Peers may finish during the launches; harvest without writing their journals.
   mergeHostLanes(request, laneRoot, targets);
+  for (const [hostId, error] of launchErrors) request.hostDelivery[hostId].launchError = error;
   save(request);
-  return summarize(request, targets);
+  return summarize(request, targets, laneRoot);
 }
 
 export function resetHostLaneForRepair(inputPath, request, repair, expectedRevision) {
@@ -248,24 +276,28 @@ export function resetHostLaneForRepair(inputPath, request, repair, expectedRevis
   if (JSON.stringify(request.hosts?.[hostId]) !== JSON.stringify(lane.outcome)) {
     return { ok: false, error: { kind: "host-retry-outcome-conflict" } };
   }
-  const custodyPaths = [["reservations"], ["nativeHistory", "hosts"], ["bootstrap", "hosts"], ["maintenance", "hosts"]];
-  for (const path of custodyPaths) {
-    const custody = container(request, path)?.[hostId];
-    const retainedIndex = ownedPaths.findIndex(owned => JSON.stringify(owned) === JSON.stringify(path));
-    const retained = lane.fields[retainedIndex];
-    const forwardOnly = path[0] === "nativeHistory" && lane.recovery?.status !== "running";
-    const validCustody = value => ["restored", "released"].includes(value.state)
-      || forwardOnly && value.state === "resume-required" && value.integrationSha === request.integrationSha;
-    if ((custody && !validCustody(custody)) || retained.present && !validCustody(retained.value)) {
-      return { ok: false, error: { kind: "host-retry-custody-held", hostId, path: path.join(".") } };
-    }
-  }
+  const custodyError = replayCustodyError(request, hostId, lane);
+  if (custodyError) return { ok: false, error: custodyError };
   const repaired = clone(request);
   repaired.status = "queued";
   delete repaired.hosts[hostId];
   const next = queueLane(repaired, root, hostId, lane, { repairId: repair.id, failureAt: request.failure.at,
     failedAttempt: request.failure.attempt, evidence: repair.outcome.evidence, at: now() });
   return { ok: true, inputPath: next.inputPath, revision: next.revision, changed: true };
+}
+
+function replayCustodyError(request, hostId, lane) {
+  for (const path of [["reservations"], ["nativeHistory", "hosts"], ["bootstrap", "hosts"], ["maintenance", "hosts"]]) {
+    const retained = lane.fields[ownedPaths.findIndex(owned => JSON.stringify(owned) === JSON.stringify(path))];
+    const valid = value => ["restored", "released"].includes(value.state)
+      || path[0] === "nativeHistory" && lane.recovery?.status !== "running"
+        && value.state === "resume-required" && value.integrationSha === request.integrationSha;
+    const custody = container(request, path)?.[hostId];
+    if (custody && !valid(custody) || retained.present && !valid(retained.value)) {
+      return { kind: "host-retry-custody-held", hostId, path: path.join("."), message: `Unresolved ${path.join(".")} custody on ${hostId}` };
+    }
+  }
+  return null;
 }
 
 // The coordinator observes a settled lane while holding its host flock. No source receipt
@@ -353,19 +385,41 @@ export function runHostLane(inputPath, operations) {
   if (terminal.has(context.lane.state)) return clone(context.lane.outcome);
   if (context.lane.recovery?.status === "running") throw new Error("Explicit host recovery must resume through runHostLaneRecovery");
   const previous = local.hosts?.[hostId];
-  const interrupted = ["running", "recovering"].includes(context.lane.state);
-  Object.assign(context.lane, { worker: workerIdentity(), startedAt: now(), state: interrupted ? "recovering" : "running" });
+  const priorState = context.lane.state;
+  const interrupted = ["running", "recovering"].includes(priorState);
+  const replay = interrupted || context.lane.retry !== undefined;
+  Object.assign(context.lane, { worker: workerIdentity(), startedAt: now(), state: replay ? "recovering" : "running" });
   checkpoint(local);
   let outcome;
   try {
-    if (interrupted) {
-      const recovered = operations.recover(local);
-      if (recovered?.then) throw new Error("Host recovery callback must be synchronous");
-      context.lane.state = "running";
-      checkpoint(local);
+    if (stopped(local) || previous?.failure?.reason === "cancelled") {
+      outcome = { status: "failed", failure: { at: now(), reason: "cancelled", message: "Host delivery cancelled" } };
+    } else {
+      if (replay) {
+        const recovery = { state: priorState, outcome: previous, startedAt: now(), status: "running" };
+        let result;
+        try {
+          const recovered = operations.recover(local);
+          if (recovered?.then) throw new Error("Host recovery callback must be synchronous");
+          checkpoint(local);
+          const custodyError = replayCustodyError(local, hostId, context.lane);
+          result = custodyError ? { ok: false, error: custodyError } : { ok: true };
+        } catch (error) {
+          result = { ok: false, error: { kind: "host-recovery-failed", message: error instanceof Error ? error.message : String(error) } };
+        }
+        const receipt = { ...recovery, status: result.ok ? "completed" : "failed", finishedAt: now(), result };
+        context.lane.recoveries = [...(context.lane.recoveries ?? []), receipt];
+        checkpoint(local);
+        if (!result.ok) outcome = { status: "failed", failure: { at: now(), ...result.error, step: local.step, progress: clone(local.progress) } };
+        else {
+          context.lane.state = "running";
+          if (context.lane.retry) delete local.hosts[hostId];
+          checkpoint(local);
+        }
+      }
+      if (!outcome) outcome = operations.deliver(local, context.lane.retry ? undefined : previous);
+      if (!outcome || !terminal.has(outcome.status)) throw new Error(`Invalid host outcome for ${hostId}`);
     }
-    outcome = operations.deliver(local, previous);
-    if (!outcome || !terminal.has(outcome.status)) throw new Error(`Invalid host outcome for ${hostId}`);
   } catch (error) {
     outcome = { status: "failed", failure: { at: now(), message: error instanceof Error ? error.message : String(error),
       step: local.step, progress: clone(local.progress) } };
