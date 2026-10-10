@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { ActionJournal, actionPerson, journalWarning, type ActionTicket } from "kenan-memory/journal";
-import { openActionStore, canonicalRecipient, type ActionStore, type ActionRecord, type ActionTicket as DispatchTicket } from "kenan-memory/actions";
+import { openActionStore, canonicalRecipient, type ActionStore, type ActionRecord, type ActionSubmission, type ActionTicket as DispatchTicket } from "kenan-memory/actions";
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
@@ -19,7 +19,7 @@ const ID = /^[a-zA-Z0-9_-]{1,100}$/;
 const failureText = (cause: unknown) => cause instanceof Error ? cause.message : String(cause);
 const json = (body: unknown, status = 200) => Response.json(body, { status, headers: { ...API_CORS_HEADERS, "cache-control": "no-store" } });
 class MessagingFailure extends Error {
-  constructor(message: string, readonly status = 400, readonly code?: string) { super(message); }
+  constructor(message: string, readonly status = 400, readonly code?: string, readonly action?: ActionRecord) { super(message); }
 }
 interface ConversationRow { id: string; backend_id: string; external_id: string; title: string; kind: "direct" | "group"; updated_at: number; unread: number; current: number; revision: number }
 
@@ -198,7 +198,8 @@ export class MessagingService {
           UPDATE messaging_state SET revision=COALESCE((SELECT MAX(seq) FROM messages),0);`);
       }
       this.db.exec(`CREATE TABLE IF NOT EXISTS messaging_action_requests(request_id TEXT PRIMARY KEY,action_id TEXT NOT NULL,ticket TEXT,kind TEXT NOT NULL CHECK(kind IN ('message','reaction')));
-        CREATE INDEX IF NOT EXISTS messaging_action_id ON messaging_action_requests(action_id);`);
+        CREATE INDEX IF NOT EXISTS messaging_action_id ON messaging_action_requests(action_id);
+        CREATE TABLE IF NOT EXISTS messaging_action_refusals(request_id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind IN ('message','reaction')),receipt TEXT NOT NULL);`);
       this.db.exec(REVISION_SCHEMA);
       this.db.query("UPDATE messaging_reaction_requests SET receipt=? WHERE receipt IS NULL").run(JSON.stringify({ ok: false, error: { code: "unknown", message: "Supervisor stopped before the backend confirmed this reaction. Check the recipient before reacting again." } }));
       this.db.exec(`UPDATE messages SET status='unknown',error='Supervisor stopped before the backend confirmed this send. Check the recipient before sending again.' WHERE status='sending';
@@ -390,7 +391,7 @@ export class MessagingService {
   private adoptOutboundRequests(): void {
     const pending: Array<Parameters<MessagingService["adoptRequest"]>> = [];
     const rows = this.db.query(`SELECT m.* FROM messages m LEFT JOIN messaging_action_requests r ON r.request_id=m.id
-      WHERE m.request_body IS NOT NULL AND r.request_id IS NULL ORDER BY m.seq DESC`).all() as MessageRow[];
+      WHERE m.request_body IS NOT NULL AND r.request_id IS NULL AND NOT EXISTS(SELECT 1 FROM messaging_action_refusals f WHERE f.request_id=m.id) ORDER BY m.seq DESC`).all() as MessageRow[];
     for (const row of rows) {
       const conversation = this.conversationRow(row.conversation_id);
       const input = JSON.parse(row.request_body!) as MessagingSend;
@@ -405,7 +406,7 @@ export class MessagingService {
         row.external_id ?? row.error ?? "Historical send outcome unknown"]);
     }
     const reactions = this.db.query(`SELECT m.* FROM messaging_reaction_requests m LEFT JOIN messaging_action_requests r ON r.request_id=m.request_id
-      WHERE r.request_id IS NULL ORDER BY m.rowid DESC`).all() as (ReactionRequestRow & { request_id: string })[];
+      WHERE r.request_id IS NULL AND NOT EXISTS(SELECT 1 FROM messaging_action_refusals f WHERE f.request_id=m.request_id) ORDER BY m.rowid DESC`).all() as (ReactionRequestRow & { request_id: string })[];
     for (const request of reactions) {
       const input = JSON.parse(request.request_body) as { messageId: string; emoji: string; remove: boolean; intentKey?: string };
       const row = this.db.query("SELECT * FROM messages WHERE id=?").get(input.messageId) as MessageRow | null;
@@ -422,13 +423,19 @@ export class MessagingService {
     for (const request of pending) this.adoptRequest(...request);
   }
   private adoptRequest(conversation: ConversationRow, requestId: string, kind: "message" | "reaction", intentKey: string, payload: unknown, state: "succeeded" | "failed-before-effect" | "uncertain", detail: string): void {
-    const reservation = this.reserve(conversation, requestId, intentKey, payload);
-    if (state === "uncertain" && reservation.disposition === "recipient-held" && reservation.action.state !== "uncertain") {
-      for (const recipient of this.actionRecipients(conversation)) {
-        const hold = this.actions.holdRecipient(recipient, `Historical unknown Signal request ${requestId} must be reconciled before further contact`, "messaging-migration");
-        if (!hold.ok) throw new Error(hold.message);
+    const result = this.reserveResult(conversation, requestId, intentKey, payload);
+    if (!result.ok) {
+      if ((result.error !== "fenced" && result.error !== "payload-conflict") || !result.action) throw new Error(result.message);
+      if (state === "uncertain") {
+        for (const recipient of this.actionRecipients(conversation)) {
+          const hold = this.actions.holdRecipient(recipient, `Historical unknown Signal request ${requestId} must be reconciled before further contact`, "messaging-migration");
+          if (!hold.ok) throw new Error(hold.message);
+        }
       }
+      this.db.query("INSERT INTO messaging_action_refusals VALUES(?,?,?)").run(requestId, kind, JSON.stringify(result));
+      return;
     }
+    const reservation = result.value;
     if (reservation.disposition === "created" && reservation.action.state === "accepted") {
       const claim = this.actions.claim(reservation.action.id, "messaging-migration");
       if (!claim.ok) throw new Error(claim.message);
@@ -455,10 +462,13 @@ export class MessagingService {
     const aliases = this.db.query("SELECT alias FROM messaging_sender_aliases WHERE backend_id=? AND sender_id=?").all(conversation.backend_id, sender) as { alias: string }[];
     return [...new Set([conversation.external_id, sender, ...aliases.map(item => item.alias)].map(id => canonicalRecipient(id).startsWith("tel:") ? canonicalRecipient(id) : `signal:${id}`))];
   }
-  private reserve(conversation: ConversationRow, requestId: string, intentKey: string, payload: unknown, followup?: MessagingPurpose["followup"]) {
+  private reserveResult(conversation: ConversationRow, requestId: string, intentKey: string, payload: unknown, followup?: MessagingPurpose["followup"]) {
     const input = { intentKey, recipients: this.actionRecipients(conversation), transport: "signal", payload, requestId: `signal:${requestId}`, threadId: "messaging-owner" };
-    const result = followup ? this.actions.followup(followup.actionId, followup.revision, input, { kind: "operator-observation", reference: `signal:${requestId}`, detail: followup.evidence }) : this.actions.submit(input);
-    if (!result.ok) throw new MessagingFailure(result.message, result.error === "unavailable" ? 503 : 409, `action_${result.error}`);
+    return followup ? this.actions.followup(followup.actionId, followup.revision, input, { kind: "operator-observation", reference: `signal:${requestId}`, detail: followup.evidence }) : this.actions.submit(input);
+  }
+  private reserve(conversation: ConversationRow, requestId: string, intentKey: string, payload: unknown, followup?: MessagingPurpose["followup"]) {
+    const result = this.reserveResult(conversation, requestId, intentKey, payload, followup);
+    if (!result.ok) throw new MessagingFailure(result.message, result.error === "unavailable" ? 503 : 409, `action_${result.error}`, result.action);
     return result.value;
   }
   private projectMessageAction(row: MessageRow, action: ActionRecord): MessagingMessage {
@@ -558,7 +568,7 @@ export class MessagingService {
     if (!backend?.plugin?.react) return error("reactions_unsupported", "This messaging backend does not support reactions");
     if (backend.info.status !== "ready") return error("backend_unavailable", backend.info.detail);
     const payload = { operation: "reaction", target: this.actionRecipient(conversation), author: this.messageSender(row, conversation.backend_id), timestamp: row.timestamp, emoji, remove };
-    let reservation: { action: ActionRecord; disposition: "created" | "existing" | "recipient-held" };
+    let reservation: ActionSubmission;
     try { reservation = this.reserve(conversation, requestId, intentKey ?? `signal.reaction:${digest(payload)}`, payload, followup); }
     catch (cause) { return error(cause instanceof MessagingFailure ? cause.code ?? "action_unavailable" : "action_unavailable", failureText(cause)); }
     if (reservation.disposition !== "created" || reservation.action.state !== "accepted") {
@@ -994,7 +1004,7 @@ export class MessagingService {
       if (cancelLink) return json({ link: await this.cancelLink(cancelLink.backendId) });
       return json({ error: "Messaging route not found" }, 404);
     } catch (cause) {
-      return json({ error: failureText(cause), ...(cause instanceof MessagingFailure && cause.code ? { code: cause.code } : {}) }, cause instanceof MessagingFailure ? cause.status : 400);
+      return json({ error: failureText(cause), ...(cause instanceof MessagingFailure && cause.code ? { code: cause.code, ...(cause.action ? { action: cause.action } : {}) } : {}) }, cause instanceof MessagingFailure ? cause.status : 400);
     }
   }
   close(): Promise<void> {

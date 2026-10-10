@@ -6,7 +6,7 @@ Every effect reserves its canonical recipient and purpose, claims a generation, 
 
 `intentKey` is an optional stable task identifier. Without one, the purpose is a digest of canonical recipient, message text, immutable attachment content hashes/metadata and quote target, or the reaction target/emoji/removal. Local conversation/upload/request UUIDs and local file paths are excluded. Signal aliases resolve to E164 `tel:` identity when a number is known, matching the telephone authority. All known aliases share the reservation, so learning a number later cannot free the previous Signal slot. Unknown aliases use their known Signal identity; no email/phone equivalence is guessed.
 
-A different purpose or transport still encounters the recipient's unresolved contact slot. Provider acceptance leaves that slot unresolved. An uncertain effect keeps it too. Native history and receipts remain readable without sending; lost message projections can be rebuilt from an already committed provider result. Receipt persistence failure leaves the action fenced and reports a no-resend warning.
+A different purpose or transport still encounters the recipient's unresolved contact slot and returns an `action_fenced` refusal, actionable resolution message and prior action, not acceptance of the new request. Same-intent changed payload returns `action_payload-conflict`. Exact retries alone reuse the existing receipt. Provider acceptance leaves that slot unresolved. An uncertain effect keeps it too. Native history and receipts remain readable without sending; lost message projections can be rebuilt from an already committed provider result. Receipt persistence failure leaves the action fenced and reports a no-resend warning.
 
 Authorized new effects use explicit evidence, not another UUID. HTTP sends and reactions accept:
 
@@ -18,7 +18,7 @@ The authority atomically resolves the settled prior purpose and reserves the nex
 
 These routes are agent tools, not human chat input. No human-authored messaging route exists here. An incoming `source` override is rejected. A future human composition path must authenticate an explicit human action source and define its legitimate new-effect semantics at that boundary; it must not route ordinary user input through the autonomous-contact workflow or let agents forge that source.
 
-Historical native send/reaction requests are adopted without provider invocation. Unknown requests take priority when acquiring recipient slots. Missing historical attachment bytes have an explicit unavailable-content payload. A historical unknown request encountering another nonuncertain action also places a recipient hold, preventing resolution of the other action from silently freeing the unknown contact. Successful migration does not claim historical delivery beyond the native receipt's status.
+Historical native send/reaction requests are adopted without provider invocation. Unknown requests take priority when acquiring recipient slots. Missing historical attachment bytes have an explicit unavailable-content payload. Fenced historical imports are recorded in `messaging_action_refusals`, never mapped to the unrelated blocking action's receipt. A rejected historical unknown request also places a recipient hold, preventing resolution of the other action from silently freeing the unknown contact. Native historical statuses remain intact; migration does not claim historical delivery beyond the native receipt's status.
 
 ## Coverage
 

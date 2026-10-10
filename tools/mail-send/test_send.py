@@ -90,9 +90,13 @@ class BoundaryTests(unittest.TestCase):
 
     def test_rephrased_intent_and_new_uuid_cannot_duplicate_contact(self):
         first, _ = self.send("--canonical-intent", "schedule", "--request-id", "one")
-        second, _ = self.send("--canonical-intent", "please check date", "--request-id", "two", subject="Different wording")
-        self.assertEqual(second["value"]["disposition"], "recipient-held")
-        self.assertEqual(second["value"]["action"]["id"], first["value"]["id"])
+        second, code = self.send("--canonical-intent", "please check date", "--request-id", "two", subject="Different wording")
+        self.assertFalse(second["ok"])
+        self.assertEqual(code, 2)
+        self.assertEqual(second["error"], "fenced")
+        self.assertEqual(second["action"]["id"], first["value"]["id"])
+        self.assertEqual(second["action"]["state"], "succeeded")
+        self.assertIn("resolve-purpose", second["message"])
         self.assertEqual(SMTP.attempts, 1)
 
     def test_changed_payload_same_intent_is_conflict(self):
@@ -185,8 +189,11 @@ class BoundaryTests(unittest.TestCase):
         first, _ = self.send()
         self.assertEqual(first["value"]["state"], "uncertain")
         SMTP.error = None
-        second, _ = self.send("--canonical-intent", "rephrased purpose", "--request-id", "new uuid")
-        self.assertEqual(second["value"]["disposition"], "recipient-held")
+        second, code = self.send("--canonical-intent", "rephrased purpose", "--request-id", "new uuid")
+        self.assertFalse(second["ok"])
+        self.assertEqual(code, 2)
+        self.assertEqual(second["error"], "fenced")
+        self.assertEqual(second["action"]["id"], first["value"]["id"])
         self.assertEqual(SMTP.attempts, 1)
 
     def test_crash_after_smtp_remains_inflight(self):
@@ -194,7 +201,9 @@ class BoundaryTests(unittest.TestCase):
         with self.assertRaises(SimulatedCrash): self.send()
         SMTP.error = None
         response, _ = self.send("--canonical-intent", "fresh words")
-        self.assertEqual(response["value"]["action"]["state"], "inflight")
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"], "fenced")
+        self.assertEqual(response["action"]["state"], "inflight")
         self.assertEqual(SMTP.attempts, 1)
 
     def test_receipt_commit_failure_cannot_replay(self):
@@ -216,8 +225,10 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(first["value"]["state"], "succeeded")
         self.assertEqual(first["value"]["result"]["refusedRecipients"], ["other@example.test"])
         self.assertEqual(first["value"]["result"]["acceptedRecipients"], ["recipient@example.test"])
-        second, _ = self.send("--cc", "other@example.test", subject="Follow up phrased differently")
-        self.assertEqual(second["value"]["disposition"], "recipient-held")
+        second, code = self.send("--cc", "other@example.test", subject="Follow up phrased differently")
+        self.assertFalse(second["ok"])
+        self.assertEqual(code, 2)
+        self.assertEqual(second["error"], "fenced")
         self.assertEqual(SMTP.attempts, 1)
 
     def test_accountable_followup_authorizes_one_new_effect(self):

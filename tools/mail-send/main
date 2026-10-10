@@ -248,7 +248,7 @@ def main():
     if not submitted["ok"]:
         return report(submitted)
     reservation = submitted["value"]
-    if reservation["disposition"] not in ("created", "existing") or reservation["action"]["state"] != "accepted":
+    if reservation["action"]["state"] != "accepted":
         return report(submitted)
     claimed = action("claim", {"id": reservation["action"]["id"], "actor": actor})
     if not claimed["ok"]:

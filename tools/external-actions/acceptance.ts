@@ -32,13 +32,19 @@ try {
   proofs.push("same-intent-new-request-ids-and-payload-conflict");
   const ticket = get(actions.claim(first.id, "synthetic-sender")); get(actions.dispatch(ticket));
   assert.equal(actions.dispatch(ticket).error, "fenced");
-  assert.equal(get(actions.submit(intent({ intentKey: "rephrased", transport: "email.send" }))).disposition, "recipient-held");
+  const fenced = actions.submit(intent({ intentKey: "rephrased", transport: "email.send" }));
+  assert.equal(fenced.ok, false); assert.equal(fenced.error, "fenced"); assert.equal(fenced.action.id, first.id);
   proofs.push("one-shot-dispatch-and-cross-transport-contact-fence");
   const reopened = make("canonical"); assert.equal(reopened.claim(first.id, "restarted").error, "fenced");
   const unknown = get(reopened.recover(first.id, ticket.revision, observation, "owning-operator"));
   assert.equal(unknown.state, "uncertain"); assert.equal(reopened.retryNoEffect(first.id, unknown.revision, observation, "operator").ok, false);
   const done = get(reopened.reconcile(first.id, unknown.revision, "effect-confirmed", accepted, "operator"));
   assert.equal(done.state, "succeeded");
+  const exact = get(reopened.submit(intent())); assert.equal(exact.disposition, "existing"); assert.equal(exact.action.id, done.id);
+  const refused = reopened.submit(intent({ intentKey: "changed-after-success", payload: { purpose: "different" } }));
+  assert.equal(refused.ok, false); assert.equal(refused.error, "fenced"); assert.equal(refused.action.state, "succeeded"); assert.equal(refused.action.id, done.id);
+  assert.match(refused.message, /resolve-purpose/);
+  proofs.push("prior-success-is-not-new-intent-acceptance-exact-retry-dedups");
   proofs.push("crash-after-effect-before-receipt-and-evidence-reconciliation");
   const bob = make("canonical", "synthetic-bob"); assert.equal(bob.inspect(first.id).error, "not-found"); get(bob.submit(intent()));
   proofs.push("synthetic-owner-isolation");
@@ -46,7 +52,7 @@ try {
   const blocked = get(held.submit(intent())).action; assert.equal(blocked.state, "held"); assert.equal(held.claim(blocked.id, "worker").error, "fenced");
   proofs.push("held-recipient");
   const aliases = make("aliases"); get(aliases.submit(intent({ recipients: ["signal:synthetic-aci"] }))); get(aliases.linkRecipients(["signal:synthetic-aci", "+12025550123"], "verified-provider"));
-  assert.equal(get(aliases.submit(intent({ intentKey: "phone:new" }))).disposition, "recipient-held");
+  assert.equal(aliases.submit(intent({ intentKey: "phone:new" })).error, "fenced");
   proofs.push("late-verified-signal-phone-alias-coordination");
   const phone = make("phone");
   const brief = { requestId: crypto.randomUUID(), to: "+12025550123", purpose: "Synthetic phone acceptance", opening: "Synthetic only", facts: [], constraints: [], maxSeconds: 60 };
@@ -55,12 +61,12 @@ try {
   proofs.push("installed-telephone-adapter-never-redials-existing-contact");
   const authority = make("http"); let dispatches = 0;
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
-    const body = await req.clone().json(); const result = await externalActionsEndpoint(req, authority, true, true);
+    const body = await req.clone().json(); const result = await externalActionsEndpoint(req, authority, { kind: "operator" });
     if (body.operation === "dispatch" && result.ok) dispatches++;
     return result;
   } }); servers.push(server);
   const clientPath = source ? resolve(source, "packages/kenan-memory/src/action-client.ts") : resolve(installed, "runtime/node_modules/kenan-memory/src/action-client.ts");
-  const script = `import {ActionClient} from ${JSON.stringify(clientPath)}; const c=new ActionClient('http://127.0.0.1:${server.port}'); const a=c.submit({...${JSON.stringify(intent())},requestId:crypto.randomUUID()}); if(a.ok && a.value.disposition!=='recipient-held' && a.value.action.state==='accepted'){const t=c.claim(a.value.action.id,'synthetic-worker'); if(t.ok){const d=c.dispatch(t.value); if(!d.ok)throw Error(d.message);}}`;
+  const script = `import {ActionClient} from ${JSON.stringify(clientPath)}; const c=new ActionClient('http://127.0.0.1:${server.port}'); const a=c.submit({...${JSON.stringify(intent())},requestId:crypto.randomUUID()}); if(a.ok && a.value.action.state==='accepted'){const t=c.claim(a.value.action.id,'synthetic-worker'); if(t.ok){const d=c.dispatch(t.value); if(!d.ok)throw Error(d.message);}}`;
   const children = Array.from({ length: 12 }, () => Bun.spawn([process.execPath, "--eval", script], { stdout: "pipe", stderr: "pipe" }));
   await Promise.all(children.map(async child => { const stderr = await new Response(child.stderr).text(); assert.equal(await child.exited, 0, stderr); }));
   assert.equal(dispatches, 1); assert.equal(get(authority.list()).length, 1);

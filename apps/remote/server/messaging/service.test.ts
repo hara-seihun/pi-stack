@@ -107,7 +107,7 @@ describe("agent Signal custody", () => {
     expect(fixture.sends()).toBe(1);
     expect(() => fixture.service.accept(alias.id, { ...input, requestId: "rephrased", intentKey: "book visit", text: "Can we meet?" })).toThrow("unresolved");
     const cross = fixture.actions.submit({ intentKey: "call instead", recipients: ["tel:+15551230000"], transport: "telephone", payload: { purpose: "book visit" }, requestId: "call-new-id", threadId: "fixture" });
-    expect(cross).toMatchObject({ ok: true, value: { disposition: "recipient-held", action: { id: first.actionId } } });
+    expect(cross).toMatchObject({ ok: false, error: "fenced", action: { id: first.actionId, state: "succeeded" } });
   });
   test("learning a telephone alias after sending does not free the original Signal contact slot", async () => {
     const fixture = await setup();
@@ -116,7 +116,7 @@ describe("agent Signal custody", () => {
     fixture.context.sender({ id: "aci:late-friend", aliases: ["+15551230000"], name: "Friend" });
     expect(() => fixture.service.accept(fixture.conversation.id, { requestId: "after-alias", text: "hello again", attachmentIds: [] })).toThrow("unresolved");
     expect(fixture.sends()).toBe(1);
-    expect(fixture.actions.submit({ intentKey: "telephone-after-alias", recipients: ["tel:+15551230000"], transport: "telephone", payload: { purpose: "hello" }, requestId: "late-alias-call", threadId: "fixture" })).toMatchObject({ ok: true, value: { disposition: "recipient-held" } });
+    expect(fixture.actions.submit({ intentKey: "telephone-after-alias", recipients: ["tel:+15551230000"], transport: "telephone", payload: { purpose: "hello" }, requestId: "late-alias-call", threadId: "fixture" })).toMatchObject({ ok: false, error: "fenced" });
   });
   test("aliases revealing two unresolved effects hold every linked identity", async () => {
     const fixture = await setup();
@@ -173,6 +173,29 @@ describe("agent Signal custody", () => {
     const restarted = await setup(root);
     expect(restarted.actions.list()).toMatchObject({ ok: true, value: [{ state: "uncertain", resolved: false }] });
     expect(() => restarted.service.accept(fixture.conversation.id, { requestId: "upgrade-new-id", text: "another purpose", attachmentIds: [] })).toThrow("unresolved");
+    expect(restarted.sends()).toBe(0);
+  });
+  test("historical fenced imports preserve native outcomes and unknown holds independently of prior success", async () => {
+    const root = directory();
+    const fixture = await setup(root);
+    const input = { requestId: "current-success", text: "confirmed original", attachmentIds: [] };
+    const first = await fixture.service.send(fixture.conversation.id, input);
+    await fixture.service.close();
+    const db = new Database(join(root, "messages.sqlite3"));
+    const historical = (id: string) => ({ conversationId: fixture.conversation.id, text: id, attachmentIds: [] });
+    for (const [id, status] of [["historical-unknown", "unknown"], ["historical-failed", "failed"]] as const) {
+      db.query("INSERT INTO messages(id,conversation_id,direction,sender,text,timestamp,status,request_body) VALUES(?,?,'outgoing','You',?,30,?,?)")
+        .run(id, fixture.conversation.id, id, status, JSON.stringify(historical(id)));
+    }
+    const restarted = await setup(root);
+    expect(db.query("SELECT request_id FROM messaging_action_refusals ORDER BY request_id").all()).toEqual([{ request_id: "historical-failed" }, { request_id: "historical-unknown" }]);
+    expect(db.query("SELECT request_id FROM messaging_action_requests WHERE request_id LIKE 'historical-%'").all()).toEqual([]);
+    db.close();
+    expect((await restarted.service.send(fixture.conversation.id, { requestId: "historical-failed", text: "historical-failed", attachmentIds: [] })).status).toBe("failed");
+    const prior = restarted.actions.inspect(first.actionId!);
+    if (!prior.ok) throw new Error(prior.message);
+    expect(restarted.actions.reconcile(first.actionId!, prior.value.revision, "resolve-purpose", { kind: "operator-observation", reference: "fixture", detail: "Original confirmed purpose is resolved, historical unknown is still unknown" }, "fixture").ok).toBe(true);
+    expect(() => restarted.service.accept(fixture.conversation.id, { requestId: "after-prior-resolved", text: "new purpose", attachmentIds: [] })).toThrow("held");
     expect(restarted.sends()).toBe(0);
   });
   test("known authority receipt repairs a lost message projection without sending", async () => {
@@ -277,7 +300,13 @@ describe("agent Signal custody", () => {
     if (!prior.ok) throw new Error(prior.message);
     const send = (body: unknown) => fixture.service.handle(new Request(`http://local/v1/agent-signal/conversations/${fixture.conversation.id}/messages`, { method: "POST", body: JSON.stringify(body) }));
     expect((await send({ ...input, requestId: "pretend-human", text: "new", source: "human" }))?.status).toBe(400);
-    expect((await send({ ...input, requestId: "different-purpose", text: "new" }))?.status).toBe(409);
+    const refused = await send({ ...input, requestId: "different-purpose", text: "new" });
+    expect(refused?.status).toBe(409);
+    expect(await refused?.json()).toMatchObject({ code: "action_fenced", action: { id: first.actionId, state: "succeeded" } });
+    const payloadConflict = await send({ ...input, requestId: "different-payload", text: "changed", intentKey: prior.value.intentKey });
+    expect(payloadConflict?.status).toBe(409);
+    expect(await payloadConflict?.json()).toMatchObject({ code: "action_payload-conflict", action: { id: first.actionId } });
+    expect(fixture.sends()).toBe(1);
     const next = { requestId: "authorized-followup", text: "followup", attachmentIds: [], followup: { actionId: first.actionId!, revision: prior.value.revision, evidence: "Owner authorized this distinct followup after reading the delivered original" } };
     expect((await send(next))?.status).toBe(202);
     expect((await fixture.service.send(fixture.conversation.id, next)).status).toBe("sent");
@@ -299,6 +328,12 @@ describe("agent Signal custody", () => {
     expect(confirmed?.status).toBe(200);
     expect(await confirmed?.json()).toMatchObject({ ok: true, value: [{ emoji: "👍" }] });
     expect((await react(body))?.status).toBe(200);
+    const rephrased = await react({ ...body, requestId: "new-reaction-purpose", intentKey: "new-purpose" });
+    expect(rephrased?.status).toBe(409);
+    expect(await rephrased?.json()).toMatchObject({ ok: false, error: { code: "action_fenced" } });
+    const changed = await react({ ...body, requestId: "changed-reaction", emoji: "❤️" });
+    expect(changed?.status).toBe(409);
+    expect(await changed?.json()).toMatchObject({ ok: false, error: { code: "action_fenced" } });
     expect((await react({ ...body, remove: true }))?.status).toBe(409);
     expect(dispatches).toBe(1);
     expect(await fixture.service.handle(new Request("http://local/v1/messaging"))).toBeNull();
