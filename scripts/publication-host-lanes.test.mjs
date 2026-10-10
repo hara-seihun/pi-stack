@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { hostLaneInputPath, hostLaneLockPath, hostWaitKind, mergeHostLanes, readHostLane, rollForwardHosts, runHostLane, runHostLaneRecovery } from "../deploy/publication-hosts.mjs";
+import { hostLaneInputPath, hostLaneLockPath, hostWaitKind, mergeHostLanes, readHostLane, rollForwardHosts, runHostLane, runHostLaneRecovery, reconcileHostLaneObservation } from "../deploy/publication-hosts.mjs";
 
 const targets = [{ id: "kenan-server" }, { id: "converge" }];
 const requestId = "PUB-0123456789abcdef01234567";
@@ -247,6 +247,52 @@ test("explicit recovery owns terminal custody without erasing failure or replayi
   assert.equal(request.hosts[targets[0].id].failure.message, "retained activation failure");
   assert.equal(after.recoveries.length, 2);
   assert.equal(request.hostDelivery[targets[0].id].recovery.status, "completed");
+});
+
+test('settled readiness observation retains causal failure and custody with a revision fence', t => {
+  const h = harness(t);
+  const request = initial();
+  let checkpoint;
+  const operations = { ...h.operations, active: () => false, launch(target, inputPath) {
+    runHostLane(inputPath, { bind(local, save) { checkpoint = save; }, recover() {}, deliver(local) {
+      local.nativeHistory = { hosts: { [target.id]: { state: 'restore-required', integrationSha } } };
+      checkpoint(local);
+      return { status: 'waiting', waiting: { kind: 'native-history', host: target.id, at: '2026-01-01T00:00:00Z' } };
+    } });
+    return { ok: true };
+  } };
+  rollForwardHosts(request, [targets[0]], operations);
+  const inputPath = hostLaneInputPath(h.laneRoot, requestId, integrationSha, targets[0].id);
+  const revision = request.hostDelivery[targets[0].id].revision;
+  request.hosts[targets[0].id] = { status: 'failed', failure: { reason: 'readiness-probe-failed', message: 'schema custody mismatch' } };
+  request.nativeHistory.hosts[targets[0].id].state = 'repair-required';
+  const result = reconcileHostLaneObservation(inputPath, request, revision);
+  assert.deepEqual(result, { ok: true, revision: revision + 1, changed: true });
+  const retained = initial();
+  mergeHostLanes(retained, h.laneRoot, targets);
+  assert.equal(retained.hosts[targets[0].id].failure.reason, 'readiness-probe-failed');
+  assert.equal(retained.nativeHistory.hosts[targets[0].id].state, 'repair-required');
+  assert.equal(readHostLane(h.laneRoot, requestId, integrationSha, targets[0].id).observations[0].state, 'waiting');
+  assert.deepEqual(reconcileHostLaneObservation(inputPath, request, revision), {
+    ok: false, error: { kind: 'host-observation-conflict', revision: revision + 1 },
+  });
+  assert.deepEqual(reconcileHostLaneObservation(inputPath, retained, revision + 1), { ok: true, revision: revision + 1, changed: false });
+  assert.deepEqual(reconcileHostLaneObservation(inputPath, { ...request, integrationSha: 'b'.repeat(40) }, revision + 1), {
+    ok: false, error: { kind: 'host-observation-identity-conflict' },
+  });
+});
+
+test('nonterminal custody rejects a coordinator observation even with the current revision', t => {
+  const h = harness(t);
+  const request = initial();
+  rollForwardHosts(request, [targets[0]], { ...h.operations, active: () => false, launch: () => ({ ok: true }) });
+  const revision = request.hostDelivery[targets[0].id].revision;
+  const inputPath = hostLaneInputPath(h.laneRoot, requestId, integrationSha, targets[0].id);
+  request.hosts[targets[0].id] = { status: 'failed', failure: { message: 'synthetic' } };
+  assert.deepEqual(reconcileHostLaneObservation(inputPath, request, revision), {
+    ok: false, error: { kind: 'host-observation-busy', state: 'queued' },
+  });
+  assert.equal(readHostLane(h.laneRoot, requestId, integrationSha, targets[0].id).state, 'queued');
 });
 
 test("another publication cannot acquire an active host lane, but can deliver its independent peer", async t => {

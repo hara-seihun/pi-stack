@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { policy, progressBudgetExhausted } from "../deploy/publication-control.mjs";
 import { publicationConfig } from "./publication-fixture.mjs";
+import { readHostLane, rollForwardHosts } from '../deploy/publication-hosts.mjs';
 
 const root = resolve(import.meta.dirname, "..");
 function fixture(t) {
@@ -16,7 +17,7 @@ function fixture(t) {
   const command = (name, text) => writeFileSync(join(state, "bin", name), `#!/bin/sh\n${text}\n`, { mode: 0o700 });
   put("persons/alice.json", JSON.stringify({ user: "alice", port: 1234 }));
   put("host.json", JSON.stringify({ version: 1, fleetUser: "alice" }));
-  command("systemctl", 'printf "%s\\n" "${SUPERVISOR_STATE:-active}"');
+  command("systemctl", 'case "$*" in *pi-stack-publication-host@*) printf "%s\\n" "${HOST_WORKER_STATE:-inactive}" ;; *) printf "%s\\n" "${SUPERVISOR_STATE:-active}" ;; esac');
   command("curl", 'printf "%s\\n" "$*" >> "$PROBE_LOG"; [ "${PROBE_FAIL:-0}" = 0 ] || exit "${PROBE_STATUS:-7}"; case "$*" in */v1/health*) printf "%s\\n" "$HEALTH" ;; *) [ "${ROOMS_FAIL:-0}" = 0 ] || exit "$ROOMS_FAIL"; printf "%s\\n" "$ROOMS" ;; esac');
   command("ssh", 'while [ "$#" -gt 0 ] && [ "$1" != bash ]; do shift; done; [ "$#" -gt 0 ] || exit 64; shift; exec bash "$@"');
   command("git", 'printf "unexpected deployment work\\n" >> "$GIT_LOG"; echo "fixture stops resumed checkout" >&2; exit 42');
@@ -130,6 +131,44 @@ for (const host of ["gmktec", "converge"]) test(`${host} meeting waits survive b
   assert.match(readFileSync(failed.failure.log, "utf8"), /fixture stops resumed checkout/);
   assert.equal(failed.hosts[host].waiting.probe.rooms, "");
   assert.ok(failed.hostWait.resumedAt);
+});
+
+test('active host delivery keeps immutable custody without repeating source preparation or live-room probes', t => {
+  const f = fixture(t);
+  const requestId = 'PUB-0123456789abcdef01234567';
+  const integrationSha = 'b'.repeat(40);
+  const request = { version: 3, requestId, sourceSha: 'a'.repeat(40), sourceRef: 'refs/heads/retained',
+    integrationSha, integratedAt: '2026-01-01T00:00:00Z', checks: { status: 'passed' },
+    status: 'queued', step: 'waiting-for-hosts', attempt: policy.maxAttempts,
+    progress: { command: 'central-checks', deadlineAt: new Date(0).toISOString() }, failures: [] };
+  const laneRoot = join(f.state, 'host-lanes');
+  const targets = [{ id: 'gmktec' }, { id: 'converge' }];
+  rollForwardHosts(request, targets, { laneRoot, active: () => false, launch: () => ({ ok: true }), save() {} });
+  for (const target of targets) {
+    const lane = readHostLane(laneRoot, requestId, integrationSha, target.id);
+    writeFileSync(join(laneRoot, requestId, integrationSha, target.id, 'journal.json'), JSON.stringify({
+      ...lane, state: 'running', startedAt: '2026-01-01T00:00:00Z',
+      fields: lane.fields.map((field, index) => index === 1 ? { present: true, value: { state: 'restore-required', integrationSha } } : field),
+    }));
+  }
+  request.waiting = { kind: 'hosts', hosts: targets.map(target => target.id), at: new Date(0).toISOString() };
+  request.nextAttemptAt = new Date(0).toISOString();
+  f.put(`requests/${requestId}.json`, JSON.stringify(request));
+  const result = f.run(process.execPath, [join(root, 'deploy/publication'), 'drain'], { HOST_WORKER_STATE: 'active', PROBE_FAIL: '1' });
+  assert.equal(result.status, 0, result.stderr);
+  const waited = JSON.parse(readFileSync(join(f.state, `requests/${requestId}.json`), 'utf8'));
+  assert.equal(waited.status, 'queued');
+  assert.equal(waited.attempt, policy.maxAttempts);
+  for (const target of targets) {
+    assert.equal(waited.hosts[target.id].waiting.kind, 'host-delivery');
+    assert.equal(waited.hosts[target.id].ready, false);
+    assert.equal(waited.reservations[target.id].state, 'restore-required');
+    assert.equal(waited.hostDelivery[target.id].state, 'running');
+  }
+  assert.deepEqual(waited.progress, request.progress);
+  assert.deepEqual(waited.checks, request.checks);
+  assert.equal(existsSync(f.env.GIT_LOG), false, 'host worker owns prepared immutable source; coordinator must not reset it');
+  assert.equal(existsSync(f.env.PROBE_LOG), false, 'an active host worker is not a live-meeting wait');
 });
 
 test("a preserving publication resumes its durable wait while the meeting is still live", t => {

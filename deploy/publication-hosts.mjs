@@ -213,6 +213,34 @@ export function rollForwardHosts(request, targets, operations) {
   return summarize(request, targets);
 }
 
+// The coordinator observes a settled lane while holding its host flock. No source receipt
+// write substitutes for this target journal transition.
+export function reconcileHostLaneObservation(inputPath, request, expectedRevision) {
+  const input = read(inputPath);
+  if (input.version !== 1 || request.requestId !== input.request.requestId || request.integrationSha !== input.request.integrationSha) {
+    return { ok: false, error: { kind: "host-observation-identity-conflict" } };
+  }
+  const { root, hostId, token } = input;
+  const lane = readHostLane(root, request.requestId, request.integrationSha, hostId);
+  if (!lane || lane.token !== token || lane.inputPath !== inputPath || lane.revision !== expectedRevision) {
+    return { ok: false, error: { kind: "host-observation-conflict", revision: lane?.revision ?? null } };
+  }
+  if (!terminal.has(lane.state)) return { ok: false, error: { kind: "host-observation-busy", state: lane.state } };
+  const outcome = request.hosts?.[hostId];
+  if (!outcome || !terminal.has(outcome.status)) return { ok: false, error: { kind: "host-observation-invalid-outcome" } };
+  const fields = capture(request, hostId);
+  if (JSON.stringify(fields) === JSON.stringify(lane.fields) && JSON.stringify(outcome) === JSON.stringify(lane.outcome)) {
+    return { ok: true, revision: lane.revision, changed: false };
+  }
+  const next = { ...lane, state: outcome.status, outcome: clone(outcome), fields,
+    revision: lane.revision + 1, updatedAt: now(),
+    observations: [...(lane.observations ?? []), { at: now(), revision: lane.revision, state: lane.state,
+      outcome: lane.outcome, fields: lane.fields }],
+  };
+  atomicWrite(journalPath(root, request.requestId, request.integrationSha, hostId), next);
+  return { ok: true, revision: next.revision, changed: true };
+}
+
 function workerContext(inputPath, operations) {
   const input = read(inputPath);
   if (input.version !== 1 || typeof operations.bind !== "function" || typeof operations.recover !== "function") {
