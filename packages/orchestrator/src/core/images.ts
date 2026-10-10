@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { isAbsolute, join, relative, resolve } from "node:path";
-import { readFileSync, realpathSync, statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { InlineImages, adoptImageSchema } from "./image-registry.js";
 import { generateImageWithSharedAccount, type SharedImageAccountOwner } from "../image-service.js";
@@ -19,13 +19,15 @@ export type CoreImagesSpec = {
   artifactRoot: string;
   adoptionReceiptPath: string;
   allowedRoots: string[];
+  relatedThreadScopeIds: string[];
   dataResource: Resource;
 };
 export type CoreImagesConfig = { kind: "disabled" } | { kind: "configured"; registries: CoreImagesSpec[] };
-export type CoreImageScope = { runtime: Pick<CoreRuntime, "path">; uid: number; allowsThread(id: string): boolean; threads: Pick<ThreadService, "snapshot" | "subscribe"> };
+export type CoreImageScope = { runtime: Pick<CoreRuntime, "path" | "readImage">; uid: number; gid: number; allowsThread(id: string): boolean; threads: Pick<ThreadService, "snapshot" | "subscribe"> };
 export type CoreImagesOptions = {
   accounts: SharedImageAccountOwner;
   scope(scopeId: string): CoreResult<CoreImageScope | null>;
+  relatedScope(registryScopeId: string, relatedScopeId: string): CoreResult<CoreImageScope | null>;
   authorize(request: Request, scopeId: string, resource: Resource, actions: readonly ("read" | "execute" | "use")[]): CoreResult<void>;
   authorizeNative(scopeId: string, resource: Resource, actions: readonly ("execute" | "use")[]): CoreResult<void>;
 };
@@ -46,7 +48,9 @@ export function parseCoreImagesConfig(value: unknown): CoreResult<CoreImagesConf
     if (!record(item) || typeof item.scopeId !== "string" || !/^[a-zA-Z0-9_.:-]+$/.test(item.scopeId) || scopes.has(item.scopeId)
       || !absolute(item.databasePath) || databases.has(item.databasePath) || !absolute(item.artifactRoot) || !absolute(item.adoptionReceiptPath)
       || !Array.isArray(item.allowedRoots) || !item.allowedRoots.length || !item.allowedRoots.every(absolute)
-      || new Set(item.allowedRoots).size !== item.allowedRoots.length) return invalid("Image registry scope, database, artifact root, adoption receipt and allowed path roots must be explicit and unique");
+      || new Set(item.allowedRoots).size !== item.allowedRoots.length
+      || !Array.isArray(item.relatedThreadScopeIds) || !item.relatedThreadScopeIds.every(id => typeof id === "string" && /^[a-zA-Z0-9_.:-]+$/.test(id) && id !== item.scopeId)
+      || new Set(item.relatedThreadScopeIds).size !== item.relatedThreadScopeIds.length) return invalid("Image registry scope, database, artifact root, adoption receipt and allowed path roots must be explicit and unique");
     const resource = authorize({ revision: 1, grants: [], consents: [] }, { principal: { kind: "service", id: "config" }, resource: item.dataResource as Resource, action: "read", now: 0 });
     if (!record(item.dataResource) || item.dataResource.kind !== "data" || !resource.ok && resource.error.code === "invalid-request") return invalid("Image registry requires an explicit valid data resource");
     scopes.add(item.scopeId); databases.add(item.databasePath);
@@ -54,7 +58,7 @@ export function parseCoreImagesConfig(value: unknown): CoreResult<CoreImagesConf
   return { ok: true, value: value as unknown as CoreImagesConfig };
 }
 
-type Registry = { spec: CoreImagesSpec; db: Database; images: InlineImages; ownership: ScopeOwnership; scope: CoreImageScope; unsubscribe(): void };
+type Registry = { spec: CoreImagesSpec; db: Database; images: InlineImages; ownership: ScopeOwnership; scope: CoreImageScope; sources: CoreImageScope[]; unsubscribe(): void };
 const response = (error: string, status: number) => Response.json({ ok: false, error: { code: status === 403 ? "denied" : status === 503 ? "unavailable" : "invalid-request", message: error } }, { status });
 
 export class CoreImages {
@@ -71,6 +75,15 @@ export class CoreImages {
       if (!resolved.ok) { await this.close(); return resolved; }
       if (resolved.value === null) continue;
       const scope = { value: resolved.value };
+      const sources = [scope.value];
+      for (const id of spec.relatedThreadScopeIds) {
+        const related = this.options.relatedScope(spec.scopeId, id);
+        if (!related.ok) { await this.close(); return related; }
+        if (related.value === null) continue;
+        if (related.value.uid !== scope.value.uid || related.value.gid !== scope.value.gid) { await this.close(); return invalid("Related image thread scope has a different owning Unix identity"); }
+        sources.push(related.value);
+      }
+      const acceptsThread = (id: string) => sources.some(source => source.allowsThread(id));
       const ownership = acquireDatabaseOwnership({ id: `${spec.scopeId}:images`, databasePath: spec.databasePath, adoptionReceiptPath: spec.adoptionReceiptPath, uid: scope.value.uid, requiredTables: ["inline_images", "inline_image_versions", "inline_image_messages", "core_image_acceptance", "core_image_sources", "core_image_ingress_errors", "core_image_threads"] }, path => scope.value.runtime.path(path));
       if (!ownership.ok) { await this.close(); return ownership; }
       let db: Database | undefined;
@@ -100,26 +113,29 @@ export class CoreImages {
           const permitted = this.options.authorizeNative(spec.scopeId, spec.dataResource, ["execute", "use"]);
           if (!permitted.ok) throw new Error(permitted.error.message);
           if (!absolute(path) || ![spec.artifactRoot, ...spec.allowedRoots].some(root => inside(root, path))) return false;
-          const physical = scope.value.runtime.path(path);
-          const real = requireRealPath(physical);
-          return [spec.artifactRoot, ...spec.allowedRoots].some(root => inside(requireRealPath(scope.value.runtime.path(root)), real));
+          return true;
         };
         const images = new InlineImages(db, spec.artifactRoot, async (input, signal) => {
           const permitted = this.options.authorizeNative(spec.scopeId, spec.dataResource, ["execute", "use"]);
           if (!permitted.ok) return { ok: false, error: { message: permitted.error.message } };
-          return generateImageWithSharedAccount(input, { ...this.options.accounts, signal, cwd: scope.value.runtime.path(spec.artifactRoot) });
-        }, () => {}, 2, () => !this.closed, id => scope.value.allowsThread(id), path => scope.value.runtime.path(path), acceptsPath);
-        const registry: Registry = { spec, db, images, ownership: ownership.value, scope: scope.value, unsubscribe: () => {} };
+          return generateImageWithSharedAccount({ prompt: input.prompt, inputBytes: input.inputBytes }, { ...this.options.accounts, signal });
+        }, () => {}, 2, () => !this.closed, acceptsThread, path => scope.value.runtime.path(path), acceptsPath,
+          async (path, signal) => {
+            if (!acceptsPath(path)) return { ok: false, error: { message: "Image path is outside its granted roots" } };
+            return scope.value.runtime.readImage(path, [spec.artifactRoot, ...spec.allowedRoots], signal);
+          }, { uid: scope.value.uid, gid: scope.value.gid });
+        const registry: Registry = { spec, db, images, ownership: ownership.value, scope: scope.value, sources, unsubscribe: () => {} };
         this.registries.set(spec.scopeId, registry);
-        registry.unsubscribe = scope.value.threads.subscribe(change => {
+        const unsubscribers = sources.map(source => source.threads.subscribe(change => {
           if (!("event" in change) || change.event.type !== "message_end") return;
           const message = change.event.message as { role?: string; content?: unknown } | undefined;
           if (message?.role !== "assistant") return;
           const text = assistantText(message.content);
           if (text.includes("<pi-remote-image")) this.acceptNative(spec.scopeId, change.threadId, messageHash(text), text);
-        });
-        for (const thread of scope.value.threads.snapshot()) {
-          const recovered = this.recoverNative(registry, thread);
+        }));
+        registry.unsubscribe = () => { for (const unsubscribe of unsubscribers) unsubscribe(); };
+        for (const source of sources) for (const thread of source.threads.snapshot()) {
+          const recovered = this.recoverNative(registry, thread, source);
           if (!recovered.ok) throw new Error(recovered.error.message);
         }
         await images.start();
@@ -154,7 +170,8 @@ export class CoreImages {
       if (!record(input) || Object.keys(input).some(key => !["threadId", "messageKey", "text"].includes(key))
         || typeof input.threadId !== "string" || !input.threadId || typeof input.messageKey !== "string" || !input.messageKey || input.messageKey.length > 512
         || typeof input.text !== "string" || Buffer.byteLength(input.text) > 8 * 1024 * 1024) return response("Invalid finalized image message", 400);
-      if (!registry.scope.allowsThread(input.threadId)) return response("Thread is outside the granted scope", 403);
+      const threadId = input.threadId;
+      if (!registry.sources.some(source => source.allowsThread(threadId))) return response("Thread is outside the granted scope", 403);
       const accepted = this.acceptMessage(registry, input.threadId, input.messageKey, input.text);
       if (!accepted.ok) return response(accepted.error.message, accepted.error.code === "ownership-conflict" ? 409 : 503);
       return Response.json({ ok: true, value: registry.images.snapshot(input.threadId) });
@@ -166,14 +183,14 @@ export class CoreImages {
       const have = input.have as Record<string, number>;
       const versions = registry.db.query("SELECT session_id,version FROM inline_image_versions").all() as { session_id: string; version: number }[];
       const ids = new Set([...Object.keys(have), ...versions.map(row => row.session_id)]);
-      const snapshots = Object.fromEntries([...ids].filter(id => registry.images.version(id) !== have[id]).map(id => [id, registry.images.snapshot(id)]));
+      const snapshots = Object.fromEntries([...ids].filter(id => registry.sources.some(source => source.allowsThread(id)) && registry.images.version(id) !== have[id]).map(id => [id, registry.images.snapshot(id)]));
       const errors = (registry.db.query("SELECT error FROM core_image_ingress_errors").all() as { error: string }[]).map(row => row.error);
       return Response.json({ ok: true, value: { snapshots, errors } });
     }
     if (operation && request.method === "GET") {
       let threadId: string;
       try { threadId = decodeURIComponent(operation); } catch { return response("Invalid image thread", 400); }
-      if (!registry.scope.allowsThread(threadId)) return response("Thread is outside the granted scope", 403);
+      if (!registry.sources.some(source => source.allowsThread(threadId))) return response("Thread is outside the granted scope", 403);
       return Response.json({ ok: true, value: registry.images.snapshot(threadId) });
     }
     return response("Unknown image operation", 404);
@@ -198,15 +215,15 @@ export class CoreImages {
     const registry = this.registries.get(scopeId);
     if (!registry || this.closed) return { ok: false, error: { code: "unavailable", message: "Native image registry is unavailable" } };
     const permitted = this.options.authorizeNative(scopeId, registry.spec.dataResource, ["execute", "use"]);
-    const result = permitted.ok ? registry.scope.allowsThread(threadId) ? this.acceptMessage(registry, threadId, messageKey, text)
+    const result = permitted.ok ? registry.sources.some(source => source.allowsThread(threadId)) ? this.acceptMessage(registry, threadId, messageKey, text)
       : { ok: false as const, error: { code: "ownership-conflict" as const, message: "Native image thread is outside its scope" } } : permitted;
     if (!result.ok) registry.db.query("INSERT INTO core_image_ingress_errors VALUES(?,?,?) ON CONFLICT(thread_id,message_key) DO UPDATE SET error=excluded.error").run(threadId, messageKey, result.error.message);
     return result;
   }
 
-  private recoverNative(registry: Registry, thread: Thread): CoreResult<void> {
+  private recoverNative(registry: Registry, thread: Thread, source: CoreImageScope): CoreResult<void> {
     const previous = registry.db.query("SELECT source_path,revision,last_offset,last_digest FROM core_image_sources WHERE thread_id=?").get(thread.id) as { source_path: string; revision: string; last_offset: number; last_digest: string } | null;
-    const recovered = withIndexedThreadHistory(registry.scope.runtime.path(thread.sessionFile), undefined, undefined, history => {
+    const recovered = withIndexedThreadHistory(source.runtime.path(thread.sessionFile), undefined, undefined, history => {
       const boundary = previous && previous.source_path === thread.sessionFile ? history.entries.find(entry => entry.offset === previous.last_offset && entry.digest === previous.last_digest) : undefined;
       const trusted = Boolean(previous && previous.source_path === thread.sessionFile && (boundary || previous.last_offset === -1 && previous.last_digest === ""));
       const after = boundary ? boundary.offset : -1;
@@ -246,5 +263,4 @@ export class CoreImages {
 
 const assistantText = (content: unknown): string => typeof content === "string" ? content : Array.isArray(content)
   ? content.filter(block => block?.type === "text" && typeof block.text === "string").map(block => block.text).join("") : "";
-const requireRealPath = (path: string) => realpathSync(path);
 const messageHash = (text: string) => createHash("sha256").update(text).digest("hex");

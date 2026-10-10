@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { appendFileSync, mkdtempSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CoreImages, parseCoreImagesConfig, type CoreImagesSpec } from "../src/core/images.js";
@@ -9,11 +9,13 @@ import { Store } from "../src/store.js";
 import type { ThreadServiceEvent } from "../src/threads/service.js";
 import type { Thread } from "../src/threads/contracts.js";
 import { indexedThreadHistory } from "../src/threads/history.mjs";
+import { createImageReader } from "../src/core/image-read.js";
+import { CustodyResources } from "../src/core/custody-resources.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
 
-async function fixture(native?: { watermarked: boolean; baselineTag?: boolean; noSuffix?: boolean }, unavailable = false) {
+async function fixture(native?: { watermarked: boolean; baselineTag?: boolean; noSuffix?: boolean }, unavailable = false, related = false) {
   const root = mkdtempSync(join(tmpdir(), "core-image-adoption-"));
   const databasePath = join(root, "supervisor.sqlite3"), artifactRoot = join(root, "images"), adoptionReceiptPath = join(root, "adopt.json");
   mkdirSync(artifactRoot);
@@ -23,6 +25,10 @@ async function fixture(native?: { watermarked: boolean; baselineTag?: boolean; n
   db.exec("INSERT INTO core_image_threads VALUES('thread')");
   const source = join(root, "source.png"); writeFileSync(source, Buffer.from("89504e470d0a1a0a", "hex"));
   previous.accept("thread", "retained-message", `<pi-remote-image id="retained" path="${source}" />`);
+  if (related) {
+    db.exec("INSERT INTO thread_views VALUES('fleet-id'); INSERT INTO core_image_threads VALUES('fleet-id')");
+    previous.accept("fleet-id", "retained-fleet-message", `<pi-remote-image id="fleet-retained" path="${source}" />`);
+  }
   db.exec("PRAGMA foreign_keys=OFF");
   for (const name of ["inline_images", "inline_image_versions", "inline_image_messages", "core_image_acceptance"]) {
     const schema = (db.query("SELECT sql FROM sqlite_master WHERE name=?").get(name) as { sql: string }).sql;
@@ -41,30 +47,37 @@ async function fixture(native?: { watermarked: boolean; baselineTag?: boolean; n
     const history = indexedThreadHistory(nativePath);
     if (!history.ok) throw new Error(history.error.message);
     const last = history.value.entries.at(-1)!;
-    watermark = { threadId: "thread", path: nativePath, revision: history.value.source.revision, lastOffset: last.offset, lastDigest: last.digest };
+    watermark = { threadId: related ? "fleet-id" : "thread", path: nativePath, revision: history.value.source.revision, lastOffset: last.offset, lastDigest: last.digest };
     if (!native.noSuffix) appendFileSync(nativePath, JSON.stringify({ type: "message", id: "after", parentId: "first", message: { role: "assistant", content: [{ type: "text", text: nativeText }], timestamp: Date.now() } }) + "\n");
   }
   writeFileSync(adoptionReceiptPath, JSON.stringify({ version: 1, state: "detached", scopeId: "person:images", databasePath,
     tableNames: ["inline_images", "inline_image_versions", "inline_image_messages", "core_image_acceptance", "core_image_sources", "core_image_ingress_errors", "core_image_threads"],
     ...(native?.watermarked ? { nativeImageSources: [watermark] } : {}),
     databaseIdentity: { dev: String(identity.dev), ino: String(identity.ino) }, previousOwner: { identity: "previous-image-controller", detachedAt: new Date().toISOString() } }), { mode: 0o600 });
-  const spec: CoreImagesSpec = { scopeId: "person", databasePath, artifactRoot, adoptionReceiptPath, allowedRoots: [root],
+  const spec: CoreImagesSpec = { scopeId: "person", databasePath, artifactRoot, adoptionReceiptPath, allowedRoots: [root], relatedThreadScopeIds: related ? ["person:fleet"] : [],
     dataResource: { id: "person:images", kind: "data", owner: "person", privacy: "private", subjects: ["person"], consent: "not-required" } };
   const accountStore = Store.open(join(root, "accounts.sqlite3"));
   let allowed = false;
   const seen: readonly string[][] = [];
   let listener: ((event: ThreadServiceEvent) => void) | null = null;
+  const processStat = readFileSync(`/proc/${process.pid}/stat`, "utf8");
+  const namespace = { kind: "process" as const, pid: process.pid, startTicks: processStat.slice(processStat.lastIndexOf(")") + 2).split(/\s+/)[19]!, mountNamespaceInode: statSync("/proc/self/ns/mnt", { bigint: true }).ino.toString() };
+  const custody = new CustodyResources({ uid: process.getuid!(), gid: process.getgid!(), namespace, retainedRunnerNamespace: namespace, dataDir: root, socketDir: root });
   const service = new CoreImages({ kind: "configured", registries: [spec] }, { accounts: { store: accountStore, shared: undefined },
-    scope: () => ({ ok: true, value: unavailable ? null : { runtime: { path: path => path }, uid: process.getuid!(), allowsThread: id => id === "thread",
-      threads: { snapshot: () => native ? [{ id: "thread", sessionFile: nativePath } as Thread] : [], subscribe: value => { listener = value; return () => { listener = null; }; } } } }),
+    scope: () => ({ ok: true, value: unavailable ? null : { runtime: { path: path => path, readImage: createImageReader(custody) }, uid: process.getuid!(), gid: process.getgid!(), allowsThread: id => id === "thread",
+      threads: { snapshot: () => native && !related ? [{ id: "thread", sessionFile: nativePath } as Thread] : [], subscribe: value => { if (!related) listener = value; return () => { if (!related) listener = null; }; } } } }),
+    relatedScope: (_registryId, id) => related && id === "person:fleet" ? { ok: true, value: {
+      runtime: { path: path => path, readImage: createImageReader(custody) }, uid: process.getuid!(), gid: process.getgid!(), allowsThread: id => id === "fleet-id",
+      threads: { snapshot: () => native ? [{ id: "fleet-id", sessionFile: nativePath } as Thread] : [], subscribe: value => { listener = value; return () => { listener = null; }; } },
+    } } : ({ ok: false, error: { code: "invalid-config", message: "Unconfigured related scope" } }),
     authorizeNative: () => ({ ok: true, value: undefined }),
     authorize: (_request, _scope, _resource, actions) => {
       (seen as string[][]).push([...actions]);
       return allowed ? { ok: true, value: undefined } : { ok: false, error: { code: "ownership-conflict", message: "No scope grant" } };
     } });
   const request = (suffix: string, body: unknown) => service.handle(new Request(`http://127.0.0.1/v1/scopes/person/images/${suffix}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
-  cleanups.push(async () => { await service.close(); accountStore.close(); rmSync(root, { recursive: true, force: true }); });
-  return { root, service, spec, source, request, seen, nativeText, emit: (text: string) => listener?.({ threadId: "thread", event: { type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } } }), allow: () => { allowed = true; } };
+  cleanups.push(async () => { await service.close(); custody.close(); accountStore.close(); rmSync(root, { recursive: true, force: true }); });
+  return { root, service, spec, source, request, seen, nativeText, emit: (text: string) => listener?.({ threadId: related ? "fleet-id" : "thread", event: { type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } } }), allow: () => { allowed = true; } };
 }
 
 test("images require explicit configuration and cannot infer filesystem grants", () => {
@@ -144,4 +157,31 @@ test("a historical gap without a trustworthy watermark is explicit and never gen
   f.emit(`<pi-remote-image id="new-live" path="${f.source}" />`);
   const updated = await (await f.request("sync", { have: {} }))!.json();
   expect(updated.value.snapshots.thread.images.map((image: any) => image.id)).toContain("new-live");
+});
+
+
+test("one canonical registry retains fleet IDs and ingests only explicitly related owning scopes", async () => {
+  const f = await fixture({ watermarked: true }, false, true);
+  expect((await f.service.start()).ok).toBe(true);
+  f.allow();
+  let result = await (await f.request("sync", { have: {} }))!.json();
+  const deadline = Date.now() + 1500;
+  while (result.value.snapshots["fleet-id"].images.find((image: any) => image.id === "fleet-retained")?.state !== "complete" && Date.now() < deadline) {
+    await Bun.sleep(2);
+    result = await (await f.request("sync", { have: {} }))!.json();
+  }
+  expect(result.value.snapshots["fleet-id"].images.find((image: any) => image.id === "fleet-retained")).toMatchObject({ state: "complete", sourcePath: f.source });
+  expect(result.value.snapshots["fleet-id"].images.map((image: any) => image.id)).toContain("fleet-retained");
+  expect(result.value.snapshots["fleet-id"].images.map((image: any) => image.id)).toContain("after-watermark");
+  f.emit(`<pi-remote-image id="fleet-live" path="${f.source}" />`);
+  result = await (await f.request("sync", { have: {} }))!.json();
+  expect(result.value.snapshots["fleet-id"].images.map((image: any) => image.id)).toContain("fleet-live");
+  expect((await f.request("accept", { threadId: "fleet-id", messageKey: "same-registry", text: `<pi-remote-image id="fleet-live" path="${f.source}" />` }))!.status).toBe(200);
+  expect((await f.request("accept", { threadId: "another-person-id", messageKey: "unrelated", text: `<pi-remote-image id="other" path="${f.source}" />` }))!.status).toBe(403);
+});
+
+test("undeclared or unresolved related source never opens a broader thread directory", async () => {
+  const f = await fixture();
+  f.spec.relatedThreadScopeIds = ["another-person"];
+  expect((await f.service.start()).ok).toBe(false);
 });

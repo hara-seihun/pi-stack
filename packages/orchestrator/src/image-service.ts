@@ -10,7 +10,10 @@ import { Store } from "./store.js";
 import { modelBrokerUrl, brokerModelAuth, BROKER_ROUTES } from "./model-broker-contract.js";
 import { IMAGE_MODELS, IMAGE_QUALITIES, IMAGE_SIZES, PNG_SIGNATURE, requestImage, type ImageAuth, type ImageFailure, type ImageRequest, type ImageResult } from "./image-generation.js";
 
-export type SharedImageInput = Omit<ImageRequest, "images"> & { inputPaths?: readonly string[] };
+export type SharedImageInput = Omit<ImageRequest, "images"> & (
+  | { inputPaths?: readonly string[]; inputBytes?: never }
+  | { inputPaths?: never; inputBytes: readonly Uint8Array[] }
+);
 export type SharedImageFailure = ImageFailure | { kind: "invalid-input" | "unavailable" | "authentication" | "storage" | "closed"; message: string };
 export { IMAGE_MODELS, IMAGE_QUALITIES, IMAGE_SIZES, type GeneratedImage } from "./image-generation.js";
 
@@ -42,25 +45,36 @@ export async function loadImageInputs(input: SharedImageInput, cwd: string, sign
     return { ok: false, error: { kind: "invalid-input", message: "Unsupported image model, quality or size." } };
   }
   const paths = input.inputPaths ?? [];
-  if (!Array.isArray(paths) || paths.length > 16 || paths.some(path => typeof path !== "string" || !path.length)) {
-    return { ok: false, error: { kind: "invalid-input", message: "Image inputs must be at most 16 nonempty local paths." } };
+  const snapshots = input.inputBytes;
+  if (snapshots !== undefined && input.inputPaths !== undefined || snapshots !== undefined && (!Array.isArray(snapshots) || snapshots.length > 16 || snapshots.some(bytes => !(bytes instanceof Uint8Array)))
+    || !Array.isArray(paths) || paths.length > 16 || paths.some(path => typeof path !== "string" || !path.length)) {
+    return { ok: false, error: { kind: "invalid-input", message: "Image inputs must select at most 16 local paths or byte snapshots, never both." } };
+  }
+  if (snapshots !== undefined && snapshots.reduce((total, bytes) => total + bytes.byteLength, 0) > 32 * 1024 * 1024) {
+    return { ok: false, error: { kind: "invalid-input", message: "Image inputs exceed 32 MiB." } };
   }
   try {
     const images: string[] = [];
     let total = 0;
-    for (const path of paths) {
+    const count = snapshots?.length ?? paths.length;
+    for (let index = 0; index < count; index++) {
       signal.throwIfAborted();
-      const absolute = imagePath(path, cwd);
-      const info = await stat(absolute);
-      if (!info.isFile()) return { ok: false, error: { kind: "invalid-input", message: `Image input is not a file: ${path}` } };
-      if (info.size + total > 32 * 1024 * 1024) return { ok: false, error: { kind: "invalid-input", message: "Image inputs exceed 32 MiB." } };
-      const bytes = await readFile(absolute, { signal });
+      let bytes: Buffer;
+      if (snapshots !== undefined) bytes = Buffer.from(snapshots[index]!);
+      else {
+        const path = paths[index]!;
+        const absolute = imagePath(path, cwd);
+        const info = await stat(absolute);
+        if (!info.isFile()) return { ok: false, error: { kind: "invalid-input", message: `Image input is not a file: ${path}` } };
+        if (info.size + total > 32 * 1024 * 1024) return { ok: false, error: { kind: "invalid-input", message: "Image inputs exceed 32 MiB." } };
+        bytes = await readFile(absolute, { signal });
+      }
       total += bytes.length;
       if (total > 32 * 1024 * 1024) return { ok: false, error: { kind: "invalid-input", message: "Image inputs exceed 32 MiB." } };
       const mime = bytes.subarray(0, 8).equals(PNG_SIGNATURE) ? "image/png"
         : bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255 ? "image/jpeg"
         : bytes.toString("ascii", 0, 4) === "RIFF" && bytes.toString("ascii", 8, 12) === "WEBP" ? "image/webp" : undefined;
-      if (!mime) return { ok: false, error: { kind: "invalid-input", message: `Unsupported image input: ${path}` } };
+      if (!mime) return { ok: false, error: { kind: "invalid-input", message: `Unsupported image input at index ${index}` } };
       images.push(`data:${mime};base64,${bytes.toString("base64")}`);
     }
     return { ok: true, value: images };

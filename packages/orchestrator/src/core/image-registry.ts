@@ -1,24 +1,35 @@
 import type { Database } from "bun:sqlite";
 import { mkdir, open, readFile, rename, stat } from "node:fs/promises";
 import { extname, join } from "node:path";
+import { constants } from "node:fs";
 import { createHash } from "node:crypto";
 import { parseInlineImageTags, type InlineImage, type InlineImageErrorCode, type InlineImageSnapshot } from "./inline-image-contract.js";
 
 export type InlineImageGenerationResult = { ok: true; images: Array<{ id: string; bytes: Buffer }>; model: string; responseId: string; usage: unknown }
   | { ok: false; error: { message: string } };
-export type InlineImageGenerator = (request: { prompt: string; inputPaths: string[] }, signal: AbortSignal) => Promise<InlineImageGenerationResult>;
+export type InlineImageGenerator = (request: { prompt: string; inputPaths: string[]; inputBytes: Buffer[] }, signal: AbortSignal) => Promise<InlineImageGenerationResult>;
+export type InlineImageInputReader = (path: string, signal: AbortSignal) => Promise<{ ok: true; value: Buffer } | { ok: false; error: { message: string } }>;
+type ArtifactOwner = { uid: number; gid: number };
+const readLocalInput: InlineImageInputReader = async (path, signal) => {
+  try {
+    const info = await stat(path);
+    if (!info.isFile() || info.size > 32 * 1024 * 1024) return { ok: false, error: { message: "Image input must be a regular file of at most 32 MiB" } };
+    const bytes = await readFile(path, { signal });
+    return bytes.length > 32 * 1024 * 1024 ? { ok: false, error: { message: "Image input exceeds 32 MiB" } } : { ok: true, value: bytes };
+  } catch (cause) { return { ok: false, error: { message: String(cause) } }; }
+};
 type Row = { session_id: string; image_id: string; value: string; attempt_dir: string | null };
 const time = () => new Date().toISOString();
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const problem = (code: InlineImageErrorCode, message: string) => ({ code, message });
 
-async function durableFile(path: string, bytes: string | Buffer) {
+async function durableFile(path: string, bytes: string | Buffer, owner?: ArtifactOwner) {
   const file = await open(path, "wx", 0o600);
-  try { await file.writeFile(bytes); await file.sync(); } finally { await file.close(); }
+  try { if (owner) await file.chown(owner.uid, owner.gid); await file.writeFile(bytes); await file.sync(); } finally { await file.close(); }
 }
-async function syncDirectory(path: string) {
-  const file = await open(path, "r");
-  try { await file.sync(); } finally { await file.close(); }
+async function syncDirectory(path: string, owner?: ArtifactOwner) {
+  const file = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try { if (owner) await file.chown(owner.uid, owner.gid); await file.sync(); } finally { await file.close(); }
 }
 
 export function adoptImageSchema(db: Database) {
@@ -59,7 +70,9 @@ export class InlineImages {
     private changed: () => void, private concurrency = 2, private isOwner: () => boolean = () => true,
     private acceptsThread: (sessionId: string) => boolean = () => true,
     private resolvePath: (path: string) => string = path => path,
-    private acceptsPath: (path: string) => boolean = () => true) {
+    private acceptsPath: (path: string) => boolean = () => true,
+    private readInput: InlineImageInputReader = (path, signal) => readLocalInput(this.resolvePath(path), signal),
+    private artifactOwner?: ArtifactOwner) {
     if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 8) throw new Error("Image concurrency must be an integer from 1 to 8");
     adoptImageSchema(db);
   }
@@ -210,7 +223,7 @@ export class InlineImages {
       for (const row of this.rows()) {
         if (this.active.size >= this.concurrency) break;
         const image = JSON.parse(row.value) as InlineImage;
-        if (image.state !== "queued" || image.waitingFor.length) continue;
+        if (image.state !== "queued" || image.waitingFor.length || !this.acceptsThread(row.session_id)) continue;
         const controller = new AbortController();
         const key = `${row.session_id}:${image.id}`;
         const directory = join(this.root, hash(row.session_id), image.id);
@@ -232,19 +245,20 @@ export class InlineImages {
       await mkdir(this.resolvePath(parent), { recursive: true, mode: 0o700 });
       await syncDirectory(this.resolvePath(this.root));
       await mkdir(this.resolvePath(directory), { mode: 0o700 });
-      await syncDirectory(this.resolvePath(parent));
+      await syncDirectory(this.resolvePath(parent), this.artifactOwner);
+      await syncDirectory(this.resolvePath(directory), this.artifactOwner);
       if (image.prompt === null) {
         const extension = extname(image.sourcePath).slice(1).toLowerCase();
         if (!["png", "jpg", "jpeg", "gif", "webp", "bmp", "avif", "svg"].includes(extension)) throw new Error("Image path must name a supported image file");
         if (!this.acceptsPath(image.sourcePath)) throw new Error("Image source path is outside the granted scope");
-        const info = await stat(this.resolvePath(image.sourcePath));
-        if (!info.isFile() || info.size > 32 * 1024 * 1024) throw new Error("Image path must name a file of at most 32 MiB");
-        const bytes = await readFile(this.resolvePath(image.sourcePath), { signal });
+        const loaded = await this.readInput(image.sourcePath, signal);
+        if (!loaded.ok) throw new Error(loaded.error.message);
+        const bytes = loaded.value;
         if (bytes.length > 32 * 1024 * 1024) throw new Error("Image file exceeds 32 MiB");
         signal.throwIfAborted();
         if (!this.isOwner() || !this.get(sessionId, image.id)) return;
         const path = join(directory, `1.${extension}`);
-        await durableFile(this.resolvePath(path), bytes);
+        await durableFile(this.resolvePath(path), bytes, this.artifactOwner);
         const receipt = { path, paths: [path], model: null, responseId: null };
         await this.publishReceipt(directory, receipt, [createHash("sha256").update(bytes).digest("hex")]);
         this.finish(sessionId, image.id, { ...receipt, state: "complete", error: null });
@@ -254,37 +268,39 @@ export class InlineImages {
         const path = ref.startsWith("/") ? ref : this.get(sessionId, ref)?.path;
         if (!path) throw new Error(`Missing completed image ${ref}`);
         if (!this.acceptsPath(path)) throw new Error("Image reference path is outside the granted scope");
-        const info = await stat(this.resolvePath(path));
-        if (!info.isFile()) throw new Error(`Invalid image reference: ${ref}`);
-        return { path, size: info.size };
+        return path;
       }));
-      if (sources.reduce((total, source) => total + source.size, 0) > 32 * 1024 * 1024) throw new Error("Image inputs exceed 32 MiB");
-      const inputs: string[] = [];
+      const inputBytes: Buffer[] = [];
       let totalBytes = 0;
+      for (const path of sources) {
+        const loaded = await this.readInput(path, signal);
+        if (!loaded.ok) throw new Error(loaded.error.message);
+        totalBytes += loaded.value.length;
+        if (totalBytes > 32 * 1024 * 1024) throw new Error("Image inputs exceed 32 MiB");
+        inputBytes.push(loaded.value);
+      }
+      const inputs: string[] = [];
       for (let i = 0; i < sources.length; i++) {
         // Snapshot external inputs once. The job owns their bytes even if the source is edited later.
         const target = join(directory, `input-${i}`);
-        const bytes = await readFile(this.resolvePath(sources[i].path), { signal });
-        totalBytes += bytes.length;
-        if (totalBytes > 32 * 1024 * 1024) throw new Error("Image inputs exceed 32 MiB");
-        await durableFile(this.resolvePath(target), bytes);
+        await durableFile(this.resolvePath(target), inputBytes[i]!, this.artifactOwner);
         inputs.push(this.resolvePath(target));
       }
       signal.throwIfAborted();
       if (!this.isOwner() || !this.get(sessionId, image.id)) return;
-      const result = await this.generate({ prompt: image.prompt, inputPaths: inputs }, AbortSignal.any([signal, AbortSignal.timeout(300_000)]));
+      const result = await this.generate({ prompt: image.prompt, inputPaths: inputs, inputBytes }, AbortSignal.any([signal, AbortSignal.timeout(300_000)]));
       if (!result.ok) {
         this.finish(sessionId, image.id, { state: "error", waitingFor: [], error: problem("provider_error", result.error.message) });
         return;
       }
       providerCompleted = true;
       await durableFile(this.resolvePath(join(directory, "provider.json")), JSON.stringify({ model: result.model, responseId: result.responseId,
-        providerUsage: result.usage, imageIds: result.images.map(output => output.id) }));
+        providerUsage: result.usage, imageIds: result.images.map(output => output.id) }), this.artifactOwner);
       const paths: string[] = [];
       const hashes: string[] = [];
       for (let i = 0; i < result.images.length; i++) {
         const path = join(directory, `${i + 1}.png`);
-        await durableFile(this.resolvePath(path), result.images[i].bytes);
+        await durableFile(this.resolvePath(path), result.images[i].bytes, this.artifactOwner);
         paths.push(path);
         hashes.push(createHash("sha256").update(result.images[i].bytes).digest("hex"));
       }
@@ -298,21 +314,24 @@ export class InlineImages {
     }
   }
   private async publishReceipt(directory: string, receipt: Pick<InlineImage, "path" | "paths" | "model" | "responseId">, hashes: string[]) {
-    await durableFile(this.resolvePath(join(directory, "receipt.writing")), JSON.stringify({ ...receipt, hashes }));
+    await durableFile(this.resolvePath(join(directory, "receipt.writing")), JSON.stringify({ ...receipt, hashes }), this.artifactOwner);
     await rename(this.resolvePath(join(directory, "receipt.writing")), this.resolvePath(join(directory, "receipt.json")));
     await syncDirectory(this.resolvePath(directory));
   }
   private async recover(directory: string): Promise<Pick<InlineImage, "path" | "paths" | "model" | "responseId"> | null> {
     try {
-      const receipt = JSON.parse(await readFile(this.resolvePath(join(directory, "receipt.json")), "utf8"));
+      const loaded = await this.readInput(join(directory, "receipt.json"), new AbortController().signal);
+      if (!loaded.ok) return null;
+      const receipt = JSON.parse(loaded.value.toString("utf8"));
       if (!Array.isArray(receipt.paths) || !receipt.paths.length || !Array.isArray(receipt.hashes)
         || receipt.hashes.length !== receipt.paths.length || receipt.path !== receipt.paths.at(-1)
         || !((typeof receipt.model === "string" && typeof receipt.responseId === "string") || (receipt.model === null && receipt.responseId === null))) return null;
       for (let i = 0; i < receipt.paths.length; i++) {
         const extension = extname(receipt.paths[i]).slice(1);
         if (!["png", "jpg", "jpeg", "gif", "webp", "bmp", "avif", "svg"].includes(extension)
-          || receipt.paths[i] !== join(directory, `${i + 1}.${extension}`) || !(await stat(this.resolvePath(receipt.paths[i]))).isFile()) return null;
-        if (createHash("sha256").update(await readFile(this.resolvePath(receipt.paths[i]))).digest("hex") !== receipt.hashes[i]) return null;
+          || receipt.paths[i] !== join(directory, `${i + 1}.${extension}`)) return null;
+        const output = await this.readInput(receipt.paths[i], new AbortController().signal);
+        if (!output.ok || createHash("sha256").update(output.value).digest("hex") !== receipt.hashes[i]) return null;
       }
       return { path: receipt.path, paths: receipt.paths, model: receipt.model, responseId: receipt.responseId };
     } catch (error) {
