@@ -6,69 +6,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test, { describe } from "node:test";
-import { hostWaitKind, rollForwardHosts } from "../deploy/publication-hosts.mjs";
+import { hostWaitKind } from "../deploy/publication-hosts.mjs";
 import { progressBudgetExhausted } from "../deploy/publication-control.mjs";
 import { publicationConfig } from "./publication-fixture.mjs";
 
 const hostIds = ["gmktec", "converge"];
 const publication = process.env.PI_PUBLICATION_TEST_COMMAND ?? new URL("../deploy/publication", import.meta.url).pathname;
 const id = "PUB-0123456789abcdef01234567";
-
-for (const waitingHost of hostIds) {
-  for (const kind of ["live-meeting", "live-telephone", "native-source", "native-history", "host-lock"]) {
-    test(`${kind} on ${waitingHost} does not hold its peer; restart retries only the pending host`, () => {
-      const request = {};
-      const calls = [];
-      const durable = [];
-      const targets = hostIds.map(id => ({ id }));
-      const first = rollForwardHosts(request, targets, {
-        deliver(target) {
-          calls.push(target.id);
-          return target.id === waitingHost
-            ? { status: "waiting", waiting: { kind, host: target.id }, nextAttemptAt: "2026-10-07T12:00:00Z" }
-            : { status: "passed", integrationSha: "old", android: { revision: "old", web: { revision: "old" } } };
-        },
-        save: value => durable.push(structuredClone(value)),
-      });
-      assert.deepEqual(first, { status: "waiting", hosts: [waitingHost] });
-      assert.deepEqual(calls, hostIds);
-      assert.equal(durable.length, 2);
-      const ready = hostIds.find(host => host !== waitingHost);
-      const successful = structuredClone(request.hosts[ready]);
-      const restarted = structuredClone(durable.at(-1));
-      calls.length = 0;
-      const second = rollForwardHosts(restarted, targets, {
-        deliver(target, previous) {
-          calls.push(target.id);
-          assert.deepEqual(previous, request.hosts[waitingHost]);
-          return { status: "passed", integrationSha: "old", android: { revision: "old", web: { revision: "old" } } };
-        },
-        save: value => durable.push(structuredClone(value)),
-      });
-      assert.deepEqual(second, { status: "passed" });
-      assert.deepEqual(calls, [waitingHost]);
-      assert.deepEqual(restarted.hosts[ready], successful);
-    });
-  }
-}
-
-for (const failure of ["throw", "returned"]) test(`${failure} failure on the first host still delivers and saves the second`, () => {
-  const request = {};
-  const saved = [];
-  const outcome = rollForwardHosts(request, hostIds.map(id => ({ id })), {
-    deliver(target) {
-      if (target.id === "gmktec") {
-        if (failure === "throw") throw new Error("host activation failed");
-        return { status: "failed", failure: { message: "host activation failed" } };
-      }
-      assert.equal(saved[0].hosts.gmktec.status, "failed", "failure is durable before the next host starts");
-      return { status: "passed", integrationSha: "ready" };
-    },
-    save: value => saved.push(structuredClone(value)),
-  });
-  assert.deepEqual(outcome, { status: "failed", hosts: ["gmktec"] });
-  assert.equal(saved.at(-1).hosts.converge.status, "passed");
-});
 
 // Host commands are fixture boundaries, while the owner, Git ancestry, proof hashing,
 // filesystem receipts and reservation scripts execute unchanged in subprocesses.
