@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { sourceContinuation, repairSourceRef, canResumeCheckedRequest, failureSignature } from '../deploy/publication-continuation.mjs';
+import { progressBudgetExhausted, policy } from '../deploy/publication-control.mjs';
 
 const id = `PUB-${'a'.repeat(24)}`;
 const sourceSha = 'b'.repeat(40);
@@ -45,6 +46,22 @@ test('checked interrupted publication resumes but unsettled source custody does 
   for (const state of ['repair-required', 'resume-required']) assert.equal(canResumeCheckedRequest({ ...running, nativeHistory: { hosts: { local: { state } } } }), false);
   assert.equal(canResumeCheckedRequest({ ...running, recoveryInProgress: true }), false);
   assert.equal(canResumeCheckedRequest({ ...running, checks: { status: 'running' } }), false);
+});
+
+test('a passed integration displaced by main has a separate bounded recheck budget, not a failed-source retry', () => {
+  const at = '2026-10-10T01:02:00Z', now = Date.parse(at);
+  const movement = { integrationSha: 'd'.repeat(40), remoteMain: 'e'.repeat(40), attempt: 2, at, checks: { status: 'passed' },
+    ref: `refs/pi-stack-publication/${id}/integrations/${'d'.repeat(40)}` };
+  const queued = { requestId: id, status: 'queued', step: 'main-moved-recheck-required', attempt: 2, attemptLimit: 2,
+    continuedRepair: { at: source.at }, mainMovements: [movement] };
+  assert.equal(progressBudgetExhausted(queued, now), false, 'the last source-repair allowance cannot manufacture a defect after passing checks');
+  assert.equal(progressBudgetExhausted(queued, now + policy.integrationRecheckLimitMs + 1), true);
+  assert.equal(progressBudgetExhausted({ ...queued, mainMovements: Array(policy.maxIntegrationRechecks).fill(movement) }, now), true);
+  for (const change of [{ checks: { status: 'failed' } }, { ref: 'unretained' }, { remoteMain: null }, { attempt: 1 }])
+    assert.equal(progressBudgetExhausted({ ...queued, mainMovements: [{ ...movement, ...change }] }, now), true);
+  assert.equal(progressBudgetExhausted({ ...queued, continuedRepair: { at: 'invalid' } }, now), true);
+  assert.equal(progressBudgetExhausted({ ...queued, continuedRepair: { at: '2026-10-10T01:03:00Z' } }, now), true, 'a stale retained integration is not a current recheck');
+  assert.equal(progressBudgetExhausted({ ...queued, step: 'queued-after-source-repair' }, now), true, 'ordinary failed-source attempts retain their own bound');
 });
 
 test('repeat defect identity excludes timestamps but separates changed command and step', () => {
