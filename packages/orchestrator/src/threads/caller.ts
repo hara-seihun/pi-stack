@@ -313,6 +313,7 @@ export function callerResolver(options: CallerResolverOptions): CallerResolver {
         if (createdBy.kind === "process" && createdBy.pid && attest) createdBy = { ...createdBy, attestation: await attest(createdBy.pid) };
         return { ok: true, input: { ...request, createdBy } };
       }
+      if (operation === "answer") return { ok: true, input: { ...input, humanActivity: caller.kind === "person" || ((caller.kind === "runtime" || caller.kind === "service") && input.humanActivity === true) } };
       if (operation === "send") {
         const request = input as SendThread;
         if (request.senderId !== undefined && request.senderId !== null && request.senderId !== "") {
@@ -320,6 +321,9 @@ export function callerResolver(options: CallerResolverOptions): CallerResolver {
           // A person reached this owner through an authenticated front door; root runners (root repair) also arrive as uid 0.
           if (caller.kind === "process") return refuse("Sending as a thread requires that thread's capability (PI_THREAD_TOKEN) or the Pi runtime");
         } else if (caller.kind === "thread") return refuse("A thread sends as itself; set senderId to the calling thread");
+        const humanActivity = !request.senderId && (request.source ?? "explicit") === "explicit"
+          && (caller.kind === "person" || ((caller.kind === "runtime" || caller.kind === "service") && request.humanActivity === true));
+        return { ok: true, input: { ...request, humanActivity } };
       }
       return { ok: true, input };
     },
@@ -330,7 +334,7 @@ export function callerResolver(options: CallerResolverOptions): CallerResolver {
 export function admissionFor(resolver: CallerResolver, source: CallerSource): (operation: string, input: Record<string, any>) => Promise<AdmissionResult> {
   let caller: ThreadCaller | { error: string } | undefined;
   return async (operation, input) => {
-    if (operation !== "control" && operation !== "spawn" && operation !== "send" && operation !== "watch" && operation !== "agentWait" && operation !== "wakeSchedule" && operation !== "attention" && operation !== "managerQuestions" && operation !== "managerQuestionCustody" && operation !== "managerWorkSummary") return { ok: true, input };
+    if (operation !== "control" && operation !== "spawn" && operation !== "send" && operation !== "answer" && operation !== "watch" && operation !== "agentWait" && operation !== "wakeSchedule" && operation !== "attention" && operation !== "managerQuestions" && operation !== "managerQuestionCustody" && operation !== "managerWorkSummary") return { ok: true, input };
     caller ??= resolver.resolve(source);
     if ("error" in caller) return { ok: false, status: 401, message: caller.error };
     return resolver.admit(operation, input, caller);

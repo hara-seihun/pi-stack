@@ -75,6 +75,8 @@ export interface AskThreadQuestions {
 }
 export interface QuestionsReceipt { accepted: true; questionIds: string[] }
 export interface AnswerThreadQuestion {
+  /** Stamped by authenticated human ingress. */
+  humanActivity?: boolean;
   threadId: string;
   questionId: string;
   selectedSuggestionIds: string[];
@@ -151,6 +153,8 @@ export interface SpawnThread {
   createdBy?: ThreadCreator;
 }
 export interface SendThread {
+  /** Stamped by authenticated human ingress; agents/processes cannot assert this. */
+  humanActivity?: boolean;
   requestId: string;
   threadId: string;
   senderId?: string;
