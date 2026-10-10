@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { silentAgent } from "./retell-transport";
+import { ActionStore, actionRequest } from "kenan-memory/actions";
 
 const brief = { requestId: "4208e41f-cafe-4bc5-991f-02dcb8f0f723", to: "+15555550123", purpose: "Book Tuesday afternoon", shareableFacts: ["Tuesday after 14:00"], opening: "I am Kenan, an AI assistant", maxSeconds: 60 };
 async function eventually<T>(read: () => Promise<T | undefined>) {
@@ -15,11 +16,16 @@ async function fixture(mode: "uncertain" | "cancel" | "connected") {
   const root = mkdtempSync(join(tmpdir(), "phone-takeover-")), localPort = port(), publicPort = port();
   const token = "a".repeat(64), admin = "owner-capability".repeat(4);
   const requests: { path: string; body: any }[] = [];
+  const actions = new ActionStore(join(root, "authority"), "synthetic");
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
   const settings = { apiKey: "synthetic-provider-secret", agentId: "agent_synthetic", agentVersion: 0, callerId: "+15555550200", silentUrl: `wss://phone.example/retell/silent/${token}` };
   const mockServer = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
     const path = new URL(req.url).pathname, body = req.method === "POST" || req.method === "PATCH" || req.method === "DELETE" ? await req.json().catch(() => null) : null;
+    if (path === "/v1/external-actions") {
+      if (req.headers.get("authorization") !== `Bearer ${admin}`) return Response.json({ ok: false, error: "fenced", message: "Phone authority required" }, { status: 403 });
+      return Response.json(actionRequest(actions, body.operation, body.input));
+    }
     requests.push({ path, body });
     if (path === "/get-agent/agent_synthetic") { if (mode === "cancel") await gate; return Response.json({ ...silentAgent(settings), agent_id: settings.agentId, version: 0, is_published: true }); }
     if (path.startsWith("/get-phone-number/")) return Response.json({ phone_number: settings.callerId, phone_number_type: "retell-twilio" });
@@ -68,7 +74,7 @@ await import(${JSON.stringify(new URL("./service.ts", import.meta.url).href)});
   const child = Bun.spawn([process.execPath, join(root, "runner.ts")], { env: { ...process.env, PI_STACK_PHONE_CONFIG: join(root, "config"), PI_STACK_PHONE_STATE: join(root, "state"), PI_REMOTE_PRIVATE_DIR: root, PI_KENAN_ACTION_JOURNAL_DIR: join(root, ".kenan-actions"), MOCK_ORIGIN: `http://127.0.0.1:${mockServer.port}` }, stdout: "ignore", stderr: "pipe" });
   const stderr = new Response(child.stderr).text();
   const request = (path: string, method = "GET", body?: unknown, ownerToken = admin) => fetch(`http://127.0.0.1:${localPort}${path}`, { method, headers: { authorization: `Bearer ${ownerToken}`, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-  const close = async () => { release(); child.kill("SIGTERM"); const timer = setTimeout(() => child.kill("SIGKILL"), 1500); await child.exited; clearTimeout(timer); mockServer.stop(true); rmSync(root, { recursive: true, force: true }); };
+  const close = async () => { release(); child.kill("SIGTERM"); const timer = setTimeout(() => child.kill("SIGKILL"), 1500); await child.exited; clearTimeout(timer); mockServer.stop(true); actions.close(); rmSync(root, { recursive: true, force: true }); };
   try { await eventually(async () => { try { if ((await request("/status")).ok) return true; } catch {} if (child.exitCode !== null) throw new Error(await stderr); return undefined; }); }
   catch (e) { await close(); throw e; }
   return { requests, request, release, close, publicPort, token, hold: (holds: Record<string, string>) => writeFileSync(join(root, "holds.json"), JSON.stringify(holds)) };

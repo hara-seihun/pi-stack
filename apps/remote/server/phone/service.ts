@@ -9,7 +9,7 @@ import { sameToken, type CallFragment } from "./dispatcher";
 import { providerSelection, loadProvider } from "./provider";
 import { silentReply, silentBegin } from "./retell-transport";
 import { contactGuard } from "./contact-guard";
-import { ActionStore, type ActionTicket } from "kenan-memory/actions";
+import { ActionClient, type ActionTicket } from "kenan-memory/actions";
 import { phoneIntent, reservePhoneAction, settlePhoneAction } from "./action-admission";
 
 const config = JSON.parse(readFileSync(process.env.PI_STACK_PHONE_CONFIG ?? "/etc/pi-stack/phone.json", "utf8"));
@@ -28,7 +28,7 @@ const owner = config.owner;
 const localPort = config.localPort, publicPort = config.publicPort;
 const voiceBase = config.voiceUrl, dispatcherBase = config.dispatcherUrl;
 if (typeof owner !== "string" || !owner || !Number.isInteger(localPort) || !Number.isInteger(publicPort) || typeof voiceBase !== "string" || typeof dispatcherBase !== "string") throw new Error("Explicit owner, listener ports, Voice and managed dispatcher URLs are required");
-const actions = new ActionStore(join(state, "..", ".kenan-actions"), owner);
+const actions = new ActionClient(dispatcherBase, adminToken);
 const db = new Database(join(state, "calls.sqlite3"));
 db.exec(`PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS calls(id TEXT PRIMARY KEY,provider_id TEXT,voice_id TEXT,status TEXT NOT NULL,brief TEXT NOT NULL,started_at INTEGER NOT NULL,ended_at INTEGER,error TEXT,cleanup INTEGER NOT NULL DEFAULT 0); CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,call_id TEXT NOT NULL,at INTEGER NOT NULL,type TEXT NOT NULL,payload TEXT NOT NULL);`);
 for (const [name, type] of [["provider_kind", "TEXT"], ["dial_state", "TEXT NOT NULL DEFAULT 'none'"], ["provider_snapshot", "TEXT"], ["accepted_at", "INTEGER"], ["action_id", "TEXT"], ["action_ticket", "TEXT"], ["request_id", "TEXT"], ["dispatcher_closed", "INTEGER NOT NULL DEFAULT 0"]]) {
