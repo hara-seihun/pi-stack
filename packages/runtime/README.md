@@ -74,6 +74,29 @@ PNG, and the owner adopted that file using a serialized `switch_session` command
 The original JSONL and per-entry/file SHA256 evidence remain in the person's
 private thread store. Opus and all user messages were retained.
 
+## Signed Anthropic narration
+
+[`patch-anthropic-narration.mjs`](patch-anthropic-narration.mjs) classifies Anthropic's
+signed `narration` channel as visible native text when its content block completes.
+The shared [`anthropic-narration.mjs`](../orchestrator/src/threads/anthropic-narration.mjs)
+reads only protobuf field `2.1.8` of the provider signature; `thinking`, malformed,
+unknown and redacted blocks remain thinking. No source prose is inspected.
+Both the SDK and bundled provider are patched. Native text retains the signature
+in `textSignature` so same-model Anthropic continuation restores the original
+signed wire block; cross-model continuation keeps ordinary text.
+
+Remote's per-record display projection applies the same classification to already
+persisted Anthropic records before removing continuation signatures. Native source
+history is not rewritten. Deployment includes the patch and shared helper in the
+immutable dependency identity. Synthetic SSE regressions cover replies after tool
+results, narration followed by `thread_wait`, genuine thinking, malformed metadata,
+JSON round trips and signed continuation replay:
+
+```sh
+node --test packages/runtime/anthropic-narration.test.mjs
+bun test apps/remote/server/context-display.test.ts
+```
+
 ## Codex transport framing
 
 [`patch-codex-sse.mjs`](patch-codex-sse.mjs) repairs Pi 0.87.1's LF-only SSE frame splitter in both the SDK and bundled CLI Codex providers. Compaction tests exposed valid CRLF frames being joined into malformed JSON. Deployment applies the patch to the immutable dependency tree and includes its source in that tree's hash. [`codex-sse.test.mjs`](codex-sse.test.mjs) exercises both copies with LF, CRLF and one-byte chunks. The extension observes response bytes without replacing Pi's parser.

@@ -1,4 +1,5 @@
 import type { ThreadMessage } from "./contracts.js";
+import { projectAnthropicNarrationMessage } from "pi-orchestrator/anthropic-narration";
 
 const PREFIX = "<agent_message>\nThis is an agent-to-agent message, not a user message.\n";
 const isThreadId = (value: unknown): value is string => typeof value === "string" && !!value.trim();
@@ -60,7 +61,7 @@ function notificationPresentation(text: string): string {
 export function finalText(message: unknown): string | null {
   if (typeof message === "string") return message || null;
   if (!message || typeof message !== "object") return null;
-  const content = (message as Record<string, unknown>).content;
+  const content = projectAnthropicNarrationMessage(message as Record<string, unknown>).content;
   if (typeof content === "string") return content || null;
   if (!Array.isArray(content)) return null;
   const text = content.filter((block): block is { type: "text"; text: string } =>
