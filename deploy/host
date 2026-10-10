@@ -342,7 +342,29 @@ fi
 owner_changed() {
   [[ -n ${PI_STACK_HOST_PLAN:-} ]] || return 0
   jq -e --arg owner "$1" --arg expected "$expected" '.protocol == "pi-host-plan-v1" and .candidate == $expected and (.owners[$owner].changed | type == "boolean")' "$PI_STACK_HOST_PLAN" >/dev/null || { echo 'host owner plan is invalid' >&2; exit 66; }
-  jq -e --arg owner "$1" '.owners[$owner].changed' "$PI_STACK_HOST_PLAN" >/dev/null
+  local proof
+  proof=$(pi_stack_as_root node "$root/deploy/host-plan.mjs" needs-activation "$root" "$PI_STACK_HOST_PLAN" "$1") || { echo "$proof" >&2; exit 66; }
+  jq -e '.value.changed' <<<"$proof" >/dev/null
+}
+record_owner() {
+  local owner=$1; shift
+  [[ -n ${PI_STACK_HOST_PLAN:-} ]] || return 0
+  pi_stack_as_root flock "$PI_STACK_HOST_PLAN.owners.lock" node --input-type=module - "$root" "$PI_STACK_HOST_PLAN" "$expected" "$owner" "$@" <<'JS'
+import { execFileSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
+const [root, path, candidate, owner, ...names] = process.argv.slice(2);
+const { acceptOwner } = await import(pathToFileURL(`${root}/deploy/host-plan.mjs`));
+const units = names.map(unit => {
+  const output = execFileSync('systemctl', ['show', unit, '-p', 'ActiveState', '-p', 'LoadState', '-p', 'InvocationID'], { encoding: 'utf8' });
+  const fields = Object.fromEntries(output.trim().split('\n').map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]));
+  const state = fields.LoadState === 'not-found' ? 'absent' : fields.ActiveState;
+  if (state !== 'active' && !(owner === 'phone' && ['inactive', 'absent'].includes(state))) throw new Error(`Owner ${owner} has no positive activation proof for ${unit}: ${state}`);
+  return { unit, state, invocationId: state === 'active' ? fields.InvocationID : null };
+});
+const result = acceptOwner(root, path, candidate, owner, { kind: 'activated-units', runningCommit: candidate, units });
+console.log(JSON.stringify(result));
+if (!result.ok) process.exitCode = 66;
+JS
 }
 owner_matches() {
   local owner=$1 running=$2
@@ -415,6 +437,30 @@ activate_remote() {
 }
 # Remote owns canonical settings and publishes its narrow timezone projection
 # before fleet admissions start. Locked owners retain explicit unavailable state.
+daemon_source_matches() {
+  local unit=$1 pid url running deadline=$((SECONDS + 10))
+  while (( SECONDS < deadline )); do
+    pid=$(pi_stack_as_root systemctl show "$unit" -p MainPID --value) || return 1
+    if [[ $pid =~ ^[1-9][0-9]*$ ]]; then
+      url=$(pi_stack_as_root node --input-type=module - "$orchestrator" "$pid" <<'JS'
+import { readFileSync, realpathSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+const [orchestrator, pid] = process.argv.slice(2);
+const env = Object.fromEntries(readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').filter(Boolean).map(value => [value.slice(0, value.indexOf('=')), value.slice(value.indexOf('=') + 1)]));
+const { orchestratorUrl } = await import(pathToFileURL(`${realpathSync(orchestrator)}/dist/config.js`));
+const url = orchestratorUrl(env);
+if (!/^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):[0-9]+$/.test(url)) throw new Error('Daemon proof requires its own local configured listener');
+console.log(url);
+JS
+      ) || return 1
+      running=$(pi_stack_as_root curl -fsS --max-time 2 "$url/v1/health" 2>/dev/null | jq -r '.releaseCommit // empty') || running=''
+      if [[ -n $running ]]; then owner_matches daemons "$running"; return $?; fi
+    fi
+    sleep 0.1
+  done
+  echo "daemon $unit did not report a source-bound health proof" >&2
+  return 1
+}
 activate_daemons() {
   local failed=0 broker_units
   local -a brokers=()
@@ -431,13 +477,16 @@ activate_daemons() {
       esac
     done
   fi
-  if owner_changed brokers; then
-    broker_units=$(pi_stack_as_root systemctl list-units --type=service --state=running --no-legend 'pi-model-broker.service' 'pi-stack-model-broker@*.service') || failed=1
-    mapfile -t brokers < <(printf '%s\n' "$broker_units" | awk '$1 ~ /^(pi-model-broker\.service|pi-stack-model-broker@.*\.service)$/ {print $1}')
-    if (( ${#brokers[@]} )); then
-      pi_stack_as_root systemctl restart "${brokers[@]}" || failed=1
-    fi
+  if (( failed == 0 )); then
+    for unit in "${daemons[@]}"; do daemon_source_matches "$unit" || failed=1; done
+    (( failed != 0 )) || record_owner daemons "${daemons[@]}" || failed=1
   fi
+  broker_units=$(pi_stack_as_root systemctl list-units --type=service --state=running --no-legend 'pi-model-broker.service' 'pi-stack-model-broker@*.service') || failed=1
+  mapfile -t brokers < <(printf '%s\n' "$broker_units" | awk '$1 ~ /^(pi-model-broker\.service|pi-stack-model-broker@.*\.service)$/ {print $1}')
+  if owner_changed brokers && (( ${#brokers[@]} )); then
+    pi_stack_as_root systemctl restart "${brokers[@]}" || failed=1
+  fi
+  if (( failed == 0 )); then record_owner brokers "${brokers[@]}" || failed=1; fi
   return "$failed"
 }
 activation_failed=0
@@ -456,8 +505,17 @@ elif ! remote_matches_release "$expected"; then
 fi
 
 if (( activation_failed == 0 )); then
+  router_proof=$(pi_stack_as_root curl -fsS --max-time 2 "$router_base/v1/router-health") || activation_failed=1
+  if (( activation_failed == 0 )); then
+    supervisor_units=()
+    mapfile -t supervisor_units < <(jq -r '.people[] | select(.unlocked) | "pi-remote@" + .user + ".service"' <<<"$router_proof")
+    remote_matches_release "$expected" && record_owner remote "${supervisor_units[@]}" && record_owner router pi-remote-router.service || activation_failed=1
+  fi
   for service in voice phone; do
-    if owner_changed "$service" && ! "$root/deploy/$service" --activate; then activation_failed=1; fi
+    if owner_changed "$service"; then
+      if "$root/deploy/$service" --activate; then record_owner "$service" "pi-stack-$service.service" || activation_failed=1
+      else activation_failed=1; fi
+    fi
   done
 fi
 if (( activation_failed == 0 )) && [[ ${PI_STACK_DEPLOY_NO_SUDO:-0} != 1 ]]; then
@@ -482,7 +540,15 @@ elif jq -e '.oneKenan == true' "$PI_STACK_HOST_FILE" >/dev/null && { owner_chang
       echo 'executor replacement waiting: accepting Root remains busy or its graceful handoff is settling' >&2
       exit 75
     fi
-    (( consumer_status == 0 )) || activation_failed=1
+    if (( consumer_status == 0 )); then
+      consumer_proof=$(pi_stack_as_root python3 "$root/deploy/one-kenan-activate" proof --host "$PI_STACK_HOST_FILE" --expected "$expected") || activation_failed=1
+      if (( activation_failed == 0 )); then
+        for role in root memory rooms; do
+          unit=$(jq -er --arg role "$role" '.consumers[$role].unit' <<<"$consumer_proof") || { activation_failed=1; break; }
+          record_owner "$role" "$unit" || activation_failed=1
+        done
+      fi
+    else activation_failed=1; fi
   fi
 fi
 if (( recognition )); then
