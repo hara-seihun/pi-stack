@@ -465,7 +465,7 @@ activate_remote() {
 # Remote owns canonical settings and publishes its narrow timezone projection
 # before fleet admissions start. Locked owners retain explicit unavailable state.
 daemon_source_matches() {
-  local unit=$1 pid url running deadline=$((SECONDS + 10))
+  local unit=$1 pid url running deadline=$((SECONDS + 100))
   while (( SECONDS < deadline )); do
     pid=$(pi_stack_as_root systemctl show "$unit" -p MainPID --value) || return 1
     if [[ $pid =~ ^[1-9][0-9]*$ ]]; then

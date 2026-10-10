@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, readFileSync, rmSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync, execFileSync } from 'node:child_process';
+import { doctorDigest } from '../deploy/doctor-cache.mjs';
 
 function fixture(t, source) {
   const root = mkdtempSync(join(tmpdir(), 'doctor-command-cache-'));
@@ -71,6 +72,27 @@ test('privileged capture transfers a private capsule to the doctor account and r
   const failedCapsule=readFileSync(f.trace,'utf8').trim().split('\n')[1];
   assert.equal(existsSync(failedCapsule),false,'failed proof also removes private capsule');
   assert.equal(readdirSync(f.cache).length,1,'failure cannot acquire another receipt');
+});
+
+test('doctor closure identity follows executable bytes across generation paths and external links', t => {
+  const root=mkdtempSync(join(tmpdir(),'doctor-content-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+  const cache=join(root,'cache');
+  const a=join(root,'generation-a'),b=join(root,'generation-b');
+  for(const path of [a,b]) {
+    mkdirSync(join(path,'node_modules/.bin'),{recursive:true});
+    mkdirSync(join(path,'node_modules/jiti/lib'),{recursive:true});
+    writeFileSync(join(path,'node_modules/jiti/lib/jiti-cli.mjs'),'same executable');
+    writeFileSync(join(path,'.pi-stack-commit'),path);
+    symlinkSync('../jiti/lib/jiti-cli.mjs',join(path,'node_modules/.bin/jiti'));
+  }
+  assert.equal(doctorDigest(a,cache),doctorDigest(b,cache),'dependency generation coordinates and release marker do not change code identity');
+  const external=join(root,'external');mkdirSync(external);writeFileSync(join(external,'entry.mjs'),'first');
+  symlinkSync(external,join(a,'external'));symlinkSync(external,join(b,'external'));
+  const before=doctorDigest(a,cache);assert.equal(before,doctorDigest(b,cache));
+  writeFileSync(join(external,'entry.mjs'),'changed');
+  assert.notEqual(doctorDigest(a,cache),before,'mutation of linked executable bytes invalidates the memoized input');
+  writeFileSync(join(b,'node_modules/jiti/lib/jiti-cli.mjs'),'changed executable');
+  assert.notEqual(doctorDigest(a,cache),doctorDigest(b,cache),'changed SDK executable cannot acquire source equivalence');
 });
 
 test('mutating bytes of the captured package refuses successful-command proof', t => {

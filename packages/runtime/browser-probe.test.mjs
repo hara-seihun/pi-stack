@@ -110,16 +110,16 @@ function fixture(t, defect) {
   return { options, tool, calls, closed };
 }
 
-test("complete native proof keeps linear batches and exact download/frame subcommand custody", async (t) => {
+test("complete native proof batches download and frames while retaining every result and artifact assertion", async (t) => {
   const f = fixture(t);
   const records = [];
   await probeBrowser(f.tool, { ...f.options, record: phase => records.push(phase) });
   const commands = records.filter(row => row.status === "running");
   assert.equal(commands.length, f.calls.length);
-  const frameCommands = commands.filter(row => row.phase.startsWith("download-and-frames/"));
-  assert.ok(frameCommands.length > 0);
-  assert.ok(frameCommands.every(row => JSON.parse(row.command.stdin).length === 1), "troubleshooting commands each have their own bounded custody");
-  const recurring = commands.filter(row => row.command.args?.includes("batch") && !row.phase.startsWith("download-and-frames/"));
+  const frameCommands = commands.filter(row => row.phase === 'download-and-frames');
+  assert.equal(frameCommands.length, 1, 'sixteen steps cross the native wrapper boundary once');
+  assert.equal(JSON.parse(frameCommands[0].command.stdin).length, 16, 'download, static frame and dynamic frame all remain in the proof');
+  const recurring = commands.filter(row => row.command.args?.includes("batch"));
   assert.ok(recurring.length > 0);
   assert.ok(recurring.every(row => JSON.parse(row.command.stdin).length > 1), "recurring linear checks stay batched");
   assert.ok(commands.every(row => row.deadlineMs === 25000));
@@ -154,7 +154,7 @@ test("unfinished download command is recorded before failure and owner cleanup",
   };
   await assert.rejects(probeBrowser(f.tool, { ...f.options, record: row => records.push(row) }), /download command stalled/);
   const failed = records.find(row => row.status === "failed");
-  assert.equal(failed.phase, "download-and-frames/0:download");
+  assert.equal(failed.phase, "download-and-frames");
   assert.deepEqual(JSON.parse(failed.command.stdin)[0].slice(0, 2), ["download", "@e2"]);
   assert.equal(f.closed.at(-1), "owner");
 });

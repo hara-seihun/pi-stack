@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from 'node:events';
 import {
   existsSync,
   mkdtempSync,
@@ -487,7 +488,7 @@ test("repair-result completes an interrupted repair once without launching anoth
   assert.deepEqual(continued.failures, f.request.failures);
 });
 
-test("assigned repair continues the original request despite an offline requester and many prior repairs", t => {
+test("assigned repair continues after a bounded owner census despite an offline requester and many prior repairs", async t => {
   const f = repairFixture(t, "blocked");
   const reporter = { url: "http://127.0.0.1:18791", sessionId: "144b647b-dd8e-53e0-a9b7-5f398b7e49e5" };
   const request = { ...f.request, reporter, repairDepth: 100 };
@@ -513,6 +514,9 @@ esac
     PI_STACK_PUBLICATION_REPORT_URL: "",
     PI_STACK_PUBLICATION_REPORT_SESSION: "",
   };
+  const census = spawn('flock', ['--no-fork', join(f.root, 'worker.lock'), process.execPath, '-e', "console.log('claimed');setTimeout(() => process.exit(0),1500)"], { stdio: ['ignore', 'pipe', 'pipe'] });
+  t.after(() => { if (census.exitCode === null) census.kill('SIGTERM'); });
+  await once(census.stdout, 'data');
   const result = runPublication(f.root, f.bin, "repair-result", environment);
   assert.equal(result.status, 0, result.stderr);
   const repair = JSON.parse(readFileSync(f.repairPath, "utf8"));
