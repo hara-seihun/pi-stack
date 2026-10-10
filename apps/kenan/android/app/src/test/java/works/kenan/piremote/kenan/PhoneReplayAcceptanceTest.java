@@ -19,7 +19,7 @@ import org.robolectric.annotation.Config;
 import org.robolectric.util.ReflectionHelpers;
 
 @RunWith(RobolectricTestRunner.class)
-@Config(sdk = 28, application = android.app.Application.class)
+@Config(sdk = 28, application = android.app.Application.class, shadows = SetupGrantFixture.class)
 public class PhoneReplayAcceptanceTest {
     private PhoneControlService service;
     private ExecutorService replay;
@@ -27,6 +27,7 @@ public class PhoneReplayAcceptanceTest {
     private PhoneConnection source;
     private ClipboardManager clipboard;
     private void prepare() throws Exception {
+        SetupGrantFixture.complete = true;
         service = Robolectric.buildService(PhoneControlService.class).get();
         NotificationIdentity.get(service).replace("hara", "test-session");
         RemoteSession.Identity identity = NotificationIdentity.get(service).current();
@@ -81,7 +82,15 @@ public class PhoneReplayAcceptanceTest {
         assertFalse(clipboard.hasPrimaryClip());
         assertEquals("fenced", new JSONArray(PhoneControlService.settings(service).getString("seenCommands", "[]")).getString(0));
     }
+    @Test public void permissionRevocationWhilePersistenceIsPendingCannotMutate() throws Exception {
+        prepare(); receive("revoked-permission");
+        SetupGrantFixture.complete = false;
+        persist(); shadowOf(Looper.getMainLooper()).idle();
+        assertFalse(clipboard.hasPrimaryClip());
+        assertEquals("revoked-permission", new JSONArray(PhoneControlService.settings(service).getString("seenCommands", "[]")).getString(0));
+    }
     @After public void cleanup() throws Exception {
+        SetupGrantFixture.complete = true;
         if (release != null) release.countDown();
         if (service != null) {
             Method close = PhoneControlService.class.getDeclaredMethod("close");

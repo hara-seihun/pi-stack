@@ -16,7 +16,7 @@ import org.robolectric.annotation.Config;
 import org.robolectric.util.ReflectionHelpers;
 
 @RunWith(RobolectricTestRunner.class)
-@Config(sdk = 28, application = android.app.Application.class)
+@Config(sdk = 28, application = android.app.Application.class, shadows = SetupGrantFixture.class)
 public class PhoneAccessibilityServiceTest {
     private AccessibilityWindowInfo window(int id, int type) {
         AccessibilityWindowInfo window = AccessibilityWindowInfo.obtain();

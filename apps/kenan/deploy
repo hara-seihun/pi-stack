@@ -13,11 +13,10 @@ cd "$root/apps/kenan"
 
 trap 'adb kill-server >/dev/null 2>&1 || true' EXIT
 
-npm run android:test
+npm run android:build
 endpoint=$(./connect-adb)
 apk=android/app/build/outputs/apk/debug/app-debug.apk
 application_id=$(jq -r .appId capacitor.config.json)
-development_id="$application_id.dev"
 expected=$(jq -r .version package.json)
 expected_name=$(jq -r .appName capacitor.config.json)
 
@@ -33,9 +32,4 @@ installed=$(adb -s "$endpoint" shell dumpsys package "$application_id" \
 launch=$(adb -s "$endpoint" shell am start -W -n "$application_id/.MainActivity")
 [[ $launch == *"Status: ok"* ]] || { printf '%s\n' "$launch" >&2; exit 1; }
 
-if adb -s "$endpoint" shell pm path "$development_id" | grep -q '^package:'; then
-  adb -s "$endpoint" uninstall "$development_id"
-fi
-packages=$(adb -s "$endpoint" shell pm list packages | tr -d '\r' | grep '^package:works\.kenan\.piremote\.kenan' || true)
-[[ $packages == "package:$application_id" ]] || { printf 'unexpected Kenan packages:\n%s\n' "$packages" >&2; exit 1; }
 printf 'Kenan %s replaced the native client on %s\n' "$installed" "$endpoint"

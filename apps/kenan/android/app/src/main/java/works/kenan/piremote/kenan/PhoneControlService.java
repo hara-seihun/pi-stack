@@ -56,7 +56,7 @@ public final class PhoneControlService extends Service {
     static boolean enabled(Context context) {
         RemoteSession.Identity identity = NotificationIdentity.get(context).current();
         SharedPreferences prefs = settings(context);
-        return identity != null && prefs.getBoolean("enabled", false) && identity.user.equals(prefs.getString("user", ""))
+        return PermissionSetup.complete(context) && identity != null && prefs.getBoolean("enabled", false) && identity.user.equals(prefs.getString("user", ""))
             && !prefs.getString("environment", "").isBlank();
     }
     static void start(Context context) {
@@ -90,6 +90,12 @@ public final class PhoneControlService extends Service {
         });
     }
     static void refresh() { PhoneControlService active = current; if (active != null) active.main.post(() -> {
+        if (!PermissionSetup.complete(active)) {
+            active.close();
+            PhoneAccessibilityService.invalidate();
+            active.stopSelf();
+            return;
+        }
         PhoneConnection source = active.connection;
         if (!active.stopping && active.connected && source != null && !active.network.isShutdown()) active.network.execute(() -> {
             if (source == active.connection && source.valid()) source.announceChanges();
@@ -108,7 +114,7 @@ public final class PhoneControlService extends Service {
                 .put("deviceId", deviceId(context)).put("name", prefs.getString("name", Build.MODEL))
                 .put("environment", prefs.getString("environment", ""))
                 .put("error", errorCode.isEmpty() ? JSONObject.NULL : new JSONObject().put("code", errorCode).put("message", errorMessage))
-                .put("capabilities", capabilities(context));
+                .put("capabilities", capabilities(context)).put("setup", PermissionSetup.wire(PermissionSetup.state(context)));
         } catch (Exception defect) { throw new IllegalStateException(defect); }
     }
     static synchronized String deviceId(Context context) {

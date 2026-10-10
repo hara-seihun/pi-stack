@@ -51,7 +51,7 @@ final class SharedOverlay {
     static KenanOverlay current() { return overlay; }
     static boolean hasPhone() { return phone != null; }
     static void refresh() {
-        if (phone == null || !KenanOverlay.isVisible(phone)) {
+        if (phone == null || !PermissionSetup.complete(phone) || !KenanOverlay.isVisible(phone)) {
             KenanOverlay previous = overlay;
             overlay = null;
             main.removeCallbacks(reconcile);

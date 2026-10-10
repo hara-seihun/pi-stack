@@ -18,7 +18,7 @@ import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
 
 @RunWith(RobolectricTestRunner.class)
-@Config(sdk = 28, application = android.app.Application.class)
+@Config(sdk = 28, application = android.app.Application.class, shadows = SetupGrantFixture.class)
 public class KenanOverlayTest {
     static final class Windows {
         final Set<View> attached = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -77,7 +77,19 @@ public class KenanOverlayTest {
         if (phone != null) SharedOverlay.detach(phone);
         PhoneAccessibilityService.current = null;
     }
-    @After public void clearSharedOwner() throws Exception { clearSharedOverlay(); }
+    @After public void clearSharedOwner() throws Exception { SetupGrantFixture.complete = true; clearSharedOverlay(); }
+
+    @Test public void permissionRevocationClosesChatWithoutChangingVisibilityConsent() throws Exception {
+        Windows windows = new Windows();
+        KenanOverlay overlay = phoneOverlay(windows);
+        assertFalse(windows.attached.isEmpty());
+        SetupGrantFixture.complete = false;
+        SharedOverlay.refresh();
+        assertTrue(overlay.closed());
+        assertNull(SharedOverlay.current());
+        assertTrue(windows.attached.isEmpty());
+        assertTrue(KenanOverlay.isVisible((android.content.Context) field(overlay, "service")));
+    }
 
     private KenanOverlay overlay(Windows windows) {
         PhoneAccessibilityService service = Robolectric.buildService(PhoneAccessibilityService.class).get();

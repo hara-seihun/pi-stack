@@ -9,6 +9,123 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 
 final class NativeShells {
+    static final int BACKGROUND = 0xff0b0d10;
+    static final int CARD = 0xff242b40;
+    static final int ACCENT = 0xffb8c8ff;
+
+    static android.graphics.drawable.GradientDrawable card(Context context, int color) {
+        float density = context.getResources().getDisplayMetrics().density;
+        var shape = new android.graphics.drawable.GradientDrawable();
+        shape.setColor(color);
+        shape.setCornerRadius(20 * density);
+        shape.setStroke(Math.round(density), 0xff46516f);
+        return shape;
+    }
+    static Button button(Context context, String title, Runnable action) {
+        float density = context.getResources().getDisplayMetrics().density;
+        Button button = new Button(context);
+        button.setText(title);
+        button.setTextColor(Color.WHITE);
+        button.setBackground(card(context, 0xff354261));
+        button.setMinHeight(Math.round(48 * density));
+        button.setPadding(Math.round(12 * density), Math.round(8 * density), Math.round(12 * density), Math.round(8 * density));
+        button.setAllCaps(false);
+        button.setOnClickListener(view -> action.run());
+        return button;
+    }
+    record Setup(android.widget.ScrollView root, TextView detail, Button grant, Button stop) {}
+    static Setup setup(Context context, Runnable grantAll, Runnable stopSetup) {
+        LinearLayout root = new LinearLayout(context);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        root.setBackgroundColor(BACKGROUND);
+        root.setClickable(true);
+        int padding = Math.round(24 * context.getResources().getDisplayMetrics().density);
+        root.setPadding(padding, padding, padding, padding);
+        TextView title = new TextView(context);
+        title.setText("Set up Kenan");
+        title.setTextColor(Color.WHITE);
+        title.setTextSize(24);
+        root.addView(title);
+        TextView explanation = new TextView(context);
+        explanation.setText("All intentional phone permissions are required before entering Kenan. Android owns each approval; declining stays here. Device Owner and secure-settings provisioning are separate.");
+        explanation.setTextColor(Color.WHITE);
+        explanation.setTextSize(16);
+        explanation.setPadding(0, padding, 0, padding);
+        root.addView(explanation);
+        TextView detail = new TextView(context);
+        detail.setTextColor(ACCENT);
+        detail.setTextSize(16);
+        detail.setPadding(0, 0, 0, padding);
+        detail.setAccessibilityLiveRegion(android.view.View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        root.addView(detail);
+        Button grant = button(context, "Grant all permissions", grantAll);
+        root.addView(grant);
+        Button stop = button(context, "Stop setup", stopSetup);
+        root.addView(stop);
+        android.widget.ScrollView viewport = new android.widget.ScrollView(context);
+        viewport.setFillViewport(true);
+        viewport.setBackgroundColor(BACKGROUND);
+        viewport.addView(root, new android.widget.ScrollView.LayoutParams(-1, -2));
+        return new Setup(viewport, detail, grant, stop);
+    }
+
+    record Conversation(android.widget.ScrollView scroll, TextView history, android.widget.EditText input) {}
+    static Conversation conversation(Context context, LinearLayout root, String transcript, String draft,
+                                     Runnable open, Runnable close, Runnable send) {
+        float density = context.getResources().getDisplayMetrics().density;
+        int padding = Math.round(16 * density);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(padding, padding, padding, padding);
+        root.setBackground(card(context, CARD));
+        root.setElevation(12 * density);
+        LinearLayout header = new LinearLayout(context);
+        header.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        TextView title = new TextView(context);
+        title.setText("Kenaznia");
+        title.setTextColor(Color.WHITE);
+        title.setTextSize(20);
+        header.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+        header.addView(button(context, "Open", open));
+        header.addView(button(context, "Close", close));
+        root.addView(header);
+        android.widget.ScrollView scroll = new android.widget.ScrollView(context);
+        TextView history = new TextView(context);
+        history.setTextColor(Color.WHITE);
+        history.setTextSize(15);
+        history.setText(transcript);
+        history.setPadding(0, padding, 0, padding);
+        scroll.addView(history);
+        scroll.setVisibility(transcript.isEmpty() ? android.view.View.GONE : android.view.View.VISIBLE);
+        root.addView(scroll, new LinearLayout.LayoutParams(-1, Math.round(160 * density)));
+        android.widget.EditText input = new android.widget.EditText(context);
+        input.setTextColor(Color.WHITE);
+        input.setHintTextColor(0xffb5bdd1);
+        input.setHint("Message Kenaznia…");
+        input.setTextSize(16);
+        input.setMinLines(2);
+        input.setMaxLines(4);
+        input.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE | android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        input.setBackgroundTintList(android.content.res.ColorStateList.valueOf(ACCENT));
+        input.setFilters(new android.text.InputFilter[] { new android.text.InputFilter.LengthFilter(8000) });
+        input.setText(draft);
+        root.addView(input);
+        Button submit = button(context, "Send", send);
+        Runnable readiness = () -> {
+            boolean ready = !input.getText().toString().trim().isEmpty();
+            submit.setEnabled(ready);
+            submit.setAlpha(ready ? 1f : .45f);
+        };
+        input.addTextChangedListener(new android.text.TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence text, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence text, int start, int before, int count) { readiness.run(); }
+            @Override public void afterTextChanged(android.text.Editable text) {}
+        });
+        readiness.run();
+        root.addView(submit);
+        return new Conversation(scroll, history, input);
+    }
+
     enum SignInState {
         ENTER_EMAIL("Sign in to Kenan with your invited email, then enter the email code."),
         REJECTED("Sign-in was not accepted. Please sign in with an invited email."),

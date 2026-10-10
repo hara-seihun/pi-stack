@@ -25,6 +25,14 @@ final class NativeAccess {
     static boolean notifications(Context context) {
         return (Build.VERSION.SDK_INT < 33
             || context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED)
-            && NotificationManagerCompat.from(context).areNotificationsEnabled();
+            && NotificationManagerCompat.from(context).areNotificationsEnabled()
+            && kenazniaChannelEnabled(context);
+    }
+
+    private static boolean kenazniaChannelEnabled(Context context) {
+        if (Build.VERSION.SDK_INT < 26) return true;
+        android.app.NotificationChannel channel = context.getSystemService(android.app.NotificationManager.class)
+            .getNotificationChannel(NotificationDelivery.CHANNEL);
+        return channel == null || channel.getImportance() != android.app.NotificationManager.IMPORTANCE_NONE;
     }
 }

@@ -1,8 +1,16 @@
 # Native resource ownership
 
+## Mandatory admission
+
+`PermissionSetup` owns the required ordinary grants and the closed `complete` / `needs-permissions` state. `SetupGate` owns its scrollable shared native shell, serialized Android Activity Result launchers and return-driven advancement. Missing grants hide the client and its accessibility subtree, suspend native foreground-feed ownership and fence phone commands. Native bootstrap waits for completion. Resume/focus reconciles effective grants; teardown unregisters launchers and releases queued bootstrap callbacks. No saved completion bit can override revoked access.
+
+Device Owner and secure-settings provisioning remain separate capabilities. Declining a grant or stopping the flow stays in setup; retry reads actual Android state. Phone enablement is owner-bound consent independent of setup and transport connectivity.
+
 ## Overlay chat and phone-action visuals
 
-`SharedOverlay` registers the phone accessibility service independently of overlay chat. The persistent `overlayVisible` choice owns the chat scope: enabling creates one `KenanOverlay`; disabling removes the chat windows, clears its draft/transcript/receipt references, cancels its handlers and animation callbacks, releases touch/back listeners, and cancels pending geometry reconciliation. Disabled accessibility/configuration events do not schedule overlay reconciliation. A late reply, acknowledgement, gesture completion or queued panel callback cannot revive a closed scope. Explicit re-enablement creates a fresh scope; ordinary thread history remains in the server's Phone thread.
+`SharedOverlay` registers the phone accessibility service independently of overlay chat. The persistent `overlayVisible` choice owns the chat scope: enabling creates one `KenanOverlay`; disabling removes the chat windows, clears its draft/transcript/receipt references, cancels its handlers and animation callbacks, releases touch/back listeners, and cancels pending geometry reconciliation. Disabled accessibility/configuration events do not schedule overlay reconciliation. A late reply, acknowledgement, gesture completion or queued panel callback cannot revive a closed scope. Explicit re-enablement creates a fresh scope; ordinary thread history remains in the canonical managing conversation.
+
+`NativeShells` supplies the shared palette, card, button and conversation controls used by the overlay and mandatory setup. `KenanOverlay` owns only overlay geometry, gesture drawing and window/receipt lifetimes. Empty conversation history collapses instead of leaving blank panel space.
 
 Enabled chat coalesces geometry events over 80 ms. Window-type snapshots filter accessibility-overlay and IME events. Bounds are cached between geometry changes. Idle Kenan is static; actual thinking/working and finite gesture/highlight effects animate.
 

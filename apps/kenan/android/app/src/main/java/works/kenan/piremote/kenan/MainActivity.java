@@ -20,6 +20,8 @@ import org.json.JSONObject;
 
 public class MainActivity extends BridgeActivity {
     private DefaultNetworkMonitor networkMonitor;
+    private SetupGate setup;
+    private final java.util.List<Runnable> setupReady = new java.util.ArrayList<>();
     private volatile boolean foreground;
     private final android.os.Handler networkEvents = new android.os.Handler(android.os.Looper.getMainLooper());
     private final Runnable networkChanged = () -> {
@@ -51,6 +53,7 @@ public class MainActivity extends BridgeActivity {
         keepSharedClientBelowSystemBars();
         routeSystemBackThroughClient();
         networkMonitor = new DefaultNetworkMonitor(this, this::defaultNetworkChanged);
+        setup = new SetupGate(this, bridge.getWebView());
     }
 
     /**
@@ -63,7 +66,7 @@ public class MainActivity extends BridgeActivity {
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override
             public void handleOnBackPressed() {
-                if (bridge == null) { moveTaskToBack(true); return; }
+                if (bridge == null || setup != null && !setup.complete()) { moveTaskToBack(true); return; }
                 bridge.eval("typeof window.PiRemoteBack === 'function' ? window.PiRemoteBack() : false", handled -> {
                     var parsed = NativeState.parse(NativeState.BackResult.class, handled);
                     if (parsed.isEmpty()) {
@@ -93,9 +96,22 @@ public class MainActivity extends BridgeActivity {
     public void onResume() {
         super.onResume();
         foreground = true;
+        if (setup != null) setup.reconcile();
+        if (setup != null && setup.complete()) setupComplete();
+    }
+
+    void whenSetupComplete(Runnable ready) {
+        if (PermissionSetup.complete(this)) ready.run();
+        else setupReady.add(ready);
+    }
+
+    void setupComplete() {
+        for (Runnable ready : java.util.List.copyOf(setupReady)) ready.run();
+        setupReady.clear();
+        if (!foreground || bridge == null) return;
         NotificationFeedLease.resume();
         ThreadNotifications.resume(this, this);
-        if (bridge != null) bridge.triggerWindowJSEvent("pi-app-foreground");
+        bridge.triggerWindowJSEvent("pi-app-foreground");
     }
 
     @Override
@@ -111,6 +127,8 @@ public class MainActivity extends BridgeActivity {
     @Override public void onDestroy() {
         foreground = false;
         if (networkMonitor != null) networkMonitor.close();
+        if (setup != null) setup.close();
+        setupReady.clear();
         networkEvents.removeCallbacksAndMessages(null);
         super.onDestroy();
     }
@@ -129,7 +147,10 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        if (hasFocus) keepSystemBarIconsVisible();
+        if (hasFocus) {
+            keepSystemBarIconsVisible();
+            if (setup != null) setup.reconcile();
+        }
     }
 
     private void keepSharedClientBelowSystemBars() {

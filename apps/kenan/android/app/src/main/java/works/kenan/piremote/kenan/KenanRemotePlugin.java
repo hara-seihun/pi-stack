@@ -1,6 +1,5 @@
 package works.kenan.piremote.kenan;
 
-import android.Manifest;
 import android.content.Intent;
 import android.os.Build;
 import android.net.Uri;
@@ -10,9 +9,6 @@ import androidx.core.content.FileProvider;
 import com.getcapacitor.annotation.ActivityCallback;
 import java.io.File;
 import java.util.concurrent.atomic.AtomicBoolean;
-import com.getcapacitor.PermissionState;
-import com.getcapacitor.annotation.Permission;
-import com.getcapacitor.annotation.PermissionCallback;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -23,22 +19,10 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-@CapacitorPlugin(name = "KenanRemote", permissions = {
-    @Permission(alias = "notifications", strings = { Manifest.permission.POST_NOTIFICATIONS }),
-    @Permission(alias = "microphone", strings = { Manifest.permission.RECORD_AUDIO }),
-    @Permission(alias = "camera", strings = { Manifest.permission.CAMERA }),
-    @Permission(alias = "contacts", strings = { Manifest.permission.READ_CONTACTS, Manifest.permission.WRITE_CONTACTS }),
-    @Permission(alias = "calendar", strings = { Manifest.permission.READ_CALENDAR, Manifest.permission.WRITE_CALENDAR }),
-    @Permission(alias = "location", strings = { Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION }),
-    @Permission(alias = "backgroundLocation", strings = { Manifest.permission.ACCESS_BACKGROUND_LOCATION }),
-    @Permission(alias = "sms", strings = { Manifest.permission.READ_SMS, Manifest.permission.SEND_SMS }),
-    @Permission(alias = "callLog", strings = { Manifest.permission.READ_CALL_LOG }),
-    @Permission(alias = "phone", strings = { Manifest.permission.CALL_PHONE })
-})
+@CapacitorPlugin(name = "KenanRemote")
 public final class KenanRemotePlugin extends Plugin {
     private final ExecutorService updateExecutor = Executors.newSingleThreadExecutor();
     private final AtomicBoolean installingUpdate = new AtomicBoolean();
-    private final AtomicBoolean requestingPhoneAccess = new AtomicBoolean();
     private AppUpdates appUpdates;
     private WebBundles webBundles;
 
@@ -51,6 +35,10 @@ public final class KenanRemotePlugin extends Plugin {
 
     @PluginMethod
     public void getState(PluginCall call) {
+        getActivity().runOnUiThread(() -> ((MainActivity) getActivity()).whenSetupComplete(() -> resolveState(call)));
+    }
+
+    private void resolveState(PluginCall call) {
         updateExecutor.execute(() -> {
             try {
                 RouterConnection.select();
@@ -134,20 +122,6 @@ public final class KenanRemotePlugin extends Plugin {
         } catch (IllegalArgumentException failure) { call.reject(failure.getMessage(), failure); }
     }
 
-    static boolean granted(PermissionState state) {
-        return switch (state) {
-            case GRANTED -> true;
-            case DENIED, PROMPT, PROMPT_WITH_RATIONALE -> false;
-        };
-    }
-
-    static boolean requiresPhoneSettings(PermissionState state) {
-        return switch (state) {
-            case GRANTED, DENIED -> true;
-            case PROMPT, PROMPT_WITH_RATIONALE -> false;
-        };
-    }
-
     @PluginMethod
     public void phoneStatus(PluginCall call) {
         try { call.resolve(JSObject.fromJSONObject(PhoneControlService.status(getContext()))); }
@@ -167,6 +141,9 @@ public final class KenanRemotePlugin extends Plugin {
     public void phoneConfigure(PluginCall call) {
         if (!Boolean.TRUE.equals(call.getBoolean("enabled", false))) {
             PhoneControlService.disable(getContext()); phoneStatus(call); return;
+        }
+        if (!PermissionSetup.complete(getContext())) {
+            call.reject("Complete all phone permissions before enabling control", "needs_permissions"); return;
         }
         RemoteSession state = NotificationIdentity.get(getContext());
         RemoteSession.Identity identity = state.current();
@@ -197,89 +174,6 @@ public final class KenanRemotePlugin extends Plugin {
             } catch (Exception failure) { call.reject("Could not enable phone control: " + failure.getMessage(), "disconnected", failure); }
         });
     }
-
-    @PluginMethod
-    public void phoneSetup(PluginCall call) {
-        NativeState.PhoneSetup parsed;
-        try { parsed = NativeState.require(NativeState.PhoneSetup.class, call.getString("step", "")); }
-        catch (IllegalArgumentException invalid) { call.reject(invalid.getMessage(), "invalid_args"); return; }
-        String step = parsed.wire();
-        if (!requestingPhoneAccess.compareAndSet(false, true)) {
-            call.reject("Return from the current phone access request first", "busy"); return;
-        }
-        try {
-            if (PhoneControlService.capabilities(getContext()).optBoolean(step)) {
-                finishPhoneAccess(call); return;
-            }
-            Runnable setup = switch (parsed) {
-                case CONTACTS, CALENDAR, LOCATION, BACKGROUND_LOCATION, SMS, CALL_LOG, PHONE, CAMERA, MICROPHONE, NOTIFICATIONS -> () -> {
-                    if (step.equals("notifications") && Build.VERSION.SDK_INT < 33) {
-                        openPhoneSettings(call, new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                            .putExtra(Settings.EXTRA_APP_PACKAGE, getContext().getPackageName())); return;
-                    }
-                    if (step.equals("backgroundLocation") && Build.VERSION.SDK_INT < 29) { finishPhoneAccess(call); return; }
-                    if (step.equals("backgroundLocation")) {
-                        boolean locationGranted = androidx.core.content.ContextCompat.checkSelfPermission(getContext(), Manifest.permission.ACCESS_COARSE_LOCATION)
-                            == android.content.pm.PackageManager.PERMISSION_GRANTED
-                            || androidx.core.content.ContextCompat.checkSelfPermission(getContext(), Manifest.permission.ACCESS_FINE_LOCATION)
-                            == android.content.pm.PackageManager.PERMISSION_GRANTED;
-                        if (!locationGranted) { requestingPhoneAccess.set(false); call.reject("Approve location before background location", "permission_denied"); return; }
-                        if (Build.VERSION.SDK_INT >= 30 && !granted(getPermissionState("backgroundLocation"))) {
-                            openPhoneSettings(call, new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getContext().getPackageName()))); return;
-                        }
-                    }
-                    if (requiresPhoneSettings(getPermissionState(step))) {
-                        openPhoneSettings(call, new Intent(step.equals("notifications") ? Settings.ACTION_APP_NOTIFICATION_SETTINGS : Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                            step.equals("notifications") ? null : Uri.parse("package:" + getContext().getPackageName()))
-                            .putExtra(Settings.EXTRA_APP_PACKAGE, getContext().getPackageName()));
-                    } else requestPermissionForAlias(step, call, "phonePermission");
-                    return;
-                };
-                case ACCESSIBILITY -> () -> openPhoneSettings(call, new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                    .putExtra(Intent.EXTRA_COMPONENT_NAME, new android.content.ComponentName(getContext(),
-                        PhoneAccessibilityService.class).flattenToString()));
-                case NOTIFICATION_ACCESS -> () -> openPhoneSettings(call, new Intent(Build.VERSION.SDK_INT >= 30 ? Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS : Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
-                    .putExtra(Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME, new android.content.ComponentName(getContext(), PhoneNotificationService.class).flattenToString()));
-                case OVERLAY -> () -> openPhoneSettings(call, new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:" + getContext().getPackageName())));
-                case BATTERY -> () -> openPhoneSettings(call, new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                    Uri.parse("package:" + getContext().getPackageName())));
-                case ALL_FILES -> () -> {
-                    if (Build.VERSION.SDK_INT < 30) { requestingPhoneAccess.set(false); call.reject("All-files access requires Android 11 or newer; app-owned files remain available", "unsupported"); return; }
-                    openPhoneSettings(call, new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:" + getContext().getPackageName())));
-                };
-                case USAGE -> () -> openPhoneSettings(call, new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS, Uri.parse("package:" + getContext().getPackageName())));
-                case WRITE_SETTINGS -> () -> openPhoneSettings(call, new Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.parse("package:" + getContext().getPackageName())));
-                case INSTALL_PACKAGES -> () -> openPhoneSettings(call, new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                    Uri.parse("package:" + getContext().getPackageName())));
-                case DEVICE_ADMIN -> () -> openPhoneSettings(call, new Intent(android.app.admin.DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN)
-                    .putExtra(android.app.admin.DevicePolicyManager.EXTRA_DEVICE_ADMIN, new android.content.ComponentName(getContext(), PhoneAdminReceiver.class))
-                    .putExtra(android.app.admin.DevicePolicyManager.EXTRA_ADD_EXPLANATION, "Optional remote screen locking. Factory reset requires separate Device Owner provisioning, not this grant."));
-                case DEVICE_OWNER -> () -> { requestingPhoneAccess.set(false); call.reject("Device Owner requires separate Android enterprise provisioning, not a settings toggle. Phone control works without it.", "unsupported"); return; };
-                case SECURE_SETTINGS -> () -> { requestingPhoneAccess.set(false); call.reject("Secure settings requires an optional shell grant or system provisioning, not a settings toggle. Phone control works without it.", "unsupported"); return; };
-            };
-            setup.run();
-        } catch (Exception failure) { requestingPhoneAccess.set(false); call.reject("Could not open phone setup: " + failure.getMessage(), "unavailable", failure); }
-    }
-
-    private void openPhoneSettings(PluginCall call, Intent intent) {
-        startActivityForResult(call, intent, "phoneSettingsReturned");
-        String instruction = call.getString("instruction", "");
-        if (!instruction.isBlank()) android.widget.Toast.makeText(getContext(),
-            instruction.substring(0, Math.min(instruction.length(), 240)), android.widget.Toast.LENGTH_LONG).show();
-    }
-    @ActivityCallback
-    private void phoneSettingsReturned(PluginCall call, ActivityResult result) {
-        if (call != null) finishPhoneAccess(call);
-        else requestingPhoneAccess.set(false);
-    }
-    private void finishPhoneAccess(PluginCall call) {
-        requestingPhoneAccess.set(false);
-        PhoneControlService.refresh();
-        phoneStatus(call);
-    }
-    @PermissionCallback
-    private void phonePermission(PluginCall call) { finishPhoneAccess(call); }
 
     @PluginMethod
     public void checkAppUpdate(PluginCall call) {
@@ -419,21 +313,9 @@ public final class KenanRemotePlugin extends Plugin {
 
     @PluginMethod
     public void notifications(PluginCall call) {
-        if (Build.VERSION.SDK_INT >= 33 && !granted(getPermissionState("notifications"))) {
-            getContext().getSharedPreferences("notification-settings", 0).edit().putBoolean("enabled", false).apply();
-            getContext().stopService(new Intent(getContext(), IdleNotificationService.class));
-            if (Boolean.TRUE.equals(call.getBoolean("request", false))) {
-                requestPermissionForAlias("notifications", call, "notificationPermission");
-            } else call.resolve(new JSObject().put("enabled", false));
-            return;
-        }
-        notificationPermission(call);
-    }
 
-    @PermissionCallback
-    private void notificationPermission(PluginCall call) {
         boolean granted = NativeAccess.notifications(getContext());
-        boolean enabled = granted && NotificationIdentity.get(getContext()).current() != null;
+        boolean enabled = granted && PermissionSetup.complete(getContext()) && NotificationIdentity.get(getContext()).current() != null;
         getContext().getSharedPreferences("notification-settings", 0).edit().putBoolean("enabled", enabled).apply();
         if (enabled) startNotifications();
         else getContext().stopService(new Intent(getContext(), IdleNotificationService.class));
@@ -441,6 +323,7 @@ public final class KenanRemotePlugin extends Plugin {
     }
 
     private void startNotifications() {
+        if (!PermissionSetup.complete(getContext())) return;
         androidx.core.content.ContextCompat.startForegroundService(getContext(), new Intent(getContext(), IdleNotificationService.class));
     }
 
@@ -520,6 +403,9 @@ public final class KenanRemotePlugin extends Plugin {
                 NotificationDelivery.receive(getContext(), identity, environment, name, feed, !replay);
                 long after = NotificationDelivery.cursor(getContext(), environment);
                 call.resolve(new JSObject().put("after", after < 0 ? org.json.JSONObject.NULL : after));
+            } catch (NotificationDelivery.PermissionRequired missing) {
+                NotificationFeedLease.release(call.getString("environment"));
+                call.reject(missing.getMessage(), "needs_permissions");
             } catch (Exception failure) { call.reject("Could not deliver notification feed: " + failure.getMessage(), failure); }
         }
     }

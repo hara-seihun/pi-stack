@@ -14,7 +14,18 @@ import java.util.Set;
 
 /** One native cursor and delivery path for polled and streamed agent notices. */
 final class NotificationDelivery {
-    static final String CHANNEL = "session-idle";
+    static final String CHANNEL = "kenaznia";
+    static final class PermissionRequired extends Exception {
+        PermissionRequired() { super("Open Kenan and restore notification permission; notices are retained for replay."); }
+    }
+
+    static void channel(Context context) {
+        if (android.os.Build.VERSION.SDK_INT < 26) return;
+        NotificationChannel channel = new NotificationChannel(CHANNEL, "Kenaznia", NotificationManager.IMPORTANCE_HIGH);
+        channel.setDescription("Priority messages from your managing Kenaznia, including while Kenan is closed.");
+        channel.enableVibration(true);
+        context.getSystemService(NotificationManager.class).createNotificationChannel(channel);
+    }
     private static final String CURSOR = "cursor:";
     private static final String SEEN = "seen:";
 
@@ -61,6 +72,7 @@ final class NotificationDelivery {
         RemoteSession state = NotificationIdentity.get(context);
         synchronized (state) {
             if (!state.isCurrent(identity)) return;
+            if (!NativeAccess.notifications(context)) throw new PermissionRequired();
             if (feed.has("policy")) ThreadNotifications.policy(context, identity.user, environment, feed.getJSONObject("policy"));
             SharedPreferences prefs = preferences(context);
             String cursorKey = CURSOR + environment;
@@ -73,8 +85,7 @@ final class NotificationDelivery {
             for (int i = 0; i < previous.length(); i++) seen.add(previous.getLong(i));
             NotificationSequence sequence = new NotificationSequence(cursor, seen);
             JSONArray events = feed.getJSONArray("notifications");
-            if (events.length() > 0) context.getSystemService(NotificationManager.class).createNotificationChannel(
-                new NotificationChannel(CHANNEL, "Agent updates and questions", NotificationManager.IMPORTANCE_HIGH));
+            if (events.length() > 0) channel(context);
             for (int i = 0; i < events.length(); i++) {
                 JSONObject event = events.getJSONObject(i);
                 long seq = event.getLong("seq");
@@ -104,6 +115,7 @@ final class NotificationDelivery {
                     .setContentTitle(title).setContentText(body)
                     .setStyle(new NotificationCompat.BigTextStyle().bigText(body))
                     .setContentIntent(target).setAutoCancel(true).setOnlyAlertOnce(!alertAgain)
+                    .setPriority(NotificationCompat.PRIORITY_MAX).setCategory(NotificationCompat.CATEGORY_MESSAGE)
                     .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).build();
                 ThreadNotifications.deliver(context, thread, notification, new JSONObject()
                     .put("user", identity.user).put("environment", environment)
