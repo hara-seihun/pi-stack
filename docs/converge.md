@@ -31,8 +31,10 @@ local context.
 
 - `bash` runs `bash -lc` and returns `output`, `exitCode`, `truncated` and `stopped`. Nonzero
   exit codes and timeout/cancellation are tool errors. Stdout/stderr are combined, keeping
-  the last 50 KiB. Timeout defaults to the lesser of 55 seconds and the local thread's
-  configured shell allowance, never exceeding 1800 seconds. Commands cannot take
+  the last 50 KiB. Canonical managers require an explicit positive timeout of at most
+  five seconds, covering the complete SSH operation with no transport grace. Other
+  threads default to the lesser of 55 seconds and their configured shell allowance,
+  never exceeding 1800 seconds. Commands cannot take
   interactive input; provide a script or literal input in the chosen command.
 - `read` reads UTF-8 text, at most 2000 lines/50 KiB, with 1-based `offset` and optional
   `limit`. `nextOffset` continues complete lines. If `partialLine` is true, use `bash` to

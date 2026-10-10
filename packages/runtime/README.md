@@ -4,7 +4,7 @@ Reusable extensions for [Pi](https://pi.dev). The [stack manifest](../../package
 
 ## Packages
 
-- `bash-timeout-guard` requires a bounded bash call, defaults to 30 minutes with a UI and 55 seconds for autonomous sessions, accepts a host-configured ceiling, and forbids detached work.
+- `bash-timeout-guard` requires explicit bounded bash calls and forbids detached work. Canonical managers have a hard five-second maximum, including Converge bash; workers retain 30 minutes with a UI, 55 seconds autonomously, or their host-configured ceiling.
 - [Claude OAuth runtime](extensions/claude-oauth/README.md) loads the upstream subscription adapter with the client version required by Opus 5.5, from the same immutable dependency tree as Pi.
 - [Browser runtime](extensions/browser/README.md) loads the native browser tool with its executable from the same immutable dependency tree.
 - [Codex compaction](extensions/codex-compaction/README.md) stores OpenAI's server-side checkpoints in Pi sessions while keeping Pi's tools and account routing. Stored JSONL remains readable through the [shared session reader](../../tools/read-condensed-session/README.md).

@@ -1,7 +1,7 @@
 import { expect, it, vi } from "vitest";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { createBashTool, type AgentSession } from "@earendil-works/pi-coding-agent";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PiExecution } from "../src/threads/pi-execution.js";
@@ -12,15 +12,60 @@ function deferred() {
   return { promise, resolve };
 }
 
-function fixture(tool?: any, overrides: Partial<AgentSession> = {}, onIdle?: () => void) {
+function fixture(tool?: any, overrides: Partial<AgentSession> = {}, onIdle?: () => void, manager = false) {
   const agent = new Agent({ initialState: { tools: tool ? [tool] : [] }, streamFn: () => { throw new Error("No model calls in cancellation fixtures"); } });
   const session = { agent, executeBash: async () => {}, compact: async () => {}, navigateTree: async () => {},
     prompt: async () => {}, steer: async () => {}, followUp: async () => {}, sendCustomMessage: async () => {}, sendUserMessage: async () => {},
     abort: vi.fn(async () => {}), abortBash: vi.fn(), clearQueue: vi.fn(), isIdle: true, isBashRunning: false, ...overrides } as unknown as AgentSession;
-  const execution = new PiExecution(onIdle);
+  const execution = new PiExecution(onIdle, manager);
   execution.bind(session);
   return { execution, session, tool: agent.state.tools[0] };
 }
+
+it("enforces manager shell budgets without an extension, including replacement tools, while workers retain their limit", async () => {
+  const execute = vi.fn(async () => ({ content: [], details: {} }));
+  const shell = { name: "bash", description: "fixture", parameters: { type: "object" }, execute };
+  const manager = fixture(shell, {}, undefined, true);
+  for (const timeout of [undefined, null, 0, NaN, Infinity, "5", 5.01, 55]) {
+    await expect(manager.tool.execute("bad", { command: "true", timeout }, undefined)).rejects.toMatchObject({ code: "invalid_request" });
+  }
+  expect(execute).not.toHaveBeenCalled();
+  await manager.tool.execute("valid", { command: "true", timeout: 5 }, undefined);
+  manager.session.agent.state.tools = [{ ...shell, name: "converge" } as any];
+  const converge = manager.session.agent.state.tools[0]!;
+  await expect(converge.execute("bad-converge", { action: "bash", timeout: 6 }, undefined)).rejects.toMatchObject({ code: "invalid_request" });
+  await converge.execute("read", { action: "read" }, undefined);
+  const worker = fixture(shell);
+  await worker.tool.execute("worker", { command: "true", timeout: 55 }, undefined);
+  await worker.tool.execute("worker-default", { command: "true" }, undefined);
+  expect(execute).toHaveBeenCalledTimes(4);
+});
+
+it("manager deadline hard-kills a real shell and retains cleanup custody after returning uncertainty", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-manager-deadline-"));
+  try {
+    const { execution, session, tool } = fixture(createBashTool(cwd), {}, undefined, true);
+    const start = performance.now();
+    await expect(tool.execute("shell", { command: "echo $$ > pid; printf accepted > effect; exec sleep 30", timeout: 0.15 }, undefined))
+      .rejects.toMatchObject({ code: "timeout", message: expect.stringContaining("Inspect before retrying") });
+    expect(performance.now() - start).toBeLessThan(500);
+    await execution.halt(session, 1000);
+    expect(readFileSync(join(cwd, "effect"), "utf8")).toBe("accepted");
+    expect(() => process.kill(Number(readFileSync(join(cwd, "pid"), "utf8")), 0)).toThrow();
+  } finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
+it("keeps deadline-interrupted effects in cancellation custody until cleanup really settles", async () => {
+  const finish = deferred();
+  const { execution, session, tool } = fixture({ name: "bash", description: "fixture", parameters: { type: "object" },
+    execute: async () => { await finish.promise; return { content: [], details: {} }; } }, {}, undefined, true);
+  await expect(tool.execute("pending-cleanup", { timeout: 0.02 }, undefined)).rejects.toMatchObject({ code: "timeout" });
+  expect(execution.activeTools).toBe(1);
+  await expect(execution.halt(session, 10)).rejects.toThrow("Cancellation failed");
+  finish.resolve();
+  await execution.halt(session, 1000);
+  expect(execution.active).toBe(false);
+});
 
 it("signals a running shell and waits until its local process has stopped", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "pi-cancel-"));

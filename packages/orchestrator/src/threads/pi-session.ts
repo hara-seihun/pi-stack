@@ -58,10 +58,23 @@ export function assistantWorkOutcome(stopReason: unknown): "complete" | "failed"
 export const openPiSession: OpenPiSession = async (options, emitOutput, exit) => {
   const activity = createExecutionActivity();
   const liveTools = new Map<string, Record<string, unknown>>();
+  let liveAssistant: { messageTimestamp: number; text: string; thinking: string } | undefined;
   const output = (input: PiEvent) => {
     let event = requireRuntimeEvent(input);
     if (typeof event.emittedAt !== "number") event.emittedAt = Date.now();
     observeExecutionActivity(activity, event);
+    if (event.type === "message_start" && (event.message as { role?: string })?.role === "assistant") {
+      const message = event.message as { timestamp: number };
+      if (!Number.isFinite(message.timestamp)) throw new Error("Active assistant message requires a timestamp");
+      liveAssistant = { messageTimestamp: message.timestamp, text: "", thinking: "" };
+    }
+    if (event.type === "message_update" && liveAssistant) {
+      const update = event.assistantMessageEvent as { type: string; delta?: string };
+      if (update.type === "text_delta") liveAssistant.text += update.delta ?? "";
+      if (update.type === "thinking_delta") liveAssistant.thinking += update.delta ?? "";
+    }
+    if (event.type === "message_end" && (event.message as { role?: string })?.role === "assistant"
+      || event.type === "agent_end" || event.type === "agent_settled" || event.type === "session_changed") liveAssistant = undefined;
     if (event.type === "tool_execution_start" || event.type === "tool_execution_update") {
       const id = String(event.toolCallId);
       liveTools.set(id, { ...liveTools.get(id), toolCallId: id, toolName: event.toolName,
@@ -71,7 +84,8 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
     if (event.type === "response" && event.command === "get_state" && event.success) {
       const data = event.data as Record<string, any>;
       event = { ...event, data: { ...data, live: { ...data?.live, ...executionActivitySnapshot(activity),
-        isThinking: activity.activity === "thinking", tools: [...liveTools.values()] } } };
+        isThinking: activity.activity === "thinking", tools: [...liveTools.values()],
+        text: liveAssistant?.text ?? "", thinking: liveAssistant?.thinking ?? "", messageTimestamp: liveAssistant?.messageTimestamp } } };
     }
     emitOutput(event);
   };
@@ -84,6 +98,7 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
   })();
   const env: NodeJS.ProcessEnv = { ...process.env, ...options.env, PI_THREAD_ID: options.threadId,
     PI_THREAD_REQUIRE_SESSION: options.env.PI_THREAD_REQUIRE_SESSION === "1" ? "1" : "0",
+    PI_THREAD_MANAGER: options.env.PI_THREAD_MANAGER === "1" ? "1" : "0",
     PI_THREAD_CAN_SPAWN: options.env.PI_THREAD_CAN_SPAWN === "0" ? "0" : "1",
     PI_THREAD_RESOURCE_BOUNDARY: process.env.PI_THREAD_RESOURCE_BOUNDARY, PI_THREAD_RUNNER_UNIT: process.env.PI_THREAD_RUNNER_UNIT };
   for (const key of ["PI_PERSON_SETTINGS_DATA", "PI_REMOTE_DATA", "PI_THREAD_SPEED", "PI_PERSON_TIMEZONE_FILE", "PI_MODEL_DELIVERY_TIMEZONE"]) {
@@ -105,7 +120,7 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
   modeEnvironment(env);
   if (argument(options.args, "--provider") && argument(options.args, "--model")) env[EXPLICIT_THREAD_MODEL_ENV] = "1";
   return piEnvironmentScope.run(env, async () => {
-    const execution = new PiExecution(() => settle());
+    const execution = new PiExecution(() => settle(), env.PI_THREAD_MANAGER === "1");
     const inputWork = new AsyncLocalStorage<string>();
     const workMessages = new WeakMap<object, string>();
     const extensions = options.args.flatMap((arg, index) => arg === "--extension" ? [resolve(options.cwd, options.args[index + 1])] : []);

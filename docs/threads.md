@@ -180,12 +180,18 @@ are not alternative journals. Cancellation/recovery cannot replay landed input.
 
 - Human input may use queue, steer or hard steer; steer is the declared initial
   delivery selection.
-- Agent input uses steer or hard steer; queue from an agent is rejected.
+- Ordinary agent input uses steer or hard steer; queue from an agent is rejected outside the canonical manager.
 - Queue waits for the current execution to finish.
 - Steer lands at the next safe boundary after current tools.
 - Hard steer cancels current execution and local tools, confirms cancellation,
   then runs the new message before other retained pending messages. It does not
   cancel peers or undo external effects.
+
+The canonical `metadata.manager:true` thread is a responsive dispatch/context owner, not a long-running execution worker. Every incoming message to it is high-priority steer, even when its requested delivery was queue or hard steer; this never cancels accepted effects. Authenticated human input precedes pending machine input, FIFO within each tier. The watchdog remains its own coalesced queue-only intent and takes the next execution boundary ahead of other machine input. Ordinary threads retain their delivery semantics. Request idempotency preserves the original request; the returned message carries effective delivery and owner-assigned `priority`.
+
+`ThreadInspection.inputs` and local `ThreadService.inputStates(id)` expose the latest sixty durable metadata-only receipts, including done outcomes and errors, oldest first. Acknowledged dispatched input without `landedAt` is still queued inside native execution, not a consumed message. Native history descriptors associate landed user messages with `inputId` through receipt ancestry, never text matching. Active assistant projections carry nullable `messageTimestamp`; ended assistant text is not replayed as a live answer.
+
+The owning controller stamps `PI_THREAD_MANAGER=1` only for that canonical manager, explicit `0` for every worker/ordinary thread, including shared runners. Its local Bash and Converge Bash executions have a five-second enforced maximum; workers retain their normal limits. The manager prompt delegates execution and keeps this chat available for context and decisions.
 
 The owner stamps sender identity. Native agent messages retain a distinct
 `<agent_message>` envelope so the model cannot mistake them for human input.
