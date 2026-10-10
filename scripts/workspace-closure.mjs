@@ -1,10 +1,12 @@
 import ts from 'typescript';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 
 const root = resolve(import.meta.dirname, '..');
 const mode = process.argv[2];
-if (!['build', 'check', 'remote-check'].includes(mode)) throw new Error('usage: node scripts/workspace-closure.mjs build|check|remote-check');
+if (!['build', 'check', 'remote-check', 'config-checker'].includes(mode)) throw new Error('usage: node scripts/workspace-closure.mjs build|check|remote-check|config-checker OUTPUT');
 const areas = ['orchestrator', 'kenan-memory', 'kenan-root'];
 const paths = {};
 for (const area of areas) {
@@ -15,6 +17,19 @@ for (const area of areas) {
     if (typeof source !== 'string') throw new Error(`Workspace export needs a source declaration: ${manifest.name}/${name}`);
     paths[name === '.' ? manifest.name : `${manifest.name}/${name.slice(2)}`] = [join(directory, source.replace(/^\.\/dist\//, './src/').replace(/\.d\.ts$/, '.ts'))];
   }
+}
+if (mode === 'config-checker') {
+  if (!process.argv[3] || process.argv.length !== 4) throw new Error('config-checker requires an explicit output path');
+  const temporary = mkdtempSync(join(tmpdir(), 'pi-config-checker-'));
+  try {
+    const builder = join(temporary, 'build.mjs');
+    const runtimePaths = Object.fromEntries(Object.entries(paths).map(([name, values]) => [name, values.map(path => path.replace(/\.d\.mts$/, '.mjs').replace(/\.d\.cts$/, '.cjs'))]));
+    writeFileSync(builder, `const paths = ${JSON.stringify(runtimePaths)};\nconst result = await Bun.build({entrypoints:[${JSON.stringify(join(root, 'deploy/core-check-config.ts'))}],target:'bun',plugins:[{name:'canonical-workspace',setup(build){build.onResolve({filter:/.*/},args=>paths[args.path]?{path:paths[args.path][0]}:undefined)}}]});\nif(!result.success || result.outputs.length!==1){console.error(result.logs);process.exit(1)}\nawait Bun.write(${JSON.stringify(resolve(process.argv[3]))}, result.outputs[0]);\n`);
+    const result = spawnSync('bun', [builder], { stdio: 'inherit', timeout: 50000 });
+    if (result.error) throw result.error;
+    if (result.status !== 0) throw new Error(`Canonical config checker build failed: ${result.status}`);
+  } finally { rmSync(temporary, { recursive: true, force: true }); }
+  process.exit(0);
 }
 function files(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap(entry => {

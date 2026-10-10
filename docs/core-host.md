@@ -19,6 +19,8 @@ bun /srv/pi/pi-orchestrator/host/core-host.mjs check /srv/pi/pi-orchestrator /et
 
 The installed generic request command is `bun /srv/pi/pi-orchestrator/dist/core/gateway-request.js`, consuming JSON stdin `{method,route,body?,headers?}`. It uses the declared gateway socket/UID and preserves every HTTP status in `{ok:true,value:{status,body}}`; transport uncertainty is an explicit error, not permission to replay a send.
 
+For a finite metadata-only config check before selecting a release, `node scripts/workspace-closure.mjs config-checker /absolute/core-check-config.js` bundles the same canonical parser and workspace exports. Run `bun /absolute/core-check-config.js /etc/pi-stack/core.json`; it reports typed rejection or counts/release identity, never the credential/config body, and does not start the core or open stores. Keep the artifact hash and source commit with its result.
+
 The three workspace packages compile together through `scripts/workspace-closure.mjs`. Source export mappings break the declaration cycle without changing shared dependency symlinks. Successful emission replaces generated dist directories, including their raw module resources. Deployed runtime dependencies contain the immutable private package closure. Remote retains root instructions, not a second root execution runtime.
 
 ## Resource preparation and conservation
