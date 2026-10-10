@@ -19,10 +19,39 @@ function parameterFields(schema, fields) {
   }
 }
 
+function anthropicSchemaPresentation(schema) {
+  if (!schema || typeof schema !== "object") return schema;
+  if (Array.isArray(schema)) {
+    const values = schema.map(anthropicSchemaPresentation);
+    return values.some((value, index) => value !== schema[index]) ? values : schema;
+  }
+  const number = schema.type === "number" || Array.isArray(schema.type) && schema.type.includes("number");
+  const bounds = ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf"];
+  const entries = [];
+  let changed = false;
+  const nativeBounds = {};
+  for (const [keyword, value] of Object.entries(schema)) {
+    if (number && bounds.includes(keyword)) {
+      nativeBounds[keyword] = value;
+      changed = true;
+      continue;
+    }
+    const presented = ["const", "enum", "default", "examples"].includes(keyword) ? value : anthropicSchemaPresentation(value);
+    changed ||= presented !== value;
+    entries.push([keyword, presented]);
+  }
+  if (!changed) return schema;
+  const presented = Object.fromEntries(entries);
+  if (Object.keys(nativeBounds).length) {
+    presented.description = [schema.description, `Native numeric validation: ${JSON.stringify(nativeBounds)}`].filter(value => value !== undefined).join("\n");
+  }
+  return presented;
+}
+
 export function anthropicToolSchema(parameters) {
   if (!requiresObject(parameters)) throw new Error("Anthropic tool parameters must describe an object");
   if (!["anyOf", "oneOf", "allOf"].some(keyword => Object.hasOwn(parameters, keyword))) {
-    return parameters.type === "object" ? parameters : { ...parameters, type: "object" };
+    return anthropicSchemaPresentation(parameters.type === "object" ? parameters : { ...parameters, type: "object" });
   }
   const fields = Object.create(null);
   parameterFields(parameters, fields);
@@ -35,5 +64,5 @@ export function anthropicToolSchema(parameters) {
   for (const keyword of ["$defs", "definitions", "$id", "$schema", "title", "description"]) {
     if (Object.hasOwn(parameters, keyword)) wire[keyword] = parameters[keyword];
   }
-  return wire;
+  return anthropicSchemaPresentation(wire);
 }

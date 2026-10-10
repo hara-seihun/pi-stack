@@ -71,6 +71,13 @@ encoding. Nested branch constraints retain operation requirements, exclusions an
 references. The wire constrains supplied declared fields to their advertised types,
 even on a branch whose native permissive extras would tolerate other values; native
 registrations stay intact. Non-object inputs fail explicitly.
+
+The provider also rejects numeric range/multiple constraints on `type: "number"`.
+The presentation pass removes those keywords recursively (including nested branch
+contracts), records them as description text, and keeps numeric types and integer
+constraints. Native tool schemas still own executable range validation; the wire
+schema is a provider-compatible presentation, not the authoritative validator.
+Literal enum/const/default/example values are not rewritten.
 Deployment hashes and applies both repair files. Orchestrator test preparation
 applies the same patch before provider payload tests.
 

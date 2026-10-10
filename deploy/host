@@ -19,6 +19,12 @@ pi_stack_enter_deployment "$0" "$root" "$@"
 export PI_STACK_HOST_FILE=${1:-$(pi_stack_host_file)}
 [[ -f $PI_STACK_HOST_FILE ]] || { echo "usage: deploy/host [HOST_FILE]; $PI_STACK_HOST_FILE does not exist" >&2; exit 64; }
 jq -e '.version == 1' "$PI_STACK_HOST_FILE" >/dev/null || { echo "$PI_STACK_HOST_FILE must declare version 1" >&2; exit 64; }
+release_mode=${PI_STACK_RELEASE_MODE:-qualified}
+case $release_mode in
+  immediate|minimal|qualified) ;;
+  *) echo "unknown release mode: $release_mode" >&2; exit 64 ;;
+esac
+export PI_STACK_RELEASE_MODE=$release_mode
 
 # Rehearsals never touch host services or require their credentials.
 services=1
@@ -133,7 +139,7 @@ fi
 restore_recognition() {
   local status=$? candidate="$recognition_base.rollback.$$" restore_failed=0
   trap - EXIT TERM INT HUP
-  if (( status != 0 && recognition_started )); then
+  if (( status != 0 && recognition_started )) && ! { [[ $release_mode != qualified ]] && [[ -f $recognition_transition ]] && jq -e --arg commit "$(git -C "$root" rev-parse HEAD)" '.phase == "accepted" and .commit == $commit' "$recognition_transition" >/dev/null; }; then
     if [[ -n $recognition_pid ]]; then
       kill "$recognition_pid" 2>/dev/null || true
       wait "$recognition_pid" 2>/dev/null || true
@@ -170,6 +176,7 @@ restore_recognition() {
   if (( recognition_journal_owner )); then
     if (( status == 0 )); then recognition_journal accepted || status=1
     elif (( restore_failed )); then recognition_journal rollback_failed || status=1
+    elif [[ $release_mode != qualified ]] && jq -e '.phase == "accepted"' "$recognition_transition" >/dev/null; then :
     else recognition_journal rolled_back || status=1; fi
   fi
   # Join bounded proof jobs before releasing deployment custody.
@@ -237,6 +244,7 @@ JS
   (( ! recognition )) || recognition_started=1
   phase publication 50 env PI_STACK_HOST_PHASE=publication "$0" "$@"
   if (( services )); then
+    if [[ $release_mode == qualified ]]; then
     phase capacity-ready 10 bash -c 'source "$1/deploy/lib"; shift; pi_stack_run_as "$@"' -- "$control" "${fleet:-${users[0]}}" node "$control/deploy/capacity-ready.mjs" "${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}/dist/agent-capacity.js"
     (
       phase browser-doctor 120 "$control/deploy/runtime-doctors" browser "$root" "${fleet:-${users[0]}}" "$control" &
@@ -249,12 +257,15 @@ JS
       exit "$failed"
     ) &
     doctor_pid=$!
+    fi
     activation_status=0; doctor_failed=0
     # Supervisors own a 90-second start and 10-second stop budget. Activation
     # overlaps the doctors; the shared generation wait must include both plus
     # the front door's 20-second readiness budget.
-    phase activation 120 env PI_STACK_HOST_PHASE=activation "$0" "$@" || activation_status=$?
-    wait "$doctor_pid" || doctor_failed=1
+    # The measured cold fleet restart can consume 100 seconds after Remote starts.
+    # Each independently bounded owner must fit within this outer cleanup budget.
+    phase activation 300 env PI_STACK_HOST_PHASE=activation "$0" "$@" || activation_status=$?
+    if [[ -n ${doctor_pid:-} ]]; then wait "$doctor_pid" || doctor_failed=1; fi
     if (( doctor_failed )); then
       echo 'runtime doctor failed' >&2
       if (( activation_status == 0 )); then
@@ -521,6 +532,7 @@ activate_daemons() {
   return "$failed"
 }
 activation_failed=0
+remote_activation_failed=0
 if [[ ${PI_STACK_FORCE_ROLLBACK:-0} != 1 ]]; then
   if (( recognition )); then
     recognition_started=1
@@ -528,15 +540,15 @@ if [[ ${PI_STACK_FORCE_ROLLBACK:-0} != 1 ]]; then
     recognition_pid=$!
   fi
 if owner_changed remote || owner_changed router; then
-  activate_remote "$expected" || activation_failed=1
+  activate_remote "$expected" || { activation_failed=1; remote_activation_failed=1; }
 elif ! remote_matches_release "$expected"; then
   # Publication can finish before a deployment is interrupted. Reconcile a
   # selected release whose supervisors never received the activation handoff.
-  activate_remote "$expected" || activation_failed=1
+  activate_remote "$expected" || { activation_failed=1; remote_activation_failed=1; }
 fi
 
 if (( activation_failed == 0 )); then
-  router_proof=$(pi_stack_as_root curl -fsS --max-time 2 "$router_base/v1/router-health") || activation_failed=1
+  router_proof=$(pi_stack_as_root curl -fsS --max-time 2 "$router_base/v1/router-health") || { activation_failed=1; remote_activation_failed=1; }
   if (( activation_failed == 0 )); then
     supervisor_units=()
     mapfile -t supervisor_units < <(jq -r '.people[] | select(.unlocked) | "pi-remote@" + .user + ".service"' <<<"$router_proof")
@@ -583,7 +595,9 @@ elif jq -e '.oneKenan == true' "$PI_STACK_HOST_FILE" >/dev/null && { owner_chang
   fi
 fi
 if (( recognition )); then
-  wait "$recognition_pid" || activation_failed=1
+  if wait "$recognition_pid"; then
+    if [[ $release_mode != qualified ]]; then recognition_journal accepted || activation_failed=1; fi
+  else activation_failed=1; fi
 fi
 if [[ -n ${daemon_activation_pid:-} ]]; then wait "$daemon_activation_pid" || activation_failed=1; fi
 
@@ -592,7 +606,11 @@ fi
 # person out of the app goes back to the previous Pi Remote release on the
 # spot, and the deployment fails loudly instead of quietly.
 smoke_failed=0
-if [[ ${PI_STACK_FORCE_ROLLBACK:-0} == 1 ]] || (( activation_failed )) || ! "$root/deploy/smoke"; then smoke_failed=1; fi
+if [[ ${PI_STACK_FORCE_ROLLBACK:-0} == 1 ]] || (( remote_activation_failed )) || { [[ $release_mode == qualified ]] && (( activation_failed )); }; then
+  smoke_failed=1
+elif [[ $release_mode == qualified ]] && ! "$root/deploy/smoke"; then
+  smoke_failed=1
+fi
 if (( smoke_failed )); then
     if [[ -n $previous_remote_release && $previous_remote_release != $(realpath -sm "$remote") && $previous_remote != "$expected" && -d $previous_remote_release ]] &&
        node "$root/deploy/remote-rollback-compatible.mjs" "$(readlink -f "$remote")" "$previous_remote_release"; then
@@ -620,6 +638,10 @@ if (( smoke_failed )); then
     fi
     echo "Pi stack $expected is not accepted on this host" >&2
     exit 1
+fi
+if (( activation_failed )); then
+  echo "Pi stack $expected Remote is serving; another owner requires repair (retained forward selection)" >&2
+  exit 1
 fi
 if (( recognition )); then
   "$root/deploy/meet-recognition" --retain || echo 'Meet recognition retention failed; retained store needs collection' >&2
