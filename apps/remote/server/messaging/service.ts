@@ -462,12 +462,12 @@ export class MessagingService {
     const aliases = this.db.query("SELECT alias FROM messaging_sender_aliases WHERE backend_id=? AND sender_id=?").all(conversation.backend_id, sender) as { alias: string }[];
     return [...new Set([conversation.external_id, sender, ...aliases.map(item => item.alias)].map(id => canonicalRecipient(id).startsWith("tel:") ? canonicalRecipient(id) : `signal:${id}`))];
   }
-  private reserveResult(conversation: ConversationRow, requestId: string, intentKey: string, payload: unknown, followup?: MessagingPurpose["followup"]) {
-    const input = { intentKey, recipients: this.actionRecipients(conversation), transport: "signal", payload, requestId: `signal:${requestId}`, threadId: "messaging-owner" };
+  private reserveResult(conversation: ConversationRow, requestId: string, intentKey: string, payload: unknown, followup?: MessagingPurpose["followup"], authenticatedThreadId: string | null = null) {
+    const input = { intentKey, recipients: this.actionRecipients(conversation), transport: "signal", payload, requestId: `signal:${requestId}`, threadId: authenticatedThreadId ?? "messaging-owner", authenticatedThreadId };
     return followup ? this.actions.followup(followup.actionId, followup.revision, input, { kind: "operator-observation", reference: `signal:${requestId}`, detail: followup.evidence }) : this.actions.submit(input);
   }
-  private reserve(conversation: ConversationRow, requestId: string, intentKey: string, payload: unknown, followup?: MessagingPurpose["followup"]) {
-    const result = this.reserveResult(conversation, requestId, intentKey, payload, followup);
+  private reserve(conversation: ConversationRow, requestId: string, intentKey: string, payload: unknown, followup?: MessagingPurpose["followup"], authenticatedThreadId: string | null = null) {
+    const result = this.reserveResult(conversation, requestId, intentKey, payload, followup, authenticatedThreadId);
     if (!result.ok) throw new MessagingFailure(result.message, result.error === "unavailable" ? 503 : 409, `action_${result.error}`, result.action);
     return result.value;
   }
@@ -543,7 +543,7 @@ export class MessagingService {
     if (changed) this.changed();
   }
   /** The id is the local messaging message id, not the Signal timestamp or universal reference. */
-  react(messageId: string, emoji: string, remove: boolean, requestId: string, intentKey?: string, followup?: MessagingPurpose["followup"]): Promise<ReactionReceipt> {
+  react(messageId: string, emoji: string, remove: boolean, requestId: string, intentKey?: string, followup?: MessagingPurpose["followup"], authenticatedThreadId: string | null = null): Promise<ReactionReceipt> {
     const error = (code: string, message: string): Promise<ReactionReceipt> => Promise.resolve({ ok: false, error: { code, message } });
     if (this.closing || this.closed) return error("closed", "Messaging is handing over");
     if (typeof requestId !== "string" || !ID.test(requestId) || typeof messageId !== "string" || !messageId || typeof emoji !== "string" || !isReactionEmoji(emoji) || typeof remove !== "boolean" || !validPurpose({ intentKey, followup }))
@@ -569,7 +569,7 @@ export class MessagingService {
     if (backend.info.status !== "ready") return error("backend_unavailable", backend.info.detail);
     const payload = { operation: "reaction", target: this.actionRecipient(conversation), author: this.messageSender(row, conversation.backend_id), timestamp: row.timestamp, emoji, remove };
     let reservation: ActionSubmission;
-    try { reservation = this.reserve(conversation, requestId, intentKey ?? `signal.reaction:${digest(payload)}`, payload, followup); }
+    try { reservation = this.reserve(conversation, requestId, intentKey ?? `signal.reaction:${digest(payload)}`, payload, followup, authenticatedThreadId); }
     catch (cause) { return error(cause instanceof MessagingFailure ? cause.code ?? "action_unavailable" : "action_unavailable", failureText(cause)); }
     if (reservation.disposition !== "created" || reservation.action.state !== "accepted") {
       const prior = this.db.query("SELECT m.request_id,receipt FROM messaging_reaction_requests m JOIN messaging_action_requests r ON r.request_id=m.request_id WHERE r.action_id=? AND r.kind='reaction' LIMIT 1").get(reservation.action.id) as { request_id: string; receipt: string | null } | null;
@@ -778,7 +778,7 @@ export class MessagingService {
    * outcome reaches it through the snapshot version like any other change,
    * and a failed send keeps its text on the message for recovery.
    */
-  accept(conversationId: string, input: MessagingSend): { message: MessagingMessage; settled: Promise<MessagingMessage> } {
+  accept(conversationId: string, input: MessagingSend, authenticatedThreadId: string | null = null): { message: MessagingMessage; settled: Promise<MessagingMessage> } {
     const row = this.conversationRow(conversationId);
     if (!input || typeof input.requestId !== "string" || !ID.test(input.requestId) || typeof input.text !== "string" || input.text.length > 200_000
       || !Array.isArray(input.attachmentIds) || input.attachmentIds.length > 32 || input.attachmentIds.some(id => typeof id !== "string")
@@ -804,7 +804,7 @@ export class MessagingService {
     const attachments = input.attachmentIds.map(id => this.attachmentRow(id));
     if (attachments.some(item => item.conversation_id !== conversationId)) throw new MessagingFailure("Attachments must belong to this conversation's draft or a confirmed failed send", 409);
     const payload = this.effectPayload(row, input.text, attachments, reply);
-    const reservation = this.reserve(row, input.requestId, input.intentKey ?? `signal.message:${digest(payload)}`, payload, input.followup);
+    const reservation = this.reserve(row, input.requestId, input.intentKey ?? `signal.message:${digest(payload)}`, payload, input.followup, authenticatedThreadId);
     if (reservation.disposition !== "created" || reservation.action.state !== "accepted") {
       const prior = this.db.query("SELECT m.* FROM messages m JOIN messaging_action_requests r ON r.request_id=m.id WHERE r.action_id=? AND r.kind='message' ORDER BY m.seq LIMIT 1").get(reservation.action.id) as MessageRow | null;
       if (prior && reservation.disposition === "existing") {
@@ -929,13 +929,13 @@ export class MessagingService {
       this.changed();
     } catch (cause) { for (const item of files) rmSync(join(this.root, "attachments", item.id), { recursive: true, force: true }); throw cause; }
   }
-  handle(req: Request): Promise<Response | null> {
-    const task = this.handleRequest(req);
+  handle(req: Request, authenticatedThreadId: string | null = null): Promise<Response | null> {
+    const task = this.handleRequest(req, authenticatedThreadId);
     this.requests.add(task);
     void task.then(() => this.requests.delete(task), () => this.requests.delete(task));
     return task;
   }
-  private async handleRequest(req: Request): Promise<Response | null> {
+  private async handleRequest(req: Request, authenticatedThreadId: string | null): Promise<Response | null> {
     const url = new URL(req.url);
     if (url.pathname !== "/v1/agent-signal" && !url.pathname.startsWith("/v1/agent-signal/")) return null;
     if (this.closing) return json({ error: "Messaging is handing over" }, 503);
@@ -945,7 +945,7 @@ export class MessagingService {
       if (reaction) {
         const body = await req.json();
         if (!body || typeof body !== "object" || Object.hasOwn(body, "source")) throw new MessagingFailure("An agent reaction body is required");
-        const receipt = await this.react(reaction.messageId, body.emoji, body.remove === undefined ? false : body.remove, body.requestId, body.intentKey, body.followup);
+        const receipt = await this.react(reaction.messageId, body.emoji, body.remove === undefined ? false : body.remove, body.requestId, body.intentKey, body.followup, authenticatedThreadId);
         return json(receipt, receipt.ok ? 200 : receipt.error.code === "message_not_found" ? 404 : receipt.error.code === "request_conflict" || receipt.error.code === "unknown" || receipt.error.code === "action_fenced" || receipt.error.code === "action_payload-conflict" ? 409 : receipt.error.code === "closed" || receipt.error.code === "backend_unavailable" || receipt.error.code === "journal_unavailable" || receipt.error.code === "action_unavailable" ? 503 : 400);
       }
       if (API.messagingOpen.match(req.method, url.pathname)) {
@@ -970,7 +970,7 @@ export class MessagingService {
         // Answer with the durable receipt, not the backend's verdict: Signal's
         // servers take most of a second, and the client already shows the
         // message as sending. The outcome follows on the snapshot version.
-        const accepted = this.accept(send.conversationId, await req.json());
+        const accepted = this.accept(send.conversationId, await req.json(), authenticatedThreadId);
         return json({ message: accepted.message }, accepted.message.status === "sending" ? 202 : 200);
       }
       const upload = API.messagingUpload.match(req.method, url.pathname);

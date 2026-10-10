@@ -50,6 +50,25 @@ describe("agent Signal custody", () => {
     expect(messagingConfig('[{"id":"signal","plugin":"signal","label":"Signal"}]')).toHaveLength(1);
     for (const value of ['{}', '[{"id":"../escape","plugin":"signal","label":"x"}]', '[{"id":"x","plugin":"/tmp/plugin.ts","label":"x"}]', '[{"id":"x","plugin":"signal","label":"x"},{"id":"x","plugin":"signal","label":"x"}]']) expect(() => messagingConfig(value)).toThrow();
   });
+  test("trusted request context owns Signal reactions; raw body never grants send ownership", async () => {
+    const fixture = await setup();
+    fixture.plugin.react = async () => ({ ok: true, value: { timestamp: 600, sender: "self" } });
+    const message = await incoming(fixture);
+    const reaction = await fixture.service.handle(new Request(`http://local/v1/agent-signal/messages/${message.id}/reactions`, {
+      method: "POST", body: JSON.stringify({ emoji: "👍", remove: false, requestId: "owned-reaction", authenticatedThreadId: "forged-worker", threadId: "forged-worker" }),
+    }), "real-worker");
+    expect(reaction?.status).toBe(200);
+    const list = fixture.actions.list();
+    if (!list.ok) throw new Error(list.message);
+    expect(list.value).toHaveLength(1);
+    expect(list.value[0]).toMatchObject({ submittingThreadId: "real-worker", state: "succeeded" });
+    const other = await fixture.service.open("personal", "+15551230001");
+    const input = { text: "unowned", attachmentIds: [], requestId: "raw-body", authenticatedThreadId: "real-worker", threadId: "real-worker" };
+    const accepted = await fixture.service.handle(new Request(`http://local/v1/agent-signal/conversations/${other.id}/messages`, { method: "POST", body: JSON.stringify(input) }));
+    expect(accepted?.status).toBe(202);
+    const sent = await fixture.service.send(other.id, input);
+    expect(fixture.actions.inspect(sent.actionId!)).toMatchObject({ ok: true, value: { submittingThreadId: null, state: "succeeded" } });
+  });
   test("unknown backend variants cannot become known states", async () => {
     const fixture = await setup();
     expect(() => fixture.context.status("future" as any, "unsupported")).toThrow("Unsupported messaging backend status");

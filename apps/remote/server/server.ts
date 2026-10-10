@@ -2019,7 +2019,7 @@ const server = Bun.serve<SocketData>({
         if (body?.followup && resolved.kind === "thread" && resolved.threadId !== manager?.snapshot().managerThreadId) return error("Contact followup requires the managing thread or owning operator", 403);
       }
       httpServer.timeout(req, 65);
-      return await messaging.handle(req) ?? error("Unknown Signal tool operation", 404);
+      return await messaging.handle(req, resolved.kind === "thread" ? resolved.threadId : null) ?? error("Unknown Signal tool operation", 404);
     }
     const speechResponse = speech ? await speech.handle(req) : null;
     if (speechResponse) {

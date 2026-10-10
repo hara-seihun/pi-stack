@@ -1,10 +1,11 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { API } from "../api";
 import { ActionStore } from "kenan-memory/actions";
 import { createMessagingService, messagingRoot } from "./index";
+import { MessagingService } from "./service";
 
 const request = (path: string, method = "GET", body?: unknown) => new Request(`http://localhost${path}`, {
   method, ...(body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
@@ -31,6 +32,20 @@ test("new encrypted accounts have no implicit profile and only accepted tool rou
     actions.close();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("public endpoint forwards trusted caller context separately from request body", async () => {
+  const root = mkdtempSync(join(tmpdir(), "signal-endpoint-caller-"));
+  const actions = new ActionStore(join(root, ".kenan-actions"), "fixture-alice");
+  const endpoint = createMessagingService(root, root, true, undefined, actions);
+  const handle = spyOn(MessagingService.prototype, "handle").mockResolvedValue(Response.json({ ok: true }));
+  const req = request(API.messaging.path(), "GET");
+  try {
+    await endpoint.handle(req, "verified-worker");
+    expect(handle).toHaveBeenLastCalledWith(req, "verified-worker");
+    await endpoint.handle(req);
+    expect(handle).toHaveBeenLastCalledWith(req, null);
+  } finally { handle.mockRestore(); await endpoint.close(); actions.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test("unavailable Signal endpoints return typed failure and HTTP 503 instead of fake backend success", async () => {

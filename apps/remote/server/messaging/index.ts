@@ -8,7 +8,7 @@ import type { MessageReaction } from "../message-protocol";
 
 export interface MessagingEndpoint {
   snapshot(): MessagingResult<MessagingSnapshot>;
-  handle(req: Request): Promise<Response | null>;
+  handle(req: Request, authenticatedThreadId?: string | null): Promise<Response | null>;
   react(messageId: string, emoji: string, remove: boolean, requestId: string): Promise<MessagingResult<MessageReaction[]>>;
   close(): Promise<void>;
 }
@@ -43,8 +43,8 @@ export function createMessagingService(data: string, privateDir: string, encrypt
     void service.start();
     return {
       snapshot: () => ({ ok: true, value: service.snapshot() }),
-      handle: async req => {
-        const response = await service.handle(req);
+      handle: async (req, authenticatedThreadId = null) => {
+        const response = await service.handle(req, authenticatedThreadId);
         if (response?.ok && onToolUse) {
           const path = new URL(req.url).pathname;
           const operation = Object.entries(API).find(([key, route]) => key.startsWith("messaging") && route.match(req.method, path));

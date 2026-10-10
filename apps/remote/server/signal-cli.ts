@@ -100,7 +100,7 @@ export async function runSignalCli(argv: string[], io = { out: (value: unknown) 
   let dispatched = false;
   try {
     const headers = new Headers();
-    if (env.PI_REMOTE_SERVER_URL && env.PI_THREAD_TOKEN) headers.set("x-pi-thread-token", env.PI_THREAD_TOKEN);
+    if (env.PI_THREAD_TOKEN) headers.set("x-pi-thread-token", env.PI_THREAD_TOKEN);
     let body: BodyInit | undefined;
     if (invocation.json) { headers.set("content-type", "application/json"); body = JSON.stringify(invocation.json); }
     if (invocation.file) {

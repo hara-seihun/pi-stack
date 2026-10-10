@@ -6,6 +6,8 @@ import { MessagingService } from "./messaging/service";
 import { ActionStore } from "kenan-memory/actions";
 import type { MessagingPlugin } from "./messaging/plugin";
 import { parseSignalArgs, runSignalCli, type SignalFetch } from "./signal-cli";
+import { callerResolver, threadCapability } from "../../../packages/orchestrator/src/threads/caller";
+import { externalActionCaller, externalActionsEndpoint } from "./external-actions";
 
 test("send/react require a chosen stable request ID; parser never invents one", () => {
   for (const args of [["send", "chat", "hello"], ["react", "message", "👍"], ["send", "chat", "hello", "--request-id", "bad/id"], ["read", "chat", "--request-id", "id"], ["read", "chat", "--limit", "101"], ["call", "chat"], ["list", "--user", "bob"]]) expect(parseSignalArgs(args).ok).toBe(false);
@@ -57,4 +59,50 @@ test("tool origin cannot select a network account, and 202 is not reported as de
   expect(calls).toBe(0);
   expect(await runSignalCli(["send", "chat", "hello", "--request-id", "chosen"], io, request, {})).toBe(0);
   expect(output[1]).toMatchObject({ message: { status: "sending" }, accepted: true, requestId: "chosen" });
+});
+
+test("router CLI carries verified worker ownership through Signal delivery and purpose resolution", async () => {
+  const root = mkdtempSync(join(tmpdir(), "signal-cli-owner-"));
+  let sends = 0;
+  const plugin: MessagingPlugin = {
+    icon: "signal", capabilities: { attachments: true, groups: true },
+    async start(context) { context.status("ready", "ready"); return { ok: true, value: undefined }; },
+    async openConversation(target) { return { ok: true, value: { id: target, title: target, kind: "direct" } }; },
+    async send() { sends++; return { ok: true, value: { externalId: `synthetic-${sends}`, timestamp: Date.now() } }; },
+    async close() {},
+  };
+  const actions = new ActionStore(join(root, ".kenan-actions"), "fixture-alice");
+  const service = new MessagingService(root, [{ id: "signal", plugin: "signal", label: "Signal" }], async () => plugin, undefined, undefined, { begin: () => null, finish: () => ({ ok: true }) }, actions);
+  const capability = threadCapability(join(root, "capability"));
+  const resolver = callerResolver({ capability });
+  try {
+    await service.start();
+    const conversation = await service.open("signal", "+15551234567");
+    const request: SignalFetch = async (url, init) => {
+      const req = new Request(url, init);
+      const caller = resolver.resolve({ headers: req.headers });
+      if ("error" in caller || caller.kind !== "thread") return Response.json({ error: "forbidden" }, { status: 403 });
+      return await service.handle(req, caller.threadId) ?? new Response(null, { status: 404 });
+    };
+    const io = { out: (_v: unknown) => {}, error: (_v: string) => {}, help: (_v: string) => {} };
+    const args = ["send", conversation.id, "hello", "--request-id", "owned-send"];
+    expect(await runSignalCli(args, io, request, { PI_REMOTE_ROUTER_PORT: "8788", PI_THREAD_TOKEN: capability.issue("worker") })).toBe(0);
+    const sent = await service.send(conversation.id, { requestId: "owned-send", text: "hello", attachmentIds: [] });
+    expect(sent.status).toBe("sent");
+    expect(await runSignalCli(args, io, request, { PI_REMOTE_ROUTER_PORT: "8788", PI_THREAD_TOKEN: capability.issue("other-worker") })).toBe(0);
+    expect(sends).toBe(1);
+    const action = actions.inspect(sent.actionId!);
+    if (!action.ok) throw new Error(action.message);
+    expect(action.value.submittingThreadId).toBe("worker");
+    const req = new Request("http://127.0.0.1/v1/external-actions", { method: "POST", headers: { "x-pi-thread-token": capability.issue("worker") }, body: JSON.stringify({ operation: "reconcile", input: {
+      id: action.value.id, expectedRevision: action.value.revision, decision: "resolve-purpose", actor: "forged-operator", evidence: { kind: "operator-observation", reference: "synthetic-conversation", detail: "Synthetic purpose complete" },
+    } }) });
+    const response = await externalActionsEndpoint(req, actions, externalActionCaller(resolver.resolve({ headers: req.headers }), 1001, "manager", false));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, value: { state: "succeeded", resolved: true } });
+    expect(await runSignalCli(["send", conversation.id, "next", "--request-id", "owned-next"], io, request, { PI_THREAD_TOKEN: capability.issue("worker") })).toBe(0);
+    expect(sends).toBe(2);
+    expect(await runSignalCli(args, io, request, { PI_THREAD_TOKEN: "forged-worker" })).toBe(1);
+    expect(sends).toBe(2);
+  } finally { await service.close(); actions.close(); rmSync(root, { recursive: true, force: true }); }
 });
