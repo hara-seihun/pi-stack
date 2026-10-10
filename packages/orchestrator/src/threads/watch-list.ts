@@ -91,7 +91,7 @@ The authenticated life policy supplied in your system context is the same standi
 
 ${BACKGROUND_ATTENTION_POLICY}
 
-Keep the detailed check evidence in the owning records. Leave only an action-changing account in this thread and end the turn; a routine check with no relevant change needs no human update.
+Keep the detailed check evidence in the owning records. Leave only an action-changing account in this thread; a routine check with no relevant change needs no human update. Always end the turn with a short final text reply, even if it is only "Checked: no change." A turn that ends with an empty reply is recorded as a failed check and its items are checked again.
 
 ${decisions.length ? `Earlier checks of these items already asked the person these questions. They are still unanswered and each continues in its own thread when answered, so do not ask them again or act on their decision here:
 ${JSON.stringify(decisions, null, 2)}

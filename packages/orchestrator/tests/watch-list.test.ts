@@ -54,6 +54,7 @@ it("makes no calls when empty or not due, and creates exactly one visible Opus 5
   expect(thread).toMatchObject({ parentId: null, role: "agent", title: "Watch list check", metadata: { watchList: true }, settings: { model: "anthropic/claude-opus-5-5", thinkingLevel: "high", speed: "standard" } });
   expect(owner.pending(thread.id)[0]?.text).toContain("request_user_input_async");
   expect(owner.pending(thread.id)[0]?.text).toContain("A future check");
+  expect(owner.pending(thread.id)[0]?.text).toContain("Always end the turn with a short final text reply");
   expect(value(await watch.watch({ action: "list", threadId: "agent" }))).toMatchObject({ items: [{ id: item.id, lastCheck: { threadId: thread.id, status: "scheduled" }, nextDueAt: 200 + 45 * 60_000 }] });
   value(await watch.tick(1e8)); expect(spawn).toHaveBeenCalledTimes(1);
   expect(opened).toHaveLength(0);
