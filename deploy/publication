@@ -26,6 +26,7 @@ import { sourceOnlyQueued, freezeSourceBundle, sourceBundleMembers, resolveSourc
 import { publicationJournalEnabled, beginPublication, finishPublication } from "./action-journal.mjs";
 import { repairSourceRef, sourceContinuation, canResumeCheckedRequest, failureSignature } from "./publication-continuation.mjs";
 import { publicationTimings, recordCommandTiming } from './publication-timings.mjs';
+import { buildHostPreflight, parseHostPreflight, nativePreflightResult } from './publication-preflight.mjs';
 
 const config = loadPublicationConfig();
 const { repositoryUrl, canonicalRepository, stateRoot, installedCommand, userUnitRoot, targets, alertInbox } = config;
@@ -242,7 +243,7 @@ function installFrom(sourceRoot, activate = true) {
   const commandSource = join(sourceRoot, "deploy/publication");
   const unitNames = ["pi-stack-publication.service", "pi-stack-publication.timer", "pi-stack-publication.path",
     "pi-stack-publication-watchdog.service", "pi-stack-publication-watchdog.timer", "pi-stack-publication-repair@.service", "pi-stack-publication-host@.service", "pi-stack-publication-notices.service"];
-  const modules = ["publication-control.mjs", "publication-config.mjs", "publication-hosts.mjs", "publication-bundle.mjs", "publication-continuation.mjs", "publication-timings.mjs", "action-journal.mjs", "release-checkout", "meeting-census", "phone-census", "native-prerequisites"];
+  const modules = ["publication-control.mjs", "publication-config.mjs", "publication-hosts.mjs", "publication-bundle.mjs", "publication-continuation.mjs", "publication-timings.mjs", "publication-preflight.mjs", "action-journal.mjs", "release-checkout", "meeting-census", "phone-census", "native-prerequisites"];
   for (const path of [commandSource, ...modules.map(name => join(sourceRoot, "deploy", name)), ...unitNames.map(name => join(sourceRoot, "deploy/systemd", name))]) {
     if (!existsSync(path)) throw new Error(`publication installation source is missing: ${path}`);
   }
@@ -2024,7 +2025,16 @@ function deliverHost(request, target, logPath, previous) {
     throw new Error(`${target.id} reservation exited ${result.status}`);
   }
   try {
-    const census = runtimeCensus(target.sshHost);
+    const probeInput = { requestId: request.requestId, integrationSha: request.integrationSha, hostId: target.id,
+      releaseRepository: target.releaseRepository, hostConfig: target.hostConfig,
+      meetings: meetingOverride(request.requestId) ? 'override' : request.meetingRuntimeProtocol === 'meet-runtime-v1' ? 'restart-blockers' : 'all', runtimeCensusScript };
+    const built = buildHostPreflight(probeInput);
+    if (!built.ok) throw new Error(`${built.error.kind}: ${built.error.message}`);
+    // Retain candidate Git before the read-only probe; source selection is untouched.
+    runHostScript('set -euo pipefail\ngit -C "$1" fetch --quiet --no-tags origin "$2"\n', target.sshHost, [target.releaseRepository, request.integrationSha], 45);
+    const observation = parseHostPreflight({ ok: true, stdout: runHostScript(built.value.script, target.sshHost, built.value.args, 60) }, probeInput);
+    if (!observation.ok) throw new Error(`${observation.error.kind}: ${observation.error.message}`);
+    const { census, meetings, native: nativeObservation } = observation.value;
     retainSelectedSource(census, target.sshHost);
     if (!request.executorHandoffs?.[target.id] && census.selectedCommit && commandResult("git", ["-C", checkout, "merge-base", "--is-ancestor", request.integrationSha, census.selectedCommit]).ok) {
       if (census.selectedCommit !== request.integrationSha && !allRequests().some(candidate => candidate.integrationSha === census.selectedCommit && candidate.checks?.status === "passed")) throw new Error(`${target.id} selected descendant has no passing publication checks`);
@@ -2041,10 +2051,13 @@ function deliverHost(request, target, logPath, previous) {
     atomicWrite(ancestryPath, `${JSON.stringify(ancestry, null, 2)}\n`);
     if (!ancestry.ok) throw new Error(`${target.id} integration omits selected or checkout source; repair the source ancestry`);
     if (!meetingOverride(request.requestId)) {
-      const rooms = censusTarget(target, request.meetingRuntimeProtocol);
+      if (meetings.status !== 0) throw new Error(`Meeting census unavailable: ${meetings.stderr}`);
+      const rooms = meetings.stdout.trim();
       if (rooms) return hostWait(request, target, "live-meeting", logPath, `${target.id} has live meetings; other hosts roll forward while this host waits.`, previous);
     }
-    const native = nativeSourceProbe(request, target, true);
+    const classified = nativePreflightResult(nativeObservation, target.id);
+    if (!classified.ok) throw Object.assign(new Error(classified.error.message), { probeFailure: classified.error });
+    const native = classified.value;
     if (!native.ok) return hostWait(request, target, "native-source", logPath, `${target.id} needs a newer native source; other hosts continue.`, previous);
     // The wrapper prepares all immutable artifacts while old listeners serve.
     // Only deploy/host may advance the boundary, after that preparation proof.
