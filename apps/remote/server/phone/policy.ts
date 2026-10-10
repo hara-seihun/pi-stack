@@ -1,10 +1,11 @@
-export type CallBrief = { requestId: string; to: string; contactName?: string; purpose: string; shareableFacts: string[]; opening: string; maxSeconds: number };
+export type CallBrief = { requestId: string; to: string; contactName?: string; purpose: string; shareableFacts: string[]; opening: string; maxSeconds: number; followUpOf?: string };
 export type Result<T> = { ok: true; value: T } | { ok: false; error: string };
 export function callBrief(value: unknown): Result<CallBrief> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return { ok: false, error: "A call brief is required" };
   const b = value as Record<string, unknown>;
-  if (Object.keys(b).some(k => !["requestId", "to", "contactName", "purpose", "shareableFacts", "opening", "maxSeconds"].includes(k))) return { ok: false, error: "Use only approved call-brief fields; private context is not accepted" };
+  if (Object.keys(b).some(k => !["requestId", "to", "contactName", "purpose", "shareableFacts", "opening", "maxSeconds", "followUpOf"].includes(k))) return { ok: false, error: "Use only approved call-brief fields; private context is not accepted" };
   if (typeof b.requestId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(b.requestId)) return { ok: false, error: "A durable approved requestId UUID is required" };
+  if (b.followUpOf !== undefined && (typeof b.followUpOf !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(b.followUpOf))) return { ok: false, error: "followUpOf must be the acknowledged callId UUID" };
   if (typeof b.to !== "string" || !/^\+[1-9]\d{6,14}$/.test(b.to)) return { ok: false, error: "An international E.164 destination is required" };
   for (const key of ["purpose", "opening"]) if (typeof b[key] !== "string" || !(b[key] as string).trim() || (b[key] as string).length > 2000) return { ok: false, error: `A bounded ${key} is required` };
   if (b.contactName !== undefined && (typeof b.contactName !== "string" || b.contactName.length > 120)) return { ok: false, error: "Contact name is too long" };
