@@ -15,8 +15,8 @@ describe("owner lifecycle controls follow custody, not scheduler flags or future
       expect(service.importThread({ id: "quiet", title: "Quiet", cwd: root, sessionFile: join(root, "quiet.jsonl"), settings: { model: "sol", thinkingLevel: "high", speed: "standard" }, metadata: { foreground: true } }).ok).toBe(true);
       expect((await service.wakeSchedule({ action: "set", threadId: "quiet", requestId: "future", reason: "Recovery", cadenceMs: 60_000, nextDueAt: Date.now() + 60_000 })).ok).toBe(true);
       expect(service.get("quiet")?.lifecycle).toEqual({ kind: "idle" });
-      expect((await service.agentWait({ action: "set", threadId: "quiet", requestId: "wait", kind: "job", jobId: "job", reason: "Build result" })).ok).toBe(true);
-      expect(service.get("quiet")?.lifecycle).toMatchObject({ kind: "waiting", target: "job", reason: "Build result" });
+      expect((await service.agentWait({ action: "set", threadId: "quiet", requestId: "wait", kind: "job", jobId: "job" })).ok).toBe(true);
+      expect(service.get("quiet")?.lifecycle).toMatchObject({ kind: "waiting", target: "job" });
       await service.close(); service = new ThreadService(options);
       expect(service.get("quiet")?.lifecycle).toMatchObject({ kind: "waiting", target: "job" });
       expect((await service.agentWait({ action: "clear", threadId: "quiet", requestId: "clear" })).ok).toBe(true);
@@ -33,7 +33,7 @@ describe("owner lifecycle controls follow custody, not scheduler flags or future
   it("queued work and durable dependency waits cancel the wait without claiming execution", () => {
     for (const source of [
       { ...idle, pending: { since: 20 } },
-      { ...idle, dependency: { kind: "job" as const, jobId: "job", since: 20, reason: "Build result" } },
+      { ...idle, dependency: { kind: "job" as const, jobId: "job", since: 20 } },
       { ...idle, subscriptions: ["peer"] },
       { ...idle, delay: { target: "capacity" as const, since: 20, reason: "No capacity" } },
     ]) {
@@ -43,13 +43,13 @@ describe("owner lifecycle controls follow custody, not scheduler flags or future
     }
   });
   it("a live execution takes precedence over its retained dependency", () => {
-    const state = deriveThreadLifecycle({ ...idle, execution: { since: 20, activity: { activity: "responding" } }, dependency: { kind: "job", jobId: "job", since: 10, reason: "Build" } });
+    const state = deriveThreadLifecycle({ ...idle, execution: { since: 20, activity: { activity: "responding" } }, dependency: { kind: "job", jobId: "job", since: 10, } });
     expect(state).toMatchObject({ kind: "working", phase: "responding" });
     expect(lifecycleControl(state)).toBe("stop");
   });
   it("missing execution phase and invalid dependency are explicit failures", () => {
     expect(deriveThreadLifecycle({ ...idle, execution: { since: 20, activity: {} } })).toMatchObject({ kind: "failed", control: "stop" });
-    expect(deriveThreadLifecycle({ ...idle, dependency: { kind: "job", jobId: "", since: 10, reason: "Build" } })).toMatchObject({ kind: "failed", control: "cancel_wait" });
+    expect(deriveThreadLifecycle({ ...idle, dependency: { kind: "job", jobId: "", since: 10, } })).toMatchObject({ kind: "failed", control: "cancel_wait" });
   });
   it("failure retains only the control belonging to actual custody", () => {
     expect(deriveThreadLifecycle({ ...idle, error: "No final result" })).toEqual({ kind: "failed", reason: "No final result", control: "none" });

@@ -135,6 +135,11 @@ const resultExecutionId = (id: string, recipientId: string): string | null => {
   return id.startsWith(prefix) && id.endsWith(suffix) && id.length > prefix.length + suffix.length
     ? id.slice(prefix.length, -suffix.length) : null;
 };
+/** Stored schedules may carry delivery timestamps that nothing reads. */
+function wakeSchedule(data: string): import("./contracts.js").ThreadWakeSchedule {
+  const { reason, cadenceMs, nextDueAt, lastMessageId } = JSON.parse(data);
+  return { reason, cadenceMs, nextDueAt, ...(lastMessageId ? { lastMessageId } : {}) };
+}
 type WaitResultEvidence = { wait?: import("./contracts.js").AgentWait; settlement: ThreadSettlement | null };
 const resumesDependency = (dependency: import("./contracts.js").WaitDependency, message: Pick<ThreadMessage, "senderId" | "source">): boolean =>
   message.source !== "notification" || !!message.senderId && (dependency.kind === "agents" && dependency.threadIds.includes(message.senderId)
@@ -302,7 +307,7 @@ export class ThreadService implements ThreadApi {
       catch (error) { this.db.exec(depth ? `ROLLBACK TO SAVEPOINT ${savepoint}; RELEASE SAVEPOINT ${savepoint}` : "ROLLBACK"); throw error; }
     } finally { this.transactionDepth--; }
   }
-  private static readonly THREAD_COLUMNS = "t.*,(SELECT MAX(created_at) FROM thread_work w WHERE w.thread_id=t.id AND w.sender_id IS NULL AND w.source='explicit') last_user_message_at,(SELECT data FROM thread_wake s WHERE s.thread_id=t.id) wake_data,(SELECT w.landed_at FROM thread_wake s JOIN thread_work w ON w.id=json_extract(s.data,'$.lastMessageId') WHERE s.thread_id=t.id) wake_landed_at,(SELECT count(*) FROM thread_work w INDEXED BY thread_work_unfinished WHERE w.thread_id=t.id AND w.status!='done') pending_count,(SELECT created_at FROM thread_execution e WHERE e.thread_id=t.id AND e.ended_at IS NULL) active_execution_at,(SELECT min(created_at) FROM thread_work w WHERE w.thread_id=t.id AND w.status='queued') queued_at";
+  private static readonly THREAD_COLUMNS = "t.*,(SELECT MAX(created_at) FROM thread_work w WHERE w.thread_id=t.id AND w.sender_id IS NULL AND w.source='explicit') last_user_message_at,(SELECT data FROM thread_wake s WHERE s.thread_id=t.id) wake_data,(SELECT count(*) FROM thread_work w INDEXED BY thread_work_unfinished WHERE w.thread_id=t.id AND w.status!='done') pending_count,(SELECT created_at FROM thread_execution e WHERE e.thread_id=t.id AND e.ended_at IS NULL) active_execution_at,(SELECT min(created_at) FROM thread_work w WHERE w.thread_id=t.id AND w.status='queued') queued_at";
   private row(id: string): Json | undefined { return this.sql(`SELECT ${ThreadService.THREAD_COLUMNS} FROM thread t WHERE id=?`).get(id) as Json | undefined; }
   private project(row: Json): Thread {
     const pending = row.pending_count ?? (this.sql("SELECT count(*) n FROM thread_work INDEXED BY thread_work_unfinished WHERE thread_id=? AND status!='done'").get(row.id) as { n: number }).n;
@@ -329,7 +334,7 @@ export class ThreadService implements ThreadApi {
       dependency: metadata.agentWait ?? null, subscriptions: metadata.peerDependencies ?? [],
       error: typeof metadata.executionError === "string" ? metadata.executionError : null, updatedAt: row.updated_at,
     });
-    return { lifecycle, executionActivity, ...(metadata.agentWait ? { waitingOnAgents: metadata.agentWait } : {}), ...(row.wake_data ? { wakeSchedule: { ...JSON.parse(row.wake_data), ...(row.wake_landed_at ? { lastLandedAt: row.wake_landed_at } : {}), deferredReason: metadata.archived ? "archived" : row.held ? "stopped" : row.state === "running" ? "busy" : undefined } } : {}), id: row.id, parentId: row.parent_id, role: "agent", agentName: metadata.agentName, dependencies: metadata.peerDependencies ?? [], title: row.title, cwd: row.cwd, sessionFile: row.session_file,
+    return { lifecycle, executionActivity, ...(metadata.agentWait ? { waitingOnAgents: metadata.agentWait } : {}), ...(row.wake_data ? { wakeSchedule: wakeSchedule(row.wake_data) } : {}), id: row.id, parentId: row.parent_id, role: "agent", agentName: metadata.agentName, dependencies: metadata.peerDependencies ?? [], title: row.title, cwd: row.cwd, sessionFile: row.session_file,
       settings: JSON.parse(row.settings), effectiveSettings: this.effectiveSettings(row.id), admission: row.admission, state: row.state === "idle" && !row.held && !metadata.archived && (metadata.agentWait || metadata.peerDependencies?.length) ? "waiting" : row.state, held: !!row.held, revision: row.revision,
       createdAt: row.created_at, updatedAt: row.updated_at, ...(row.last_user_message_at !== null ? { lastUserMessageAt: row.last_user_message_at } : {}), pendingMessages: pending, metadata };
   }
@@ -1100,7 +1105,6 @@ export class ThreadService implements ThreadApi {
       let dependency: import("./contracts.js").WaitDependency | undefined;
       if (input.action === "set") {
         if (thread.held || thread.metadata?.archived || thread.metadata?.raw) return bad("unavailable", "Waiting requires an unheld, unarchived normal thread");
-        if (typeof input.reason !== "string" || !input.reason.trim()) return bad("invalid_request", "Waiting requires a reason");
         const parsed = parseRunnerWaitDependency(input); if (!parsed.ok) return parsed;
         dependency = parsed.value;
         const ids = dependency.kind === "agents" ? dependency.threadIds : dependency.kind === "message" ? [dependency.fromThreadId] : [];
@@ -1131,7 +1135,7 @@ export class ThreadService implements ThreadApi {
         else if (messageIds.length) registration = { status: "resumed", messageIds: messageIds as [string, ...string[]] };
         else if (settlement) registration = { status: "already_arrived", settlement };
         else if (dependency && input.action === "set") {
-          const wait: import("./contracts.js").AgentWait = { ...dependency, reason: input.reason.trim(), since: Date.now() };
+          const wait: import("./contracts.js").AgentWait = { ...dependency, since: Date.now() };
           registration = { status: "registered", wait };
         } else throw new Error("Validated wait registration has no dependency");
         if (registration.status === "registered") {
@@ -1165,8 +1169,7 @@ export class ThreadService implements ThreadApi {
     if (input.action === "set" && (thread.held || thread.metadata?.archived || thread.metadata?.raw)) return bad("unavailable", "Wake scheduling requires an unheld, unarchived normal thread");
     this.transaction(() => {
       if (input.action === "set") {
-        const { deferredReason: _deferred, lastLandedAt: _landed, ...previous } = thread.wakeSchedule ?? {};
-        const schedule: import("./contracts.js").ThreadWakeSchedule = { ...previous, reason: input.reason.trim(), cadenceMs: input.cadenceMs, nextDueAt: input.nextDueAt ?? Date.now() + input.cadenceMs };
+        const schedule: import("./contracts.js").ThreadWakeSchedule = { ...thread.wakeSchedule, reason: input.reason.trim(), cadenceMs: input.cadenceMs, nextDueAt: input.nextDueAt ?? Date.now() + input.cadenceMs };
         this.sql("INSERT INTO thread_wake(thread_id,generation,data) VALUES(?,?,?) ON CONFLICT(thread_id) DO UPDATE SET data=excluded.data").run(thread.id, randomUUID(), JSON.stringify(schedule));
       } else {
         const message = thread.wakeSchedule?.lastMessageId;
@@ -1196,7 +1199,7 @@ export class ThreadService implements ThreadApi {
         this.insertMessage(receipt, { requestId: receipt, threadId: thread.id, senderId: thread.id, source: "notification", delivery: "steer",
           text: `Scheduled wake check for this existing thread: ${schedule.reason}\nRead current dependency evidence. Continue useful work, cancel thread_wake when resolved, or return to thread_wait without polling.\n\n${BACKGROUND_ATTENTION_POLICY}` }, thread.settings);
         this.sql("UPDATE thread SET state='running',metadata=json_remove(metadata,'$.agentWait') WHERE id=?").run(thread.id);
-        this.sql("UPDATE thread_wake SET data=? WHERE thread_id=?").run(JSON.stringify({ ...schedule, nextDueAt: now + schedule.cadenceMs, lastDueAt: schedule.nextDueAt, lastDeliveredAt: now, lastMessageId: receipt }), thread.id);
+        this.sql("UPDATE thread_wake SET data=? WHERE thread_id=?").run(JSON.stringify({ ...schedule, nextDueAt: now + schedule.cadenceMs, lastMessageId: receipt }), thread.id);
       });
       this.changed(thread.id);
     }
@@ -1272,7 +1275,6 @@ export class ThreadService implements ThreadApi {
       if (input.metadata && ("foreground" in input.metadata || "attentionSummary" in input.metadata)) return bad("invalid_request", "Use attention instead of setting attention metadata");
       if (input.metadata && "ephemeral" in input.metadata) return bad("invalid_request", "Set ephemeral on the spawn request, not in metadata");
       if (input.metadata && "autoArchiveViewedAt" in input.metadata) return bad("invalid_request", "Use view control instead of setting auto-archive metadata");
-      if (input.metadata && "taskDescription" in input.metadata && (typeof input.metadata.taskDescription !== "string" || !input.metadata.taskDescription.trim() || input.metadata.taskDescription.length > 240)) return bad("invalid_request", "Task description must be a nonempty sentence of at most 240 characters");
       if (parent?.metadata?.sandbox) return bad("invalid_request", "Sandbox threads cannot create workers");
       if (parent?.metadata?.archived) return bad("unavailable", "Restore the parent before creating children");
       if (parent?.held) return bad("unavailable", "Resume the parent conversation before creating workers");
@@ -1955,7 +1957,6 @@ export class ThreadService implements ThreadApi {
     if (patch.title !== undefined && options.titleSource === "agent" && thread.metadata?.titleSource === "manual") return bad("conflict", "The person named this thread; their title stays until they rename it again");
     if (patch.metadata && "archived" in patch.metadata && patch.archived === undefined) return bad("invalid_request", "Use the explicit archived control instead of changing metadata.archived");
     for (const key of ["agentWait", "peerDependencies", "explicitDependencies", "waitDependencies", "peerResultAfter", "peerDependents", "peerSubscriberAfter", "dependencyUpdate", "peerDependencyVersion", "dependencyError", "agentName", "cancellationRequest", "cancellationSettled", "foreground", "attentionSummary", "context", "execution", "raw", "telephoneContext", "sandbox", "sandboxProfile", "sandboxGateway", "nativeHistoryRequired", "runnerReference", "ephemeral", "manager"] as const) if (patch.metadata && key in patch.metadata && digest(patch.metadata[key] ?? null) !== digest(thread.metadata?.[key] ?? null)) return bad("conflict", `Thread ${key} is immutable`);
-    if (patch.metadata && "taskDescription" in patch.metadata && (typeof patch.metadata.taskDescription !== "string" || !patch.metadata.taskDescription.trim() || patch.metadata.taskDescription.length > 240)) return bad("invalid_request", "Task description must be a nonempty sentence of at most 240 characters");
     if (patch.metadata && "mode" in patch.metadata && !isThreadModeName(patch.metadata.mode)) return bad("invalid_request", "A thread mode must be declared in modes.ts");
     if (!validSandboxBoundary({ ...thread.metadata, ...patch.metadata })) return bad("conflict", "Sandbox execution boundary is immutable");
     const admission = patch.metadata && "mode" in patch.metadata ? threadMode(patch.metadata.mode)!.admission : thread.admission;
@@ -2106,8 +2107,7 @@ export class ThreadService implements ThreadApi {
     }
     if (input.action === "rename" || input.action === "title") {
       if (typeof input.title !== "string" || !input.title.trim()) return bad("invalid_request", "A thread title must be nonempty");
-      if (input.action === "title" && input.taskDescription !== undefined && (typeof input.taskDescription !== "string" || !input.taskDescription.trim() || input.taskDescription.length > 240)) return bad("invalid_request", "Task description must be a nonempty sentence of at most 240 characters");
-      return this.update(input.threadId, { title: input.title, ...(input.action === "title" && input.taskDescription !== undefined ? { metadata: { taskDescription: input.taskDescription.trim() } } : {}) }, input.action === "title" ? { titleSource: "agent" } : {});
+      return this.update(input.threadId, { title: input.title }, input.action === "title" ? { titleSource: "agent" } : {});
     }
     if (input.action === "update") {
       if (input.archived === true) { const closed = await this.control({ threadId: input.threadId, action: "close" }); if (!closed.ok) return closed; }

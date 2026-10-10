@@ -13,7 +13,7 @@ The local service runs inside the person's existing Unix account and mount names
 ## Execution state is an observation
 
 Remote projects the owner's `Thread.lifecycle` unchanged. The closed union is Idle,
-Working, Waiting (typed target, reason and timestamp), Cancelling, Failed (reason and
+Working, Waiting (typed target and timestamp; capacity and retry add the provider's reason), Cancelling, Failed (reason and
 owned control), or Archived. Only owned execution has Cancel current work. Queued input,
 provider backoff and durable dependencies have Cancel wait. A future recovery wake alone
 leaves the thread Idle. Native execution recovery is Working, not client Reconnecting.

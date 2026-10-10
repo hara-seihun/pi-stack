@@ -3,12 +3,13 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 import { resolveDelivery, THINKING_LEVELS, THREAD_AWAIT_TIMEOUT_MS, type PiSessionOptions, type Result, type ThreadApi } from "./contracts.js";
 import { createThreadClient } from "./http.js";
 import { historyPreview } from "./pi-history-preview.js";
-import { finalText, readableNotificationText } from "./message-format.js";
+import { readableNotificationText } from "./message-format.js";
 import { DELEGATION_POLICY } from "../delegation-policy.js";
 import { SUBAGENT_MODEL_DESCRIPTIONS } from "../catalog.js";
 import { threadMode } from "./modes.js";
 import { SPEEDS } from "./speed.js";
 import { threadWaitParameters } from "./wait-contract.js";
+import { agentMessageView, agentSettlementView, agentThreadView, agentWaitView, agentWakeView, agentWatchView, mapResult } from "./agent-results.js";
 import { BACKGROUND_ATTENTION_POLICY } from "./attention-policy.js";
 import { QUESTION_AUTHORING_POLICY, QUESTION_TEXT_DESCRIPTION, QUESTION_SUGGESTION_DESCRIPTION } from "./question-policy.js";
 
@@ -58,41 +59,42 @@ export function threadTools(options: PiSessionOptions) {
       parameters: Type.Object({
         summary: Type.String({ minLength: 1, maxLength: 1000, description: "Renia-reduced notification: the important change and what the person needs to do, with deadline/timezone if relevant." }),
       }),
-      execute: async (id, input, signal) => result(await api(signal).attention({ ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` })),
+      execute: async (id, input, signal) => result(mapResult(await api(signal).attention({ ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` }), () => ({ accepted: true }))),
     }),
     defineTool({
       name: "thread_title", label: "Name this thread",
-      description: "Name your own thread; nothing else names it. Call this during your first turn in a new thread with a short, specific topic title (about 3–7 words, no trailing punctuation) and taskDescription; keep a supplied title when it already fits. Call it again only when the conversation's topic has changed enough that the current title would mislead someone scanning their thread list, not for every new subtopic. If the person has renamed the thread themselves, their title stays and this tool refuses; leave it. Include taskDescription: one short sentence saying what you are trying to accomplish, so the Orchestrator shows the purpose as well as the title. Update both when the task changes. Your agent name is separate and never changes.",
-      parameters: Type.Object({ title: Type.String({ minLength: 1, maxLength: 80, description: "The thread's topic title." }), taskDescription: Type.Optional(Type.String({ minLength: 1, maxLength: 240, description: "One sentence describing the task's intended outcome." })) }),
-      execute: async (_id, input, signal) => result(await api(signal).control({ action: "title", threadId: options.threadId, title: input.title, ...(input.taskDescription !== undefined ? { taskDescription: input.taskDescription } : {}) })),
+      description: "Name your own thread; nothing else names it. Call this during your first turn in a new thread with a short, specific topic title (about 3–7 words, no trailing punctuation); keep a supplied title when it already fits. Call it again only when the conversation's topic has changed enough that the current title would mislead someone scanning their thread list, not for every new subtopic. If the person has renamed the thread themselves, their title stays and this tool refuses; leave it. Your agent name is separate and never changes.",
+      parameters: Type.Object({ title: Type.String({ minLength: 1, maxLength: 80, description: "The thread's topic title." }) }),
+      execute: async (_id, input, signal) => result(mapResult(await api(signal).control({ action: "title", threadId: options.threadId, title: input.title }), thread => ({ title: thread.title }))),
     }),
     defineTool({
       name: "thread_wait", label: "Wait for a named dependency",
-      description: "Set or clear your own typed dependency wait as your final tool call; this ends the turn without polling. Name agents (nonempty accessible peer threadIds and optional after cursors), job (jobId), deployment (publicationId), or message (accessible collaborator fromThreadId). Child settlements or collaborator messages resume the same thread. For external jobs/deployments set thread_wake first as recovery. Having finished or being available for assignment is idle: do not set a wait. Dependencies subscribe to durable peer results, including cancellation when a peer is closed; they never veto explicit Close. Clear removes your wait and outgoing subscriptions without creating work. The returned waitRegistration distinguishes registered (durable wait), already_arrived (current assignment result), resumed (new input IDs; continue with that input), and cleared. Only a still-active registered wait ends the turn.",
+      description: "Set or clear your own typed dependency wait as your final tool call; this ends the turn without polling. Name agents (nonempty accessible peer threadIds and optional after cursors), job (jobId), deployment (publicationId), or message (accessible collaborator fromThreadId). Child settlements or collaborator messages resume the same thread. For external jobs/deployments set thread_wake first as recovery. Having finished or being available for assignment is idle: do not set a wait. Dependencies subscribe to durable peer results, including cancellation when a peer is closed; they never veto explicit Close. Clear removes your wait and outgoing subscriptions without creating work. The result status distinguishes registered (durable wait), already_arrived (current assignment result), resumed (new input IDs; continue with that input), and cleared. Only a still-active registered wait ends the turn.",
       parameters: threadWaitParameters,
       execute: async (id, input, signal) => {
         const waited = await api(signal).agentWait({ ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` });
-        return { ...result(waited), ...(waited.ok && waited.value.waitRegistration.status === "registered"
+        return { ...result(mapResult(waited, value => agentWaitView(value.waitRegistration))), ...(waited.ok && waited.value.waitRegistration.status === "registered"
           && JSON.stringify(waited.value.metadata?.agentWait) === JSON.stringify(waited.value.waitRegistration.wait) ? { terminate: true } : {}) };
       },
     }),
     defineTool({
       name: "thread_wake", label: "Schedule own-thread wakes",
-      description: "Set, list, change or cancel one durable periodic recovery check for your own existing thread. Set replaces reason/cadence and retimes nextDueAt (epoch milliseconds, default now+cadence). Due checks coalesce while busy and pause during Stop/archive. Restart-safe ordinary messages resume the same thread through normal model admission; no watch-list item or polling model is created. List shows next due and last durable delivery/landing. Cancel when resolved. Prefer agent settlement events; wakes are fallback checks.",
+      description: "Set, list, change or cancel one durable periodic recovery check for your own existing thread. Set replaces reason/cadence and retimes nextDueAt (epoch milliseconds, default now+cadence). The reason is the wake message you will read when the check lands, so write what to check and what to do. Due checks coalesce while busy and pause during Stop/archive. Restart-safe ordinary messages resume the same thread through normal model admission; no watch-list item or polling model is created. List shows the reason, cadence and next due time. Cancel when resolved. Prefer agent settlement events; wakes are fallback checks.",
       parameters: Type.Union([
         Type.Object({ action: Type.Literal("set"), reason: Type.String({ minLength: 1 }), cadenceMs: Type.Integer({ minimum: 60000 }), nextDueAt: Type.Optional(Type.Integer({ minimum: 0 })) }),
         Type.Object({ action: Type.Literal("list") }),
         Type.Object({ action: Type.Literal("cancel") }),
       ]),
-      execute: async (id, input, signal) => result(await api(signal).wakeSchedule(input.action === "list"
+      execute: async (id, input, signal) => result(mapResult(await api(signal).wakeSchedule(input.action === "list"
         ? { action: "list", threadId: options.threadId }
-        : { ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` })),
+        : { ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` }),
+        schedule => !schedule ? null : input.action === "set" ? { nextDueAt: schedule.nextDueAt } : agentWakeView(schedule))),
     }),
     defineTool({
       name: "watch_list_add", label: "Add to watch list",
       description: "Add a persistent check to this person's shared encrypted watch list. The watch agent checks due items with its configured model and acts within the person's current life policy; it asks only for decisions that policy leaves with the person. An empty list makes no model calls.",
       parameters: Type.Object(watchFields),
-      execute: async (id, item, signal) => result(await api(signal).watch({ action: "add", item, threadId: options.threadId, requestId: `${options.threadId}:${id}` })),
+      execute: async (id, item, signal) => result(mapResult(await api(signal).watch({ action: "add", item, threadId: options.threadId, requestId: `${options.threadId}:${id}` }), agentWatchView)),
     }),
     defineTool({
       name: "watch_list_update", label: "Update a watch item",
@@ -102,7 +104,7 @@ export function threadTools(options: PiSessionOptions) {
         how: Type.Optional(Type.Union([Type.String(), Type.Null()])),
         cadenceMs: Type.Optional(Type.Union([Type.Integer({ minimum: 60000 }), Type.Null()])),
       }) }),
-      execute: async (id, input, signal) => result(await api(signal).watch({ action: "update", ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` })),
+      execute: async (id, input, signal) => result(mapResult(await api(signal).watch({ action: "update", ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` }), agentWatchView)),
     }),
     defineTool({
       name: "watch_list_remove", label: "Remove a watch item",
@@ -158,8 +160,9 @@ export function threadTools(options: PiSessionOptions) {
         ...settings.properties,
         model: Type.Optional(Type.String({ description: "Defaults to Sol; any available installed model may be selected." })),
       })) }),
-      execute: async (id, input, signal) => result(await api(signal).spawn({ ...input, ephemeral: input.ephemeral ?? true, requestId: `${options.threadId}:${id}`, parentId: options.threadId,
-        cwd: input.cwd ?? options.cwd, admission: "force", settings: input.settings as Parameters<ThreadApi["spawn"]>[0]["settings"] })),
+      execute: async (id, input, signal) => result(mapResult(await api(signal).spawn({ ...input, ephemeral: input.ephemeral ?? true, requestId: `${options.threadId}:${id}`, parentId: options.threadId,
+        cwd: input.cwd ?? options.cwd, admission: "force", settings: input.settings as Parameters<ThreadApi["spawn"]>[0]["settings"] }),
+        thread => ({ id: thread.id, ...(thread.agentName ? { agentName: thread.agentName } : {}) }))),
     }),
     defineTool({
       name: "thread_send", label: "Send to a thread",
@@ -168,12 +171,12 @@ export function threadTools(options: PiSessionOptions) {
       execute: async (id, input, signal) => {
         if (input.threadId === options.threadId && input.delivery === "hardSteer") return result({ ok: false, error: { code: "invalid_request", message: "Hard steer cannot wait for the tool that requested it. Return and continue in this thread instead." } });
         const request = { ...input, requestId: `${options.threadId}:${id}`, senderId: options.threadId, delivery: resolveDelivery({ ...input, senderId: options.threadId }), source: "explicit" as const };
-        return result(await api(signal).send(request));
+        return result(mapResult(await api(signal).send(request), agentMessageView));
       },
     }),
     defineTool({
       name: "thread_await", label: "Await a peer result",
-      description: "Wait up to 25 seconds for the first completed assignment from accessible peers. A turn settled while the peer owns a wait, dependency or unanswered question is not an assignment result. A timeout returns settlement:null, timedOut:true, remaining IDs, after cursors and current child statuses; it does not settle or stop children. Use the statuses to decide whether to intervene, continue other work or call again with the returned after. Settlements include outcome and final text; native result metadata and thinking are omitted. Stop or hard steer cancels the wait; ordinary steer waits for this tool boundary.",
+      description: "Wait up to 25 seconds for the first completed assignment from accessible peers. A turn settled while the peer owns a wait, dependency or unanswered question is not an assignment result. A timeout returns settlement:null, timedOut:true, remaining IDs, after cursors and each child's lifecycle; it does not settle or stop children. Use the statuses to decide whether to intervene, continue other work or call again with the returned after. Settlements include outcome and final text; native result metadata and thinking are omitted. Stop or hard steer cancels the wait; ordinary steer waits for this tool boundary.",
       parameters: Type.Object({
         threadIds: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 100, uniqueItems: true }),
         after: Type.Optional(Type.Record(Type.String(), Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }))),
@@ -183,10 +186,7 @@ export function threadTools(options: PiSessionOptions) {
         signal?.throwIfAborted();
         if (!value.ok) return result(value);
         const settlement = value.value.settlement;
-        if (settlement) return result({ ok: true, value: { ...value.value, settlement: {
-          threadId: settlement.threadId, outcome: settlement.outcome, finalText: finalText(settlement.finalMessage),
-          ...(settlement.error ? { error: settlement.error } : {}),
-        } } });
+        if (settlement) return result({ ok: true, value: { ...value.value, settlement: agentSettlementView(settlement) } });
 
         const diagnostics = new AbortController();
         const timer = setTimeout(() => diagnostics.abort(), 2_000);
@@ -199,9 +199,7 @@ export function threadTools(options: PiSessionOptions) {
                 if (!page.ok) return { threadId, error: page.error };
                 const thread = page.value.threads.find(item => item.id === threadId);
                 if (!thread) return { threadId, error: { code: "not_found", message: "Peer status unavailable" } };
-                return { threadId, state: thread.state, held: thread.held, pendingMessages: thread.pendingMessages,
-                  ...(thread.metadata?.admissionWait ? { admissionWait: thread.metadata.admissionWait } : {}),
-                  ...(thread.metadata?.executionError ? { executionError: thread.metadata.executionError } : {}) };
+                return { threadId, lifecycle: thread.lifecycle, ...(thread.pendingMessages ? { pendingMessages: thread.pendingMessages } : {}) };
               } catch (error) {
                 return { threadId, error: { code: "unavailable", message: error instanceof Error ? error.message : String(error) } };
               }
@@ -221,7 +219,8 @@ export function threadTools(options: PiSessionOptions) {
       name: "thread_list", label: "List threads",
       description: "List accessible persistent threads without starting them. Select children to list this thread's direct children; otherwise list the current environment. Archived threads are omitted unless includeArchived is set.",
       parameters: Type.Object({ children: Type.Optional(Type.Boolean()), parentId: Type.Optional(Type.String()), includeArchived: Type.Optional(Type.Boolean({ description: "Also list archived threads, for example to find one to restore." })), cursor: Type.Optional(Type.String()), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }),
-      execute: async (_id, input, signal) => result(await api(signal).list({ parentId: input.children ? options.threadId : input.parentId, ...(input.includeArchived ? {} : { archived: false }), cursor: input.cursor, limit: input.limit })),
+      execute: async (_id, input, signal) => result(mapResult(await api(signal).list({ parentId: input.children ? options.threadId : input.parentId, ...(input.includeArchived ? {} : { archived: false }), cursor: input.cursor, limit: input.limit }),
+        page => ({ threads: page.threads.map(agentThreadView), ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) }))),
     }),
     defineTool({
       name: "thread_read", label: "Read thread history",
@@ -234,7 +233,7 @@ export function threadTools(options: PiSessionOptions) {
         const inspected = await api(signal).inspect(input.threadId, { context: "omit" });
         if (!inspected.ok) return result(inspected);
         return result({ ok: true, value: { ...historyPreview(value.value, input.entryId, input.entryId ? input.offset ?? 0 : 0),
-          thread: inspected.value.thread, pending: inspected.value.pending.map(({ images: _images, text, ...receipt }) => ({ ...receipt, text: readableNotificationText({ ...receipt, text }).slice(0, 2000) })) } });
+          thread: agentThreadView(inspected.value.thread), pending: inspected.value.pending.map(({ images: _images, text, ...receipt }) => ({ ...receipt, text: readableNotificationText({ ...receipt, text }).slice(0, 2000) })) } });
       },
     }),
     defineTool({
@@ -251,7 +250,8 @@ export function threadTools(options: PiSessionOptions) {
       execute: async (_id, input, signal) => {
         const threadId = "threadId" in input ? input.threadId ?? options.threadId : options.threadId;
         if (threadId === options.threadId && (input.action === "close" || input.action === "cancel")) return result({ ok: false, error: { code: "invalid_request", message: "Return from this turn to stop your own work; stopping it inside a tool would wait on that same tool." } });
-        return result(await api(signal).control({ ...input, threadId } as Parameters<ThreadApi["control"]>[0]));
+        return result(mapResult(await api(signal).control({ ...input, threadId } as Parameters<ThreadApi["control"]>[0]),
+          thread => input.action === "settings" ? { ...agentThreadView(thread), settings: thread.settings } : agentThreadView(thread)));
       },
     }),
   ].filter(tool => tool.name !== "thread_spawn" || options.env.PI_THREAD_CAN_SPAWN !== "0");

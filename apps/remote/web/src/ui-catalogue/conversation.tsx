@@ -51,7 +51,7 @@ function observationFields(observation: Observation): Pick<Session, "lifecycle" 
       : { kind: "working", phase: observation.phase, since: epoch }, state: "running", activity: observation.phase };
     case "tools": return { ...idle, lifecycle: { kind: "working", phase: "waiting_on_tool", since: epoch, detail: `Running ${observation.tools.join(", ")}` }, state: "running", activity: "waiting_on_tool", activeTools: observation.tools };
     case "agent-tool": return { ...idle, lifecycle: { kind: "working", phase: "waiting_on_agents", since: epoch, detail: "Awaiting synthetic agent results during execution" }, state: "running", activity: "waiting_on_agents", activeTools: ["functions.thread_await"] };
-    case "dependency": return { ...idle, lifecycle: { kind: "waiting", target: observation.wait.kind, reason: observation.wait.reason, since: observation.wait.since, dependency: observation.wait }, state: "waiting", activity: "awaiting", waitingOnAgents: observation.wait };
+    case "dependency": return { ...idle, lifecycle: { kind: "waiting", target: observation.wait.kind, since: observation.wait.since, dependency: observation.wait }, state: "waiting", activity: "awaiting", waitingOnAgents: observation.wait };
   }
 }
 export function conversationSession(patch: Partial<Omit<Session, ObservationKeys>> & { observation?: Observation } = {}): Session {
@@ -121,10 +121,10 @@ function QueueFixture({ mode }: { mode: "empty" | "variants" | "held" | "pending
 }
 function InspectorFixture({ mode }: { mode: "idle" | "archived" | "agents" | "job" | "deployment" | "message" | "error" | "children" }) {
   const [open, setOpen] = useState(true);
-  const wait: Session["waitingOnAgents"] = mode === "agents" ? { kind: "agents", threadIds: ["peer"], after: {}, since: epoch, reason: prose }
-    : mode === "job" ? { kind: "job", jobId: longToken, since: epoch, reason: "Waiting for job completion" }
-    : mode === "deployment" ? { kind: "deployment", publicationId: longToken, since: epoch, reason: "Waiting for publication" }
-    : mode === "message" ? { kind: "message", fromThreadId: "peer", since: epoch, reason: "Waiting for a collaborator" } : undefined;
+  const wait: Session["waitingOnAgents"] = mode === "agents" ? { kind: "agents", threadIds: ["peer"], after: {}, since: epoch }
+    : mode === "job" ? { kind: "job", jobId: longToken, since: epoch }
+    : mode === "deployment" ? { kind: "deployment", publicationId: longToken, since: epoch }
+    : mode === "message" ? { kind: "message", fromThreadId: "peer", since: epoch } : undefined;
   const current = session({ observation: wait ? { kind: "dependency", wait } : mode === "archived" ? { kind: "archived" } : mode === "error" ? { kind: "error", message: prose } : { kind: "idle" }, cwd: `/home/catalogue/${longToken}` });
   const children = mode === "children" ? Array.from({ length: 8 }, (_, i) => session({ id: `child-${i}`, parentId: current.id, agentName: `${unicode}-${i}`, name: prose })) : [];
   configureFixtureTransport([
@@ -136,7 +136,7 @@ function InspectorFixture({ mode }: { mode: "idle" | "archived" | "agents" | "jo
 function StatusMatrix() {
   const phases = Object.keys(ACTIVITIES) as Activity[];
   const rows = phases.map(activity => session({ observation: activity === "idle" ? { kind: "idle" }
-    : activity === "awaiting" ? { kind: "dependency", wait: { kind: "job", jobId: "job-1", reason: "Waiting for the external job", since: epoch } }
+    : activity === "awaiting" ? { kind: "dependency", wait: { kind: "job", jobId: "job-1", since: epoch } }
     : activity === "status_error" ? { kind: "reporting-error" }
     : activity === "waiting_on_agents" ? { kind: "agent-tool" }
     : activity === "waiting_on_tool" ? { kind: "tools", tools: ["functions.read"] }

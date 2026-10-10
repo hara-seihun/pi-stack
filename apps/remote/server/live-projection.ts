@@ -9,7 +9,7 @@ export function projectThreadActivity(thread: Pick<Thread, "lifecycle" | "execut
     case "idle": case "archived": return { ...empty, activity: "idle" };
     case "cancelling": return { ...empty, activity: "cancelling" };
     case "failed": return { ...empty, activity: "status_error", executionError: lifecycle.reason };
-    case "waiting": return { ...empty, activity: "awaiting", activitySince: lifecycle.since, activityDetail: lifecycle.reason };
+    case "waiting": return { ...empty, activity: "awaiting", activitySince: lifecycle.since, ...("reason" in lifecycle ? { activityDetail: lifecycle.reason } : {}) };
     case "working": return { lifecycle, activity: lifecycle.phase, activitySince: lifecycle.since,
       activityDetail: lifecycle.detail, lastActivityAt: thread.executionActivity?.lastActivityAt,
       activeTools: thread.executionActivity?.activeTools ?? [] };

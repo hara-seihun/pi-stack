@@ -322,7 +322,7 @@ export type ThreadControl =
   /** A person's title, pinned against the agent's own naming until they rename again. */
   | { threadId: string; action: "rename"; title: string }
   /** The thread's own agent naming its thread; refused while a person's rename pins the title. */
-  | { threadId: string; action: "title"; title: string; taskDescription?: string }
+  | { threadId: string; action: "title"; title: string }
   | { threadId: string; action: "settings"; settings: SettingsOverrides }
   /** Retry dormant waiting work on the saved model, without interrupting live native work. */
   | { threadId: string; action: "retryWaiting" }
@@ -336,7 +336,7 @@ export type WaitDependency =
   | { kind: "job"; jobId: string }
   | { kind: "deployment"; publicationId: string }
   | { kind: "message"; fromThreadId: string };
-export type AgentWait = { reason: string; since: number } & WaitDependency;
+export type AgentWait = { since: number } & WaitDependency;
 export type AgentWaitRegistration =
   | { status: "registered"; wait: AgentWait }
   | { status: "already_arrived"; settlement: ThreadSettlement }
@@ -345,7 +345,7 @@ export type AgentWaitRegistration =
 /** Current thread snapshot and immutable outcome of this request, also on retry. */
 export type AgentWaitResult = Thread & { waitRegistration: AgentWaitRegistration };
 export type AgentWaitRequest = { threadId: string; requestId: string } & (
-  | ({ action: "set"; reason: string } & (
+  | ({ action: "set" } & (
       // Retained pre-typed runners send concrete child waits without kind.
       | { kind?: "agents"; threadIds: string[]; after?: Record<string, number> }
       | { kind: "job"; jobId: string }
@@ -389,8 +389,8 @@ export function validateWaitDependency(input: unknown): Result<WaitDependency> {
 }
 export interface ThreadWakeSchedule {
   reason: string; cadenceMs: number; nextDueAt: number;
-  lastDueAt?: number; lastDeliveredAt?: number; lastMessageId?: string; lastLandedAt?: number;
-  deferredReason?: "stopped" | "archived" | "busy";
+  /** Queued wake input that cancel withdraws. */
+  lastMessageId?: string;
 }
 export type ThreadWakeRequest = { threadId: string } & (
   | { action: "list" }

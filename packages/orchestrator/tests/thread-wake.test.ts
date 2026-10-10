@@ -62,12 +62,12 @@ it.each([false, true])("replaces wait-owned peers atomically while retaining exp
   await spawn(parent, "parent");
   for (const id of ["explicit", "old", "next"]) await spawn(peers, id);
   unwrap(await parent.service.control({ action: "dependencies", threadId: "parent", threadIds: ["explicit"] }));
-  unwrap(await parent.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "first", reason: "First result", threadIds: ["old", "explicit"] }));
-  const replacement = unwrap(await parent.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "next", reason: "Next result", threadIds: ["next"] }));
+  unwrap(await parent.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "first", threadIds: ["old", "explicit"] }));
+  const replacement = unwrap(await parent.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "next", threadIds: ["next"] }));
   expect(replacement).toMatchObject({ dependencies: ["explicit", "next"], waitingOnAgents: { threadIds: ["next"] } });
   expect(peers.service.get("old")?.metadata?.peerDependents).toEqual([]);
   expect(peers.service.get("explicit")?.metadata?.peerDependents).toEqual(["parent"]);
-  expect(await parent.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "missing", reason: "Unavailable peer", threadIds: ["missing"] })).toMatchObject({ ok: false });
+  expect(await parent.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "missing", threadIds: ["missing"] })).toMatchObject({ ok: false });
   expect(parent.service.get("parent")?.dependencies).toEqual(["explicit", "next"]);
   await boundary(); unwrap(await parent.service.close());
   const recovered = fixture(parent.root);
@@ -77,14 +77,14 @@ it.each([false, true])("replaces wait-owned peers atomically while retaining exp
   unwrap(await recovered.service.send({ requestId: "human", threadId: "parent", text: "Continue local work" }));
   expect(recovered.service.get("parent")?.waitingOnAgents).toBeUndefined();
   expect(recovered.service.get("parent")?.dependencies).toEqual(["explicit", "next"]);
-  expect(unwrap(await recovered.service.agentWait({ action: "set", kind: "job", threadId: "parent", requestId: "job", reason: "External result", jobId: "job" })).dependencies).toEqual(["explicit"]);
+  expect(unwrap(await recovered.service.agentWait({ action: "set", kind: "job", threadId: "parent", requestId: "job", jobId: "job" })).dependencies).toEqual(["explicit"]);
 });
 
 it("a failed current-assignment probe does not change the accepted wait or subscriptions", async () => {
   const f = fixture(); for (const id of ["parent", "old", "next"]) await spawn(f, id);
-  const accepted = unwrap(await f.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "first", reason: "First result", threadIds: ["old"] }));
+  const accepted = unwrap(await f.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "first", threadIds: ["old"] }));
   vi.spyOn(f.service, "await").mockResolvedValueOnce({ ok: false, error: { code: "unavailable", message: "Peer owner unavailable" } });
-  expect(await f.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "next", reason: "Next result", threadIds: ["next"] })).toMatchObject({ ok: false, error: { code: "unavailable" } });
+  expect(await f.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "next", threadIds: ["next"] })).toMatchObject({ ok: false, error: { code: "unavailable" } });
   expect(f.service.get("parent")).toMatchObject({ dependencies: ["old"], waitingOnAgents: accepted.waitingOnAgents });
   expect(f.service.get("next")?.metadata?.peerDependents ?? []).toEqual([]);
 });
@@ -94,7 +94,7 @@ it("accepted wait replacement retains durable subscription custody through owner
   let directory = new ThreadDirectory({ id: "person", api: parent.service }, [{ id: "fleet", api: peers.service }]);
   parent.service.setDirectory(directory); peers.service.setDirectory(directory);
   await spawn(parent, "parent"); for (const id of ["old", "next"]) await spawn(peers, id);
-  unwrap(await parent.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "first", reason: "First result", threadIds: ["old"] }));
+  unwrap(await parent.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "first", threadIds: ["old"] }));
   const control = peers.service.control.bind(peers.service);
   vi.spyOn(peers.service, "control").mockImplementation(input => input.action === "resultSubscribe" && input.active && input.threadId === "next"
     ? Promise.resolve({ ok: false, error: { code: "unavailable", message: "Subscription transport unavailable" } }) : control(input));
@@ -122,20 +122,20 @@ it.each([false, true])("auto-archive releases completed peer edges without clear
   await spawn(parent, "parent"); unwrap(await peers.service.start());
   unwrap(await peers.service.spawn({ requestId: "complete-work", id: "complete", parentId: "parent", cwd: peers.root, message: "Complete assignment" }));
   await until(() => peers.sessions.some(s => s.commands.some(c => c.workId === "complete-work")));
-  unwrap(await parent.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "complete-wait", reason: "Result", threadIds: ["complete"] }));
+  unwrap(await parent.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "complete-wait", threadIds: ["complete"] }));
   peers.sessions.find(s => s.commands.some(c => c.workId === "complete-work"))!.settle();
   await until(() => peers.service.get("complete")?.metadata?.archived === true && parent.service.get("parent")?.dependencies?.length === 0);
   expect(peers.service.get("complete")?.metadata?.peerDependents).toEqual([]);
   unwrap(await peers.service.spawn({ requestId: "next-work", id: "next", parentId: "parent", cwd: peers.root, message: "Unfinished assignment" }));
   await until(() => peers.sessions.some(s => s.commands.some(c => c.workId === "next-work")));
-  unwrap(await peers.service.agentWait({ action: "set", kind: "job", threadId: "next", requestId: "next-job", reason: "Unfinished external work", jobId: "job" }));
+  unwrap(await peers.service.agentWait({ action: "set", kind: "job", threadId: "next", requestId: "next-job", jobId: "job" }));
   peers.sessions.find(s => s.commands.some(c => c.workId === "next-work"))!.settle();
   await until(() => peers.service.latestSettlement("next")?.assignmentPending === true);
-  const next = unwrap(await parent.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "next-wait", reason: "Next result", threadIds: ["next"] }));
+  const next = unwrap(await parent.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "next-wait", threadIds: ["next"] }));
   expect(next).toMatchObject({ dependencies: ["next"], waitRegistration: { status: "registered" }, waitingOnAgents: { threadIds: ["next"] } });
   expect(peers.service.get("next")?.metadata?.archived).not.toBe(true);
   expect(peers.service.get("next")?.metadata?.peerDependents).toEqual(["parent"]);
-  expect(unwrap(await parent.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "archived-result", reason: "Saved result", threadIds: ["complete"] }))).toMatchObject({ dependencies: [], waitRegistration: { status: "already_arrived", settlement: { threadId: "complete" } } });
+  expect(unwrap(await parent.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "archived-result", threadIds: ["complete"] }))).toMatchObject({ dependencies: [], waitRegistration: { status: "already_arrived", settlement: { threadId: "complete" } } });
   expect(peers.service.get("complete")?.metadata?.archived).toBe(true);
 });
 
@@ -173,7 +173,7 @@ it.each([true, false])("dependency settlement resumes a durable waiter through t
   await spawn(parent, "parent"); unwrap(await parent.service.start()); unwrap(await child.service.start());
   unwrap(await child.service.spawn({ requestId: "child", id: "child", parentId: "parent", cwd: child.root, message: "work" }));
   await until(() => child.sessions[0]?.commands.some(c => c.type === "prompt") === true);
-  const wait = unwrap(await parent.service.agentWait({ requestId: "wait", threadId: "parent", action: "set", ...(legacy ? {} : { kind: "agents" as const }), reason: "Need child result", threadIds: ["child"] }));
+  const wait = unwrap(await parent.service.agentWait({ requestId: "wait", threadId: "parent", action: "set", ...(legacy ? {} : { kind: "agents" as const }), threadIds: ["child"] }));
   expect(wait).toMatchObject({ state: "waiting", waitingOnAgents: { threadIds: ["child"], reason: "Need child result" } });
   expect(parent.sessions).toHaveLength(0);
   child.sessions[0]!.settle(); await until(() => parent.sessions[0]?.commands.some(c => c.type === "prompt") === true);
@@ -183,9 +183,9 @@ it.each([true, false])("dependency settlement resumes a durable waiter through t
   unwrap(await parent.service.agentWait({ requestId: "release-result", threadId: "parent", action: "clear" }));
   parent.sessions[0]!.settle(); await until(() => parent.service.get("parent")?.state === "idle");
   await until(() => child.service.get("child")?.metadata?.archived === true);
-  expect(await parent.service.agentWait({ requestId: "wait-closed-child", threadId: "parent", action: "set", kind: "agents", reason: "Already arrived", threadIds: ["child"] })).toMatchObject({ ok: true, value: { waitRegistration: { status: "already_arrived", settlement: { outcome: "complete" } } } });
+  expect(await parent.service.agentWait({ requestId: "wait-closed-child", threadId: "parent", action: "set", kind: "agents", threadIds: ["child"] })).toMatchObject({ ok: true, value: { waitRegistration: { status: "already_arrived", settlement: { outcome: "complete" } } } });
   unwrap(await child.service.control({ threadId: "child", action: "reopen" }));
-  const arrived = unwrap(await parent.service.agentWait({ requestId: "wait-after-result", threadId: "parent", action: "set", kind: "agents", reason: "Already arrived", threadIds: ["child"] }));
+  const arrived = unwrap(await parent.service.agentWait({ requestId: "wait-after-result", threadId: "parent", action: "set", kind: "agents", threadIds: ["child"] }));
   expect(arrived.waitingOnAgents).toBeUndefined();
   expect(arrived.waitRegistration).toMatchObject({ status: "already_arrived", settlement: { threadId: "child", outcome: "complete" } });
 });
@@ -244,7 +244,7 @@ it.each(["queued", "running", "waiting"])("historical assignment results and par
   if (state !== "queued") {
     unwrap(await next.service.start()); await until(() => next.sessions[0]?.commands.some(c => c.type === "prompt") === true);
     if (state === "waiting") {
-      unwrap(await next.service.agentWait({ requestId: "child-job", threadId: "child", action: "set", kind: "job", jobId: "current-job", reason: "Finish second assignment" }));
+      unwrap(await next.service.agentWait({ requestId: "child-job", threadId: "child", action: "set", kind: "job", jobId: "current-job", }));
       next.sessions[0]!.settle(); await until(() => next.service.latestSettlement("child")?.assignmentPending === true);
     }
   }
@@ -314,7 +314,7 @@ it("withdrawn unlanded input cannot swallow a wait during validation", async () 
   const directory = new ThreadDirectory({ id: "person", api: f.service }); f.service.setDirectory(directory);
   let entered = false;
   const release = pauseRegistration(f.service, "agents", () => { entered = true; });
-  const registering = f.service.agentWait({ requestId: "wait", threadId: "self", action: "set", kind: "agents", threadIds: ["child"], reason: "Child result" });
+  const registering = f.service.agentWait({ requestId: "wait", threadId: "self", action: "set", kind: "agents", threadIds: ["child"], });
   await until(() => entered);
   unwrap(await f.service.send({ requestId: "withdrawn", threadId: "self", text: "Never mind" }));
   unwrap(await f.service.control({ threadId: "self", action: "cancelMessage", messageId: "withdrawn" }));
@@ -327,7 +327,7 @@ it("rejects a competing registration without overwriting accepted intent", async
   const directory = new ThreadDirectory({ id: "person", api: f.service }); f.service.setDirectory(directory);
   let entered = false;
   const release = pauseRegistration(f.service, "agents", () => { entered = true; });
-  const registering = f.service.agentWait({ requestId: "wait", threadId: "self", action: "set", kind: "agents", threadIds: ["child"], reason: "Child result" });
+  const registering = f.service.agentWait({ requestId: "wait", threadId: "self", action: "set", kind: "agents", threadIds: ["child"], });
   await until(() => entered);
   expect(await f.service.agentWait({ requestId: "clear", threadId: "self", action: "clear" })).toMatchObject({ ok: false, error: { code: "conflict" } });
   expect(await f.service.control({ action: "dependencies", threadId: "self", threadIds: [] })).toMatchObject({ ok: false, error: { code: "conflict" } });
@@ -345,7 +345,7 @@ it.each([
   const f = fixture(); await spawn(f, "self"); await spawn(f, "collaborator");
   unwrap(await f.service.spawn({ requestId: "child", id: "child", parentId: "self", cwd: f.root }));
   unwrap(await f.service.send({ requestId: "human", threadId: "self", text: "New instruction" }));
-  const result = unwrap(await f.service.agentWait({ requestId: "wait", threadId: "self", action: "set", reason: "Dependency", ...dependency }));
+  const result = unwrap(await f.service.agentWait({ requestId: "wait", threadId: "self", action: "set", ...dependency }));
   expect(result.waitingOnAgents).toBeUndefined();
   expect(result.waitRegistration).toEqual({ status: "resumed", messageIds: ["human"] });
   expect(f.service.pending("self")).toMatchObject([{ id: "human" }]);
@@ -357,7 +357,7 @@ it.each(["collaborator", "other"])("completed notification from %s during valida
   const directory = new ThreadDirectory({ id: "person", api: f.service }); f.service.setDirectory(directory);
   let entered = false;
   const release = pauseRegistration(f.service, "message", () => { entered = true; });
-  const registering = f.service.agentWait({ requestId: "wait", threadId: "self", action: "set", kind: "message", reason: "Named result", fromThreadId: "collaborator" });
+  const registering = f.service.agentWait({ requestId: "wait", threadId: "self", action: "set", kind: "message", fromThreadId: "collaborator" });
   await until(() => entered);
   unwrap(await f.service.send({ requestId: "notification", threadId: "self", senderId, source: "notification", text: "Result" }));
   unwrap(await f.service.start()); await until(() => f.sessions[0]?.commands.some(c => c.type === "prompt") === true);
@@ -402,7 +402,7 @@ it("a settled parent has no explicit wait even when its cleanup child waits acro
 it("Close discards wakes across restart; reopen creates no work", async () => {
   const f = fixture(); await spawn(f, "held"); await spawn(f, "archived");
   unwrap(await schedule(f, "held", "wake-held")); unwrap(await schedule(f, "archived", "wake-archived"));
-  unwrap(await f.service.agentWait({ requestId: "wait-held", threadId: "held", action: "set", kind: "job", jobId: "external-job", reason: "External job" }));
+  unwrap(await f.service.agentWait({ requestId: "wait-held", threadId: "held", action: "set", kind: "job", jobId: "external-job", }));
   unwrap(await f.service.control({ threadId: "held", action: "stop", descendants: false }));
   unwrap(await f.service.control({ threadId: "archived", action: "update", archived: true })); unwrap(await f.service.close());
   const next = fixture(f.root); unwrap(await next.service.start()); next.service.reconcile(); await boundary();
@@ -424,12 +424,12 @@ it("set/change/cancel retries have stable custody, invalid dependencies cannot m
   expect((await f.service.wakeSchedule({ ...input, cadenceMs: 70000 })).ok).toBe(false);
   unwrap(await f.service.wakeSchedule({ ...input, requestId: "retime", nextDueAt: 900000 }));
   unwrap(await f.service.wakeSchedule(input)); expect(f.service.get("self")?.wakeSchedule?.nextDueAt).toBe(900000);
-  const bad = await f.service.agentWait({ requestId: "bad", threadId: "self", action: "set", kind: "agents", reason: "x", threadIds: ["missing"] }); expect(bad.ok).toBe(false);
+  const bad = await f.service.agentWait({ requestId: "bad", threadId: "self", action: "set", kind: "agents", threadIds: ["missing"] }); expect(bad.ok).toBe(false);
   expect(f.service.get("self")?.waitingOnAgents).toBeUndefined();
   unwrap(await f.service.wakeSchedule({ threadId: "self", action: "cancel", requestId: "cancel" }));
   unwrap(await f.service.wakeSchedule({ threadId: "self", action: "cancel", requestId: "cancel" }));
   unwrap(await f.service.wakeSchedule(input)); expect(f.service.get("self")?.wakeSchedule).toBeUndefined();
-  unwrap(await f.service.agentWait({ requestId: "wait", threadId: "self", action: "set", kind: "job", jobId: "external-job", reason: "external" }));
+  unwrap(await f.service.agentWait({ requestId: "wait", threadId: "self", action: "set", kind: "job", jobId: "external-job", }));
   const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 10000);
   unwrap(await f.service.control({ threadId: "self", action: "archiveInactive", inactiveBefore: Date.now() - 1 })); expect(f.service.get("self")?.metadata?.archived).not.toBe(true);
   clock.mockRestore(); unwrap(await f.service.agentWait({ requestId: "clear", threadId: "self", action: "clear" })); expect(f.service.get("self")?.waitingOnAgents).toBeUndefined();
@@ -445,7 +445,7 @@ it("capability admission denies other threads and other people, including schedu
   const own = createThreadClient("http://fixture/v1/threads", transport, { token: key.issue("self") });
   unwrap(await own.wakeSchedule({ threadId: "self", action: "set", requestId: "own", reason: "job", cadenceMs: 60000 }));
   for (const action of ["list", "cancel"] as const) expect((await own.wakeSchedule({ threadId: "other", action, requestId: "forged" })).ok).toBe(false);
-  expect((await own.agentWait({ threadId: "other", action: "set", kind: "job", jobId: "external-job", requestId: "forged-wait", reason: "x" })).ok).toBe(false);
+  expect((await own.agentWait({ threadId: "other", action: "set", kind: "job", jobId: "external-job", requestId: "forged-wait", })).ok).toBe(false);
   const foreign = createThreadClient("http://fixture/v1/threads", transport, { token: foreignKey.issue("self") });
   expect((await foreign.wakeSchedule({ threadId: "self", action: "list" })).ok).toBe(false);
   const process = createThreadClient("http://fixture/v1/threads", transport); expect((await process.wakeSchedule({ threadId: "self", action: "list" })).ok).toBe(false);
@@ -467,14 +467,14 @@ it.each(["prepare", "admit", "open"] as const)("cancel fences a queued wake whil
 it("typed external waits survive restart and collaborator messages clear only the named message wait", async () => {
   const f = fixture(); await spawn(f, "self"); await spawn(f, "collaborator"); await spawn(f, "other");
   expect((await f.service.agentWait({ requestId: "generic", threadId: "self", action: "set", reason: "available" } as never)).ok).toBe(false);
-  expect((await f.service.agentWait({ requestId: "empty", threadId: "self", action: "set", kind: "agents", reason: "available", threadIds: [] })).ok).toBe(false);
-  unwrap(await f.service.agentWait({ requestId: "job", threadId: "self", action: "set", kind: "job", reason: "GPU assay", jobId: "assay-123" }));
+  expect((await f.service.agentWait({ requestId: "empty", threadId: "self", action: "set", kind: "agents", threadIds: [] })).ok).toBe(false);
+  unwrap(await f.service.agentWait({ requestId: "job", threadId: "self", action: "set", kind: "job", jobId: "assay-123" }));
   unwrap(await f.service.close()); const next = fixture(f.root);
   expect(next.service.get("self")?.waitingOnAgents).toMatchObject({ kind: "job", jobId: "assay-123" });
-  unwrap(await next.service.agentWait({ requestId: "release", threadId: "self", action: "set", kind: "deployment", reason: "Release", publicationId: "PUB-123" }));
+  unwrap(await next.service.agentWait({ requestId: "release", threadId: "self", action: "set", kind: "deployment", publicationId: "PUB-123" }));
   expect(next.service.get("self")?.waitingOnAgents).toMatchObject({ kind: "deployment", publicationId: "PUB-123" });
-  expect((await next.service.agentWait({ requestId: "foreign", threadId: "self", action: "set", kind: "message", reason: "Collaborator", fromThreadId: "inaccessible" })).ok).toBe(false);
-  unwrap(await next.service.agentWait({ requestId: "message", threadId: "self", action: "set", kind: "message", reason: "Collaborator", fromThreadId: "collaborator" }));
+  expect((await next.service.agentWait({ requestId: "foreign", threadId: "self", action: "set", kind: "message", fromThreadId: "inaccessible" })).ok).toBe(false);
+  unwrap(await next.service.agentWait({ requestId: "message", threadId: "self", action: "set", kind: "message", fromThreadId: "collaborator" }));
   unwrap(await next.service.send({ requestId: "unrelated", threadId: "self", senderId: "other", source: "notification", text: "Unrelated result" }));
   expect(next.service.get("self")?.waitingOnAgents).toMatchObject({ kind: "message", fromThreadId: "collaborator" });
   unwrap(await next.service.send({ requestId: "matched", threadId: "self", senderId: "collaborator", source: "notification", text: "Named result" }));

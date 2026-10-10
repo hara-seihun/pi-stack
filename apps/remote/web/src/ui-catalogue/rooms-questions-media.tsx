@@ -85,7 +85,7 @@ type RoomMode = "loading" | "denied" | "empty" | "history" | "running" | "held" 
 function roomSnapshot(mode: RoomMode): RoomSnapshot {
   const running = mode === "running" || mode === "running-draft";
   const answering = mode.startsWith("question");
-  const observation: Pick<RoomSnapshot, "state" | "activity" | "activityDetail" | "waitingOnAgents"> = mode === "waiting" ? { state: "waiting", activity: "awaiting", activityDetail: "Waiting for the synthetic route worker to finish.", waitingOnAgents: { kind: "agents", threadIds: [peerId], after: {}, reason: "Waiting for the synthetic route worker to finish.", since: epoch } } : running ? { state: "running", activity: "thinking" } : { state: "idle", activity: "idle" };
+  const observation: Pick<RoomSnapshot, "state" | "activity" | "activityDetail" | "waitingOnAgents"> = mode === "waiting" ? { state: "waiting", activity: "awaiting", activityDetail: "Waiting for the synthetic route worker to finish.", waitingOnAgents: { kind: "agents", threadIds: [peerId], after: {}, since: epoch } } : running ? { state: "running", activity: "thinking" } : { state: "idle", activity: "idle" };
   const value: RoomSnapshot = { room: { id: roomId, title: "Synthetic planning room", members: people.slice(0, 3), ...observation, unreadCount: 0, readThrough: 0 },
     ...observation, held: mode === "held", activeTools: [],
     messages: mode === "empty" ? [] : [{ id: "message-1", sender: people[1]!, text: `Let's plan together. ${unicode}`, time: epoch }, { id: "message-2", sender: { user: "assistant", displayName: "Kenan" }, text: "The **local route** is ready.\n\n- Preserve the draft\n- Keep everyone informed", time: epoch + 1000 }],

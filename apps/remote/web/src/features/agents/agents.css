@@ -32,11 +32,10 @@
 .agent-open { display: grid; grid-template-columns: 20px minmax(0, 1fr); column-gap: var(--space-3); row-gap: 3px; align-items: center; width: 100%; min-height: 64px; padding: var(--space-3); text-align: left; border-radius: var(--radius-2); background: transparent; color: var(--text); }
 .agent-open:hover { background: var(--surface); }
 .agent-row-status { grid-row: 1 / span 2; align-self: start; margin-top: 2px; }
-.agent-row-task, .agent-row-description, .agent-row-activity, .agent-row-detail, .agent-row-identity, .agent-row-attention, .agent-open > .status-quiet { grid-column: 2; }
+.agent-row-task, .agent-row-activity, .agent-row-detail, .agent-row-identity, .agent-row-attention, .agent-open > .status-quiet { grid-column: 2; }
 .agent-open > .status-quiet { color: var(--status-held); font-size: var(--text-xs); }
 .agent-open > .status-quiet:empty { display: none; }
 .agent-row-task { font-size: var(--text-md); font-weight: 650; line-height: 1.4; overflow-wrap: anywhere; }
-.agent-row-description { font-size: var(--text-sm); line-height: 1.4; overflow-wrap: anywhere; }
 .agent-row-activity { color: var(--muted); font-size: var(--text-sm); line-height: 1.4; overflow-wrap: anywhere; }
 .agent-row-detail, .agent-row-attention { color: var(--muted); font-size: var(--text-sm); line-height: 1.4; overflow-wrap: anywhere; }
 .agent-row-identity { display: flex; gap: var(--space-2); align-items: baseline; color: var(--muted); font-size: var(--text-xs); margin-top: 3px; }

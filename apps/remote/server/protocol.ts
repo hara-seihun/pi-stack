@@ -75,7 +75,6 @@ export interface Session {
   foreground?: boolean;
   attentionSummary?: string;
   /** Agent-authored sentence describing the task's intended outcome; absent until provided. */
-  taskDescription?: string;
   model: string;
   /** Native Pi context estimate, not cumulative billed tokens. Null after compaction until fresh usage arrives. */
   contextUsage?: ContextUsage;
