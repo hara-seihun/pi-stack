@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { refreshTranscriptProjection, sourceValue } from "./transcript-refresh";
+import { refreshTranscriptProjection } from "./transcript-refresh";
 
 test("a concurrently appended native transcript reschedules projection without a false transport error", async () => {
   const pending: Array<() => Promise<void>> = [];
@@ -7,10 +7,9 @@ test("a concurrently appended native transcript reschedules projection without a
   const errors: unknown[] = [];
   let reads = 0;
   const run = () => refreshTranscriptProjection(async () => {
-    const text = sourceValue(++reads === 1
-      ? { ok: false, error: { code: "conflict", message: "Session revision changed; refresh the history index" } }
-      : { ok: true, value: "fresh native snapshot" });
-    published.push(text);
+    if (++reads === 1) return { ok: false, error: { code: "conflict", message: "Session revision changed; refresh the history index" } };
+    published.push("fresh native snapshot");
+    return { ok: true, value: undefined };
   }, () => pending.push(run), cause => errors.push(cause));
   await run();
   expect(published).toEqual([]);
@@ -25,10 +24,9 @@ test("a concurrently appended native transcript reschedules projection without a
 test("non-conflict source failures remain explicit and do not retry", async () => {
   const errors: unknown[] = [];
   let retried = false;
-  await refreshTranscriptProjection(async () => {
-    sourceValue({ ok: false, error: { code: "invalid_record", message: "Invalid native record" } });
-  }, () => { retried = true; }, cause => errors.push(cause));
+  await refreshTranscriptProjection(async () => ({ ok: false, error: { code: "invalid_record", message: "Invalid native record" } }),
+    () => { retried = true; }, cause => errors.push(cause));
   expect(retried).toBe(false);
   expect(errors).toHaveLength(1);
-  expect(String(errors[0])).toContain("invalid_record: Invalid native record");
+  expect(errors[0]).toEqual({ code: "invalid_record", message: "Invalid native record" });
 });

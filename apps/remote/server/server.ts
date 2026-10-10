@@ -117,8 +117,8 @@ import { fleetSessions, streamSessions } from "./stream-sessions";
 import { ClientStream, PING_INTERVAL_MS, readSubscription } from "./stream";
 import { ReconcilePublisher } from "../shared/reconcile";
 import { parsePresentationEvent } from "./pi-event-presentation";
-import { SourceTranscripts } from "./source-transcripts";
-import { refreshTranscriptProjection, sourceValue } from "./transcript-refresh";
+import { SourceTranscripts, type SourceResult } from "./source-transcripts";
+import { refreshTranscriptProjection } from "./transcript-refresh";
 import { MachineActions } from "./machine-actions";
 import { createMessagingService } from "./messaging";
 import { PiReactions, nativeMessageExists, reactToMessage } from "./reactions";
@@ -726,6 +726,11 @@ function signalLiveSync() {
   }, LIVE_SYNC_INTERVAL_MS);
 }
 
+function sourceValue<T>(result: SourceResult<T>): T {
+  if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
+  return result.value;
+}
+
 function invalidateDisplayContext(sessionId: string) {
   signalTranscript(sessionId);
 }
@@ -1162,31 +1167,42 @@ function sessionSubscribers(sessionId: string): ClientStream[] {
   return [...streams.values()].filter(stream => stream.subscription.session === sessionId);
 }
 
-async function refreshTranscript(sessionId: string): Promise<void> {
-  await Promise.all(sessionSubscribers(sessionId).map(stream => sendTranscript(stream)));
+async function refreshTranscript(sessionId: string): Promise<SourceResult<void>> {
+  const results = await Promise.all(sessionSubscribers(sessionId).map(stream => sendTranscript(stream)));
+  for (const result of results) if (!result.ok) return result;
+  return { ok: true, value: undefined };
 }
 
 function signalTranscript(sessionId: string): void {
   if (shuttingDown || transcriptTimers.has(sessionId) || !sessionSubscribers(sessionId).length) return;
   transcriptTimers.set(sessionId, setTimeout(() => {
     transcriptTimers.delete(sessionId);
-    void refreshTranscriptProjection(() => refreshTranscript(sessionId), () => signalTranscript(sessionId), cause => {
-      for (const stream of sessionSubscribers(sessionId)) stream.send({ type: "error", message: `Could not read transcript: ${cause instanceof Error ? cause.message : String(cause)}` });
-    });
+    const failed = (message: string) => {
+      for (const stream of sessionSubscribers(sessionId)) stream.send({ type: "error", message: `Could not read transcript: ${message}` });
+    };
+    void refreshTranscriptProjection(() => refreshTranscript(sessionId), () => signalTranscript(sessionId), error => {
+      failed(`${error.code}: ${error.message}`);
+    }).catch(cause => failed(cause instanceof Error ? cause.message : String(cause)));
   }, TRANSCRIPT_COALESCE_MS));
 }
 
-async function sendTranscript(stream: ClientStream): Promise<void> {
+async function sendTranscript(stream: ClientStream): Promise<SourceResult<void>> {
   const sessionId = stream.subscription.session;
-  if (!sessionId) return;
+  if (!sessionId) return { ok: true, value: undefined };
   const revision = stream.revision;
   const loaded = await transcripts.page(sessionId, undefined, 60);
-  let page = sourceValue(loaded);
+  if (!loaded.ok) return loaded;
+  let page = loaded.value;
   const from = stream.subscription.transcriptFrom;
   const limit = from == null ? 60 : Math.min(600, Math.max(60, page.total - from));
-  if (limit > 60) page = sourceValue(await transcripts.page(sessionId, undefined, limit));
+  if (limit > 60) {
+    const expanded = await transcripts.page(sessionId, undefined, limit);
+    if (!expanded.ok) return expanded;
+    page = expanded.value;
+  }
   if (!stream.closed && stream.revision === revision && stream.subscription.session === sessionId)
     stream.publish({ type: "transcript", ...page });
+  return { ok: true, value: undefined };
 }
 
 /** Apply a subscription change and push whatever it now entitles the client to. */
@@ -1210,7 +1226,7 @@ async function applySubscription(stream: ClientStream, patch: Partial<StreamSubs
     pending.push(stream.synchronizeSelection(
       () => sessionRow.get(sessionId) ? refreshThreadInspection(sessionId, fresh) : Promise.resolve(),
       async () => {
-        await sendTranscript(stream);
+        sourceValue(await sendTranscript(stream));
         sendLive(stream);
         projectState();
         sendState(stream);
