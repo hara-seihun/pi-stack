@@ -1,0 +1,98 @@
+import { afterEach, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { captureAuxiliary, type AuxiliaryPlan } from "./core-auxiliary";
+const dirs: string[] = [];
+afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+function fixture() {
+  const dir = mkdtempSync(join(tmpdir(), "core-aux-")); dirs.push(dir);
+  const threadsPath = join(dir, "threads.sqlite3"), supervisorPath = join(dir, "supervisor.sqlite3"), session = join(dir, "session.jsonl");
+  writeFileSync(session, JSON.stringify({ type: "message", id: "native", parentId: null, message: { role: "assistant", content: "PRIVATE_BODY_NOT_EXPORTED" } }) + "\n");
+  const db = new Database(threadsPath);
+  db.exec("CREATE TABLE thread(id TEXT,session_file TEXT,held INTEGER,metadata TEXT,created_at INTEGER); CREATE TABLE thread_wake(thread_id TEXT,data TEXT)");
+  db.query("INSERT INTO thread VALUES(?,?,?,?,?)").run("manager", session, 1, JSON.stringify({ manager: true, archived: false, private: "PRIVATE_BODY_NOT_EXPORTED" }), Date.now() - 10000);
+  db.query("INSERT INTO thread_wake VALUES(?,?)").run("manager", "PRIVATE_BODY_NOT_EXPORTED"); db.close();
+  const ui = new Database(supervisorPath);
+  ui.exec("CREATE TABLE manager_view(singleton INTEGER,thread_id TEXT,initialized INTEGER,view TEXT); INSERT INTO manager_view VALUES(1,'manager',1,'mono'); CREATE TABLE metadata(key TEXT,value TEXT)");
+  for (const [key, value] of [["thread-settlements:person", "12"], ["thread-attention:person", "3"], ["thread-questions:person", "8"], ["manager-origin:child", "other-host"]]) ui.query("INSERT INTO metadata VALUES(?,?)").run(key!, value!);
+  ui.close();
+  const ident = (path: string) => { const s = statSync(path, { bigint: true }); return { path, dev: String(s.dev), ino: String(s.ino) }; };
+  const plan: AuxiliaryPlan = { version: 1, phase: "baseline", outputPath: join(dir, "out.json"), baselinePath: null, baselineSha256: null, scopes: [{ id: "person:one", availability: "available", threads: ident(threadsPath), supervisor: ident(supervisorPath), sessionRoots: [dir], manager: { kind: "supervisor" }, managerRouting: { kind: "configured", relay: { scopeId: "person:one", adoptedOrigins: [] }, notices: { notificationOwnerId: "person" } }, images: null, duties: null, missingCursor: { kind: "reject" }, detachedReceiptPath: null, liveOwner: null }] };
+  return { plan, dir, session, supervisorPath };
+}
+test("captures exact manager identity/cursors/origins/held state without private bodies", () => {
+  const { plan } = fixture(), result = captureAuxiliary(plan);
+  expect(result.scopes[0]).toMatchObject({ manager: { kind: "existing", threadId: "manager" }, managerRouting: { notices: { notificationOwnerId: "person", adoptedCursors: { settlements: 12, attention: 3, questions: 8 } }, relay: { adoptedOrigins: [{ threadId: "child", environmentId: "other-host" }] } } });
+  expect(result.evidence[0]!.retained).toEqual([{ id: "manager", held: true, archived: false, manager: true }]);
+  expect(JSON.stringify(result)).not.toContain("PRIVATE_BODY_NOT_EXPORTED");
+});
+test("missing cursors and invented no-manager states reject rather than default", () => {
+  const { plan, supervisorPath } = fixture();
+  const ui = new Database(supervisorPath); ui.exec("DELETE FROM metadata WHERE key='thread-attention:person'"); ui.close();
+  expect(() => captureAuxiliary(plan)).toThrow("Missing original cursor");
+  plan.scopes[0]!.manager = { kind: "none" };
+  expect(() => captureAuxiliary(plan)).toThrow("Manager metadata exists");
+});
+test("unavailable scopes retain explicit configuration and never touch paths", () => {
+  const { plan } = fixture();
+  const scope = plan.scopes[0]!; scope.availability = "unavailable"; scope.threads = { path: "/missing/forbidden", dev: "1", ino: "1" }; scope.manager = { kind: "existing", threadId: "manager" };
+  expect(captureAuxiliary(plan).evidence).toEqual([{ id: scope.id, state: "unavailable", touched: false }]);
+});
+test("image baseline records bounded native offsets under a live ingress owner", () => {
+  const { plan, supervisorPath, dir } = fixture();
+  const ui = new Database(supervisorPath); ui.exec("CREATE TABLE inline_images(id TEXT); CREATE TABLE inline_image_versions(id TEXT); CREATE TABLE inline_image_messages(id TEXT)"); ui.close();
+  const scope = plan.scopes[0]!;
+  expect(() => captureAuxiliary(plan)).toThrow("explicit owner");
+  scope.images = { scopeId: scope.id, databasePath: supervisorPath, artifactRoot: join(dir, "images") };
+  const proc = readFileSync(`/proc/${process.pid}/stat`, "utf8");
+  scope.liveOwner = { pid: process.pid, startTicks: proc.slice(proc.lastIndexOf(")") + 2).split(" ")[19]! };
+  const result = captureAuxiliary(plan);
+  expect(result.evidence[0]!.nativeImageSources).toMatchObject([{ threadId: "manager", lastOffset: 0, lastDigest: expect.stringMatching(/^[a-f0-9]{64}$/) }]);
+  expect(JSON.stringify(result)).not.toContain("PRIVATE_BODY_NOT_EXPORTED");
+  scope.sessionRoots = ["/not-the-owner"];
+  expect(() => captureAuxiliary(plan)).toThrow("escapes registered");
+});
+test("accepted watch spool remains in its existing store with metadata-only capture", () => {
+  const { plan, supervisorPath } = fixture();
+  const ui = new Database(supervisorPath);
+  for (const table of ["watch_item", "watch_request", "watch_wake", "watch_delivery", "watch_schedule"]) ui.exec(`CREATE TABLE ${table}(id TEXT,body TEXT)`);
+  ui.query("INSERT INTO watch_wake VALUES(?,?)").run("immutable-occurrence", "PRIVATE_BODY_NOT_EXPORTED"); ui.close();
+  expect(() => captureAuxiliary(plan)).toThrow("existing-store duty owner");
+  plan.scopes[0]!.duties = { scopeId: plan.scopes[0]!.id, path: "/declared/duties.md", watch: { kind: "existing", databasePath: supervisorPath, acceptedSpool: "hold" } };
+  const result = captureAuxiliary(plan);
+  expect(result.evidence[0]!.watch.find((row: any) => row.table === "watch_wake").rows[0].id).toBe("immutable-occurrence");
+  expect(JSON.stringify(result)).not.toContain("PRIVATE_BODY_NOT_EXPORTED");
+});
+(process.getuid?.() === 0 ? test : test.skip)("detached capture retains early watermarks and includes post-baseline sources without skipping output", () => {
+  const { plan, supervisorPath, dir, session } = fixture();
+  const scope = plan.scopes[0]!;
+  const ui = new Database(supervisorPath);
+  ui.exec("CREATE TABLE inline_images(id TEXT); CREATE TABLE inline_image_versions(id TEXT); CREATE TABLE inline_image_messages(id TEXT)");
+  scope.images = { scopeId: scope.id, databasePath: supervisorPath, artifactRoot: join(dir, "images") };
+  const proc = readFileSync(`/proc/${process.pid}/stat`, "utf8");
+  scope.liveOwner = { pid: process.pid, startTicks: proc.slice(proc.lastIndexOf(")") + 2).split(" ")[19]! };
+  const threadDb = new Database(scope.threads!.path);
+  threadDb.query("INSERT INTO thread VALUES(?,?,?,?,?)").run("unstarted", join(dir, "not-created.jsonl"), 0, "{}", Date.now() - 10000);
+  const initial = captureAuxiliary(plan);
+  const bytes = JSON.stringify(initial);
+  plan.baselinePath = join(dir, "baseline.json"); writeFileSync(plan.baselinePath, bytes, { mode: 0o600 });
+  plan.baselineSha256 = createHash("sha256").update(bytes).digest("hex");
+  writeFileSync(session, readFileSync(session, "utf8") + JSON.stringify({ type: "message", id: "later", parentId: "native", message: { role: "assistant", content: "AFTER_BASELINE_PRIVATE" } }) + "\n");
+  threadDb.query("INSERT INTO thread VALUES(?,?,?,?,?)").run("new-thread", join(dir, "new.jsonl"), 0, "{}", Date.now());
+  threadDb.close();
+  ui.exec("UPDATE metadata SET value='13' WHERE key='thread-settlements:person'"); ui.close();
+  plan.phase = "detached";
+  scope.detachedReceiptPath = join(dir, "detached.json");
+  writeFileSync(scope.detachedReceiptPath, JSON.stringify({ state: "detached", scopeId: scope.id, databasePath: scope.threads!.path, databaseIdentity: scope.threads, previousOwner: { identity: "fixture-owner", detachedAt: new Date().toISOString() } }), { mode: 0o600 });
+  const final = captureAuxiliary(plan);
+  expect(final.evidence[0]!.nativeImageSources.find((r: any) => r.threadId === "manager")).toEqual(initial.evidence[0]!.nativeImageSources.find((r: any) => r.threadId === "manager"));
+  expect(final.evidence[0]!.nativeImageSources.find((r: any) => r.threadId === "new-thread")).toMatchObject({ lastOffset: -1, revision: "created-after-baseline" });
+  expect(final.evidence[0]!.nativeImageSources.find((r: any) => r.threadId === "unstarted")).toMatchObject({ lastOffset: -1, revision: "unstarted" });
+  expect(final.scopes[0]!.managerRouting.notices.adoptedCursors.settlements).toBe(13);
+  expect(JSON.stringify(final)).not.toContain("AFTER_BASELINE_PRIVATE");
+  writeFileSync(plan.baselinePath, bytes + " ");
+  expect(() => captureAuxiliary(plan)).toThrow("Baseline custody changed");
+});
