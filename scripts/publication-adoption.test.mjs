@@ -97,7 +97,7 @@ test("code-only repairs retain source and cannot be overwritten by unrelated own
   assert.equal(readFileSync(f.installed, "utf8"), owner);
 });
 
-for (const retainedState of ['pinned', 'checked', 'selection-failed']) test(`resumed ${retainedState} publication reselects its own integration after another request moved the checkout`, t => {
+for (const retainedState of ['pinned', 'checked', 'selection-failed', 'ambient-checkout']) test(`resumed ${retainedState} publication reselects its own integration after another request moved the checkout`, t => {
   const f = fixture(t);
   const adopted = f.adopt();
   assert.equal(adopted.status, 0, adopted.stderr);
@@ -110,6 +110,14 @@ for (const retainedState of ['pinned', 'checked', 'selection-failed']) test(`res
   f.checked('git', ['-C', repository, 'fetch', '--quiet', f.source, movedSha]);
   f.checked('git', ['-C', repository, 'checkout', '--quiet', '--detach', movedSha]);
   f.checked('git', ['-C', f.source, 'checkout', '--quiet', '--detach', f.sha]);
+  const foreign = join(f.root, 'foreign-immutable');
+  if (retainedState === 'ambient-checkout') {
+    f.checked('git', ['clone', '--quiet', '--no-hardlinks', f.source, foreign]);
+    f.checked('git', ['-C', foreign, 'checkout', '--quiet', '--detach', movedSha]);
+    f.checked('git', ['-C', foreign, 'remote', 'set-url', 'origin', 'https://github.com/hara-seihun/pi-stack.git']);
+    writeFileSync(join(foreign, 'preserved-untracked'), 'immutable source evidence\n');
+    f.env.PI_STACK_PUBLICATION_CHECKOUT = foreign;
+  }
   const proof = join(f.root, 'delivered.json');
   writeFileSync(proof, '{}\n');
   const host = { status: 'passed', integrationSha: f.sha, proof,
@@ -149,6 +157,11 @@ process.exit(result.status ?? 1);
   assert.equal(resumed.attempt, request.attempt);
   assert.equal(readFileSync(proof, 'utf8'), '{}\n');
   const commands = readFileSync(join(f.root, 'git.log'), 'utf8');
+  if (retainedState === 'ambient-checkout') {
+    assert.equal(f.checked('git', ['-C', foreign, 'rev-parse', 'HEAD']), movedSha);
+    assert.equal(readFileSync(join(foreign, 'preserved-untracked'), 'utf8'), 'immutable source evidence\n');
+    assert.equal(commands.includes(foreign), false, 'coordinator operations cannot target inherited host source');
+  }
   assert.doesNotMatch(commands, /fetch-submitted|push|reset --hard [a-f0-9]{40}/);
   if (retainedState === 'selection-failed') {
     assert.equal(resumed.failure.step, 'select-retained-integration');

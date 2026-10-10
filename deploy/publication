@@ -39,7 +39,7 @@ const meetingOverride = requestId => {
 };
 const proofRoot = join(stateRoot, "proofs");
 const contractRoot = join(stateRoot, "contracts");
-const checkout = process.env.PI_STACK_PUBLICATION_CHECKOUT ?? join(stateRoot, "repository");
+const checkout = join(stateRoot, "repository");
 const hostLaneRoot = join(stateRoot, 'host-lanes');
 const immutableRoot = join(stateRoot, 'integrations');
 const postServingRoot = join(stateRoot, 'post-serving');
@@ -2094,6 +2094,8 @@ function postRun(instance) {
 export function executePostServing(inputPath) {
   const input = JSON.parse(readFileSync(inputPath, 'utf8'));
   const request = input.request;
+  validateSha(request.integrationSha);
+  const sourceRoot = join(immutableRoot, request.integrationSha);
   const target = targets.find(target => target.id === input.hostId);
   if (!target) throw new Error('Unknown post-serving host');
   const lane = readHostLane(hostLaneRoot, request.requestId, request.integrationSha, target.id);
@@ -2118,10 +2120,10 @@ export function executePostServing(inputPath) {
   else {
     if (!target.sshHost) {
       const checks = runLogged(request, 'post-serving-checks', 'bash', ['-c', 'set -euo pipefail\nsource deploy/lib\npi_stack_prepare_dependencies "$PWD"\nnpm run check'], 900, log,
-        { cwd: checkout, env: { ...process.env, PI_STACK_CHECK_CACHE_DIR: join(stateRoot, 'check-cache') } });
+        { cwd: sourceRoot, env: { ...process.env, PI_STACK_CHECK_CACHE_DIR: join(stateRoot, 'check-cache') } });
       receipt.results.checks = { status: checks.ok ? 'passed' : 'failed', exitCode: checks.status };
       if (!checks.ok) failures.push(`Full source checks exited ${checks.status}`);
-      const android = runLogged(request, 'post-serving-android-tests', 'npm', ['run', 'android:test', '--workspace=kenan'], 180, log, { cwd: checkout });
+      const android = runLogged(request, 'post-serving-android-tests', 'npm', ['run', 'android:test', '--workspace=kenan'], 180, log, { cwd: sourceRoot });
       receipt.results.androidTests = { status: android.ok ? 'passed' : 'failed', exitCode: android.status, at: new Date().toISOString(),
         ...(request.checks?.androidPlan?.kind === 'native' ? { identity: request.checks.androidPlan.identity } : {}) };
       if (!android.ok) failures.push(`Android tests exited ${android.status}`);
