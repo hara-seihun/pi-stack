@@ -8,14 +8,6 @@ type Completion = Pick<ThreadSettlement, "executionId" | "threadId" | "time">;
 type NotificationApi = Pick<ThreadApi, "settlements" | "questionEvents" | "attentionEvents" | "questions" | "list">;
 type NotificationDirectory = Pick<ThreadApi, "list"> & Partial<Pick<ThreadApi, "send">>;
 
-async function routeManagerNotice(directory: NotificationDirectory, policy: ManagerNotificationPolicy, thread: Thread, requestId: string, text: string): Promise<void> {
-  if (policy.view !== "mono" || thread.id === policy.managerThreadId) return;
-  if (!directory.send) throw new Error("Manager notification delivery is unavailable");
-  const result = await directory.send({ threadId: policy.managerThreadId, senderId: thread.id, requestId,
-    source: "notification", delivery: "steer", text });
-  if (!result.ok) throw new Error(result.error.message);
-}
-
 function hasReply(item: ThreadSettlement, thread: Thread): boolean {
   const message = item.finalMessage;
   if (thread.metadata?.manager === true && isSilentAssistant(message)) return false;
@@ -34,7 +26,7 @@ async function findThread(api: Pick<ThreadApi, "list">, id: string): Promise<Thr
 }
 
 function conversation(thread: Thread): boolean {
-  return (thread.metadata?.foreground === true || thread.metadata?.foreground === undefined && !thread.parentId && thread.role !== "worker")
+  return (thread.metadata?.foreground === true || thread.metadata?.foreground === undefined && !thread.parentId && thread.role !== "kenatia")
     && thread.lifecycle.kind !== "archived" && !thread.held;
 }
 
@@ -46,7 +38,7 @@ function busy(thread: Thread): boolean {
   }
 }
 
-/** Each owner sequences receipts; launch provenance never delays another agent's notification. */
+/** UI receipt projection only. Core owns manager dispatch independently of Remote. */
 export async function projectThreadNotifications(db: Database, owner: string, api: NotificationApi, directory: NotificationDirectory = api, published?: () => void, policy: ManagerNotificationPolicy = CLASSIC_NOTIFICATION_POLICY): Promise<void> {
   await projectAttentionNotifications(db, owner, api, published, policy, directory);
   await projectQuestionNotifications(db, owner, api, policy, directory);
@@ -66,10 +58,6 @@ export async function projectThreadNotifications(db: Database, owner: string, ap
       return { item, thread };
     }));
     for (const { item, thread } of receipts) {
-      if (!item.assignmentPending && (item.finalMessage || item.outcome !== "complete")) {
-        await routeManagerNotice(directory, policy, thread, `manager-notice:${owner}:settlement:${item.executionId}`,
-          JSON.stringify({ type: "thread_settled", threadId: thread.id, title: thread.title, outcome: item.outcome, finalMessage: item.finalMessage, error: item.error }));
-      }
       pending.delete(item.threadId);
       if (humanNotification(policy, thread.id, "idle") && hasReply(item, thread) && conversation(thread)) {
         pending.set(item.threadId, { executionId: item.executionId, threadId: item.threadId, time: item.time });
@@ -111,8 +99,6 @@ export async function projectAttentionNotifications(db: Database, owner: string,
     const page = result.value;
     if (page.cursor === cursor) return;
     const named = await Promise.all(page.items.map(async item => ({ item, thread: await findThread(api, item.threadId) })));
-    for (const { item, thread } of named) await routeManagerNotice(directory, policy, thread, `manager-notice:${owner}:attention:${item.seq}`,
-      `Attention from ${thread.title} (${thread.id}): ${item.summary}\nOnly your explicit thread_attention notifies the person.`);
     db.transaction(() => {
       for (const { item, thread } of named) {
         if (!humanNotification(policy, thread.id, "attention")) continue;
@@ -134,8 +120,6 @@ export async function projectQuestionNotifications(db: Database, owner: string, 
     const page = result.value;
     if (page.cursor === cursor) return;
     const named = await Promise.all(page.items.map(async item => ({ item, thread: await findThread(api, item.threadId) })));
-    for (const { item, thread } of named) await routeManagerNotice(directory, policy, thread, `manager-notice:${owner}:question:${item.questionId}`,
-      `Question from ${thread.title} (${thread.id}): ${item.question}\nUse manager_questions_list to handle held questions; only your explicit thread_attention notifies the person.`);
     db.transaction(() => {
       for (const { item, thread } of named) {
         if (!humanNotification(policy, thread.id, "question")) continue;

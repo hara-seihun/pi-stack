@@ -3,7 +3,7 @@ import type { ImageContent } from "@earendil-works/pi-ai";
 import type { Delivery, ThreadError } from "pi-orchestrator/api";
 import { assertNever } from "../shared/explicit-state";
 
-export type PromptInput = { requestId: string; text: string; delivery: Delivery; replyTo?: string; includeMeetingImages?: boolean };
+export type PromptInput = { requestId: string; text: string; replyTo?: string; includeMeetingImages?: boolean };
 export type PreparedPrompt = { text: string; delivery: Delivery; images: ImageContent[] };
 export type PromptFailure = { code: ThreadError["code"] | "forbidden"; message: string };
 export type AdmissionResult<T> = { ok: true; value: T } | { ok: false; error: PromptFailure };
@@ -37,13 +37,13 @@ function failureResponse(error: PromptFailure): PromptAdmissionResponse {
 export function parsePromptInput(body: unknown): AdmissionResult<PromptInput> {
   if (!object(body) || typeof body.requestId !== "string" || !uuid.test(body.requestId)
     || typeof body.text !== "string" || !body.text.trim()
-    || !["queue", "steer", "hardSteer"].includes(String(body.delivery))
+    || body.delivery !== undefined && !["pending", "queue", "steer", "hardSteer"].includes(String(body.delivery))
     || body.replyTo !== undefined && (typeof body.replyTo !== "string" || !body.replyTo)
     || body.includeMeetingImages !== undefined && typeof body.includeMeetingImages !== "boolean"
     || Object.keys(body).some(key => !["requestId", "text", "delivery", "replyTo", "includeMeetingImages"].includes(key))) {
-    return { ok: false, error: { code: "invalid_request", message: "Provide a valid requestId, nonempty prompt, explicit delivery and optional replyTo/includeMeetingImages." } };
+    return { ok: false, error: { code: "invalid_request", message: "Provide a valid requestId, nonempty prompt and optional replyTo/includeMeetingImages." } };
   }
-  return { ok: true, value: { requestId: body.requestId, text: body.text, delivery: body.delivery as Delivery,
+  return { ok: true, value: { requestId: body.requestId, text: body.text,
     ...(body.replyTo === undefined ? {} : { replyTo: body.replyTo as string }),
     ...(body.includeMeetingImages === undefined ? {} : { includeMeetingImages: body.includeMeetingImages as boolean }) } };
 }
@@ -66,7 +66,11 @@ export class PromptAdmissions {
     const input = parsePromptInput(body);
     if (!input.ok) return failureResponse(input.error);
     if (!sessionId) return rejection("invalid_request", "A prompt recipient is required.");
-    const serialized = JSON.stringify(input.value);
+    const fields = body as Record<string, unknown>;
+    const serialized = JSON.stringify({ requestId: input.value.requestId, text: input.value.text,
+      ...(fields.delivery === undefined ? {} : { delivery: fields.delivery }),
+      ...(input.value.replyTo === undefined ? {} : { replyTo: input.value.replyTo }),
+      ...(input.value.includeMeetingImages === undefined ? {} : { includeMeetingImages: input.value.includeMeetingImages }) });
     try {
       this.db.query("INSERT OR IGNORE INTO prompt_admissions(request_id,session_id,input) VALUES(?,?,?)")
         .run(input.value.requestId, sessionId, serialized);
@@ -105,9 +109,8 @@ export class PromptAdmissions {
         const response = failureResponse(sent.error);
         return response.body.outcome === "rejected" ? this.terminal(input.requestId, response) : response;
       }
-      if (typeof sent.value.id !== "string" || !sent.value.id || !["queue", "steer", "hardSteer"].includes(sent.value.delivery)) return pending("The owner returned an invalid admission receipt; acceptance is unconfirmed.");
-      return this.terminal(input.requestId, { status: 202, body: { outcome: "accepted", accepted: true, workId: sent.value.id, delivery: input.delivery,
-        ...(sent.value.delivery !== input.delivery ? { effectiveDelivery: sent.value.delivery } : {}) } });
+      if (typeof sent.value.id !== "string" || !sent.value.id || sent.value.delivery !== "pending") return pending("The owner returned an invalid admission receipt; acceptance is unconfirmed.");
+      return this.terminal(input.requestId, { status: 202, body: { outcome: "accepted", accepted: true, workId: sent.value.id, delivery: "pending" } });
     } catch (error) { return pending(error instanceof Error ? error.message : String(error)); }
   }
 }

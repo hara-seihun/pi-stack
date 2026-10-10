@@ -1,55 +1,35 @@
 import { Database } from "bun:sqlite";
-import { telephoneDispatcher } from "./phone/dispatcher";
+import { CoreClient, coreConfiguration } from "./core-client";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync, watchFile, unwatchFile } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
-import { configuredOrchestratorThreadUrl } from "./thread-owners";
-import { isHostAdministrator, peopleUsage as readPeopleUsage } from "./people-usage";
+import { isHostAdministrator } from "./people-usage";
 import { projectThreadNotifications } from "./thread-notifications";
 import { startThreadRefresh } from "./thread-refresh";
-import { readLivePeers, readPeerAncestors, readPeerSession } from "./peer-directory";
 import {
-  WatchList,
-  watchInterval,
-  watchSettings,
   loadThreadModelCatalog,
   threadSettingsMetadata,
-  modelBrokerUrl,
   createWorkspaceAdmission,
   ORCHESTRATOR_CATALOG,
-  OrchestratorClient,
   catalogAgentType,
-  createSharedImageGenerationService,
-  resolveDelivery,
-  ThreadService,
-  configuredPersonSpawnModel,
-  configuredAgentCapacity,
   ModelAvailabilityStore,
   modelAvailabilityPath,
   modelAvailabilityKey,
-  ThreadDirectory,
-  archivedAcrossOwners,
   createThreadClient,
-  importRemoteThreads,
-  createSharedPiSessionOpener,
-  threadHttp,
   admissionFor,
   callerResolver,
   hostIdentityConfig,
   threadCapability,
   type CallerSource,
   type ThreadCreator,
-  type ThreadInspection,
   type Thread,
   type ThreadMessage,
   type PiEvent,
   type Result,
-  type SharedImageGenerationService,
   type ThreadModeName,
   type PlanUsageSnapshot,
   type PersonalUsage,
-  readBrokerUsage,
 } from "pi-orchestrator/api";
 import { createLiveProjection, settleLiveProjection, restoreLiveProjection, projectThreadActivity, type LiveProjection } from "./live-projection";
 import { managerLiveText, isSilentAssistant } from "pi-orchestrator/manager-turn";
@@ -67,17 +47,12 @@ import { messageFinalizationKey, sha256 } from "./sync";
 import { QuestionFeed } from "./question-feed";
 import { beginSupervisorGeneration, ensureSupervisorSchema, ensureThreadView, removeEventJournal, setThreadColor, recordIdleNotification } from "./database";
 import { oneKenanEnabled } from "kenan-memory/config";
-import { lifeClient } from "kenan-memory/life-client";
-import type { LifePolicyView, LifeSnapshot } from "kenan-memory/life-contract";
-import { projectNeedsYou, readNeedsYouQuestions } from "./needs-you";
-import { dismissNeedsYou, parseNeedsYouDismissal } from "./needs-you-dismissal";
 import { handleRoomOwner, RoomHistoryError } from "./rooms-owner";
 import { roomInput, roomInstructions, roomMetadata, roomMembers } from "../shared/rooms";
 import { dismissError, observeError, observeFailure } from "./error-feedback";
 import { startLedgerSnapshots } from "./ledger-snapshot";
 import { SupervisorRelease } from "./supervisor-release";
-import { autoArchiveDelay, startAutoArchive } from "./auto-archive";
-import { Manager, managerDestination, managerSettings, parseManagerPatch } from "./manager";
+import { Manager, parseManagerPatch } from "./manager";
 import { createThreadViewRecorder } from "./thread-viewing";
 import { VoiceClient } from "./voice/client";
 import { MeetGateway } from "./meet/gateway";
@@ -91,14 +66,13 @@ import { externalMeetingRequest } from "./meet/external";
 import { ensureExternalMeetingThread } from "./meet/threads";
 import { liveDevInstructions } from "./skills";
 import { configuredThreadDestinations, defaultThreadDestinations, recentThreadModels, threadModelOptions, type ThreadDestination } from "./thread-model-defaults";
-import { contextFilesPrompt, listContextFiles, selectContextFiles, watchContextFiles, type ContextFileSources } from "./thread-context-files";
-import { reconcileThreadContextSelection, storedThreadContextSelection, type ThreadContextSelection } from "./manager-context-selection";
+import { contextFilesPrompt, listContextFiles, selectContextFiles, type ContextFileSources } from "./thread-context-files";
+import { storedThreadContextSelection, type ThreadContextSelection } from "./manager-context-selection";
 import { API } from "./api";
 import { SettingsService, type OwnedSettingAdapter } from "./settings-store";
 import { machineActionDefinition, modelAvailabilityDefinition } from "../shared/settings";
 import { settingsError } from "pi-orchestrator/person-settings-contract";
 import { PhoneBroker, phoneCallerAllowed, type PhoneSocketData } from "./phones";
-import { CalendarStore } from "./calendar";
 import { PhoneOverlay } from "./phone-overlay";
 import { PHONE_MAX_FRAME_BYTES } from "./phone-commands";
 import { jsonHttp } from "./json-http";
@@ -107,8 +81,6 @@ import { createHash } from "node:crypto";
 import { parseFeatureEvent, type Feature, type FeatureActor } from "../shared/feature-usage";
 import { idleNotifications, notificationHistory, resolveNotificationQuestions } from "./notifications";
 import { notificationUnread, humanQuestions } from "./notification-policy";
-import { managerRelay } from "./manager-relay";
-import { managerRelayClient as createManagerRelayClient } from "./manager-relay-client";
 import { listPersons, publicPerson } from "./persons";
 import { ownEnvironment } from "./environments";
 import { API_CORS_HEADERS } from "./cors";
@@ -131,7 +103,6 @@ import { decodeMessageReply, encodeMessageReply, replyFromNativeEntry } from "./
 import { PromptAdmissions } from "./prompt-admissions";
 import { SlackReactions } from "./slack-reactions";
 import { AGENT_NAME } from "./agent-identity";
-import { createSpeechService } from "./speech/service";
 import { closeAiChat } from "./chat-lifecycle";
 import { archivedSessionQuery } from "./archived-sessions";
 import { availableUploadPath, storeUpload, uploadName } from "./uploads";
@@ -148,12 +119,9 @@ const ROOMS_ENABLED = oneKenanEnabled();
 const DATA = process.env.PI_REMOTE_DATA ?? join(process.env.XDG_STATE_HOME ?? join(HOME, ".local/state"), "pi-remote");
 process.env.PI_PERSON_SETTINGS_DATA = DATA;
 const INGESTION = process.env.PI_REMOTE_INGESTION ?? join(DATA, "ingestion");
-const AUTO_ARCHIVE_AFTER_MS = autoArchiveDelay(process.env.PI_REMOTE_AUTO_ARCHIVE_AFTER_MS);
 const PRIVATE_ID = process.env.PI_REMOTE_PRIVATE_ID ?? "private";
 const PRIVATE_NAME = process.env.PI_REMOTE_PRIVATE_NAME ?? "Private";
 const PRIVATE_DIR = process.env.PI_REMOTE_PRIVATE_DIR ?? join(HOME, PRIVATE_ID);
-const THREAD_CONTEXT_EXTENSION = join(import.meta.dir, "thread-context.ts");
-const ORCHESTRATOR_DB_PATH = process.env.PI_REMOTE_ORCHESTRATOR_DB ?? join(HOME, ".local/share/pi-orchestrator/ledger.sqlite3");
 const HOST = process.env.PI_REMOTE_HOST ?? "127.0.0.1";
 const PORT = Number(process.env.PI_REMOTE_PORT ?? "8788");
 const AGENT_DIR = process.env.PI_AGENT_DIR ?? join(HOME, ".pi/agent");
@@ -185,11 +153,10 @@ const destinationDefinitions: ThreadDestination[] = process.env.PI_REMOTE_THREAD
   ? defaultThreadDestinations()
   : JSON.parse(process.env.PI_REMOTE_THREAD_DESTINATIONS);
 const THREAD_DESTINATIONS = new Map(configuredThreadDestinations(destinationDefinitions
-  .filter((destination) => OFFERED_DESTINATIONS.includes(destination.id)), THREAD_MODEL_CATALOG.configuredModels)
+  .filter((destination) => !destination.sandbox && OFFERED_DESTINATIONS.includes(destination.id)), THREAD_MODEL_CATALOG.configuredModels)
   .map((destination) => [destination.id, destination]));
 
 const machineActions = new MachineActions();
-const speech = createSpeechService();
 
 /** Optional context is owned by the destination's workspace and the supervisor's Unix account. */
 function destinationContextSources(destination: ThreadDestination | undefined): ContextFileSources | null {
@@ -249,7 +216,7 @@ function environmentMetadata() {
     requiresUnlock: ENVIRONMENT_REQUIRES_UNLOCK,
     persons: knownPersons(),
     profiles: threadStartProfiles(),
-    capabilities: { voice: true, downloads: true, notifications: true, files: true },
+    capabilities: { voice: false, downloads: true, notifications: true, files: true },
   };
 }
 
@@ -273,15 +240,9 @@ const db = new Database(join(DATA, "supervisor.sqlite3"), { create: true, strict
 const transcriptSource = new ThreadTranscriptSource(db, (id, options) => directory.inspect(id, options),
   id => liveProjections.get(id)?.toolProgress, identity => piReactions.list(identity));
 const transcripts = new SourceTranscripts(db, transcriptSource.read, transcriptSource.project,
-  (sessionId, hash) => API.sessionImage.path({ sessionId, hash }), id => {
-    const thread = liveThread(id);
-    return thread?.agentName ?? (typeof thread?.metadata?.agentName === "string" ? thread.metadata.agentName : undefined);
-  });
+  (sessionId, hash) => API.sessionImage.path({ sessionId, hash }));
 const piReactions = new PiReactions(db, MESSAGE_OWNER);
 const slackReactions = new SlackReactions(process.env.PI_REMOTE_SLACK_REACTIONS);
-const orchestrator = new OrchestratorClient({
-  ledgerPath: ORCHESTRATOR_DB_PATH,
-});
 const voice = new VoiceClient(DATA);
 const liveProjections = new Map<string, LiveProjection>();
 /** Live timing of the response each session is streaming right now. */
@@ -289,54 +250,30 @@ const responseTiming = new ResponseTiming();
 const activity = new SessionActivity(() => now());
 const forkingSessions = new Set<string>();
 let shuttingDown = false;
-const runner = createSharedPiSessionOpener({ dataDir: DATA });
-// Thread capabilities and caller checks: a thread's parent and creator are verified, never taken from the request.
 const capability = threadCapability();
 const callers = callerResolver({ capability, host: hostIdentityConfig() });
 const MANAGER_ENVIRONMENT_ID = process.env.PI_REMOTE_MANAGER_ENVIRONMENT ?? ENVIRONMENT_ID;
 if (!/^[a-z][a-z0-9-]{0,31}$/.test(MANAGER_ENVIRONMENT_ID)) throw new Error("PI_REMOTE_MANAGER_ENVIRONMENT must be an environment ID");
-function managerRelayClient(environmentId?: string) {
-  return createManagerRelayClient(`http://127.0.0.1:${process.env.PI_REMOTE_ROUTER_PORT ?? "8788"}/v1/agent-manager`, environmentId);
-}
-const managerOwner = MANAGER_ENVIRONMENT_ID !== ENVIRONMENT_ID ? managerRelayClient() : null;
-let manager: Manager | null = null;
-let remoteNotificationPolicy: import("pi-orchestrator/api").ManagerNotificationPolicy | null = null;
-function currentNotificationPolicy(): import("pi-orchestrator/api").ManagerNotificationPolicy | null {
-  if (!manager) return remoteNotificationPolicy;
-  const snapshot = manager.snapshot();
-  return snapshot.view === "classic" ? { view: "classic" } : { view: "mono", managerThreadId: snapshot.managerThreadId };
-}
-let notificationPolicyRefresh: Promise<import("pi-orchestrator/api").Result<import("pi-orchestrator/api").ManagerNotificationPolicy>> | null = null;
-async function loadNotificationPolicy(): Promise<import("pi-orchestrator/api").Result<import("pi-orchestrator/api").ManagerNotificationPolicy>> {
-  if (manager) return { ok: true, value: currentNotificationPolicy()! };
-  if (!managerOwner) return { ok: false, error: { code: "unavailable", message: "Canonical manager notification owner is unavailable" } };
-  if (notificationPolicyRefresh) return notificationPolicyRefresh;
-  notificationPolicyRefresh = managerOwner.managerNotificationPolicy().then(result => {
-    const next = result.ok ? result.value : null;
-    if (JSON.stringify(remoteNotificationPolicy) !== JSON.stringify(next)) { remoteNotificationPolicy = next; signalSync(); }
-    return result;
-  }).finally(() => { notificationPolicyRefresh = null; });
-  return notificationPolicyRefresh;
-}
-const threads = new ThreadService({
-  managerNotificationPolicy: loadNotificationPolicy,
-  ...(managerOwner ? { routeManagerQuestionCustody: input => managerOwner.managerQuestionCustody(input) } : {}),
-  capability,
-  capacity: configuredAgentCapacity(),
-  spawnDefaultModel: () => configuredPersonSpawnModel(),
-  admitNewThread: settings => modelAvailability.admit(settings.model),
-  attachSession: runner.attachSession,
-  recoverSession: runner.recoverSession,
-  databasePath: join(DATA, "threads.sqlite3"),
-  sessionsDir: join(DATA, "threads"),
-  openSession: (options, output, exit) => runner.openSession({ ...options,
-    args: [...options.args, "--extension", THREAD_CONTEXT_EXTENSION],
-  }, output, exit),
-  environment: threadEnvironment,
-  prepareMessage: prepareThreadMessage,
+let coreError: string | null = null;
+const coreConfig = unwrap(coreConfiguration());
+const core = new CoreClient(coreConfig, createThreadClient, fetch, message => {
+  coreError = message;
+  observeError(db, "core", message);
+  signalSync();
 });
-unwrap(importRemoteThreads(threads, db as any, { sessionsDir: join(DATA, "threads"),
-  resolveCwd: workspace => workspaces.get(workspace)?.path ?? workspace }));
+const threads = Object.assign(core.api, {
+  get: core.get.bind(core), snapshot: core.snapshot.bind(core), pending: core.pending.bind(core),
+  inputStates: core.inputStates.bind(core), archivedCount: core.archivedCount.bind(core),
+  latestSettlement: core.latestSettlement.bind(core), subscribe: core.subscribe.bind(core), update: core.update.bind(core),
+});
+let manager: Manager;
+function currentNotificationPolicy(): import("pi-orchestrator/api").ManagerNotificationPolicy {
+  const managerThreadId = core.managerThreadId();
+  return managerThreadId === null ? { view: "classic" } : { view: "mono", managerThreadId };
+}
+async function loadNotificationPolicy(): Promise<import("pi-orchestrator/api").Result<import("pi-orchestrator/api").ManagerNotificationPolicy>> {
+  return threads.managerNotificationPolicy();
+}
 ensureSupervisorSchema(db);
 const featureUsage = new FeatureUsage(db);
 function trackFeature(feature: Feature, actor: FeatureActor, id: string = crypto.randomUUID()) {
@@ -345,92 +282,15 @@ function trackFeature(feature: Feature, actor: FeatureActor, id: string = crypto
   return result;
 }
 const promptAdmissions = new PromptAdmissions(db);
-beginSupervisorGeneration(db, SUPERVISOR_EPOCH);
-const fleetUrl = process.env.PI_REMOTE_ROOMS_RUNTIME === "1" ? null : configuredOrchestratorThreadUrl();
-const fleet = fleetUrl ? createThreadClient(`${fleetUrl}/v1/thread-owner`) : null;
-/** Assigned once the phone broker exists; thread events can arrive earlier. */
 let phoneOverlay: PhoneOverlay | null = null;
-const directory = new ThreadDirectory({ id: "person", api: threads }, fleet ? [{ id: "fleet", api: fleet }] : [], managerOwner ? { id: "manager", api: managerOwner } : undefined, id => {
-  const route = db.query("SELECT value FROM metadata WHERE key=?").get(`manager-origin:${id}`) as { value: string } | null;
-  return route ? { id: `question-origin:${route.value}`, api: managerRelayClient(route.value) } : null;
-});
-threads.setDirectory(directory, (parent, input) => {
-  // Encrypted-folder sessions must retain their mount namespace and transcript custody.
-  const privatePath = (path: string) => resolve(path) === resolve(PRIVATE_DIR) || resolve(path).startsWith(`${resolve(PRIVATE_DIR)}/`);
-  return privatePath(parent.cwd) || privatePath(input.cwd) ? undefined : fleet ?? undefined;
-});
-// Each watch item is checked in the destination it came from, with that destination's chosen context.
-const WATCH_DESTINATIONS = [...THREAD_DESTINATIONS.values()].filter(destination => !destination.raw && !destination.sandbox).map(destination => destination.id);
-const DEFAULT_WATCH_DESTINATION = process.env.PI_REMOTE_WATCH_DESTINATION
-  ?? (WATCH_DESTINATIONS.includes("home") ? "home" : WATCH_DESTINATIONS[0] ?? "home");
-const watchList = new WatchList({
-  databasePath: join(DATA, "threads.sqlite3"), threads,
-  intervalMs: watchInterval(process.env.PI_REMOTE_WATCH_INTERVAL_MS),
-  settings: unwrap(watchSettings(process.env.PI_REMOTE_WATCH_MODEL)),
-  checkOutcome: id => threads.watchCheckOutcome(id),
-  enabled: process.env.PI_REMOTE_WATCH_ENABLED !== "0",
-  destinations: WATCH_DESTINATIONS,
-  defaultDestination: DEFAULT_WATCH_DESTINATION,
-  destinationOf: threadId => {
-    const thread = threads.get(threadId);
-    const profileId = thread ? remotePlacement(thread, id => threads.get(id)).profileId : undefined;
-    return typeof profileId === "string" ? profileId : undefined;
-  },
-  placement: profileId => {
-    const destination = THREAD_DESTINATIONS.get(profileId);
-    if (!destination || destination.sandbox || destination.raw) return { ok: false, error: { code: "invalid_request", message: `Watch destination ${profileId} must be an offered full-context destination` } };
-    const admitted = workspaceAdmission.resolve(destination.workspaceId);
-    const contextFiles = watchContextFiles(destination.watchContextFiles, destinationContextSources(destination)?.directory);
-    return admitted.ok ? { ok: true, value: { cwd: admitted.value.cwd, metadata: { workspaceId: destination.workspaceId, profileId, ...(contextFiles.length ? { contextFiles } : {}) } } }
-      : { ok: false, error: { code: "unavailable", message: admitted.error.message } };
-  },
-  onError: error => { observeError(db, "watch-list", error); if (error) console.error("Watch list check failed:", error); },
-});
-threads.setWatchList(watchList);
-const MANAGER_DESTINATION = MANAGER_ENVIRONMENT_ID === ENVIRONMENT_ID
-  ? unwrap(managerDestination([...THREAD_DESTINATIONS.values()], process.env.PI_REMOTE_MANAGER_DESTINATION)) : null;
-manager = MANAGER_DESTINATION ? new Manager(db, threads, () => {
-  const admitted = workspaceAdmission.resolve(MANAGER_DESTINATION.workspaceId);
-  if (!admitted.ok) return { ok: false, error: { code: "unavailable", message: admitted.error.message } };
-  const sources = destinationContextSources(MANAGER_DESTINATION);
-  const contextFiles = sources ? listContextFiles(sources).map(offer => offer.name) : [];
-  return { ok: true, value: { cwd: admitted.value.cwd, metadata: {
-    workspaceId: MANAGER_DESTINATION.workspaceId, profileId: MANAGER_DESTINATION.id, contextFiles, contextSelection: "all",
-  } } };
-}, unwrap(managerSettings(process.env.PI_REMOTE_MANAGER_MODEL)), () => { signalSync(); void refreshThreadNotifications(); void pushNotifications(); }) : null;
-if (manager) {
-  const existingManager = manager.snapshot().managerThreadId;
-  if (existingManager && threads.get(existingManager)) effectiveThreadContextSelection(existingManager);
-  const workObserver = managerRelayClient();
-  threads.setManagerWatchdog(async () => {
-    const managerThreadId = manager!.snapshot().managerThreadId;
-    if (managerThreadId === null) return { ok: true, value: { managerThreadId, activeWork: false, lastHumanMessageAt: null } };
-    const summary = await workObserver.managerWorkSummary();
-    return summary.ok ? { ok: true, value: { ...summary.value, managerThreadId } } : summary;
-  }, message => { observeError(db, "manager-watchdog", message); });
-}
-const peerThreads = new Map<string, Thread>();
-let peerArchivedTotal = 0;
-const peerChildren = new Map<string, boolean>();
-const peerInspections = new Map<string, ThreadInspection>();
-let peerError: string | null = null;
-let peerRecovery: "automatic" | "required" = "automatic";
-class PeerOwnershipError extends Error {}
-function peerFeedback(message: string | null) {
-  return observeFailure(db, "peer:fleet", !message ? null : peerRecovery === "required" ? {
-    message, recovery: "required", impact: "Worker status cannot be reconciled because a thread has conflicting owners.",
-    action: "Ask Kenan to repair the conflicting thread ownership.",
-  } : {
-    message, recovery: "automatic", impact: "Worker status updates are delayed; the last available listing is retained.", attentionAfterMs: 60_000,
-  });
-}
+const directory = Object.assign(threads, { owners: [{ id: "core", api: threads }] });
+manager = new Manager(db, () => core.managerThreadId(), () => { signalSync(); void refreshThreadNotifications(); void pushNotifications(); });
 function notificationFeedback(owner: string, message: string | null) {
   return observeFailure(db, `notifications:${owner}`, message ? {
     message, recovery: "automatic", impact: "Idle notifications are delayed; existing notifications are retained.", attentionAfterMs: 60_000,
   } : null);
 }
 const notificationErrors = new Map<string, string>();
-let peerRefresh: Promise<void> | null = null;
 const notificationRefreshes = new Map<string, Promise<void>>();
 const notificationRefreshAgain = new Set<string>();
 function refreshThreadNotifications(cause: "read" | "change" = "change"): Promise<void> {
@@ -461,71 +321,28 @@ function refreshThreadNotifications(cause: "read" | "change" = "change"): Promis
   })).then(() => {});
 }
 async function refreshPeers() {
-  if (!fleet) return;
-  if (peerRefresh) return peerRefresh;
-  peerRefresh = (async () => {
-    const loaded = await readLivePeers(fleet, id => threads.get(id), peerThreads);
-    if (!loaded.ok) {
-      if (loaded.error.code === "conflict") throw new PeerOwnershipError(loaded.error.message);
-      peerRecovery = "automatic"; peerError = loaded.error.message; peerFeedback(peerError); signalSync(); return;
-    }
-    const next = new Map([...peerThreads].filter(([, thread]) => thread.metadata?.archived));
-    for (const [id, thread] of loaded.value.threads) next.set(id, thread);
-    const changed = peerError !== null || peerArchivedTotal !== loaded.value.archivedTotal || JSON.stringify([...next]) !== JSON.stringify([...peerThreads]);
-    peerArchivedTotal = loaded.value.archivedTotal;
-    peerError = null;
-    peerFeedback(null);
-    const updated = [...next.values()].filter(thread => peerThreads.get(thread.id)?.revision !== thread.revision);
-    for (const thread of updated) if (!peerThreads.has(thread.id)) ensureThreadView(db, thread.id);
-    peerThreads.clear();
-    peerChildren.clear();
-    for (const thread of next.values()) if (thread.parentId) peerChildren.set(thread.parentId, true);
-    for (const [id, thread] of next) peerThreads.set(id, thread);
-    const lookup = cachedThreadLookup(next, id => threads.get(id) ?? null);
-    for (const thread of updated) noteModelRecency(thread, lookup);
-    if (changed) { signalSync(); void refreshThreadNotifications(); }
-  })().catch(cause => {
-    const message = cause instanceof Error ? cause.message : String(cause);
-    peerRecovery = cause instanceof PeerOwnershipError ? "required" : "automatic";
-    peerFeedback(message);
-    peerError = message;
-    signalSync();
-  }).finally(() => { peerRefresh = null; });
-  return peerRefresh;
+  const result = await core.refreshProjection();
+  coreError = result.ok ? null : result.error.message;
+  observeError(db, "core", coreError);
+  if (!result.ok) throw new Error(result.error.message);
 }
 const inspectingThreads = new Map<string, Promise<void>>();
 async function refreshThreadInspection(id: string, fresh = false) {
   const pending = inspectingThreads.get(id);
   if (pending) return pending;
-  const local = threads.get(id);
-  const known = peerInspections.get(id);
-  const listed = peerThreads.get(id);
-  if (!fresh && !local && known && listed?.state === "idle" && known.thread.revision === listed.revision) return;
-  const operation = inspectThread(id, Boolean(local)).finally(() => inspectingThreads.delete(id));
+  const operation = inspectThread(id).finally(() => inspectingThreads.delete(id));
   inspectingThreads.set(id, operation);
   return operation;
 }
-async function inspectThread(id: string, local: boolean) {
+async function inspectThread(id: string) {
   const result = await directory.inspect(id, { context: "omit" });
   if (!result.ok) throw new Error(result.error.message);
   const inspection = result.value;
-  const changed = !local && (peerThreads.get(id)?.revision !== inspection.thread.revision
-    || JSON.stringify(peerInspections.get(id)?.pending) !== JSON.stringify(inspection.pending));
-  if (!local) peerThreads.set(id, inspection.thread);
-  peerInspections.delete(id);
-  peerInspections.set(id, inspection);
-  while (peerInspections.size > 12) peerInspections.delete(peerInspections.keys().next().value!);
   ensureThreadView(db, id);
-  if (changed) signalSync();
-  if (inspection.live) {
-    const live = liveFor(id);
-    const previous = JSON.stringify([live.activity, live.activitySince, live.lastActivityAt, live.activityDetail, [...live.activeTools]]);
-    restoreLiveProjection(live, inspection.live);
-    if (previous !== JSON.stringify([live.activity, live.activitySince, live.lastActivityAt, live.activityDetail, [...live.activeTools]])) {
-      signalSync();
-      signalLiveSync();
-    }
-  }
+  signalSync();
+  // Native inspection is durable history/context, not a stream checkpoint. Only
+  // the atomic core projection can restore live text without replaying deltas.
+  unwrap(await core.refreshProjection());
 }
 function unwrap<T>(result: Result<T>): T {
   if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
@@ -590,36 +407,12 @@ function refreshPlanUsageIfDue() {
   if (planUsageRefresh || Date.now() < nextPlanUsageRefresh) return;
   nextPlanUsageRefresh = Date.now() + PLAN_USAGE_REFRESH_MS;
   planUsageRefresh = (async () => {
-    try {
-      await orchestrator.refreshPlanFacts(AGENT_DIR);
-    } catch (cause) {
-      console.error("Plan meter refresh failed", cause);
-    }
-    // The administrator's own ledger holds the pool and her spending. Everyone
-    // else's ledger is empty; her broker knows the pool and what she spent.
-    const broker = HOST_ADMINISTRATOR ? undefined : modelBrokerUrl();
-    if (broker) {
-      try {
-        const usage = await readBrokerUsage(broker);
-        planUsage = usage.plans;
-        ownUsage = usage.personal;
-        allowance = usage.allowance ?? null;
-      } catch (cause) {
-        console.error("Model broker usage refresh failed", cause);
-        planUsage ??= orchestrator.plans();
-      }
-    } else {
-      planUsage = orchestrator.plans();
-      if (HOST_ADMINISTRATOR) ownUsage = orchestrator.ownUsage();
-    }
-    if (HOST_ADMINISTRATOR) {
-      try {
-        const names = new Map(listPersons().map((person) => [person.user, person.displayName]));
-        peopleUsage = readPeopleUsage((windowMs) => orchestrator.personUsage(windowMs), userInfo().username, names);
-      } catch (cause) {
-        console.error("People usage refresh failed", cause);
-      }
-    }
+    const result = await core.usage();
+    observeError(db, "core-usage", result.ok ? null : result.error.message);
+    if (!result.ok) return;
+    planUsage = result.value.plans;
+    ownUsage = result.value.personal;
+    allowance = result.value.allowance;
   })().finally(() => { planUsageRefresh = null; });
 }
 
@@ -632,15 +425,7 @@ const json = (data: unknown, status = 200) => new Response(JSON.stringify(data),
   },
 });
 
-let imageProvider: SharedImageGenerationService | undefined;
-const inlineImages = new InlineImages(db, join(DATA, "inline-images"), async (input, signal) => {
-  try {
-    imageProvider ??= createSharedImageGenerationService({ ledgerPath: ORCHESTRATOR_DB_PATH });
-    return await imageProvider.generateImageWithSharedAccount(input, { signal });
-  } catch (cause) {
-    return { ok: false, error: { message: cause instanceof Error ? cause.message : String(cause) } };
-  }
-}, signalSync, 2, ownsSupervisorLease, id => liveThread(id)?.metadata?.sandbox !== true);
+const inlineImages = new InlineImages(db, coreConfig, signalSync, message => observeError(db, "images", message));
 
 /** Live event streams by id, the only thing a client keeps open. */
 const streams = new Map<string, ClientStream>();
@@ -767,18 +552,22 @@ async function sessionFileResponse(url: URL, method: string, req: Request): Prom
 // The meeting root is the conversation thread the room is attached to; Voice hard-steers it on
 // every handoff, so it routes work to worker threads. Workers inherit the meeting through their parent.
 function meetingInstructions(sessionId: string, audience: "thread" | "voice" = "thread"): string {
-  const thread = threads.get(sessionId) ?? peerThreads.get(sessionId);
+  const thread = threads.get(sessionId);
   if (!thread || !remotePlacement(thread).meetingId) return "";
   if (audience === "voice") return liveDevInstructions();
   return meetingThreadInstructions(thread.metadata?.liveDispatcher === true ? "root" : "worker");
 }
 
-function effectiveThreadContextSelection(sessionId: string): ThreadContextSelection {
+function effectiveThreadContextSelection(sessionId: string): ThreadContextSelection | undefined {
   const thread = threads.get(sessionId);
-  if (!thread) throw new Error("Context selection requires an owned thread");
-  const destination = THREAD_DESTINATIONS.get(String(thread.metadata?.profileId ?? ""));
-  if (thread.metadata?.manager === true && !destination) throw new Error("Manager context destination is unavailable");
-  return unwrap(reconcileThreadContextSelection(thread, destinationContextSources(destination), metadata => threads.update(sessionId, { metadata })));
+  if (!thread) return undefined;
+  if (thread.metadata?.manager === true) {
+    const destination = THREAD_DESTINATIONS.get(String(thread.metadata.profileId ?? ""));
+    if (!destination) throw new Error("Core manager context destination is unavailable");
+    const sources = destinationContextSources(destination);
+    return { mode: "all", files: sources ? listContextFiles(sources).map(offer => offer.name) : [] };
+  }
+  return storedThreadContextSelection(thread.metadata);
 }
 
 /** Whole current-destination context, reread each turn; workers never inherit the manager's selection. */
@@ -786,6 +575,7 @@ function chosenContextFiles(sessionId: string): string {
   const thread = threads.get(sessionId);
   if (!thread) return "";
   const selection = effectiveThreadContextSelection(sessionId);
+  if (!selection) return "";
   const sources = destinationContextSources(THREAD_DESTINATIONS.get(String(thread.metadata?.profileId ?? "")));
   return contextFilesPrompt(sources, selection.files, selection.mode === "all");
 }
@@ -831,7 +621,7 @@ function cachedThreadLookup(known: ReadonlyMap<string, Thread>, read: ThreadLook
     return missing.get(id)!;
   };
 }
-const liveThread: ThreadLookup = id => threads.get(id) ?? peerThreads.get(id) ?? null;
+const liveThread: ThreadLookup = id => threads.get(id) ?? null;
 /** A worker's placement is inherited: the nearest ancestor that set each key wins. */
 function remotePlacement(thread: Thread, lookup: ThreadLookup = liveThread): Record<string, unknown> {
   const seen = new Set<string>();
@@ -856,16 +646,10 @@ const threadViewRows = db.query("SELECT id,idle_unread,color FROM thread_views")
  * runtime events, and a long-lived account has thousands of threads.
  */
 function threadTable(options: { archived?: boolean } = {}) {
-  const local = threads.snapshot(options);
-  const byId = new Map<string, Thread>();
-  for (const thread of local) byId.set(thread.id, thread);
-  for (const thread of peerThreads.values()) byId.set(thread.id, thread);
-  // An active worker's parent may itself be archived; placement still comes from it.
-  const lookup = cachedThreadLookup(byId, id => threads.get(id) ?? null);
+  const all = threads.snapshot(options);
+  const lookup = cachedThreadLookup(new Map(all.map(thread => [thread.id, thread])), liveThread);
   const views = new Map((threadViewRows.all() as ThreadView[]).map(view => [view.id, view]));
-  const peers = [...peerThreads.values()].filter(thread => options.archived !== false || !thread.metadata?.archived);
-  const all = [...local, ...peers];
-  return { local, all, lookup, rows: () => all.map(thread => threadRow(thread, lookup, views.get(thread.id) ?? null)) };
+  return { local: all, all, lookup, rows: () => all.map(thread => threadRow(thread, lookup, views.get(thread.id) ?? null)) };
 }
 function threadRow(thread: Thread, lookup: ThreadLookup = liveThread, view: ThreadView | null = threadViewRow.get(thread.id) as ThreadView | null): any {
   const meta = { ...remotePlacement(thread, lookup), ...thread.metadata };
@@ -883,21 +667,15 @@ function threadRow(thread: Thread, lookup: ThreadLookup = liveThread, view: Thre
     color: view?.color ?? null,
     created_at: new Date(thread.createdAt).toISOString(), updated_at: new Date(thread.updatedAt).toISOString() };
 }
-const sessionRow = { get(id: string) { const found = threads.get(id) ?? peerThreads.get(id); return found ? threadRow(found) : null; } };
+const sessionRow = { get(id: string) { const found = threads.get(id); return found ? threadRow(found) : null; } };
 function allThreadRows() { return threadTable().rows(); }
 const activeSessionRows = { all: () => threadTable({ archived: false }).rows().filter(row => !row.archived_at) };
 async function archivedSessionPage(params = new URLSearchParams()) {
   const query = archivedSessionQuery(params);
-  const owners = query.conversationsOnly || !fleet ? [threads] : [threads, fleet];
-  const result = await archivedAcrossOwners(owners, query);
+  const result = await threads.archived(query);
   if (!result.ok) return result;
   if (result.value.kind !== "page") return { ok: false as const, error: { code: "unavailable" as const, message: "The archive owner did not return a page" } };
   const selected = result.value.threads;
-  if (fleet) {
-    const ancestors = await readPeerAncestors(fleet, selected.filter(thread => !threads.get(thread.id)), id => threads.get(id), peerThreads);
-    if (!ancestors.ok) return ancestors;
-    for (const [id, thread] of ancestors.value) { peerThreads.set(id, thread); ensureThreadView(db, id); }
-  }
   const lookup = cachedThreadLookup(new Map(selected.map(thread => [thread.id, thread])), liveThread);
   const sessions = publicSessions(selected.map(thread => threadRow(thread, lookup)));
   return { ok: true as const, value: { sessions, total: result.value.total, offset: query.offset, limit: query.limit,
@@ -938,28 +716,11 @@ function recordResponseMetrics(sessionId: string, metrics: ResponseMetrics | nul
 }
 
 function touchSession(_id: string) { signalSync(); }
-const recordThreadView = createThreadViewRecorder(directory, liveThread, thread => {
-  if (!threads.get(thread.id)) peerThreads.set(thread.id, thread);
-});
+const recordThreadView = createThreadViewRecorder(directory, liveThread, () => {});
 async function markSessionViewed(id: string, reopened = false) {
   await recordThreadView(id, reopened);
   const result = db.query("UPDATE thread_views SET idle_unread=0 WHERE id=? AND idle_unread<>0").run(id);
   if (result.changes) signalSync();
-}
-function nextThreadName(): string {
-  const current = Number((db.query("SELECT value FROM metadata WHERE key='last_thread_number'").get() as any)?.value ?? 0);
-  db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES('last_thread_number',?)").run(String(current + 1));
-  return String(current + 1);
-}
-
-function creationName(requestId: string): string {
-  return db.transaction(() => {
-    const saved = db.query("SELECT title FROM thread_creation_names WHERE request_id=?").get(requestId) as { title: string } | null;
-    if (saved) return saved.title;
-    const title = nextThreadName();
-    db.query("INSERT INTO thread_creation_names(request_id,title) VALUES(?,?)").run(requestId, title);
-    return title;
-  })();
 }
 
 
@@ -991,9 +752,9 @@ function supervisorState(): SupervisorState {
   const table = threadTable({ archived: false });
   return {
     sessions: publicSessions(table.rows().filter(row => !row.archived_at), table.local),
-    archivedTotal: threads.archivedCount() + peerArchivedTotal,
+    archivedTotal: threads.archivedCount(),
     ownerErrors: [
-      { owner: "fleet", feedback: peerFeedback(peerError) },
+      { owner: "core", feedback: observeFailure(db, "core", coreError ? { message: coreError, recovery: "automatic", impact: "Thread updates are delayed; the last core projection is retained.", attentionAfterMs: 60_000 } : null) },
       ...[...notificationErrors].map(([owner, message]) => ({ owner, feedback: notificationFeedback(owner, message) })),
     ].flatMap(({ owner, feedback }) => feedback ? [{ owner, ...feedback }] : []),
   };
@@ -1004,12 +765,10 @@ function supervisorState(): SupervisorState {
 // makes that row differ from the shared projection.
 function publicSessions(rows: any[], local: Thread[] = threads.snapshot({ archived: false })): Session[] {
   const parents = new Set(local.map(thread => thread.parentId));
-  const localIds = new Set(local.map(thread => thread.id));
-  return rows.filter(row => !ROOMS_ENABLED || !roomMetadata(row.metadata?.room)).map(row => publicSession(row, parents.has(row.id) || Boolean(peerChildren.get(row.id)), false,
-    localIds.has(row.id) || (row.archived_at && threads.get(row.id)) ? "person" : "fleet"));
+  return rows.filter(row => !ROOMS_ENABLED || !roomMetadata(row.metadata?.room)).map(row => publicSession(row, parents.has(row.id), false, "person"));
 }
 function pendingMessages(id: string) {
-  return threads.get(id) ? threads.pending(id) : peerInspections.get(id)?.pending ?? [];
+  return threads.pending(id);
 }
 function queuedMessagesFor(id: string): QueuedMessage[] {
   const acknowledgement = liveThread(id)?.metadata?.acknowledgementWait as { overdue?: boolean } | undefined;
@@ -1021,17 +780,15 @@ function queuedMessagesFor(id: string): QueuedMessage[] {
       id: message.id, text: decodeMessageReply(message.text).text, delivery: message.delivery,
       state: waiting ? "queued" as const : "dispatched" as const,
       ...(!waiting && message.insertedAt == null ? { acknowledgement: acknowledgement?.overdue ? "unconfirmed" as const : "pending" as const } : {}),
-      canSteer: waiting && message.delivery === "queue",
-      canHardSteer: waiting,
       canCancel: waiting,
       createdAt: new Date(message.createdAt).toISOString(),
     };
   });
 }
 function publicSession(row: any,
-  hasChildren = threads.snapshot({ archived: false }).some(thread => thread.parentId === row.id) || Boolean(peerChildren.get(row.id)),
+  hasChildren = threads.snapshot({ archived: false }).some(thread => thread.parentId === row.id),
   queued = true,
-  origin: Session["origin"] = threads.get(row.id) ? "person" : "fleet",
+  origin: Session["origin"] = "person",
 ): Session {
   const live = liveProjections.get(row.id);
   return {
@@ -1042,7 +799,6 @@ function publicSession(row: any,
     manager: row.metadata?.manager === true,
     contextSelection: threads.get(row.id) ? effectiveThreadContextSelection(row.id) : storedThreadContextSelection(row.metadata),
     foreground: typeof row.metadata?.foreground === "boolean" ? row.metadata.foreground : origin === "person" && !row.parentId && !row.metadata?.watchList,
-    agentName: typeof row.metadata?.agentName === "string" ? row.metadata.agentName : liveThread(row.id)?.agentName,
     dependencies: row.metadata?.peerDependencies,
     attentionSummary: typeof row.metadata?.attentionSummary === "string" ? row.metadata.attentionSummary : undefined,
     waitingOnAgents: row.waitingOnAgents,
@@ -1058,7 +814,7 @@ function publicSession(row: any,
     idleUnread: notificationUnread(db, currentNotificationPolicy(), row.id, Boolean(row.idle_unread)),
     humanAttention: currentNotificationPolicy()?.view === "classic" || notificationUnread(db, currentNotificationPolicy(), row.id, Boolean(row.idle_unread)),
     queuedMessages: queued ? queuedMessagesFor(row.id) : [],
-    ...(queued ? { inputs: threads.get(row.id) ? threads.inputStates(row.id) : peerInspections.get(row.id)?.inputs } : {}),
+    ...(queued ? { inputs: threads.inputStates(row.id) } : {}),
     archivedAt: row.archived_at,
   };
 }
@@ -1072,7 +828,7 @@ function publicSession(row: any,
 // hold, which it remembers on the ClientStream.
 
 function bootstrap(): Bootstrap {
-  return { environmentId: ENVIRONMENT_ID, home: HOME, managerOwnerEnvironmentId: MANAGER_ENVIRONMENT_ID, manager: manager?.snapshot() ?? null, threadStarts: threadStartProfiles(), speech: speech?.catalog() ?? null, ...(ROOMS_ENABLED ? { rooms: true } : {}) };
+  return { environmentId: ENVIRONMENT_ID, home: HOME, managerOwnerEnvironmentId: MANAGER_ENVIRONMENT_ID, manager: manager?.snapshot() ?? null, threadStarts: threadStartProfiles(), ...(ROOMS_ENABLED ? { rooms: true } : {}) };
 }
 
 let stateEncoded = "";
@@ -1117,7 +873,7 @@ function pushBootstrap(): void {
 function sendState(stream: ClientStream): void {
   const selected = stream.subscription.session;
   const sessions = streamSessions(stateSnapshot.sessions, selected).map(session => session.id === selected
-    ? { ...session, queuedMessages: queuedMessagesFor(selected), inputs: threads.get(selected) ? threads.inputStates(selected) : peerInspections.get(selected)?.inputs } : session);
+    ? { ...session, queuedMessages: queuedMessagesFor(selected), inputs: threads.inputStates(selected) } : session);
   stream.publish({ type: "state", sessions, archivedTotal: stateSnapshot.archivedTotal, ownerErrors: stateSnapshot.ownerErrors });
   if (stream.subscription.workers) stream.publish({ type: "workers", sessions: fleetSessions(stateSnapshot.sessions) });
 }
@@ -1131,7 +887,7 @@ function sendImages(stream: ClientStream): void {
 async function readSessionQuestions(id: string) {
   const policy = await loadNotificationPolicy();
   if (!policy.ok) return policy;
-  const result = await (threads.get(id) ? threads.questions(id) : peerThreads.has(id) && fleet ? fleet.questions(id) : directory.questions(id));
+  const result = await directory.questions(id);
   return result.ok ? { ok: true as const, value: humanQuestions(db, policy.value, result.value) } : result;
 }
 const questionFeed = new QuestionFeed(readSessionQuestions, resource => {
@@ -1155,6 +911,10 @@ function sendEvents(stream: ClientStream): void {
   stream.send({ type: "events", sessionId, events });
 }
 
+function notificationFeed(after: number | null) {
+  const feed = idleNotifications(db, after, notificationThread, currentNotificationPolicy());
+  return { ...feed, notifications: feed.notifications.map(notice => ({ ...notice, manager: notice.sessionId === core.managerThreadId() })) };
+}
 async function pushNotifications(target?: ClientStream): Promise<void> {
   const policy = await loadNotificationPolicy();
   if (!policy.ok) return;
@@ -1162,7 +922,7 @@ async function pushNotifications(target?: ClientStream): Promise<void> {
     let cursor = stream.subscription.notificationsAfter;
     if (cursor === undefined) continue;
     for (let page = 0; page < 16; page++) {
-      const feed = idleNotifications(db, cursor, notificationThread, currentNotificationPolicy());
+      const feed = notificationFeed(cursor);
       stream.subscription.notificationsAfter = feed.cursor;
       if (page === 0 && target || feed.cursor !== cursor || feed.notifications.length) stream.send({ type: "notifications", feed: { ...feed, policy: policy.value } });
       if (cursor === null || cursor === feed.cursor) break;
@@ -1438,7 +1198,8 @@ function handlePiEvent(sessionId: string, event: any) {
     if (rt.thinkingActive) { rt.thinkingActive = false; touchSession(sessionId); }
     const text = textFromMessage(event.message);
     if (event.message?.role === "assistant") {
-      inlineImages.accept(sessionId, sha256(text), text);
+      const images = inlineImages.accept(sessionId, sha256(text), text);
+      if (!images.ok) observeError(db, "images", images.error.message);
       recordResponseMetrics(sessionId, responseTiming.finish(sessionId, event.message, eventAt), messageFinalizationKey(event.message));
       rt.liveText = "";
       rt.messageTimestamp = null;
@@ -1517,26 +1278,10 @@ function handlePiEvent(sessionId: string, event: any) {
   } else if (event.type === "extension_error") {
     emit(sessionId, "notice", { text: "Extension error" });
   } else if (event.type === "extension_ui_request") {
-    if (["select", "confirm", "input", "editor"].includes(event.method)) {
-      void rpc(sessionId, "extension_ui_response", { id: event.id, cancelled: true }).catch(cause => console.error(cause));
-      emit(sessionId, "notice", { text: "An interactive extension dialog was cancelled on mobile." });
-    }
+    if (["select", "confirm", "input", "editor"].includes(event.method)) emit(sessionId, "notice", { text: "The headless runtime cancelled an interactive extension dialog." });
   }
 }
 
-function threadEnvironment(thread: Thread) {
-  const meta = remotePlacement(thread);
-  return { ...process.env, HOME, PI_PERSON_SETTINGS_DATA: DATA,
-    PI_REMOTE_WORKSPACES: JSON.stringify([...workspaces.values()]),
-    PI_REMOTE_SESSION_ID: thread.id, PI_THREAD_API_URL: `http://${HOST}:${PORT}/v1/threads`,
-    PI_REMOTE_SENDER_ID: MESSAGE_OWNER.id, PI_REMOTE_SENDER_NAME: MESSAGE_OWNER.name,
-    ...(ROOMS_ENABLED && roomMetadata(thread.metadata?.room) ? { PI_REMOTE_ROOM_ID: thread.id } : {}),
-    PI_SESSION_ID: thread.id, PI_SESSION_FILE: thread.sessionFile,
-    PI_REMOTE_MEETING_ID: String(meta.meetingId ?? ""),
-    PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS: String(bashTimeoutSeconds(meta.bashTimeoutSeconds)),
-    PI_REMOTE_SERVER_URL: `http://${HOST}:${PORT}`, PI_CODING_AGENT_DIR: AGENT_DIR,
-  };
-}
 
 function canonicalModelProvider(provider: string): string {
   if (/^openai-codex(?:-\d+)?$/.test(provider)) return "openai-codex";
@@ -1586,13 +1331,11 @@ async function runCommand(row: any, requestId: string, name: string, args: strin
   if (previous) return { response: JSON.parse(previous.response), status: previous.status };
   const response = name === "compact"
     ? await rpc(row.id, "compact", { id: requestId, customInstructions: args || undefined })
-    : await enqueuePrompt(row.id, requestId, `/${name}${args ? ` ${args}` : ""}`, resolveDelivery({}), [], humanActivity);
+    : await enqueuePrompt(row.id, requestId, `/${name}${args ? ` ${args}` : ""}`, [], humanActivity);
   saveRequest(requestId, row.id, "command", 202, response);
   return { response, status: 202 };
 }
 async function directChildren(id: string): Promise<Result<Session[]>> {
-  const owner = await directory.owner(id);
-  if (!owner.ok) return owner;
   const children: Thread[] = [];
   let cursor: string | undefined;
   do {
@@ -1601,8 +1344,7 @@ async function directChildren(id: string): Promise<Result<Session[]>> {
     children.push(...page.value.threads);
     cursor = page.value.nextCursor;
   } while (cursor);
-  for (const thread of children) if (!threads.get(thread.id)) { peerThreads.set(thread.id, thread); ensureThreadView(db, thread.id); }
-  if (!threads.get(id)) peerChildren.set(id, children.length > 0);
+  for (const thread of children) ensureThreadView(db, thread.id);
   const lookup = cachedThreadLookup(new Map(children.map(thread => [thread.id, thread])), liveThread);
   return { ok: true, value: publicSessions(children.map(thread => threadRow(thread, lookup))) };
 }
@@ -1667,30 +1409,38 @@ async function prepareThreadMessage(thread: Thread, message: ThreadMessage): Pro
     if (!sender) return { ok: false, error: { code: "unavailable", message: "Room question answer has no authenticated speaker" } };
     return { ok: true, value: { text: roomInput(sender, message.text), images: message.images } };
   }
-  const meetingId = remotePlacement(thread).meetingId;
-  if (typeof meetingId !== "string" || !meetingId) return { ok: true, value: { text: message.text, images: message.images } };
   try {
+    const stored = db.query("SELECT session_id,meeting_transcript FROM message_annotations WHERE work_id=?").get(message.id) as { session_id: string | null; meeting_transcript: string } | null;
+    if (stored && stored.session_id !== thread.id) return { ok: false, error: { code: "conflict", message: "Meeting preparation identity belongs to another thread" } };
+    if (stored) {
+      const handoff = meetingHandoffText(JSON.parse(stored.meeting_transcript));
+      return { ok: true, value: { text: [message.text, handoff].filter(Boolean).join("\n\n"), images: message.images } };
+    }
+    const meetingId = remotePlacement(thread).meetingId;
+    if (typeof meetingId !== "string" || !meetingId) return { ok: true, value: { text: message.text, images: message.images } };
     await meet.flushTranscript(meetingId);
     const transcript = await prepareMeetingHandoff(meet.transcripts, meetingId, thread.id, handoffHistory);
-    db.query("INSERT OR REPLACE INTO message_annotations(work_id,session_id,created_at,meeting_transcript) VALUES(?,?,?,?)")
+    db.query("INSERT OR IGNORE INTO message_annotations(work_id,session_id,created_at,meeting_transcript) VALUES(?,?,?,?)")
       .run(message.id, thread.id, now(), JSON.stringify(transcript));
-    const handoff = meetingHandoffText(transcript);
+    const receipt = db.query("SELECT session_id,meeting_transcript FROM message_annotations WHERE work_id=?").get(message.id) as { session_id: string | null; meeting_transcript: string };
+    if (receipt.session_id !== thread.id) return { ok: false, error: { code: "conflict", message: "Meeting preparation identity belongs to another thread" } };
+    const handoff = meetingHandoffText(JSON.parse(receipt.meeting_transcript));
     return { ok: true, value: { text: [message.text, handoff].filter(Boolean).join("\n\n"), images: message.images } };
   } catch (cause) {
     return { ok: false, error: { code: "unavailable", message: cause instanceof Error ? cause.message : String(cause) } };
   }
 }
 
-function notificationThread(id: string): { parentId: string | null; role?: "agent" | "conversation" | "worker"; foreground?: boolean } | null {
-  const thread = threads.get(id) ?? peerThreads.get(id);
+function notificationThread(id: string): { parentId: string | null; role?: Thread["role"]; foreground?: boolean } | null {
+  const thread = threads.get(id);
   if (ROOMS_ENABLED && roomMetadata(thread?.metadata?.room)) return null;
   if (thread) return { parentId: thread.parentId, role: thread.role,
     foreground: typeof thread.metadata?.foreground === "boolean" ? thread.metadata.foreground : undefined };
   return ROOMS_ENABLED && db.query("SELECT value FROM metadata WHERE key=?").get(`room-link:${id}`) ? { parentId: null } : null;
 }
 
-async function enqueuePrompt(sessionId: string, requestId: string, text: string, delivery: "queue" | "steer" | "hardSteer", images: ImageContent[] = [], humanActivity = false) {
-  const sent = await directory.send({ threadId: sessionId, requestId, text, delivery, images, humanActivity });
+async function enqueuePrompt(sessionId: string, requestId: string, text: string, images: ImageContent[] = [], humanActivity = false) {
+  const sent = await directory.send({ threadId: sessionId, requestId, text, images, humanActivity });
   const message = unwrap(sent);
   return { accepted: true, workId: message.id, delivery: message.delivery, session: publicSession(sessionRow.get(sessionId)) };
 }
@@ -1705,21 +1455,29 @@ async function insertThread(id: string, name: string, destination: ThreadDestina
   const thread = unwrap(await directory.spawn({ id, requestId: id, title: name, parentId, createdBy,
     cwd: admitted.value.cwd, message, settings: { model, ...settings },
     metadata: { workspaceId: destination.workspaceId, profileId: destination.id, meetingId, ...(mode ? { mode, liveDispatcher: mode === "live" } : {}), ...(destination.raw ? { raw: true } : {}),
-      ...(destination.sandbox ? { sandbox: true } : {}),
       ...(contextFiles.length ? { contextFiles } : {}) },
   }));
   ensureThreadView(db, thread.id);
   return thread;
 }
+unwrap(await core.refreshProjection());
+beginSupervisorGeneration(db, SUPERVISOR_EPOCH);
 const unsubscribeThreads = threads.subscribe(change => {
-  if ("event" in change) handlePiEvent(change.threadId, change.event);
-  else { ensureThreadView(db, change.threadId); const thread = threads.get(change.threadId); if (thread) noteModelRecency(thread); if (thread?.metadata?.rootConsent === true) signalTranscript(change.threadId); signalSync(); void refreshThreadNotifications(); }
+  if (change.event) handlePiEvent(change.threadId, change.event);
+  else {
+    ensureThreadView(db, change.threadId);
+    if (change.live) restoreLiveProjection(liveFor(change.threadId), change.live);
+    const thread = threads.get(change.threadId);
+    if (thread) noteModelRecency(thread);
+    signalTranscript(change.threadId); signalSync(); signalLiveSync(); void refreshThreadNotifications();
+  }
 });
 {
   const table = threadTable();
-  for (const thread of table.all) { ensureThreadView(db, thread.id); noteModelRecency(thread, table.lookup); }
+  for (const thread of table.all) { ensureThreadView(db, thread.id); noteModelRecency(thread, table.lookup); restoreLiveProjection(liveFor(thread.id), core.live(thread.id)); }
 }
-await inlineImages.start();
+const imageStartup = await inlineImages.start();
+if (!imageStartup.ok) throw new Error(`Core images unavailable: ${imageStartup.error.message}`);
 
 const meetingRuntime = await MeetGateway.connect(db, {
   sessionExists: (id) => {
@@ -1745,14 +1503,10 @@ const externalActions = ENVIRONMENT_REQUIRES_UNLOCK
     : new ActionClient(`http://127.0.0.1:${process.env.PI_REMOTE_ROUTER_PORT ?? "8788"}`)
   : null;
 const messaging = createMessagingService(DATA, PRIVATE_DIR, ENVIRONMENT_REQUIRES_UNLOCK, () => { trackFeature("signal", "agent"); }, externalActions ?? undefined);
-const calendar = new CalendarStore(DATA, process.env.PI_REMOTE_SENDER_ID ?? process.env.USER ?? "user", process.env.PI_REMOTE_CALENDAR_FEED_BASE);
 if (process.env.PI_PERSON_TIMEZONE_FILE) {
-  if (!calendar.timezoneMigration.ok) throw new Error(`Owner timezone migration unavailable: ${calendar.timezoneMigration.error.message}`);
   const timezone = reconcilePersonTimezoneProjection(DATA, process.env.PI_PERSON_TIMEZONE_FILE);
   if (!timezone.ok) throw new Error(`Owner timezone projection unavailable: ${timezone.error.message}`);
 }
-observeError(db, "settings-migration", calendar.timezoneMigration.ok ? null : calendar.timezoneMigration.error.message);
-calendar.start();
 type SocketData = PhoneSocketData;
 const phones = new PhoneBroker({
   commandUsed: () => { trackFeature("phone", "agent"); },
@@ -1770,20 +1524,27 @@ const phones = new PhoneBroker({
     phoneOverlay?.ready(device);
   },
 });
+db.exec("CREATE TABLE IF NOT EXISTS phone_overlay_inputs(device_id TEXT NOT NULL,message_id TEXT NOT NULL,input TEXT NOT NULL,prepared TEXT NOT NULL,PRIMARY KEY(device_id,message_id))");
 phoneOverlay = new PhoneOverlay({
-  thread: id => { const row = sessionRow.get(id) as any; return row ? { archived: Boolean(row.archived_at) } : null; },
-  create: async (message, device) => {
-    const destination = meetingDestination();
-    const id = crypto.randomUUID();
-    await insertThread(id, `Phone · ${device.name}`, destination, destination.defaultModel, null, message, undefined, undefined, [], { kind: "person", via: "upstream" });
-    signalSync();
-    return id;
+  prepare: (deviceId, messageId, input, proposed) => {
+    db.query("INSERT OR IGNORE INTO phone_overlay_inputs VALUES(?,?,?,?)").run(deviceId, messageId, input, proposed);
+    const receipt = db.query("SELECT input,prepared FROM phone_overlay_inputs WHERE device_id=? AND message_id=?").get(deviceId, messageId) as { input: string; prepared: string };
+    if (receipt.input !== input) throw new Error("Phone overlay source identity has conflicting content");
+    return receipt.prepared;
   },
-  prompt: async (threadId, requestId, text) => { await enqueuePrompt(threadId, requestId, text, "steer", [], true); },
+  thread: id => { const row = sessionRow.get(id) as any; return row ? { archived: Boolean(row.archived_at) } : null; },
+  create: async (message, _device, requestId) => {
+    const managerThreadId = core.managerThreadId();
+    if (!managerThreadId) throw new Error("Core scope has no managing conversation for the phone overlay");
+    unwrap(await directory.send({ threadId: managerThreadId, requestId, text: message, humanActivity: true }));
+    signalSync();
+    return managerThreadId;
+  },
+  prompt: async (threadId, requestId, text) => { unwrap(await directory.send({ threadId, requestId, text, humanActivity: true })); },
   send: (deviceId, command, args) => phones.send(deviceId, command, args),
   online: deviceId => phones.online(deviceId),
   load: () => (db.query("SELECT key,value FROM metadata WHERE key LIKE 'phone-overlay:%'").all() as Array<{ key: string; value: string }>)
-    .map(row => ({ deviceId: row.key.slice("phone-overlay:".length), threadId: row.value })),
+    .flatMap(row => { const threadId = core.managerThreadId(); return threadId ? [{ deviceId: row.key.slice("phone-overlay:".length), threadId }] : []; }),
   save: (deviceId, threadId) => { db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)").run(`phone-overlay:${deviceId}`, threadId); },
   log: message => console.warn(message),
 });
@@ -1793,7 +1554,7 @@ const server = Bun.serve<SocketData>({
   port: PORT,
   idleTimeout: 30,
   async fetch(req, httpServer) {
-    return jsonHttp(req, await (async () => {
+    return jsonHttp(req, await core.withCaller(req, async () => {
     const url = new URL(req.url);
     if (req.method === "OPTIONS" && url.pathname.startsWith("/v1/")) {
       return new Response(null, {
@@ -1803,10 +1564,33 @@ const server = Bun.serve<SocketData>({
     }
     if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
     if (shuttingDown && !supervisorRelease.accepts(req.method, url.pathname)) return error("Supervisor is handing over; retry after activation", 503);
-    if (API.health.match(req.method, url.pathname)) return json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, releaseCommit: RELEASE_COMMIT, meetingRuntime: { protocol: "meet-runtime-v1", lifetime: "person-service" } });
+    if (API.health.match(req.method, url.pathname)) return json({ ok: coreError === null, version: VERSION, environmentId: ENVIRONMENT_ID, releaseCommit: RELEASE_COMMIT, core: { scopeId: coreConfig.scopeId, error: coreError }, meetingRuntime: { protocol: "meet-runtime-v1", lifetime: "person-service" } }, coreError === null ? 200 : 503);
+    if (url.pathname === "/v1/core/prepare-message" && req.method === "POST") {
+      if (req.headers.get("authorization") !== `Bearer ${coreConfig.token}`) return error("Core service authentication required", 403);
+      const input = await readBody(req);
+      if (!input?.thread || !input?.message || typeof input.thread.id !== "string" || input.message.threadId !== input.thread.id) return error("Expected scoped thread/message input", 400);
+      const owned = await threads.inspect(input.thread.id, { context: "omit" });
+      if (!owned.ok) return threadError(owned.error);
+      return json(await prepareThreadMessage(owned.value.thread, input.message));
+    }
+    if (url.pathname.startsWith("/v1/core/manager-relay/") && req.method === "POST") {
+      if (req.headers.get("authorization") !== `Bearer ${coreConfig.token}`) return error("Core service authentication required", 403);
+      const operation = url.pathname.slice("/v1/core/manager-relay/".length);
+      if (!["managerNotificationPolicy", "managerWorkSummary", "send", "questionOrigin", "managerQuestionCustody"].includes(operation)) return error("Unknown core manager transport operation", 400);
+      const body = await readBody(req);
+      if (!body?.input || typeof body.input !== "object" || Array.isArray(body.input) || Object.keys(body).some(key => key !== "input" && key !== "environmentId")) return error("Expected a manager relay envelope", 400);
+      try {
+        return await fetch(`http://127.0.0.1:${process.env.PI_REMOTE_ROUTER_PORT ?? "8788"}/v1/agent-manager/${operation}`, {
+          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+          signal: AbortSignal.any([req.signal, AbortSignal.timeout(30_000)]),
+        });
+      } catch (cause) { return json({ ok: false, error: { code: "unavailable", message: `Manager relay outcome unconfirmed: ${String(cause)}; reconcile the original request identity` } }, 503); }
+    }
     const peer = httpServer.requestIP(req);
     const caller: CallerSource = { headers: req.headers, socket: peer ? { address: peer.address, port: peer.port, localAddress: HOST, localPort: PORT } : undefined };
-    const humanCaller = () => { const resolved = callers.resolve(caller); return !("error" in resolved) && resolved.kind === "person"; };
+    const resolvedCaller = callers.resolve(caller);
+    if ("error" in resolvedCaller || !phoneCallerAllowed(resolvedCaller, process.getuid?.() ?? -1)) return error("This person's authenticated ingress is required", 403);
+    const humanCaller = () => resolvedCaller.kind === "person";
     if (API.featureUsage.match(req.method, url.pathname) || API.recordFeatureUsage.match(req.method, url.pathname)) {
       const resolved = callers.resolve(caller);
       if ("error" in resolved || !phoneCallerAllowed(resolved, process.getuid?.() ?? -1)) return error("Feature usage requires this person's authorized caller", 403);
@@ -1826,14 +1610,6 @@ const server = Bun.serve<SocketData>({
       const resolved = callers.resolve(caller);
       const phone = ownedPhoneActionCaller(req, MESSAGE_OWNER.id, peer?.address === "127.0.0.1" || peer?.address === "::1");
       return externalActionsEndpoint(req, externalActions, externalActionCaller(resolved, process.getuid?.() ?? -1, manager?.snapshot().managerThreadId ?? null, phone));
-    }
-    if (url.pathname.startsWith("/v1/telephone/")) {
-      const destination = meetingDestination();
-      const admitted = workspaceAdmission.resolve(destination.workspaceId);
-      if (!admitted.ok) return error(admitted.error.message, 503);
-      return telephoneDispatcher(req, { threads, owner: MESSAGE_OWNER.id, cwd: admitted.value.cwd,
-        model: destination.defaultModel, loopback: peer?.address === "127.0.0.1" || peer?.address === "::1",
-        onApproved: callId => { trackFeature("telephone", "agent", callId); } });
     }
     if (API.settings.match(req.method, url.pathname)) return json(await settingsService.snapshot());
     const settingUpdate = API.updateSetting.match(req.method, url.pathname);
@@ -1863,8 +1639,8 @@ const server = Bun.serve<SocketData>({
             metadata: { workspaceId: destination.workspaceId, profileId: destination.id, room: { id, members } } }));
           ensureThreadView(db, id);
         },
-        update: async (id, members) => { unwrap(threads.update(id, { metadata: { room: { id, members } } })); },
-        send: async (id, requestId, text) => { await enqueuePrompt(id, requestId, text, "queue", [], humanCaller()); },
+        update: async (id, members) => { unwrap(await threads.update(id, { metadata: { room: { id, members } } })); },
+        send: async (id, requestId, text) => { await enqueuePrompt(id, requestId, text, [], humanCaller()); },
         history: async (id, options) => {
           const inspect = async (before: number | undefined, limit: number, revision?: string) => {
             const result = await directory.inspect(id, { contextRecords: { includeEntries: true,
@@ -1904,7 +1680,7 @@ const server = Bun.serve<SocketData>({
           const target = `room:${id}`;
           if (policy.view === "mono") {
             unwrap(await directory.send({ threadId: policy.managerThreadId, senderId: target, requestId: `manager-notice:room:${receiptId}`,
-              source: "notification", delivery: "steer", text: `Room update from ${title} (${target}): ${body}` }));
+              source: "notification", text: `Room update from ${title} (${target}): ${body}` }));
           } else {
             db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)").run(`room-link:${target}`, "1");
             recordIdleNotification(db, receiptId, { id: target, title }, time, { kind: "idle", body });
@@ -1912,71 +1688,6 @@ const server = Bun.serve<SocketData>({
           signalSync();
         },
       });
-    }
-    const dismissNeed = API.dismissNeed.match(req.method, url.pathname);
-    if (API.needsYou.match(req.method, url.pathname) || dismissNeed) {
-      const resolved = callers.resolve(caller);
-      if ("error" in resolved || !phoneCallerAllowed(resolved, process.getuid?.() ?? -1)) return error("Needs you requires this person's authorized router or local caller", 403);
-      if (process.env.PI_REMOTE_ROOMS_RUNTIME === "1") return error("Life projections are not available in rooms", 403);
-      if (url.search) return error("Needs you accepts no person or scope parameters", 400);
-      const client = lifeClient();
-      if (dismissNeed) {
-        const target = parseNeedsYouDismissal(await readBody(req));
-        if (target === null) return json({ ok: false, error: "invalid-request", message: "Expected a current need dismissal target." }, 400);
-        const result = await dismissNeedsYou(target, {
-          client, now: new Date().toISOString(),
-          findQuestion: async questionId => {
-            const pending = await readNeedsYouQuestions(directory.owners, thread => !roomMetadata(thread.metadata?.room), []);
-            const question = pending.questions.find(question => question.id === questionId);
-            if (question) return { ok: true, threadId: question.threadId };
-            return pending.errors.length ? { ok: false, message: pending.errors.join("; ") } : { ok: true, threadId: null };
-          },
-          dismissQuestion: async (threadId, questionId) => {
-            let questionDismissed = false;
-            try {
-              const source = await directory.inspect(threadId, { context: "omit" });
-              if (!source.ok) return { ok: false, error: "question-failed", message: source.error.message };
-              if (roomMetadata(source.value.thread.metadata?.room)) return { ok: false, error: "invalid-state", message: "Room questions must be settled in their room." };
-              const answer = await directory.answer({ threadId, questionId, selectedSuggestionIds: [], text: "", dismissed: true });
-              if (!answer.ok) return { ok: false, error: "question-failed", message: answer.error.message };
-              questionDismissed = true;
-              await questionFeed.settle(threadId);
-              for (const stream of sessionSubscribers(threadId)) void sendQuestions(stream);
-              return { ok: true };
-            } catch (cause) { return { ok: false, error: "unavailable", message: cause instanceof Error ? cause.message : String(cause), ...(questionDismissed ? { questionDismissed: true as const } : {}) }; }
-          },
-        });
-        signalSync();
-        const status = result.ok ? 200 : result.error === "conflict" ? 409 : result.error === "not-found" ? 404 : result.error === "invalid-request" || result.error === "invalid-state" ? 400 : 503;
-        return json(result, status);
-      }
-      const lifeRead = client.request<LifeSnapshot>({ operation: "read", target: { scope: "self" } });
-      const [life, pending, watch, policy] = await Promise.all([
-        lifeRead,
-        lifeRead.then(life => readNeedsYouQuestions(directory.owners, thread => !roomMetadata(thread.metadata?.room),
-          life.ok ? [...new Set(life.value.entities.filter(entity => entity.status === "current" && entity.threadId !== null).map(entity => entity.threadId!))] : [])),
-        watchList.watch({ action: "list", threadId: "needs-you-projection" }).catch(cause => ({ ok: false as const, error: { code: "unavailable" as const, message: cause instanceof Error ? cause.message : String(cause) } })),
-        client.request<LifePolicyView>({ operation: "policy-read", target: { scope: "self" }, includeHistory: false }),
-      ]);
-      const projection = projectNeedsYou(life, pending, watch, policy, Date.now());
-      const notificationPolicy = await loadNotificationPolicy();
-      if (!notificationPolicy.ok) return threadError(notificationPolicy.error);
-      if (notificationPolicy.value.view === "mono") {
-        const visible = new Set(humanQuestions(db, notificationPolicy.value, pending.questions).map(question => question.id));
-        projection.items = projection.items.filter(item => item.kind === "question" && item.location?.questionId && visible.has(item.location.questionId));
-      }
-      return json(projection);
-    }
-    if (url.pathname === "/v1/calendar" || url.pathname.startsWith("/v1/calendar/")) {
-      const feed = url.pathname.startsWith("/v1/calendar/feed/");
-      if (!feed) {
-        const resolved = callers.resolve(caller);
-        if ("error" in resolved || !phoneCallerAllowed(resolved, process.getuid?.() ?? -1)) return error("Calendar access requires this person's authorized router or local caller", 403);
-      }
-      httpServer.timeout(req, 65);
-      const response = await calendar.handle(req);
-      if (!feed && response.ok && (req.method !== "GET" || !humanCaller())) trackFeature("calendar", humanCaller() ? "human" : "agent");
-      return response;
     }
     if (url.pathname === "/v1/phones" || url.pathname.startsWith("/v1/phones/")) {
       const connecting = !!API.phoneConnect.match(req.method, url.pathname);
@@ -2021,27 +1732,25 @@ const server = Bun.serve<SocketData>({
       httpServer.timeout(req, 65);
       return await messaging.handle(req, resolved.kind === "thread" ? resolved.threadId : null) ?? error("Unknown Signal tool operation", 404);
     }
-    const speechResponse = speech ? await speech.handle(req) : null;
-    if (speechResponse) {
-      if (speechResponse.ok && API.speechUtterances.match(req.method, url.pathname)) trackFeature("speech", humanCaller() ? "human" : "agent");
-      return speechResponse;
-    }
-    if (url.pathname.startsWith("/v1/manager-relay/")) {
+    for (const prefix of ["/v1/thread-owner", "/v1/threads", "/v1/manager-relay"]) {
+      if (!url.pathname.startsWith(`${prefix}/`)) continue;
       const resolved = callers.resolve(caller);
-      return managerRelay(req, { db, environmentId: ENVIRONMENT_ID, threads, directory, manager: manager?.snapshot() ?? null,
-        authorizedRouter: !("error" in resolved) && resolved.kind === "person" });
+      if ("error" in resolved || resolved.kind !== "thread" && resolved.kind !== "person" && resolved.kind !== "runtime" && resolved.kind !== "service") return error("Authenticated thread or owner ingress required", 403);
+      const headers = new Headers(req.headers);
+      headers.delete("x-pi-core-router-confirmed");
+      if (prefix === "/v1/manager-relay") {
+        if (resolved.kind !== "person") return error("Manager provenance requires this account's authenticated router", 403);
+        headers.set("x-pi-core-router-confirmed", "true");
+      } else headers.delete("x-pi-remote-manager-origin");
+      return core.forward(new Request(req, { headers }), prefix);
     }
-    const ownedThreadResponse = await threadHttp(threads, req, "/v1/thread-owner", admissionFor(callers, caller));
-    if (ownedThreadResponse) return ownedThreadResponse;
-    const threadResponse = await threadHttp(directory, req, "/v1/threads", admissionFor(callers, caller));
-    if (threadResponse) return threadResponse;
     const requestedSession = /^\/v1\/sessions\/([^/]+)(?:\/|$)/.exec(url.pathname);
-    if (fleet && requestedSession && requestedSession[1] !== "archived") {
+    if (requestedSession && requestedSession[1] !== "archived") {
       const id = decodeURIComponent(requestedSession[1]!);
       if (!sessionRow.get(id)) {
-        const loaded = await readPeerSession(fleet, id, id => threads.get(id), peerThreads);
+        const loaded = await threads.inspect(id, { context: "omit" });
         if (!loaded.ok) return threadError(loaded.error);
-        if (loaded.value) for (const [id, thread] of loaded.value) { peerThreads.set(id, thread); ensureThreadView(db, id); }
+        ensureThreadView(db, id);
       }
     }
     const externalResponse = await externalMeetingRequest(req, meet, (sessionId, meetingId, name) => ensureExternalMeetingThread(sessionId, meetingId, name, {
@@ -2176,6 +1885,8 @@ const server = Bun.serve<SocketData>({
       }
     }
     if (API.voice.match(req.method, url.pathname)) {
+      const row = sessionRow.get(url.searchParams.get("sessionId") ?? "") as any;
+      if (!row?.meeting_id || !meet.isLive(row.meeting_id)) return error("Voice transport requires an active external Meet", 403);
       const result = await voice.status();
       return result.ok ? json(result.value) : error(result.error, result.status);
     }
@@ -2184,6 +1895,7 @@ const server = Bun.serve<SocketData>({
       const row = sessionRow.get(sessionId) as any;
       if (!row) return error("Session not found", 404);
       if (row.archived_at) return error("Thread is archived", 409);
+      if (!row.meeting_id || !meet.isLive(row.meeting_id)) return error("Voice transport requires an active external Meet", 403);
       const result = await voice.negotiate(row.id, await req.text(), await voiceInstructions(row));
       if (result.ok) trackFeature("voice", humanCaller() ? "human" : "agent");
       return result.ok ? json(result.value, 201) : error(result.error, result.status);
@@ -2193,7 +1905,9 @@ const server = Bun.serve<SocketData>({
     const voiceSessionRequest = voiceSessionUpdate ?? voiceSessionClose;
     if (voiceSessionRequest) {
       const { sessionId, voiceId } = voiceSessionRequest;
-      if (!sessionRow.get(sessionId)) return error("Thread not found", 404);
+      const row = sessionRow.get(sessionId) as any;
+      if (!row) return error("Thread not found", 404);
+      if (!row.meeting_id || voiceSessionUpdate && !meet.isLive(row.meeting_id)) return error("Voice transport requires an external Meet", 403);
       if (voiceSessionUpdate) {
         const body = await readBody(req);
         const result = await voice.heartbeat(sessionId, voiceId, Number(body.seconds), body.finalized === true);
@@ -2348,7 +2062,7 @@ const server = Bun.serve<SocketData>({
         if (before !== null && (!Number.isSafeInteger(before) || before <= 0)) return error("Invalid history cursor");
         return json(await resolveNotificationQuestions(notificationHistory(db, before, notificationThread, 100, currentNotificationPolicy()), readSessionQuestions));
       }
-      return json({ environmentId: ENVIRONMENT_ID, ...idleNotifications(db, after, notificationThread, currentNotificationPolicy()), policy: currentNotificationPolicy() });
+      return json({ environmentId: ENVIRONMENT_ID, ...notificationFeed(after), policy: currentNotificationPolicy() });
     }
     if (API.workspaces.match(req.method, url.pathname)) {
       return json({ workspaces: [...workspaces.values()] });
@@ -2431,7 +2145,7 @@ const server = Bun.serve<SocketData>({
     if (API.sessions.match(req.method, url.pathname)) {
       if (url.searchParams.get("allAgents") === "1") {
         await refreshPeers();
-        if (peerError) return error(`Could not load the complete agent directory: ${peerError}`, 503);
+        if (coreError) return error(`Could not load the core directory: ${coreError}`, 503);
       } else void refreshPeers();
       projectState();
       return json(currentState());
@@ -2458,7 +2172,8 @@ const server = Bun.serve<SocketData>({
         if (!contextFiles.ok) return error(contextFiles.error);
         const creator = await admissionFor(callers, caller)("spawn", { parentId: body.parentId ?? undefined });
         if (!creator.ok) return error(creator.message, creator.status);
-        const thread = await insertThread(id, creationName(requestId), destination, model, null, body.message, body.parentId,
+        const title = typeof body.title === "string" && body.title.trim() ? body.title.trim() : "New conversation";
+        const thread = await insertThread(id, title, destination, model, null, body.message, body.parentId,
           { thinkingLevel: body.thinkingLevel, speed: body.speedMode },
           contextFiles.value, creator.input.createdBy);
         const response = { session: publicSession(threadRow(thread)) };
@@ -2492,16 +2207,13 @@ const server = Bun.serve<SocketData>({
       const result = await directChildren(childrenRequest.sessionId);
       return result.ok ? json({ children: result.value }) : threadError(result.error);
     }
-    const queueAction = [API.queueItem, API.queueSteer, API.queueHardSteer]
-      .map(route => ({ route, match: route.match(req.method, url.pathname) })).find(item => item.match);
-    if (queueAction?.match) {
-      const { sessionId, workId } = queueAction.match;
+    const queueAction = API.queueItem.match(req.method, url.pathname);
+    if (queueAction) {
+      const { sessionId, workId } = queueAction;
       const before = unwrap(await directory.inspect(sessionId, { context: "omit" }));
       const message = before.pending.find(item => item.id === workId);
       if (!message) return error("Pending message not found", 404);
-      const result = await directory.control(queueAction.route === API.queueItem
-        ? { threadId: sessionId, action: "cancelMessage", messageId: workId }
-        : { threadId: sessionId, action: "promoteMessage", messageId: workId, delivery: queueAction.route === API.queueHardSteer ? "hardSteer" : "steer" });
+      const result = await directory.control({ threadId: sessionId, action: "cancelMessage", messageId: workId });
       if (!result.ok) return threadError(result.error);
       return json({ ok: true, workId, text: message.text });
     }
@@ -2543,11 +2255,11 @@ const server = Bun.serve<SocketData>({
             if (!reply) return { ok: false, error: { code: "invalid_request", message: "Reply target is not a user or assistant message" } };
             text = encodeMessageReply(text, reply);
           }
-          return { ok: true, value: { text, delivery: input.delivery, images: roomImages.images } };
+          return { ok: true, value: { text, delivery: "pending", images: roomImages.images } };
         },
         send: async (threadId, requestId, prepared) => {
           if (req.signal.aborted) return { ok: false, error: { code: "unavailable", message: "The caller disconnected before admission; check the saved request explicitly." } };
-          return directory.send({ threadId, requestId, ...prepared, humanActivity: humanCaller() });
+          return directory.send({ threadId, requestId, text: prepared.text, images: prepared.images, humanActivity: humanCaller() });
         },
       });
       if (result.body.outcome === "accepted" && body && typeof body === "object" && "requestId" in body && typeof body.requestId === "string") trackFeature("chat", humanCaller() ? "human" : "agent", body.requestId);
@@ -2583,7 +2295,7 @@ const server = Bun.serve<SocketData>({
       return archived.ok ? json({ ok: true, archived: true, session: publicSession(threadRow(archived.value)) }) : threadError(archived.error);
     }
     if (row.archived_at && action !== "events" && action !== "context") return error("Thread is archived", 409);
-    if (action === "admission" && req.method === "PUT") return error("Admission belongs to Orchestrator", 405);
+    if (action === "admission" && req.method === "PUT") return error("Admission belongs to the shared core", 405);
 
     if (action === "context" && req.method === "GET") {
       const view = url.searchParams.get("view");
@@ -2707,7 +2419,7 @@ const server = Bun.serve<SocketData>({
     }
 
     return error("Not found", 404);
-    })());
+    }));
   },
   websocket: {
     perMessageDeflate: false,
@@ -2757,11 +2469,7 @@ refreshPlanUsageIfDue();
 void refreshPeers();
 
 signalSync();
-unwrap(await threads.start());
-watchList.start();
-const unreadThread = db.query("SELECT idle_unread FROM thread_views WHERE id=?");
-const stopAutoArchive = startAutoArchive(directory, AUTO_ARCHIVE_AFTER_MS, error => console.error("[supervisor] auto-archive failed", error), thread => Boolean((unreadThread.get(thread.id) as { idle_unread: number } | null)?.idle_unread),
-  thread => typeof thread.metadata?.meetingId === "string" && meet.isLive(thread.metadata.meetingId));
+core.start();
 void refreshThreadNotifications();
 
 const stopLedgerSnapshots = startLedgerSnapshots(
@@ -2800,8 +2508,6 @@ function stopSupervisorTimers() {
   liveSyncPending = false;
   clearInterval(journalRemoval);
   unwatchFile(modelAvailability.path);
-  watchList.stop();
-  stopAutoArchive();
   clearInterval(uploadPruner);
   clearInterval(dashboardTicker);
   stopThreadRefresh();
@@ -2813,8 +2519,7 @@ function stopSupervisorTimers() {
 
 async function closeImageGeneration() {
   inlineImages.stop();
-  try { await imageProvider?.close(); }
-  finally { await inlineImages.close(); }
+  await inlineImages.close();
 }
 
 const supervisorRelease = new SupervisorRelease({
@@ -2823,11 +2528,10 @@ const supervisorRelease = new SupervisorRelease({
     phones.stop();
     stopSupervisorTimers();
     unsubscribeThreads();
-    threads.suspend();
-    runner.detach();
+    core.close();
   },
-  detach: () => threads.detach(),
-  closeImages: async () => { await calendar.close(); await watchList.close(); speech?.close(); await messaging.close(); externalActions?.close(); await closeImageGeneration(); },
+  detach: async () => ({ ok: true, value: undefined }),
+  closeImages: async () => { await messaging.close(); externalActions?.close(); await closeImageGeneration(); },
   stopServer: () => { server.stop(true); },
   closeDatabase: () => db.close(),
   exit: code => process.exit(code),

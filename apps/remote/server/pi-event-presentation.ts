@@ -17,6 +17,7 @@ const presentation = {
   owner_execution_phase: "observe", model_request_start: "observe",
   session_changed: "observe",
   command_settled: "observe", runner_attached: "observe",
+  tool_operation_result: "observe", thread_landed: "observe",
   thread_settled: "project", thread_error: "project", thread_message_inserted: "project",
 } satisfies Record<RuntimeEventType, "project" | "observe">;
 

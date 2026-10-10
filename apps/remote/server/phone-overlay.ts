@@ -3,13 +3,15 @@ import type { OverlayAck, OverlayMessage, PhoneDevice, PhoneResult } from "./pho
 
 /**
  * The phone overlay is one more door onto Kenan: what the person types beside
- * Kenan's dot becomes a message in that phone's own thread, and the thread's
+ * Kenan's dot becomes a message in the person's managing conversation, and its
  * assistant text comes back as speech bubbles while the dot shows its state.
  */
 export type OverlayHost = {
   /** null when the thread no longer exists; archived threads are not reused. */
   thread(id: string): { archived: boolean } | null;
-  create(text: string, device: PhoneDevice): Promise<string>;
+  create(text: string, device: PhoneDevice, requestId: string): Promise<string>;
+  /** Freeze display/context bytes by the phone's original source identity before admission. */
+  prepare(deviceId: string, messageId: string, input: string, proposed: string): string;
   prompt(threadId: string, requestId: string, text: string): Promise<void>;
   send(deviceId: string, command: string, args: Record<string, unknown>): Promise<PhoneResult>;
   online(deviceId: string): boolean;
@@ -47,7 +49,7 @@ export function spokenText(message: unknown): string {
 }
 
 export class PhoneOverlay {
-  private readonly deviceFor = new Map<string, string>();
+  private readonly deviceFor = new Map<string, Set<string>>();
   private readonly threadFor = new Map<string, string>();
   private readonly dot = new Map<string, DotState>();
   private readonly enabled = new Set<string>();
@@ -60,23 +62,30 @@ export class PhoneOverlay {
 
   private bind(deviceId: string, threadId: string) {
     const previous = this.threadFor.get(deviceId);
-    if (previous) this.deviceFor.delete(previous);
+    if (previous) {
+      const devices = this.deviceFor.get(previous);
+      devices?.delete(deviceId);
+      if (devices?.size === 0) this.deviceFor.delete(previous);
+    }
     this.threadFor.set(deviceId, threadId);
-    this.deviceFor.set(threadId, deviceId);
+    const devices = this.deviceFor.get(threadId) ?? new Set<string>();
+    devices.add(deviceId);
+    this.deviceFor.set(threadId, devices);
   }
 
   async message(device: PhoneDevice, message: OverlayMessage): Promise<OverlayAck> {
     if (device.capabilities.overlayEnabled !== true || !this.enabled.has(device.id)) return { ok: false, error: { code: "disabled", message: "Overlay chat is disabled on this phone" } };
-    const text = `${overlayContext(message)}\n${message.text}`;
+    const original = `${overlayContext(message)}\n${message.text}`;
     const existing = this.threadFor.get(device.id);
     const live = existing ? this.host.thread(existing) : null;
     this.state(device.id, "thinking");
     try {
+      const text = this.host.prepare(device.id, message.id, JSON.stringify(message), existing && live && !live.archived ? original : `${overlayBriefing(device)}\n\n${original}`);
       if (existing && live && !live.archived) {
-        await this.host.prompt(existing, crypto.randomUUID(), text);
+        await this.host.prompt(existing, `overlay:${device.id}:${message.id}`, text);
         return { ok: true, threadId: existing };
       }
-      const threadId = await this.host.create(`${overlayBriefing(device)}\n\n${text}`, device);
+      const threadId = await this.host.create(text, device, `overlay:${device.id}:${message.id}`);
       this.bind(device.id, threadId);
       this.host.save(device.id, threadId);
       return { ok: true, threadId };
@@ -88,16 +97,19 @@ export class PhoneOverlay {
 
   /** Orchestrator thread events, for every thread; only overlay threads matter. */
   event(threadId: string, event: any): void {
-    const deviceId = this.deviceFor.get(threadId);
-    if (!deviceId || !this.enabled.has(deviceId) || !event || typeof event !== "object") return;
-    if (event.type === "thread_message_inserted") this.state(deviceId, "thinking");
-    else if (event.type === "tool_execution_start") this.state(deviceId, "working");
-    else if (event.type === "message_end" && event.message?.role === "assistant") {
-      const text = spokenText(event.message);
-      if (text) this.say(deviceId, text);
-    } else if (event.type === "thread_settled") {
-      if (event.outcome === "failed") this.say(deviceId, spokenText(event.finalMessage) || "That didn't work; the details are in the Phone thread.");
-      this.state(deviceId, "idle");
+    const devices = this.deviceFor.get(threadId);
+    if (!devices || !event || typeof event !== "object") return;
+    for (const deviceId of devices) {
+      if (!this.enabled.has(deviceId)) continue;
+      if (event.type === "thread_message_inserted") this.state(deviceId, "thinking");
+      else if (event.type === "tool_execution_start") this.state(deviceId, "working");
+      else if (event.type === "message_end" && event.message?.role === "assistant") {
+        const text = spokenText(event.message);
+        if (text) this.say(deviceId, text);
+      } else if (event.type === "thread_settled") {
+        if (event.outcome === "failed") this.say(deviceId, spokenText(event.finalMessage) || "That didn't work; the details are in the managing conversation.");
+        this.state(deviceId, "idle");
+      }
     }
   }
 
