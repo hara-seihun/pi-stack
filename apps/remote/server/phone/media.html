@@ -102,9 +102,10 @@ async function request(path, body) {
   return response;
 }
 function validateGrant(value) {
-  if (!value || typeof value.callId !== 'string' || !value.callId || typeof value.accessToken !== 'string' || !value.accessToken || typeof value.participantId !== 'string' || !value.participantId || value.transport !== 'livekit' || typeof value.url !== 'string') throw new Error('Invalid Retell monitor grant');
-  const url = new URL(value.url);
-  if (url.protocol !== 'wss:') throw new Error('Retell transport must be secure WebRTC signaling');
+  if (!value || typeof value.callId !== 'string' || !value.callId || typeof value.accessToken !== 'string' || !value.accessToken || typeof value.participantId !== 'string' || !value.participantId || !['livekit', 'gateway'].includes(value.transport)) throw new Error('Invalid Retell monitor grant: transport=' + String(value?.transport));
+  // LiveKit grants carry their signaling URL; Retell's gateway transport signals through api.retellai.com/webrtc-proxy.
+  if (value.transport === 'livekit' && typeof value.url !== 'string') throw new Error('Invalid Retell LiveKit grant: no signaling URL');
+  if (value.url !== undefined && new URL(value.url).protocol !== 'wss:') throw new Error('Retell transport must be secure WebRTC signaling');
   if (value.iceServers !== undefined && !Array.isArray(value.iceServers)) throw new Error('Invalid Retell ICE servers');
   return value;
 }
@@ -244,12 +245,34 @@ async function connectTransport(callId) {
   grant = validateGrant(await (await request('/media/transport', {})).json());
   ensureOpen();
   if (grant.callId !== callId) throw new Error('Retell call identity mismatch');
-  const client = new RetellClient({ key: token, baseURL: location.origin, fetch: sdkFetch });
+  // sdkFetch routes SDK control calls by path only; the base URL matters for the gateway transport's direct WebRTC signaling.
+  const client = new RetellClient({ key: token, baseURL: 'https://api.retellai.com', fetch: sdkFetch });
   monitor = client.monitorCall({ call_id: grant.callId, transcript: false, hooks: { onError: fail, onEnd: close } });
   await monitor.ready;
   await monitor.listen();
   ensureOpen();
-  // Pinned SDK 3.0.2 does not expose incoming tracks. The same LiveKit room owns subscriptions and teardown.
+  if (grant.transport === 'gateway') {
+    // Gateway transport: one RTCPeerConnection; its receiver carries the call audio. The SDK's own playback element stays muted.
+    const pc = monitor.transport?.pc;
+    if (!pc || typeof pc.getReceivers !== 'function') throw new Error('Retell gateway peer connection unavailable');
+    if (monitor.transport.audioEl) monitor.transport.audioEl.muted = true;
+    const attachGateway = () => {
+      for (const receiver of pc.getReceivers()) {
+        const track = receiver.track;
+        if (closed || !track || track.kind !== 'audio' || track.readyState !== 'live' || incoming.has(track.id)) continue;
+        const source = audio.createMediaStreamSource(new MediaStream([track]));
+        source.connect(inputGate);
+        incoming.set(track.id, { source });
+      }
+    };
+    pc.addEventListener('track', attachGateway);
+    attachGateway();
+    diagnostics.phase = 'listening';
+    await waitFor(() => incoming.size > 0, pc, 'track', 'Retell caller audio');
+    await takeOver();
+    return;
+  }
+  // Pinned SDK 3.0.2 does not expose incoming LiveKit tracks. The same LiveKit room owns subscriptions and teardown.
   room = monitor.transport?.room;
   if (!room?.remoteParticipants || typeof room.on !== 'function') throw new Error('Retell SDK LiveKit room unavailable');
   room.on(RoomEvent.TrackSubscribed, attachIncoming);

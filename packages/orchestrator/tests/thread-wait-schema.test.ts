@@ -47,7 +47,10 @@ it.each(["anthropic-messages", "openai-responses", "openai-completions"])("%s pr
   const projected = tool.input_schema ?? tool.parameters ?? tool.function.parameters;
   expect(projected.type).toBe("object");
   expect(Object.keys(projected.properties).sort()).toEqual(["action", "kind", "threadIds", "after", "jobId", "publicationId", "fromThreadId"].sort());
-  expect(JSON.stringify(projected.properties.kind)).toContain("deployment");
+  expect(JSON.stringify(projected)).toContain("deployment");
+  if (api === "anthropic-messages") {
+    for (const keyword of ["anyOf", "oneOf", "allOf"]) expect(Object.hasOwn(projected, keyword)).toBe(false);
+  }
   for (const input of inputs) expect(Value.Check(projected, input)).toBe(true);
   for (const input of invalid) expect(Value.Check(projected, input)).toBe(false);
 });

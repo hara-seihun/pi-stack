@@ -1,24 +1,22 @@
 import { expect, test } from "bun:test";
-import { isReadingEarlier, ReadingAnchor, restoreReadingPosition } from "./src/scroll-position";
-
-test("scrolling even slightly above latest pauses following, but iOS bottom overscroll does not", () => {
-  expect(isReadingEarlier(0)).toBe(false);
-  expect(isReadingEarlier(-1)).toBe(false);
-  expect(isReadingEarlier(-3)).toBe(true);
-  expect(isReadingEarlier(20)).toBe(false);
-});
+import { isReadingEarlier, ReadingAnchor } from "./src/scroll-position";
 
 function fixture() {
   let height = 1200;
-  let anchorTop = -140;
+  let anchorTop = 540;
   let present = true;
+  let top = 500;
+  let writes = 0;
   const anchor = {
     closest: () => anchor,
     hasAttribute: () => false,
     getBoundingClientRect: () => ({ top: anchorTop - scroller.scrollTop }),
   };
   const scroller = {
-    scrollTop: -120,
+    style: { overflowAnchor: "none" },
+    get scrollTop() { return top; },
+    set scrollTop(value: number) { top = value; writes++; },
+    clientHeight: 200,
     get scrollHeight() { return height; },
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 300, height: 200 }),
     ownerDocument: { elementFromPoint: () => present ? anchor : null },
@@ -26,82 +24,161 @@ function fixture() {
   } as unknown as HTMLDivElement;
   return {
     scroller,
-    growBelow(amount: number) { height += amount; anchorTop -= amount; },
-    prependAbove(amount: number) { height += amount; },
+    writes: () => writes,
+    move(value: number) { top = value; },
+    growBelow(amount: number) { height += amount; },
+    prependAbove(amount: number) { height += amount; anchorTop += amount; },
     replaceLive(heightChange: number) { height += heightChange; present = false; },
   };
 }
 
-test("a reader's viewport stays put as live text grows", () => {
+test("normal-flow bottom detection tolerates rounding and bottom overscroll", () => {
+  expect(isReadingEarlier(1000, 1200, 200)).toBe(false);
+  expect(isReadingEarlier(999, 1200, 200)).toBe(false);
+  expect(isReadingEarlier(997, 1200, 200)).toBe(true);
+  expect(isReadingEarlier(1020, 1200, 200)).toBe(false);
+});
+
+test("reading above latest follows an identified row, not total content height", () => {
   const page = fixture();
   const reading = new ReadingAnchor();
   reading.setReading(page.scroller, true);
   page.growBelow(300);
   reading.afterResize(page.scroller);
-  expect(page.scroller.scrollTop).toBe(-420);
-
+  expect(page.scroller.scrollTop).toBe(500);
+  expect(page.writes()).toBe(0);
   page.prependAbove(200);
   reading.afterResize(page.scroller);
-  expect(page.scroller.scrollTop).toBe(-420);
+  expect(page.scroller.scrollTop).toBe(700);
+  expect(page.writes()).toBe(1);
 });
 
-test("a resize arriving before the scroll event does not undo the person's movement", () => {
-  const page = fixture();
-  const reading = new ReadingAnchor();
-  reading.setReading(page.scroller, true);
-  page.scroller.scrollTop = -240;
-  page.prependAbove(200);
-  reading.afterResize(page.scroller);
-  expect(page.scroller.scrollTop).toBe(-240);
-
-  page.growBelow(80);
-  reading.afterResize(page.scroller);
-  expect(page.scroller.scrollTop).toBe(-320);
-});
-
-test("completion preserves the reading offset when the live anchor is replaced", () => {
-  const page = fixture();
-  const reading = new ReadingAnchor();
-  reading.setReading(page.scroller, true);
-  const beforeCommit = reading.beforeUpdate(page.scroller);
-  page.replaceLive(-20);
-  reading.afterUpdate(page.scroller, beforeCommit);
-  expect(page.scroller.scrollTop).toBe(-100);
-  reading.afterResize(page.scroller);
-  expect(page.scroller.scrollTop).toBe(-100);
-});
-
-test("CSS scroll-anchor support does not disable compensation for replaced or virtualized content", () => {
-  const prior = globalThis.CSS;
-  Object.defineProperty(globalThis, "CSS", { configurable: true, value: { supports: () => true } });
-  try {
+test("resize and commit delivery yield to compositor movement before its scroll event", () => {
+  for (const delivery of ["resize", "commit"]) {
     const page = fixture();
     const reading = new ReadingAnchor();
     reading.setReading(page.scroller, true);
-    page.growBelow(300);
+    const before = reading.beforeUpdate(page.scroller);
+    page.move(240);
+    page.prependAbove(200);
+    if (delivery === "resize") reading.afterResize(page.scroller);
+    else reading.afterUpdate(page.scroller, before);
+    expect(page.scroller.scrollTop).toBe(240);
+    expect(page.writes()).toBe(0);
+    page.prependAbove(80);
     reading.afterResize(page.scroller);
-    expect(page.scroller.scrollTop).toBe(-420);
-  } finally {
-    if (prior === undefined) Reflect.deleteProperty(globalThis, "CSS");
-    else Object.defineProperty(globalThis, "CSS", { configurable: true, value: prior });
+    expect(page.scroller.scrollTop).toBe(320);
   }
 });
 
-test("a replaced message is recovered by identity even when total height changes above it", () => {
-  let scrollTop = -300;
-  let height = 1200;
+test("a removed anchor never guesses a correction from total height", () => {
+  const page = fixture();
+  const reading = new ReadingAnchor();
+  reading.setReading(page.scroller, true);
+  const before = reading.beforeUpdate(page.scroller);
+  page.replaceLive(-20);
+  reading.afterUpdate(page.scroller, before);
+  reading.afterResize(page.scroller);
+  expect(page.scroller.scrollTop).toBe(500);
+  expect(page.writes()).toBe(0);
+});
+
+test("a layout clamp at bottom does not turn a reading viewport into a following viewport", () => {
+  const page = fixture();
+  const reading = new ReadingAnchor();
+  reading.setReading(page.scroller, true);
+  const before = reading.beforeUpdate(page.scroller);
+  page.replaceLive(-800);
+  page.move(200);
+  reading.afterUpdate(page.scroller, before);
+  expect(reading.onScroll(page.scroller)).toEqual({ reading: true, programmatic: true });
+  page.growBelow(1000);
+  reading.afterResize(page.scroller);
+  expect(page.scroller.scrollTop).toBe(200);
+  expect(page.writes()).toBe(0);
+});
+
+test("wheel, drag, touch and momentum ownership prevents every programmatic scroll", () => {
+  for (const atLatest of [false, true]) {
+    const page = fixture();
+    if (atLatest) page.move(1000);
+    const reading = new ReadingAnchor();
+    reading.setReading(page.scroller, !atLatest);
+    reading.beginInteraction(page.scroller);
+    const before = reading.beforeUpdate(page.scroller);
+    page.prependAbove(200);
+    page.growBelow(300);
+    reading.afterUpdate(page.scroller, before);
+    reading.afterResize(page.scroller);
+    expect(page.writes()).toBe(0);
+    expect(page.scroller.style.overflowAnchor).toBe("auto");
+    page.move(400);
+    reading.onScroll(page.scroller);
+    page.prependAbove(80);
+    reading.afterResize(page.scroller);
+    expect(page.writes()).toBe(0);
+    reading.endInteraction(page.scroller);
+    reading.afterResize(page.scroller);
+    expect(page.writes()).toBe(0);
+    expect(page.scroller.scrollTop).toBe(400);
+    expect(page.scroller.style.overflowAnchor).toBe("none");
+    page.prependAbove(60);
+    reading.afterResize(page.scroller);
+    expect(page.scroller.scrollTop).toBe(460);
+  }
+});
+
+test("suspending a pane releases contact ownership without losing its reading mode", () => {
+  const page = fixture();
+  const reading = new ReadingAnchor();
+  reading.setReading(page.scroller, true);
+  reading.beginInteraction(page.scroller);
+  reading.pause(page.scroller);
+  reading.afterResize(page.scroller);
+  page.prependAbove(80);
+  reading.afterResize(page.scroller);
+  expect(page.scroller.scrollTop).toBe(580);
+  expect(page.scroller.style.overflowAnchor).toBe("none");
+});
+
+test("following latest writes only at idle and owned scroll events keep following enabled", () => {
+  const page = fixture();
+  page.move(1000);
+  const reading = new ReadingAnchor();
+  reading.setReading(page.scroller, false);
+  page.growBelow(300);
+  reading.afterResize(page.scroller);
+  expect(page.scroller.scrollTop).toBe(1300);
+  expect(reading.onScroll(page.scroller)).toEqual({ reading: false, programmatic: true });
+  page.growBelow(80);
+  reading.afterResize(page.scroller);
+  expect(page.scroller.scrollTop).toBe(1380);
+  reading.onScroll(page.scroller);
+  reading.beginInteraction(page.scroller);
+  page.move(700);
+  expect(reading.onScroll(page.scroller)).toEqual({ reading: true, programmatic: false });
+  page.growBelow(500);
+  reading.afterResize(page.scroller);
+  expect(page.scroller.scrollTop).toBe(700);
+  reading.endInteraction(page.scroller);
+  reading.jumpLatest(page.scroller);
+  expect(page.scroller.scrollTop).toBe(1880);
+});
+
+test("replacement DOM is reacquired by message identity; browser anchoring is not double-applied", () => {
+  let top = 300;
   let replaced = false;
-  let y = 40;
+  let y = 340;
   const makeAnchor = () => ({
     closest() { return this; },
     hasAttribute: (name: string) => name === "data-message-id",
     getAttribute: () => "held-message",
-    getBoundingClientRect: () => ({ top: y - scrollTop }),
+    getBoundingClientRect: () => ({ top: y - top }),
   });
   const original = makeAnchor(), replacement = makeAnchor();
   const scroller = {
-    get scrollTop() { return scrollTop; }, set scrollTop(value: number) { scrollTop = value; },
-    get scrollHeight() { return height; },
+    get scrollTop() { return top; }, set scrollTop(value: number) { top = value; },
+    clientHeight: 200, scrollHeight: 1200,
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 300, height: 200 }),
     ownerDocument: { elementFromPoint: () => replaced ? replacement : original },
     contains: (node: unknown) => node === (replaced ? replacement : original),
@@ -111,30 +188,11 @@ test("a replaced message is recovered by identity even when total height changes
   reading.setReading(scroller, true);
   const before = reading.beforeUpdate(scroller);
   replaced = true;
-  height += 200;
+  y += 200;
   reading.afterUpdate(scroller, before);
-  expect(scrollTop).toBe(-300);
-  y -= 80;
+  expect(top).toBe(500);
+  y += 80;
+  top += 80;
   reading.afterResize(scroller);
-  expect(scrollTop).toBe(-380);
-});
-
-test("following latest leaves scroll position to reverse flex layout", () => {
-  const page = fixture();
-  const reading = new ReadingAnchor();
-  reading.setReading(page.scroller, false);
-  page.growBelow(300);
-  reading.afterResize(page.scroller);
-  expect(page.scroller.scrollTop).toBe(-120);
-});
-
-test("compensation does not double-apply a browser's own scroll adjustment", () => {
-  const page = fixture();
-  const reading = new ReadingAnchor();
-  reading.setReading(page.scroller, true);
-  const before = reading.beforeUpdate(page.scroller)!;
-  page.growBelow(300);
-  page.scroller.scrollTop = -420;
-  restoreReadingPosition(page.scroller, before);
-  expect(page.scroller.scrollTop).toBe(-420);
+  expect(top).toBe(580);
 });

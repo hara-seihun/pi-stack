@@ -122,22 +122,16 @@ function recordMetadata(entry, raw, path, line, offset) {
       return failure("invalid-record", path, `Invalid session tool metadata at line ${line}`, { line, offset });
     }
     blocks.push(Object.freeze({ index, type: block.type,
-      displayed: block.type !== "thinking" || Boolean(String(block.thinking || "").trim()),
+      displayed: block.type === "thinking" ? Boolean(String(block.thinking || "").trim())
+        : message.role === "assistant" && block.type === "text" ? Boolean(String(block.text || "").trim()) : true,
       ...(block.type === "toolCall" ? { toolCallId: block.id } : {}),
       ...(block.name != null ? { name: block.name } : {}),
       ...(block.namespace != null ? { namespace: block.namespace } : {}),
     }));
   }
-  let displayedItemCount = message.role === "assistant" && Array.isArray(message.content)
-    ? blocks.filter(block => block.displayed).length + Number(blocks.length === 0 && Boolean(message.errorMessage)) : 1;
-  if (message.role === "assistant" && message.stopReason === "stop" && !message.errorMessage && Array.isArray(message.content)) {
-    const text = message.content.filter(block => block.type === "text");
-    if ((message.content.length === 0 || text.length > 0)
-      && message.content.every(block => block.type === "text" || block.type === "thinking")
-      && text.every(block => typeof block.text === "string" && !block.text.trim())) {
-      displayedItemCount = blocks.filter(block => block.type === "thinking" && block.displayed).length + 1;
-    }
-  }
+  const displayedItemCount = message.role === "assistant" && Array.isArray(message.content)
+    ? blocks.filter(block => block.displayed).length + Number(blocks.length === 0 && Boolean(message.errorMessage))
+    : message.role === "assistant" && typeof message.content === "string" && !message.content.trim() ? 0 : 1;
   return ok(Object.freeze({ ...base, role: message.role, timestamp: timestampMs(timestamp) ?? null,
     blocks: Object.freeze(blocks), toolCallIds: Object.freeze(blocks.filter(block => block.type === "toolCall").map(block => block.toolCallId)),
     toolResultId: message.role === "toolResult" ? message.toolCallId ?? null : null, displayedItemCount,

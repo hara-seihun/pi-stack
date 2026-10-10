@@ -9,8 +9,6 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-const tick = () => new Promise(resolve => setTimeout(resolve, 0));
-
 function harness(owners: string[]) {
   const rounds: Array<{ owner: string; work: ReturnType<typeof deferred> }> = [];
   const feedback: Array<{ owner: string; message: string | null }> = [];
@@ -72,8 +70,7 @@ test("real events during projection request catchup; readers during catchup do n
   rounds[1]!.work.resolve(); await waitForRound(3);
   expect(rounds).toHaveLength(3);
   const lastReader = refresh("read");
-  await tick();
-  rounds[2]!.work.resolve(); await tick();
+  rounds[2]!.work.resolve(); await Promise.resolve();
   expect(rounds).toHaveLength(3);
   await Promise.all([first, ...events, ...readers, nextEvent, lastReader]);
   expect(rounds).toHaveLength(3);
@@ -100,7 +97,7 @@ test("owners project independently and failed refresh keeps feedback and permits
   await waitForRound(2);
   expect(rounds.map(round => round.owner)).toEqual(["person", "fleet"]);
   rounds[0]!.work.reject(new Error("Owner unavailable"));
-  rounds[1]!.work.resolve(); await tick();
+  rounds[1]!.work.resolve(); await Promise.resolve();
   expect(rounds).toHaveLength(2);
   await Promise.all([first, joiner]);
   expect(feedback).toContainEqual({ owner: "person", message: "Owner unavailable" });

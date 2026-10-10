@@ -22,7 +22,7 @@ export class ThreadService {
     this.runtimes = new Map(); this.operations = new Map(); this.opening = new Map();
     this.halts = new Map(); this.dependencyOperations = new Map();
     this.producer = { source: 'original-native-producer', busy: true, waiters: new Map(), executionId: 'original-execution' };
-    this.closeCalls = 0; this.cancelCalls = 0;
+    this.closeCalls = 0; this.cancelCalls = 0; this.routing = false; this.routed = 0;
   }
   sql(text) { return this.db.prepare(text); }
   async start() {
@@ -32,7 +32,13 @@ export class ThreadService {
     await this.send({ requestId: 'startup-input', threadId: 'idle' });
     await this.deliverScheduledWakes();
     await this.wake(); await this.drain();
+    await this.routeNotifications();
     return { ok: true };
+  }
+  async routeNotifications() {
+    // Legacy cross-owner routing: its in-flight retry is a busy controller operation.
+    this.routing = true;
+    try { this.routed++; } finally { this.routing = false; }
   }
   async attach(id) {
     const runtime = id === 'busy' ? this.producer : { busy: false, waiters: new Map() };
@@ -205,7 +211,8 @@ assert.deepEqual(new Set(baseline.dispatches), new Set([
 if (baselineDaemon) { baselineDaemon.stop(); await baselineRun; baselineDaemon.ledger.close(); }
 await baseline.detach();
 
-const originals = Object.fromEntries(['start','attach','wake','drain','detach','send','spawn','answer','schedule','deliverScheduledWakes'].map(key => [key, ThreadService.prototype[key]]));
+assert.equal(baseline.routed, 1, 'the unfenced baseline routes notifications');
+const originals = Object.fromEntries(['start','attach','wake','drain','detach','send','spawn','answer','schedule','deliverScheduledWakes','routeNotifications'].map(key => [key, ThreadService.prototype[key]]));
 const originalReconcile = Daemon.prototype.reconcile;
 const threadPath = database('threads.sqlite3', true), ledgerPath = mode === 'fleet' ? ledger('ledger.sqlite3') : null;
 if (ledgerPath) assert.equal((await legacyFleetLedger(ledgerPath, identity)).ready, true);
@@ -221,6 +228,7 @@ else assert.equal((await service.start()).ok, true);
 for (const key of ['send','spawn','answer','schedule','deliverScheduledWakes']) assert.equal(ThreadService.prototype[key], originals[key]);
 assert.equal(service.runtimes.get('busy'), producer);
 assert.deepEqual(service.dispatches, [], 'Startup wake AND direct drain must be paused before originalStart');
+assert.equal(service.routed, 0, 'cross-owner notification routing is paused with dispatch, so a retiring peer cannot hold readiness');
 assert.equal(service.sql("SELECT count(*) AS n FROM thread_work WHERE status='queued'").get().n, 4);
 assert.equal(service.sql("SELECT last_message_id FROM thread_wake WHERE thread_id='wake-startup'").get().last_message_id, 'wake:startup-schedule');
 await intake(service, 'draining');

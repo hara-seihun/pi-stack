@@ -7,6 +7,21 @@ become=()
 [[ $EUID == 0 || ${PI_STACK_DEPLOY_NO_SUDO:-0} == 1 ]] || become=(sudo -n)
 dir=${PI_REMOTE_PERSONS_DIR:-/var/lib/pi-remote/persons}
 [[ -d $dir ]] || exit 0
+# A supervisor retired by native-history maintenance runs only its maintenance
+# bridge: it has closed its owners and serves no HTTP and no rooms until the
+# candidate activates. Its own receipt, read as that person inside the unit's
+# mount namespace (encrypted homes are mounted there only), proves it. Any
+# missing or unreadable proof stays unknown live state.
+retired_supervisor() {
+  local user=$1 file=$2 data pid uid gid phase
+  data=$("${become[@]}" jq -r '.environment.PI_REMOTE_DATA // empty' "$file") || return 1
+  [[ $data == /* ]] || return 1
+  pid=$("${become[@]}" systemctl show "pi-remote@$user.service" -p MainPID --value) || return 1
+  [[ $pid =~ ^[1-9][0-9]*$ ]] || return 1
+  uid=$(id -u "$user") && gid=$(id -g "$user") || return 1
+  phase=$("${become[@]}" nsenter -t "$pid" -m -S "$uid" -G "$gid" jq -er '.phase | strings' "$data/native-history-maintenance.json" 2>/dev/null) || return 1
+  [[ $phase == migrated || $phase == owners-closed || $phase == migration-pending ]]
+}
 live=()
 all_preserved=1
 preserved_count=0
@@ -22,11 +37,12 @@ for file in "$dir"/*.json; do
   else
     status=$?
     [[ $status == 7 ]] || { echo "cannot census $user (curl $status): $response" >&2; exit 1; }
-    states=$("${become[@]}" systemctl show "pi-remote@$user.service" "pi-remote-dev-supervisor@$user.service" -p ActiveState --value)
-    [[ -n $states ]] || { echo "cannot determine supervisor state for $user" >&2; exit 1; }
-    for state in $states; do
+    for unit in "pi-remote@$user.service" "pi-remote-dev-supervisor@$user.service"; do
+      state=$("${become[@]}" systemctl show "$unit" -p ActiveState --value)
+      [[ -n $state ]] || { echo "cannot determine supervisor state for $user" >&2; exit 1; }
       case "$state" in
         inactive|failed) ;;
+        active) [[ $unit == pi-remote@* ]] && retired_supervisor "$user" "$file" || { echo "cannot census $user ($state): $response" >&2; exit 1; } ;;
         *) echo "cannot census $user ($state): $response" >&2; exit 1 ;;
       esac
     done

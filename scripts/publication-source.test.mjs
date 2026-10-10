@@ -127,7 +127,7 @@ test("typed host waits retain the integration, while unrelated exit 75 remains a
       const request = ${JSON.stringify(request)};
       const target = { id: "converge", sshHost: null, releaseCommand: ${JSON.stringify(release)} };
       const result = deployTarget(request, target, ${JSON.stringify(log)});
-      if (result.kind === "host-lock-busy") requeueBusyHost(request, target, ${JSON.stringify(log)}, result.liveMeeting ? "live-meeting" : result.nativePrerequisite ? "native-source" : result.nativeHistory ? "native-history" : "host-lock");
+      if (result.kind === "host-lock-busy") requeueBusyHost(request, target, ${JSON.stringify(log)}, result.liveMeeting ? "live-meeting" : result.liveTelephone ? "live-telephone" : result.nativePrerequisite ? "native-source" : result.nativeHistory ? "native-history" : "host-lock");
       console.log(JSON.stringify({ result, request }));
     `], { encoding: "utf8", timeout: 5000, env: { ...process.env,
       PI_STACK_PUBLICATION_STATE: f.root, PI_STACK_PUBLICATION_CONFIG: publicationConfig(f.root, f.source) } });
@@ -176,6 +176,16 @@ test("typed host waits retain the integration, while unrelated exit 75 remains a
   assert.equal(history.request.attempt, 1);
   assert.equal(history.request.blockedSince, undefined);
   assert.deepEqual(history.request.hosts, request.hosts);
+  const telephone = run("Live telephone calls; defer deployment");
+  assert.equal(telephone.result.liveTelephone, true);
+  assert.equal(telephone.request.waiting.kind, "live-telephone");
+  assert.equal(telephone.request.step, "waiting-for-live-telephone-calls");
+  assert.equal(telephone.request.blockedSince, undefined);
+  assert.equal(telephone.request.attempt, 1);
+  assert.deepEqual(telephone.request.hosts, request.hosts);
+  const phoneError = run("Phone census unavailable");
+  assert.equal(phoneError.result.kind, undefined);
+  assert.equal(phoneError.request.status, "running");
   const unrelated = run("release checkout failed for another reason");
   assert.equal(unrelated.result.kind, undefined);
   assert.equal(unrelated.request.status, "running");
