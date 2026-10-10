@@ -26,7 +26,7 @@ const jobs = [
       "scripts/deploy-lock.test.mjs"],
   ]),
   ...["config", "transport", "roots", "core", "gate", "bundle", "source", "progress", "proof", "continuation"].map(suite => [
-    `publication ${suite}`, "node", ["--test", suite === "core" ? "scripts/publication.test.mjs" : `scripts/publication-${suite}.test.mjs`],
+    `publication ${suite}`, "node", ["--test", ...(suite === 'continuation' ? ['scripts/publication-continuation.test.mjs', 'scripts/publication-timings.test.mjs'] : [suite === "core" ? "scripts/publication.test.mjs" : `scripts/publication-${suite}.test.mjs`])],
     { timeoutMs: 55_000 },
   ]),
   ["publication telephone", "node", ["--test", "--test-name-pattern=live-telephone|telephone phone-census", "scripts/publication-hosts.test.mjs"], { timeoutMs: 55_000 }],
@@ -37,6 +37,7 @@ const jobs = [
   ["user usage", "node", ["--test", "tools/user-usage/usage.test.mjs"]],
   ["Claude reset collector", "node", ["--test", "tools/claude-reset/collect.test.mjs"]],
   ...testFiles(root, 'packages/runtime', /\.test\.mjs$/).map(file => [`runtime test: ${file}`, 'node', ['--test', file], { checkInputs: [file] }]),
+  ['runtime dependency closure', 'node', ['--test', 'scripts/deploy-runtime-closure.test.mjs'], { dependsOn: ['orchestrator memory build'], timeoutMs: 55_000 }],
   ["One Kenan deployment", "python3", ["-B", "scripts/one-kenan-deploy.test.py"]],
   ["prompt availability", "python3", ["-B", "scripts/prompt-availability.test.py"]],
   ["Meet recognition protocol", "python3", ["-B", "-m", "unittest", "discover", "-s", "apps/meet-recognition", "-p", "test_protocol.py"]],

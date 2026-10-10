@@ -31,6 +31,7 @@ const shipping = {
   tools: ['config/tools.json', 'tools'],
   'user usage': ['tools/user-usage'],
   'Claude reset collector': ['tools/claude-reset'],
+  'runtime dependency closure': ['deploy/runtime', 'packages/runtime', 'packages/orchestrator', 'packages/kenan-memory', 'packages/kenan-root'],
   'One Kenan deployment': ['deploy', 'config', 'scripts/one-kenan-deploy.test.py'],
   'prompt availability': ['deploy/prompt-availability', 'scripts/prompt-availability.test.py'],
   'Meet recognition protocol': ['apps/meet-recognition'],
@@ -62,7 +63,7 @@ export function checkPolicy(name, job) {
   if (name.startsWith('publication ')) {
     const suite = name.slice('publication '.length);
     if (!['config', 'transport', 'roots', 'core', 'gate', 'bundle', 'source', 'progress', 'proof', 'telephone', 'continuation', 'host lanes'].includes(suite)) throw new Error(`No declared check inputs for ${name}`);
-    return { kind: 'memo', inputs: suite === 'continuation' ? ['deploy/publication-continuation.mjs'] : suite === 'host lanes' ? ['deploy/publication-hosts.mjs'] : ['deploy', 'config', 'scripts/publication-fixture.mjs', 'apps/meet-recognition'], completeScope: true };
+    return { kind: 'memo', inputs: suite === 'continuation' ? ['deploy/publication-continuation.mjs', 'deploy/publication-timings.mjs'] : suite === 'host lanes' ? ['deploy/publication-hosts.mjs'] : ['deploy', 'config', 'scripts/publication-fixture.mjs', 'apps/meet-recognition'], completeScope: true };
   }
   if (name.startsWith('orchestrator test: ') || name.startsWith('remote test: ') || name.startsWith('runtime test: ') || name.startsWith('memory test: ') || name.startsWith('root test: ')) {
     if (!job?.[3]?.checkInputs?.length) throw new Error(`No declared check entrypoint for ${name}`);
@@ -73,7 +74,7 @@ export function checkPolicy(name, job) {
       completeScope: generatedRuntimeFixtures.has(name) || generatedOrchestratorFixture };
   }
   if (name === 'remote types') return { kind: 'memo', inputs: ['apps/remote/server', 'apps/remote/tsconfig.json', 'packages/orchestrator/src', 'packages/kenan-memory/src', 'packages/kenan-root/src'], completeScope: true, typeProgram: true };
-  if (Object.hasOwn(shipping, name)) return { kind: 'memo', inputs: shipping[name], completeScope: ['job lifecycle', 'explicit state dispatch', 'manifests', 'tools', 'deploy lock', 'deploy host guest disabled', 'deploy host guest enabled', 'remote deployment'].includes(name) };
+  if (Object.hasOwn(shipping, name)) return { kind: 'memo', inputs: shipping[name], completeScope: ['job lifecycle', 'explicit state dispatch', 'manifests', 'tools', 'deploy lock', 'deploy host guest disabled', 'deploy host guest enabled', 'remote deployment', 'runtime dependency closure'].includes(name) };
   throw new Error(`No declared check inputs for ${name}`);
 }
 
