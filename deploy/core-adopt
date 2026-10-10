@@ -102,6 +102,36 @@ def transfer(plan):
     return {'ok': True, 'scopeId': plan['scopeId'], 'databaseIdentity': receipt['databaseIdentity'], 'copied': False}
 
 
+REBIND_SNAPSHOT = SNAPSHOT.replace("**file(wal)", "**file(wal),'identity':{'dev':str(wal.stat().st_dev),'ino':str(wal.stat().st_ino)}")
+
+
+def rebind(plan):
+    if plan.get('version') != 1 or not isinstance(plan.get('scopeId'), str):
+        raise ValueError('explicit same-object scope rebinding plan required')
+    database = absolute(plan['databasePath'])
+    path = absolute(plan['adoptionReceiptPath'])
+    receipt = trusted(path)
+    if receipt.get('state') != 'detached' or receipt.get('scopeId') != plan['scopeId'] or receipt.get('databasePath') != str(database) or not isinstance(receipt.get('previousOwner'), dict):
+        raise ValueError('same-object rebinding requires affirmative original owner detachment')
+    observations = {}
+    for _ in range(2):
+        current = {}
+        for role in ('source', 'target'):
+            view = plan[role]
+            if type(view.get('uid')) is not int or type(view.get('gid')) is not int or min(view['uid'], view['gid']) < 0:
+                raise ValueError('exact resource executor UID/GID required')
+            namespace_path(view['namespace'])
+            current[role] = json.loads(enter(view['namespace'], ['/usr/bin/python3', '-c', REBIND_SNAPSHOT, str(database)], view['uid'], view['gid']))
+        if current['source'] != current['target'] or observations and observations != current:
+            raise ValueError('same physical database/WAL changed across namespace rebinding')
+        observations = current
+    if observations['target']['databaseIdentity'] != receipt['databaseIdentity']:
+        raise ValueError('rebind must retain the original exact physical database')
+    receipt['namespaceRebinding'] = {'version': 1, 'kind': 'same-physical-object', 'source': {'namespace': plan['source']['namespace'], **observations['source']}, 'target': {'namespace': plan['target']['namespace'], **observations['target']}, 'retainedRunnerNamespace': plan['source']['namespace']}
+    publish(path, receipt)
+    return {'ok': True, 'scopeId': plan['scopeId'], 'databaseIdentity': receipt['databaseIdentity'], 'copied': False}
+
+
 def pin(plan):
     if plan.get('version') != 1 or not isinstance(plan.get('namespaces'), list) or not plan['namespaces']:
         raise ValueError('explicit namespace pin list required')
@@ -201,9 +231,22 @@ def retain_fuse(plan):
 KEY_INITIALIZATION = r'''
 import hashlib,json,os,secrets,stat,sys
 from pathlib import Path
-p=Path(sys.argv[1]);parent=p.parent;before=parent.stat();database=Path(sys.argv[3])
-if database.parent!=parent or not database.is_file() or database.is_symlink():raise ValueError('existing registered database required')
-if not parent.is_dir() or parent.is_symlink():raise ValueError('existing encrypted database parent required')
+p=Path(sys.argv[1]);parent=p.parent;database=Path(sys.argv[3])
+if not database.is_file() or database.is_symlink():raise ValueError('existing registered database required')
+if len(sys.argv)==5:
+ base=Path(sys.argv[4]);s=base.lstat()
+ if not stat.S_ISDIR(s.st_mode) or base.is_symlink() or s.st_uid!=os.getuid() or s.st_mode&0o022 or not parent.is_relative_to(base):raise ValueError('registered owner-only key base required')
+ current=base
+ for component in parent.relative_to(base).parts:
+  current=current/component
+  if sys.argv[2]=='create':
+   try:current.mkdir(mode=0o700)
+   except FileExistsError:pass
+  s=current.lstat()
+  if not stat.S_ISDIR(s.st_mode) or current.is_symlink() or s.st_uid!=os.getuid() or s.st_mode&0o077:raise ValueError('new epoch key directory custody changed')
+elif database.parent!=parent:raise ValueError('key must live beside its existing encrypted database')
+if not parent.is_dir() or parent.is_symlink():raise ValueError('existing registered key parent required')
+before=parent.stat()
 if sys.argv[2]=='create':
  fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
  try:
@@ -223,39 +266,56 @@ print(json.dumps({'dev':str(s.st_dev),'ino':str(s.st_ino),'sha256':hashlib.sha25
 
 
 def initialize_capability(plan):
-    if plan.get('version') != 1 or plan.get('priorCapability') != 'none' or not isinstance(plan.get('scopeId'), str) or not plan['scopeId']:
-        raise ValueError('explicit proved no-prior-capability scope required')
-    if plan.get('sourceProof', {}).get('kind') != 'owner-source-no-capability':
-        raise ValueError('owning source must explicitly attest no previous capability issuer')
+    prior_kind = plan.get('priorCapability')
+    if plan.get('version') != 1 or prior_kind not in ('none', 'absent-after-drain') or not isinstance(plan.get('scopeId'), str) or not plan['scopeId']:
+        raise ValueError('explicit proved capability initialization epoch required')
+    expected = 'owner-source-no-capability' if prior_kind == 'none' else 'detached-capability-epoch'
+    if plan.get('sourceProof', {}).get('kind') != expected:
+        raise ValueError('capability epoch requires its exact owning proof variant')
     source = absolute(plan['sourceProof']['path'])
     if hashlib.sha256(source.read_bytes()).hexdigest() != plan['sourceProof']['sha256']:
-        raise ValueError('original no-capability source proof changed')
-    if type(plan.get('uid')) is not int or type(plan.get('gid')) is not int or min(plan['uid'], plan['gid']) < 0 or plan['namespace'].get('kind') != 'pinned':
-        raise ValueError('exact original encrypted scope UID/GID and pin required')
-    key, database, mount = (absolute(plan[field]) for field in ('keyPath', 'databasePath', 'encryptedMountpoint'))
+        raise ValueError('capability source proof changed')
+    if type(plan.get('uid')) is not int or type(plan.get('gid')) is not int or min(plan['uid'], plan['gid']) < 0:
+        raise ValueError('exact original scope UID/GID required')
+    namespace_path(plan['namespace'])
+    key, database = (absolute(plan[field]) for field in ('keyPath', 'databasePath'))
     receipt_path = absolute(plan['receiptPath'])
-    if key.parent != database.parent or not key.is_relative_to(mount) or receipt_path.is_relative_to(mount):
-        raise ValueError('new key must live beside its existing encrypted scope DB; receipt belongs to host custody')
-    mount_identity(plan['namespace'], str(mount))
+    extra = []
+    if prior_kind == 'none':
+        mount = absolute(plan['encryptedMountpoint'])
+        if plan['namespace'].get('kind') != 'pinned' or key.parent != database.parent or not key.is_relative_to(mount) or receipt_path.is_relative_to(mount):
+            raise ValueError('new root key must live beside its existing encrypted scope DB; receipt belongs to host custody')
+        mount_identity(plan['namespace'], str(mount))
+    else:
+        base = absolute(plan['keyBasePath'])
+        if not key.parent.is_relative_to(base) or receipt_path.is_relative_to(base):
+            raise ValueError('new epoch key belongs to its registered owner base; receipt belongs to host custody')
+        extra = [str(base)]
     digest = hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     prior = trusted(receipt_path) if receipt_path.exists() else None
     if prior is not None and (prior.get('protocol') != 'pi-core-initialized-capability-v1' or prior.get('planSha256') != digest):
         raise ValueError('another capability initialization owns this receipt')
-    identity = json.loads(enter(plan['namespace'], ['/usr/bin/python3', '-c', KEY_INITIALIZATION, str(key), 'inspect' if prior is not None else 'create', str(database)], plan['uid'], plan['gid']))
+    if prior_kind == 'absent-after-drain' and prior is not None and prior.get('state') != 'initialized':
+        raise ValueError('capability initialization effect is uncertain; inspect and reconcile its exact receipt before continuing')
+    if prior_kind == 'absent-after-drain' and prior is None:
+        import runpy
+        runpy.run_path(str(Path(__file__).with_name('core-capability-epoch.py')))['validate'](trusted(source), plan)
+        publish(receipt_path, {'version': 1, 'protocol': 'pi-core-initialized-capability-v1', 'state': 'preparing', 'scopeId': plan['scopeId'], 'priorCapability': prior_kind, 'keyPath': str(key), 'planSha256': digest, 'sourceProof': plan['sourceProof']})
+    identity = json.loads(enter(plan['namespace'], ['/usr/bin/python3', '-c', KEY_INITIALIZATION, str(key), 'inspect' if prior is not None else 'create', str(database), *extra], plan['uid'], plan['gid']))
     if prior is not None:
         if prior.get('keyIdentity') != identity:
             raise ValueError('initialized capability identity changed')
         return {'ok': True, 'value': prior}
-    receipt = {'version': 1, 'protocol': 'pi-core-initialized-capability-v1', 'scopeId': plan['scopeId'], 'priorCapability': 'none',
+    receipt = {'version': 1, 'protocol': 'pi-core-initialized-capability-v1', 'state': 'initialized', 'scopeId': plan['scopeId'], 'priorCapability': prior_kind,
                'keyPath': str(key), 'planSha256': digest, 'keyIdentity': identity, 'sourceProof': plan['sourceProof']}
     publish(receipt_path, receipt)
     return {'ok': True, 'value': receipt}
 
 
 def main():
-    actions = {'pin': pin, 'transfer': transfer, 'retain-fuse': retain_fuse, 'initialize-capability': initialize_capability}
+    actions = {'pin': pin, 'transfer': transfer, 'rebind': rebind, 'retain-fuse': retain_fuse, 'initialize-capability': initialize_capability}
     if os.geteuid() != 0 or len(sys.argv) != 3 or sys.argv[1] not in actions:
-        raise ValueError('usage: root core-adopt pin|retain-fuse|transfer|initialize-capability ABSOLUTE_ROOT_PLAN')
+        raise ValueError('usage: root core-adopt pin|retain-fuse|transfer|rebind|initialize-capability ABSOLUTE_ROOT_PLAN')
     plan = trusted(absolute(sys.argv[2]))
     print(json.dumps(actions[sys.argv[1]](plan)))
 
