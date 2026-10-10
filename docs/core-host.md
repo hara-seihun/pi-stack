@@ -46,6 +46,12 @@ Prepare immutable artifacts while old owners serve. Prepare pins and resource cu
 
 `deploy/host` selects prepared artifacts, installs source/bindings and starts one core before changed transport owners. It never starts per-person engines or separate root/memory/broker factories. Missing authority, common resource view, detachment receipt or native reference is an explicit unfinished cutover, not permission to reset storage. Host handbooks record actual installation and serving outcomes separately from this source contract.
 
+## Account and unlock reload
+
+After the owning host helper prepares an explicit account registration or unlocks an existing registered resource view, `SIGHUP` reloads only the protected canonical configuration. Existing scope IDs, databases, keys, managers and adopted generations cannot be replaced through reload. New scopes and unavailable-to-adopt transitions use their own legitimate custody receipts. Invalid configuration leaves the running owner untouched.
+
+Reload serializes with shutdown. Accepted in-process root judgments drain while their callback and memory services remain available. The core then releases its controllers and transports and adopts the next configuration in the same process; independent native execution hosts continue. Clients reconnect to durable inboxes and projections. A startup failure remains explicit unavailable custody, not a reset or replay; the same corrected configuration can be signalled again. Publication owns changes to the immutable release or host listener identity. Provisioning is complete only after the new scope is actually serving, not when the signal is sent.
+
 ## Completed-integration dependencies
 
 `deploy/integration-retain.py STATE --execute` is the publication lifecycle owner for completed integration `node_modules`. It requires all receipts for that exact integration to be published, the publication worker lock, ignored/untracked dependencies and two complete all-UID live-reference censuses. Referenced integrations and inaccessible censuses refuse deletion. Source, Git, build outputs, proofs, receipts, selected `/srv/pi` closures and Bun's download cache are untouched. Each removal is fsynced in `STATE/dependency-retention.jsonl`. The worker runs collection when draining an empty queue; failure creates a retention alert without reversing a completed release.

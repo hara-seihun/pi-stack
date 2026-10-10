@@ -7,6 +7,7 @@ import { ThreadService } from "../src/threads/service.js";
 import { threadCapability } from "../src/threads/caller.js";
 import { CoreService, type CoreRuntime } from "../src/core/service.js";
 import { serveCore } from "../src/core/main.js";
+import { CoreReloadOwner, validateCoreReload } from "../src/core/reload.js";
 import { acquireDatabaseOwnership, acquireScopeOwnership } from "../src/core/ownership.js";
 import { bindGatewayRequest, registerGatewaySocket, type GatewayBinding } from "../src/core/gateway.js";
 import type { IncomingMessage } from "node:http";
@@ -132,4 +133,41 @@ test("the unified HTTP host serves health without opening unavailable partitions
     const locked = await fetch(`${started.value.service.url}/v1/scopes/alice/projection`, { headers: { authorization: "Bearer alice-token" } });
     expect(locked.status).toBe(503);
   } finally { expect((await started.value.close()).ok).toBe(true); }
+});
+
+
+test("trusted reload preserves custody and drains before replacing plugins", async () => {
+  const { config } = await fixture();
+  const next = structuredClone(config); next.policy.revision += 1;
+  const changed = structuredClone(next); changed.scopes[0]!.storage.databasePath += ".other";
+  expect(validateCoreReload(config, changed).ok).toBe(false);
+  let desired = changed;
+  const events: string[] = [];
+  const owner = new CoreReloadOwner(config, { close: async () => { events.push("old-drained"); return { ok: true, value: undefined }; } },
+    () => ({ ok: true, value: desired }), async () => {
+      events.push("new-adopted");
+      return { ok: true, value: { close: async () => { events.push("new-drained"); return { ok: true, value: undefined }; } } };
+    });
+  expect((await owner.reload()).ok).toBe(false); expect(events).toEqual([]);
+  desired = next;
+  expect((await owner.reload()).ok).toBe(true);
+  expect((await owner.reload()).ok).toBe(true);
+  expect(events).toEqual(["old-drained", "new-adopted"]);
+  expect((await owner.stop()).ok).toBe(true);
+  expect(events).toEqual(["old-drained", "new-adopted", "new-drained"]);
+});
+
+test("shutdown during reload drain never admits a replacement", async () => {
+  const { config } = await fixture();
+  const next = structuredClone(config); next.policy.revision += 1;
+  let release!: () => void;
+  const barrier = new Promise<void>(resolve => { release = resolve; });
+  let entered!: () => void;
+  const draining = new Promise<void>(resolve => { entered = resolve; });
+  let starts = 0;
+  const owner = new CoreReloadOwner(config, { close: async () => { entered(); await barrier; return { ok: true, value: undefined }; } },
+    () => ({ ok: true, value: next }), async () => { starts++; return { ok: false, error: { code: "unavailable", message: "Must not start" } }; });
+  const reload = owner.reload(); await draining;
+  const stop = owner.stop(); release();
+  expect((await reload).ok).toBe(true); expect((await stop).ok).toBe(true); expect(starts).toBe(0);
 });

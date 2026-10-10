@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { loadCoreConfig, type CoreResult } from "./config.js";
 import type { CoreConfig } from "./contracts.js";
 import { CoreService } from "./service.js";
+import { CoreReloadOwner } from "./reload.js";
 import { createCoreCustodyFactory } from "./custody.js";
 import { CoreImages } from "./images.js";
 import { createCoreMemory, type CoreMemoryAdapter } from "./memory.js";
@@ -185,7 +186,14 @@ async function main(): Promise<void> {
   if (command === "--check-config") { console.log(JSON.stringify({ ok: true, scopes: config.value.scopes.map(scope => scope.id), releaseCommit: config.value.releaseCommit })); return; }
   const running = await serveCore(config.value);
   if (!running.ok) { console.error(JSON.stringify(running)); process.exitCode = 1; return; }
-  const stop = () => { void running.value.close().then(result => { if (!result.ok) { console.error(JSON.stringify(result)); process.exitCode = 1; } }); };
+  const lifecycle = new CoreReloadOwner(config.value, running.value, () => loadCoreConfig(path), serveCore);
+  const report = (result: CoreResult<void>) => { if (!result.ok) console.error(JSON.stringify(result)); };
+  const reload = () => { void lifecycle.reload().then(result => { report(result); process.exitCode = result.ok ? 0 : 1; }); };
+  const stop = () => {
+    process.off("SIGHUP", reload);
+    void lifecycle.stop().then(result => { report(result); if (!result.ok) process.exitCode = 1; });
+  };
+  process.on("SIGHUP", reload);
   process.once("SIGTERM", stop); process.once("SIGINT", stop);
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) void main().catch(cause => { console.error(cause); process.exitCode = 1; });

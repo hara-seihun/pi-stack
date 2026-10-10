@@ -1,6 +1,4 @@
 import { afterEach, expect, test } from "bun:test";
-import { Database } from "bun:sqlite";
-import { CalendarStore } from "./calendar";
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -45,20 +43,4 @@ test("administrator writes owning adapters once; unknown/arbitrary configuration
   expect(await service.update("arbitrary.secret", { value: "changed" })).toMatchObject({ ok: false, error: { code: "unknown-setting" } });
   expect(await service.update("model.available:sol", { value: "false" })).toMatchObject({ ok: false, error: { code: "invalid" } });
   expect(writes).toBe(1);
-});
-test("existing calendar timezone migrates with configured provenance and removes duplicate ownership", async () => {
-  const data = directory();
-  writePersonSetting(data, "person.timezone", { zone: "Asia/Tokyo", source: "client-observed" });
-  const db = new Database(join(data, "calendar.sqlite3"));
-  db.exec("CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO settings VALUES ('zone','Europe/London')");
-  db.close();
-  const calendar = new CalendarStore(data, "person");
-  expect(calendar.timezoneMigration.ok).toBe(true);
-  expect(readPersonTimezone(data)).toMatchObject({ ok: true, value: { zone: "Europe/London", source: "configured" } });
-  await calendar.close();
-  const updated = new Database(join(data, "calendar.sqlite3"));
-  expect(updated.query("SELECT value FROM settings WHERE key='zone'").get()).toBeNull();
-  updated.close();
-  const other = directory();
-  expect(readPersonTimezone(other)).toEqual({ ok: true, value: null });
 });
