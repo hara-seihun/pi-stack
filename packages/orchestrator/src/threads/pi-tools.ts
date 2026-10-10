@@ -7,9 +7,10 @@ import { readableNotificationText } from "./message-format.js";
 import { DELEGATION_POLICY } from "../delegation-policy.js";
 import { SUBAGENT_MODEL_DESCRIPTIONS } from "../catalog.js";
 import { threadMode } from "./modes.js";
+import { isThreadRole, roleTools } from "./roles.js";
 import { SPEEDS } from "./speed.js";
 import { threadWaitParameters } from "./wait-contract.js";
-import { agentMessageView, agentSettlementView, agentThreadView, agentWaitView, agentWakeView, agentWatchView, mapResult } from "./agent-results.js";
+import { agentMessageView, agentSettlementView, agentThreadView, agentWaitView, agentWakeView, mapResult } from "./agent-results.js";
 import { BACKGROUND_ATTENTION_POLICY } from "./attention-policy.js";
 import { QUESTION_AUTHORING_POLICY, QUESTION_TEXT_DESCRIPTION, QUESTION_SUGGESTION_DESCRIPTION } from "./question-policy.js";
 
@@ -18,16 +19,7 @@ const questionInput = Type.Object({
   suggestions: Type.Optional(Type.Array(Type.String({ minLength: 1, description: QUESTION_SUGGESTION_DESCRIPTION }))),
   recommendedSuggestionIndex: Type.Optional(Type.Integer({ minimum: 0 })),
 });
-const delivery = Type.Union([Type.Literal("queue"), Type.Literal("steer"), Type.Literal("hardSteer")]);
-const agentDelivery = Type.Union([Type.Literal("steer"), Type.Literal("hardSteer")]);
-const watchFields = {
-  what: Type.String({ minLength: 1, description: "What to check." }),
-  why: Type.String({ minLength: 1, description: "Why it matters." }),
-  how: Type.Optional(Type.String({ description: "Known way to check it." })),
-  cadenceMs: Type.Optional(Type.Integer({ minimum: 60000, description: "Repeat interval in milliseconds; omitted uses the person's default." })),
-  nextDueAt: Type.Optional(Type.Integer({ minimum: 0, description: "Next due time as Unix epoch milliseconds; new items default to now." })),
-  destination: Type.Optional(Type.String({ minLength: 1, description: "Destination whose workspace and chosen context check this item, such as personal or home; omitted on add uses this thread's own destination." })),
-};
+
 const settings = Type.Object({
   model: Type.Optional(Type.String()),
   thinkingLevel: Type.Optional(Type.Union(THINKING_LEVELS.map(value => Type.Literal(value)))),
@@ -63,13 +55,13 @@ export function threadTools(options: PiSessionOptions) {
     }),
     defineTool({
       name: "thread_title", label: "Name this thread",
-      description: "Name your own thread; nothing else names it. Call this during your first turn in a new thread with a short, specific topic title (about 3–7 words, no trailing punctuation); keep a supplied title when it already fits. Call it again only when the conversation's topic has changed enough that the current title would mislead someone scanning their thread list, not for every new subtopic. If the person has renamed the thread themselves, their title stays and this tool refuses; leave it. Your agent name is separate and never changes.",
+      description: "Name your own thread; nothing else names it. Call this during your first turn in a new thread with a short, specific topic title (about 3–7 words, no trailing punctuation); keep a supplied title when it already fits. Call it again only when the conversation's topic has changed enough that the current title would mislead someone scanning their thread list, not for every new subtopic. If the person has renamed the thread themselves, their title stays and this tool refuses; leave it. The task title is the agent's identity.",
       parameters: Type.Object({ title: Type.String({ minLength: 1, maxLength: 80, description: "The thread's topic title." }) }),
       execute: async (_id, input, signal) => result(mapResult(await api(signal).control({ action: "title", threadId: options.threadId, title: input.title }), thread => ({ title: thread.title }))),
     }),
     defineTool({
       name: "thread_wait", label: "Wait for a named dependency",
-      description: "Set or clear your own typed dependency wait as your final tool call; this ends the turn without polling. Name agents (nonempty accessible peer threadIds and optional after cursors), job (jobId), deployment (publicationId), or message (accessible collaborator fromThreadId). Child settlements or collaborator messages resume the same thread. For external jobs/deployments set thread_wake first as recovery. Having finished or being available for assignment is idle: do not set a wait. Dependencies subscribe to durable peer results, including cancellation when a peer is closed; they never veto explicit Close. Clear removes your wait and outgoing subscriptions without creating work. The result status distinguishes registered (durable wait), already_arrived (current assignment result), resumed (new input IDs; continue with that input), and cleared. Only a still-active registered wait ends the turn.",
+      description: "Set or clear your own typed dependency wait as your final tool call; this ends the turn without polling. Name agents (nonempty accessible peer threadIds and optional after cursors), job (jobId), deployment (publicationId), or message (accessible collaborator fromThreadId). Child settlements or collaborator messages resume the same thread. For external work, leave its state and next action in the owning Markdown notes; Kenaznia owns timing and recovery. Having finished or being available for assignment is idle: do not set a wait. Dependencies subscribe to durable peer results, including cancellation when a peer is closed; they never veto explicit Close. Clear removes your wait and outgoing subscriptions without creating work. The result status distinguishes registered (durable wait), already_arrived (current assignment result), resumed (new input IDs; continue with that input), and cleared. Only a still-active registered wait ends the turn.",
       parameters: threadWaitParameters,
       execute: async (id, input, signal) => {
         const waited = await api(signal).agentWait({ ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` });
@@ -79,7 +71,7 @@ export function threadTools(options: PiSessionOptions) {
     }),
     defineTool({
       name: "thread_wake", label: "Schedule own-thread wakes",
-      description: "Set, list, change or cancel one durable periodic recovery check for your own existing thread. Set replaces reason/cadence and retimes nextDueAt (epoch milliseconds, default now+cadence). The reason is the wake message you will read when the check lands, so write what to check and what to do. Due checks coalesce while busy and pause during Stop/archive. Restart-safe ordinary messages resume the same thread through normal model admission; no watch-list item or polling model is created. List shows the reason, cadence and next due time. Cancel when resolved. Prefer agent settlement events; wakes are fallback checks.",
+      description: "Kenaznia alone can set, list, change or cancel a duty reminder for its own conversation; ordinary workers write their state to Markdown and finish. Set replaces reason/cadence and retimes nextDueAt (epoch milliseconds, default now+cadence). The reason is the wake message you will read when the check lands, so write what to check and what to do. Due checks coalesce while busy and pause during Stop/archive. Restart-safe ordinary messages resume the same thread through normal model admission; no watch-list item or polling model is created. List shows the reason, cadence and next due time. Cancel when resolved. Prefer agent settlement events; wakes are fallback checks.",
       parameters: Type.Union([
         Type.Object({ action: Type.Literal("set"), reason: Type.String({ minLength: 1 }), cadenceMs: Type.Integer({ minimum: 60000 }), nextDueAt: Type.Optional(Type.Integer({ minimum: 0 })) }),
         Type.Object({ action: Type.Literal("list") }),
@@ -89,34 +81,6 @@ export function threadTools(options: PiSessionOptions) {
         ? { action: "list", threadId: options.threadId }
         : { ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` }),
         schedule => !schedule ? null : input.action === "set" ? { nextDueAt: schedule.nextDueAt } : agentWakeView(schedule))),
-    }),
-    defineTool({
-      name: "watch_list_add", label: "Add to watch list",
-      description: "Add a persistent check to this person's shared encrypted watch list. The watch agent checks due items with its configured model and acts within the person's current life policy; it asks only for decisions that policy leaves with the person. An empty list makes no model calls.",
-      parameters: Type.Object(watchFields),
-      execute: async (id, item, signal) => result(mapResult(await api(signal).watch({ action: "add", item, threadId: options.threadId, requestId: `${options.threadId}:${id}` }), agentWatchView)),
-    }),
-    defineTool({
-      name: "watch_list_update", label: "Update a watch item",
-      description: "Change a watch item's check, reason, method, timing or destination. List first to get its ID. Set how or cadenceMs to null to clear it; omitted fields stay unchanged. nextDueAt is epoch milliseconds.",
-      parameters: Type.Object({ id: Type.String({ minLength: 1 }), patch: Type.Object({
-        what: Type.Optional(watchFields.what), why: Type.Optional(watchFields.why), nextDueAt: watchFields.nextDueAt, destination: watchFields.destination,
-        how: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-        cadenceMs: Type.Optional(Type.Union([Type.Integer({ minimum: 60000 }), Type.Null()])),
-      }) }),
-      execute: async (id, input, signal) => result(mapResult(await api(signal).watch({ action: "update", ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` }), agentWatchView)),
-    }),
-    defineTool({
-      name: "watch_list_remove", label: "Remove a watch item",
-      description: "Remove a resolved or no-longer-needed check from this person's watch list. List first to get its ID. Any agent may maintain the list.",
-      parameters: Type.Object({ id: Type.String({ minLength: 1 }) }),
-      execute: async (id, input, signal) => result(await api(signal).watch({ action: "remove", ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` })),
-    }),
-    defineTool({
-      name: "watch_list", label: "Read watch list",
-      description: "List this person's persistent shared watch items, including due times, cadence, provenance and the last checking thread. Does not start an agent.",
-      parameters: Type.Object({}),
-      execute: async (_id, _input, signal) => result(await api(signal).watch({ action: "list", threadId: options.threadId })),
     }),
     defineTool({
       name: "request_user_input_async", label: "Ask the user asynchronously",
@@ -155,28 +119,27 @@ export function threadTools(options: PiSessionOptions) {
     }),
     defineTool({
       name: "thread_spawn", label: "Start a thread",
-      description: `${DELEGATION_POLICY}\n\nStart a fresh agent peer with its own context. Every agent may spawn peers within the shared resource limit. parentId records creator provenance only. It returns immediately; assignment replies arrive as ordinary agent messages. Creating a peer is not a dependency: use thread_wait or explicit dependencies when you rely on its result. An ephemeral worker archives after its final assignment settles, but its work and filesystem effects persist. Set ephemeral:false if you expect to continue the conversation after its response. To continue an existing conversation use thread_send instead. ${spawnDefaults(options.env.PI_THREAD_MODE)} Explicit settings may select any available installed model. ${SUBAGENT_MODEL_DESCRIPTIONS}`,
-      parameters: Type.Object({ message: Type.String(), title: Type.Optional(Type.String()), cwd: Type.Optional(Type.String()), ephemeral: Type.Optional(Type.Boolean({ default: true, description: "Archive after its last assignment settles. Set false when you plan to send follow-up work." })), settings: Type.Optional(Type.Object({
+      description: `${DELEGATION_POLICY}\n\nStart a fresh agent peer with its own context. Kenaznia spawns kenan; a kena can spawn kenatian; a kenatia cannot spawn. parentId records creator provenance only. It returns immediately; assignment replies arrive as ordinary agent messages. Creating a peer is not a dependency: use thread_wait or explicit dependencies when you rely on its result. Workers finish by writing their state and next action to the owning Markdown notes. Threads remain open until explicit Close; completion never archives them. To continue an existing conversation use thread_send instead. ${spawnDefaults(options.env.PI_THREAD_MODE)} Explicit settings may select any available installed model. ${SUBAGENT_MODEL_DESCRIPTIONS}`,
+      parameters: Type.Object({ message: Type.String(), title: Type.Optional(Type.String()), cwd: Type.Optional(Type.String()), settings: Type.Optional(Type.Object({
         ...settings.properties,
         model: Type.Optional(Type.String({ description: "Defaults to Sol; any available installed model may be selected." })),
       })) }),
-      execute: async (id, input, signal) => result(mapResult(await api(signal).spawn({ ...input, ephemeral: input.ephemeral ?? true, requestId: `${options.threadId}:${id}`, parentId: options.threadId,
+      execute: async (id, input, signal) => result(mapResult(await api(signal).spawn({ ...input, requestId: `${options.threadId}:${id}`, parentId: options.threadId,
         cwd: input.cwd ?? options.cwd, admission: "force", settings: input.settings as Parameters<ThreadApi["spawn"]>[0]["settings"] }),
-        thread => ({ id: thread.id, ...(thread.agentName ? { agentName: thread.agentName } : {}) }))),
+        thread => ({ id: thread.id, title: thread.title, role: thread.role }))),
     }),
     defineTool({
       name: "thread_send", label: "Send to a thread",
-      description: "Send to an existing accessible thread. Agents steer by default and may hard steer to cancel and confirm current local work before running the message. A closed recipient needs an explicit thread_control reopen before sending. Reopen never continues discarded work.",
-      parameters: Type.Object({ threadId: Type.String(), text: Type.String(), delivery: Type.Optional(Type.Union(agentDelivery.anyOf, { default: "steer", description: "Agents may steer or hard steer." })) }),
+      description: "Send to any existing authorized agent. Every pending message arrives together at its next completed-output boundary without cutting off text or waiting for a running tool. A closed recipient needs explicit reopen before new work.",
+      parameters: Type.Object({ threadId: Type.String(), text: Type.String() }),
       execute: async (id, input, signal) => {
-        if (input.threadId === options.threadId && input.delivery === "hardSteer") return result({ ok: false, error: { code: "invalid_request", message: "Hard steer cannot wait for the tool that requested it. Return and continue in this thread instead." } });
         const request = { ...input, requestId: `${options.threadId}:${id}`, senderId: options.threadId, delivery: resolveDelivery({ ...input, senderId: options.threadId }), source: "explicit" as const };
         return result(mapResult(await api(signal).send(request), agentMessageView));
       },
     }),
     defineTool({
       name: "thread_await", label: "Await a peer result",
-      description: "Wait up to 25 seconds for the first completed assignment from accessible peers. A turn settled while the peer owns a wait, dependency or unanswered question is not an assignment result. A timeout returns settlement:null, timedOut:true, remaining IDs, after cursors and each child's lifecycle; it does not settle or stop children. Use the statuses to decide whether to intervene, continue other work or call again with the returned after. Settlements include outcome and final text; native result metadata and thinking are omitted. Stop or hard steer cancels the wait; ordinary steer waits for this tool boundary.",
+      description: "Wait up to 25 seconds for the first completed assignment from accessible peers. A turn settled while the peer owns a wait, dependency or unanswered question is not an assignment result. A timeout returns settlement:null, timedOut:true, remaining IDs, after cursors and each child's lifecycle; it does not settle or stop children. Use the statuses to decide whether to intervene, continue other work or call again with the returned after. Settlements include outcome and final text; native result metadata and thinking are omitted. Pending messages arrive at the completed-output boundary; a running wait yields its observation without cancelling the dependency.",
       parameters: Type.Object({
         threadIds: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 100, uniqueItems: true }),
         after: Type.Optional(Type.Record(Type.String(), Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }))),
@@ -238,14 +201,13 @@ export function threadTools(options: PiSessionOptions) {
     }),
     defineTool({
       name: "thread_control", label: "Control a thread",
-      description: "Close cancels and archives only the selected agent and discards pending input; result subscribers receive durable cancellation. Reopen unhides without replay or continuation. Cancel interrupts only local work without archiving. Dependencies replaces your own durable peer result subscriptions (empty releases them); terminal peer results discharge their subscriptions. Omit threadId for self. Settings save future preferences; retryWaiting moves dormant capacity waiting to the selected model without interrupting live work. Pending receipts can be cancelled or promoted.",
+      description: "Explicit Close stops and archives only the selected agent; accepted pending messages keep their receipts. Result subscribers receive durable cancellation. Reopen releases accepted pending inputs without repeating already-landed work. Cancel interrupts only local work without archiving. Dependencies replaces your own durable peer result subscriptions (empty releases them); terminal peer results discharge their subscriptions. Omit threadId for self. Settings save future preferences; retryWaiting moves dormant capacity waiting to the selected model without interrupting live work. Pending receipt cancellation is only for an explicit user request; there is one delivery mode and no promotion.",
       parameters: Type.Union([
         Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Union([Type.Literal("close"), Type.Literal("reopen"), Type.Literal("cancel")]) }),
         Type.Object({ action: Type.Literal("dependencies"), threadIds: Type.Array(Type.String({ minLength: 1 }), { maxItems: 100, uniqueItems: true }) }),
         Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("settings"), settings }),
         Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("retryWaiting") }),
         Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("cancelMessage"), messageId: Type.String() }),
-        Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("promoteMessage"), messageId: Type.String(), delivery }),
       ]),
       execute: async (_id, input, signal) => {
         const threadId = "threadId" in input ? input.threadId ?? options.threadId : options.threadId;
@@ -254,5 +216,11 @@ export function threadTools(options: PiSessionOptions) {
           thread => input.action === "settings" ? { ...agentThreadView(thread), settings: thread.settings } : agentThreadView(thread)));
       },
     }),
-  ].filter(tool => tool.name !== "thread_spawn" || options.env.PI_THREAD_CAN_SPAWN !== "0");
+  ].filter(tool => {
+    const declared = options.env.PI_THREAD_ROLE;
+    if (declared !== undefined && !isThreadRole(declared)) throw new Error(`Invalid thread role: ${declared}`);
+    const role = declared ?? (options.env.PI_THREAD_MANAGER === "1" ? "kenaznia" : "kena");
+    return roleTools(role, [tool.name]).length > 0
+      && (tool.name !== "thread_spawn" || options.env.PI_THREAD_CAN_SPAWN !== "0");
+  });
 }

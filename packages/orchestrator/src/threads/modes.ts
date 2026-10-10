@@ -1,5 +1,6 @@
 import type { Admission, SettingsOverrides, ThreadSettings } from "./contracts.js";
 import { requestedSpeedError, type Speed } from "./speed.js";
+import { KENAZNIA_TOOLS } from "./roles.js";
 
 /**
  * Thread modes are declared here, once, and every owner derives admission, settings and tools from
@@ -17,7 +18,7 @@ export interface ThreadMode {
     readonly settings: Required<SettingsOverrides>;
     /** Tools the conversation keeps; everything else is switched off before each turn. */
     readonly tools: readonly string[];
-    /** Bash ceiling for the conversation, so only quick commands such as placing a canvas skeleton fit. */
+    /** Required by native launch metadata; dispatch roles expose no shell tool. */
     readonly bashTimeoutSeconds: number;
   };
   /** Defaults for workers the conversation spawns; explicit model or thinking overrides still apply. */
@@ -29,10 +30,8 @@ export const THREAD_MODES = {
     admission: "live",
     conversation: {
       settings: { model: "sol", thinkingLevel: "low", speed: "priority" },
-      tools: ["bash", "read", "thread_spawn", "thread_send", "thread_list", "thread_read", "thread_control", "thread_wait", "thread_wake", "thread_attention",
-        "meet_room", "meet_voice", "meet_share_screen", "meet_stop_sharing", "message_react",
-        "watch_list", "watch_list_add", "watch_list_update", "watch_list_remove"],
-      bashTimeoutSeconds: 10,
+      tools: KENAZNIA_TOOLS,
+      bashTimeoutSeconds: 1,
     },
     worker: { settings: { model: "luna", thinkingLevel: "medium", speed: "priority" } },
   },
