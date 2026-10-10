@@ -90,6 +90,8 @@ The header reads canonical owner lifecycle and separately reports connection syn
 
 Exact native `thread_landed` receipts associate submitted user bubbles with input IDs. Bounded owner metadata distinguishes queued, dispatch acceptance unconfirmed, accepted in the runtime queue, consumed/in-progress, and explicit successful/failed/cancelled turn outcomes. Historical pages carry their own input receipt; recent session receipts update live bubbles. A finished turn is not a claim that a larger task is complete. Failures show their actual reason. Prompt admission receipts preserve requested delivery identity and expose normalized `effectiveDelivery` separately.
 
+Manager conversations keep normal chronological flow with human bubbles aligned right and Kenan replies aligned left. Input receipts remain attached to their user bubble; ordinary worker layouts are unchanged.
+
 Managers with owner-reported all-context selection show a read-only expandable list of every selected destination file. Ordinary new-thread context selection remains manual.
 
 ## Optimistic actions

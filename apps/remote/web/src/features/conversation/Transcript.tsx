@@ -154,7 +154,7 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, autoCollapse
     </footer>}
     {(body.error || loaded && !loaded.ok || actionError) && <p className="step-loading step-failed" role="status">{actionError || body.error || loaded && !loaded.ok && loaded.error.message}</p>}
   </>;
-  return <div data-transcript-seq={entry.seq} data-transcript-source={entry.key}>{sender
+  return <div className={entry.kind === "user" && !sender ? "transcript-message-human" : "transcript-message-agent"} data-transcript-seq={entry.seq} data-transcript-source={entry.key}>{sender
     ? <AgentDisclosure route={route} open={open} onOpen={setOpen}>{content}</AgentDisclosure>
     : content}</div>;
 }, (before, after) => before.entry.signature === after.entry.signature && before.sessionId === after.sessionId && before.autoCollapse === after.autoCollapse && before.mono === after.mono && before.onEdit === after.onEdit && before.onReply === after.onReply);

@@ -101,7 +101,7 @@ function ScreenFixture({ mode }: { mode: "empty" | "history" | "working" | "held
     ...(mode === "long-header" ? { name: `${unicode} ${longToken}`, model: `provider/${longToken}`, contextUsage: { tokens: 180000, contextWindow: 200000, percent: 90 } } : {}),
   });
   return <div style={{ height: "100dvh" }}><ConversationScreen session={current} mono={mode === "receipts" ? { hintSeen: true, onClassic: noop, onHintSeen: noop, saving: false } : undefined} ancestors={mode === "long-header" ? [session({ id: "parent", agentName: unicode })] : []}
-    entries={mode === "receipts" ? receiptEntries : mode === "empty" ? [] : mode === "expanded" ? [...messages.slice(0, 1), ...toolEntries, ...messages.slice(1)] : messages}
+    entries={mode === "receipts" ? [entry("assistant", "Ready for your next instruction.", "reply-before"), ...receiptEntries, entry("assistant", "The previous turn finished. I am still available.", "reply-after")] : mode === "empty" ? [] : mode === "expanded" ? [...messages.slice(0, 1), ...toolEntries, ...messages.slice(1)] : messages}
     liveText={busy ? "Streaming **response** with an unfinished list:\n- first item\n- " : ""} liveThinking={busy ? "Inspecting the available states…" : ""} thinkingActive={busy}
     autoCollapse={mode !== "expanded"} images={null} offline={mode === "offline" ? "Connection lost" : ""} syncing={mode === "syncing"} pending={false}
     home="/home/catalogue" prompt={prompt} attachments={[]} slashCommands={[{ name: "kelana", description: prose, source: "skill" }, { name: "software-engineering", description: "Valid states and explicit errors", source: "skill" }]}

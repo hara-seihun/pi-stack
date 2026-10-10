@@ -193,6 +193,20 @@ test("disconnect preserves last observed execution state instead of manufacturin
 });
 
 
+test("manager chat sides follow sender identity without reordering canonical messages or worker layout", () => {
+  const entries = [
+    { kind: "user" as const, key: "native-human:0", signature: "human", text: "First instruction" },
+    { kind: "assistant" as const, key: "native-agent:0", signature: "agent", text: "Second reply" },
+  ];
+  const html = render({ session: { ...session, manager: true }, entries });
+  expect(html).toContain("manager-conversation");
+  expect(html).toContain('class="transcript-message-human"');
+  expect(html).toContain('class="transcript-message-agent"');
+  expect(html).toContain('data-transcript-source="native-human:0"');
+  expect(html.indexOf("First instruction")).toBeLessThan(html.indexOf("Second reply"));
+  expect(render({ entries })).not.toContain("manager-conversation");
+});
+
 test("automatic manager context shows only owner-selected names and no manual deselection", () => {
   const automatic = { ...session, manager: true, contextSelection: { mode: "all" as const, files: ["AGENTS.md", "notes.md"] } };
   const html = render({ session: automatic });
