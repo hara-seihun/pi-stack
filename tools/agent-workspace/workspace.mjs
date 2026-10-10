@@ -914,7 +914,39 @@ function gitStatusExcludingNested(record, args, nestedWorkspaces = []) {
   return git(record.path, [...args, "--", ".", ...exclusions]);
 }
 
-function gitDisposition(record, nestedWorkspaces = []) {
+function publishedCustodyInspector(statePath) {
+  const snapshots = new Map();
+  return (record, commits) => {
+    const upstream = record.repository;
+    if (upstream === null) fail("published custody requires a recorded upstream repository");
+    const mirror = mirrorFor(statePath, upstream);
+    if (!snapshots.has(mirror)) {
+      try {
+        withResourceLock(statePath, `mirror:${mirror}`, () => {
+          prepareMirror(mirror, upstream, { fetch: upstream, push: upstream });
+          run("git", ["--git-dir", mirror, "fetch", "--atomic", "--prune", "--no-tags",
+            "--no-write-fetch-head", "--no-auto-maintenance", upstream,
+            "+refs/heads/*:refs/pi-workspace/published/*"]);
+        }, inspectionDeadline);
+        snapshots.set(mirror, { state: "ready", mirror, upstream });
+      } catch (error) {
+        snapshots.set(mirror, { state: "failed", error });
+      }
+    }
+    const snapshot = snapshots.get(mirror);
+    if (snapshot.state === "failed") throw snapshot.error;
+    const covered = new Set();
+    for (const commit of commits) {
+      if (command("git", ["--git-dir", mirror, "cat-file", "-e", `${commit}^{commit}`]).status !== 0) continue;
+      const count = Number(run("git", ["--git-dir", mirror, "rev-list", "--count", commit,
+        "--not", "--glob=refs/pi-workspace/published/*"]));
+      if (count === 0) covered.add(commit);
+    }
+    return { mirror, upstream, covered };
+  };
+}
+
+function gitDisposition(record, nestedWorkspaces = [], publishedCustody) {
   const lines = gitStatusExcludingNested(record, ["status", "--porcelain=v1", "--ignored=matching", "--untracked-files=normal"], nestedWorkspaces).split("\n");
   const changed = lines.filter((line) => line && !line.startsWith("!! "));
   if (changed.length > 0) return { safe: false, sourceRetention: true, reason: `working tree has changes: ${changed.slice(0, 8).join(" | ")}` };
@@ -934,13 +966,20 @@ function gitDisposition(record, nestedWorkspaces = []) {
     : [];
   const candidates = [...refs, "HEAD"];
   const durableSource = record.durableSourceCommit === null ? [] : [record.durableSourceCommit];
-  const local = [];
+  let local = [];
   for (const ref of candidates) {
     const count = Number(git(record.path, ["rev-list", "--count", ref, "--not", "--remotes", ...durableSource]));
-    if (count > 0) local.push(`${ref}:${count}`);
+    if (count > 0) local.push({ ref, count, commit: git(record.path, ["rev-parse", `${ref}^{commit}`]) });
   }
-  if (local.length > 0) return { safe: false, sourceRetention: true, reason: `checkout has commits absent from remote refs: ${local.join(", ")}`, head };
+  let custody;
+  if (local.length > 0 && publishedCustody !== undefined) {
+    custody = publishedCustody(record, [...new Set(local.map(candidate => candidate.commit))]);
+    local = local.filter(candidate => !custody.covered.has(candidate.commit));
+  }
+  if (local.length > 0) return { safe: false, sourceRetention: true, reason: `checkout has commits absent from remote refs: ${local.map(({ ref, count }) => `${ref}:${count}`).join(", ")}`, head };
   if (ignored.length > 0) return { safe: false, sourceRetention: false, reason: `checkout has unclassified ignored output: ${ignored.slice(0, 8).join(" | ")}`, head };
+  if (custody !== undefined) return { safe: true, sourceRetention: false,
+    reason: `every local branch commit exists on a remote ref, durable source ancestry, or refreshed published custody in ${custody.mirror}`, head };
   if (head === record.durableSourceCommit) return { safe: true, sourceRetention: false, reason: "checkout remains at its durable source commit", head };
   return { safe: true, sourceRetention: false, reason: "every local branch commit exists on a remote ref or in durable source ancestry", head };
 }
@@ -1184,7 +1223,7 @@ function inspectRecord(record, options = {}) {
       systemdUnits: systemd.references,
     };
   }
-  const disposition = duringInspection(options.deadline, () => gitDisposition(record, options.nestedWorkspaces));
+  const disposition = duringInspection(options.deadline, () => gitDisposition(record, options.nestedWorkspaces, options.publishedCustody));
   return {
     classification: disposition.safe ? "reclaimable" : "repair-required",
     reason: disposition.reason,
@@ -1198,7 +1237,7 @@ function inspectRecord(record, options = {}) {
 
 function reconcileRecord(database, record, options) {
   let safety = options.safety;
-  let inspection = inspectRecord(record, { ignoreLease: options.ignoreLease, safety, deadline: options.deadline });
+  let inspection = inspectRecord(record, { ...options, safety });
   if (inspection.classification === "active") return { record, inspection, action: "none" };
   if (inspection.classification === "missing") {
     if (options.execute) {
@@ -1215,7 +1254,7 @@ function reconcileRecord(database, record, options) {
     removeDockerReferences(inspection.containers);
     killProcessReferences(inspection.processes);
     safety = safetySnapshot(database);
-    inspection = inspectRecord({ ...current, state: "reclaiming" }, { ignoreLease: true, safety, deadline: options.deadline });
+    inspection = inspectRecord({ ...current, state: "reclaiming" }, { ...options, ignoreLease: true, safety });
   }
   if (inspection.classification === "referenced" || inspection.classification === "blocked") {
     if (options.execute) updateState(database, record, inspection.classification, inspection.reason);
@@ -1229,13 +1268,13 @@ function reconcileRecord(database, record, options) {
   let removedCaches = [];
   if (options.execute) {
     safety = freshThreadSafety(safety);
-    inspection = inspectRecord(record, { ignoreLease: true, safety, deadline: options.deadline });
+    inspection = inspectRecord(record, { ...options, ignoreLease: true, safety });
     if (inspection.classification === "referenced" || inspection.classification === "blocked") {
       updateState(database, record, inspection.classification, inspection.reason);
       return { record, inspection, action: "none" };
     }
     removedCaches = stripCaches(record, options.statePath, () => database.prepare("DELETE FROM workspace_capacity_measurement WHERE workspace_id=?").run(record.id));
-    inspection = inspectRecord(record, { ignoreLease: true, safety, deadline: options.deadline });
+    inspection = inspectRecord(record, { ...options, ignoreLease: true, safety });
   }
   if (inspection.classification === "repair-required") {
     if (options.execute) updateState(database, record, "repair-required", inspection.reason);
@@ -1245,7 +1284,7 @@ function reconcileRecord(database, record, options) {
   if (!options.execute) return { record, inspection, action: "would-release" };
   const current = recordBy(database, { id: record.id });
   if (!options.ignoreLease && current.leaseExpiresAt > Date.now()) return { record: current, inspection: inspectRecord(current), action: "lease-renewed" };
-  const latest = inspectRecord(current, { ignoreLease: true, safety: freshThreadSafety(safety), deadline: options.deadline });
+  const latest = inspectRecord(current, { ...options, ignoreLease: true, safety: freshThreadSafety(safety) });
   if (latest.classification !== "reclaimable") {
     updateState(database, current, latest.classification, latest.reason);
     return { record: current, inspection: latest, action: "none" };
@@ -1288,7 +1327,7 @@ function groupReconciliation(database, records, options) {
   }
 
   let inspections = records.map((record) => inspectRecord(record,
-    groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline })));
+    groupInspectionOptions(record, records, { ...options, ignoreLease: true, safety })));
   if (options.execute && options.reapExpired && !options.preserveRuntime && inspections.some((inspection) => inspection.classification === "referenced")) {
     const current = records.map((record) => recordBy(database, { id: record.id }));
     if (!options.ignoreLease && current.some((record) => record.leaseExpiresAt > Date.now())) {
@@ -1300,7 +1339,7 @@ function groupReconciliation(database, records, options) {
     killProcessReferences(inspections.flatMap((inspection) => inspection.processes));
     safety = safetySnapshot(database);
     inspections = records.map((record) => inspectRecord(record,
-      groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline })));
+      groupInspectionOptions(record, records, { ...options, ignoreLease: true, safety })));
   }
 
   const preserveKnownSource = options.reapExpired && options.preserveRuntime
@@ -1309,7 +1348,7 @@ function groupReconciliation(database, records, options) {
   if (options.execute && !preserveKnownSource && !inspections.some((inspection) => ["referenced", "blocked"].includes(inspection.classification))) {
     safety = freshThreadSafety(safety);
     inspections = records.map((record) => inspectRecord(record,
-      groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline })));
+      groupInspectionOptions(record, records, { ...options, ignoreLease: true, safety })));
   }
   if (options.execute && !preserveKnownSource && !inspections.some((inspection) => ["referenced", "blocked"].includes(inspection.classification))) {
     records.forEach((record, index) => {
@@ -1318,13 +1357,13 @@ function groupReconciliation(database, records, options) {
       }
     });
     inspections = records.map((record) => inspectRecord(record,
-      groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline })));
+      groupInspectionOptions(record, records, { ...options, ignoreLease: true, safety })));
   }
 
   if (options.execute && !preserveKnownSource && !inspections.some((inspection) => ["referenced", "blocked"].includes(inspection.classification))) {
     safety = freshThreadSafety(safety);
     inspections = records.map((record) => inspectRecord(record,
-      groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline })));
+      groupInspectionOptions(record, records, { ...options, ignoreLease: true, safety })));
   }
   const releasable = inspections.every((inspection) => ["missing", "reclaimable"].includes(inspection.classification));
   if (!releasable) {
@@ -2642,13 +2681,15 @@ function measureCapacityCommand(database, args, statePath) {
 }
 
 function reconcileCommand(database, args, statePath) {
-  assertOnly(args, ["root", "id", "path", "execute", "reap-expired", "preserve-runtime", "ignore-lease", "json", "max-groups", "budget-ms", "after"]);
+  assertOnly(args, ["root", "id", "path", "execute", "reap-expired", "preserve-runtime", "ignore-lease", "json", "max-groups", "budget-ms", "after", "refresh-custody"]);
   const started = Date.now();
   const budget = numberFlag(args, "budget-ms", 20_000);
   const maxGroups = numberFlag(args, "max-groups", 32);
   if (budget < 1 || budget > 40_000) fail("--budget-ms must be between 1 and 40000");
   if (!Number.isSafeInteger(maxGroups) || maxGroups < 1) fail("--max-groups must be a positive integer");
   const execute = bool(args, "execute");
+  const refreshCustody = bool(args, "refresh-custody");
+  if (refreshCustody && !execute) fail("--refresh-custody requires --execute; read-only reconciliation never fetches");
   if (execute) pruneReleased(database, Date.now(), one(args, "root"));
   let records;
   if (one(args, "id") !== undefined || one(args, "path") !== undefined) records = [recordBy(database, selectorFrom(args))];
@@ -2683,6 +2724,7 @@ function reconcileCommand(database, args, statePath) {
     deadline,
     maxGroups,
     after,
+    publishedCustody: refreshCustody ? publishedCustodyInspector(statePath) : undefined,
     onProgress: execute && !targeted ? (id) => database.prepare(
       "INSERT INTO reconciliation_cursor (scope, after_id) VALUES (?, ?) ON CONFLICT(scope) DO UPDATE SET after_id = excluded.after_id",
     ).run(scope, id) : undefined,
@@ -2793,7 +2835,7 @@ function help() {
   agent-workspace finalize-creation (--id ID|--path PATH)
   agent-workspace heartbeat (--id ID|--path PATH) [--lease-seconds N]
   agent-workspace release (--id ID|--path PATH) [--reap-expired] [--preserve-runtime]
-  agent-workspace reconcile [--root PATH] [--execute] [--reap-expired] [--preserve-runtime]
+  agent-workspace reconcile [--root PATH] [--execute] [--refresh-custody] [--reap-expired] [--preserve-runtime]
                             [--budget-ms 20000] [--max-groups 32] [--after ID|start]
   agent-workspace measure-capacity [--root PATH | --path PATH | --id ID] [--budget-ms 40000] [--json]
   agent-workspace reprice-capacity (--id ID|--path PATH) --intent source-only|budgeted --headroom-gib N --growth-mib N [--json]
