@@ -56,21 +56,30 @@ Only creation/control override requests resolve partial preferences.
 
 ## State and work
 
-Native execution and assignment completion are distinct. `running` includes
-accepted runnable input, admission, startup, execution and cancellation until
-confirmed. `waiting` describes an agent with a current `thread_wait` (agent, job,
-deployment or message) or unresolved outgoing result subscriptions, but no local
-execution. Active execution wins over either waiting reason. `idle` is genuinely available with no current work. Archived agents
-retain history but accept no automatic execution. There is no persistent Stopped
-product state. An inactive or stopped agent with no explicit dependencies is
-idle even if agents it previously launched are still active. Launch provenance
-never supplies a non-idle status or icon; each agent owns its own activity.
+Native execution, runnable input, assignment completion and future schedules are distinct.
+The owner derives one `Thread.lifecycle` union directly from execution custody, queued
+input, typed waits, subscriptions and failures. Remote, web, Android and rooms consume
+that observation; they do not reconcile scheduler flags or infer work from a wake timer.
 
-Execution activity names observed phases: queuing, admission, opening, inference,
-tools, compaction, cancellation or provider recovery. Missing instrumentation is
-a status defect, not a reason to invent Idle or Working. The same state feeds
-status pills, lists, notification policy and recurring producers. See
-[explicit dispatch](state-dispatch.md) and [runtime wire](runtime-wire.md).
+| Lifecycle | Control | Meaning |
+| --- | --- | --- |
+| `idle` | Send | No current execution or dependency |
+| `working` | Cancel current work | Owned local execution; observed phase can distinguish Typing |
+| `waiting` | Cancel wait | Dispatch, capacity, retry, agent, job, deployment or message dependency; includes reason |
+| `cancelling` | None | Cancellation requested, not yet confirmed |
+| `failed` | Owner-selected control | Failure reason with precisely the control still justified by custody |
+| `archived` | None | Retained history, no automatic execution |
+
+A future wake does not make an idle thread busy or give it a Stop button. Launch
+provenance never supplies activity. Existing `state` is the scheduler's runnable-input
+classification, not the product lifecycle. Execution activity is instrumentation within
+owned work, not another lifecycle machine. Missing instrumentation on an owned execution
+is an explicit failure. Network disconnection belongs only to the client transport;
+reattaching native execution never displays Reconnecting.
+
+The unified manager view compresses healthy observations to Idle, Working or Typing,
+without dependency identities or hidden-agent controls. Classic view retains wait details.
+See [explicit dispatch](state-dispatch.md) and [runtime wire](runtime-wire.md).
 
 A native turn ending does not finish an assignment that still has a dependency or
 unanswered question. Settlements with `assignmentPending` are not completion

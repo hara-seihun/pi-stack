@@ -21,7 +21,7 @@ export function resizeComposerPrompt(element: HTMLTextAreaElement, viewportHeigh
   element.style.overflowY = contentHeight > element.clientHeight ? "auto" : "hidden";
 }
 
-export function Composer({ value, onChange, onSend, placeholder, disabled, readOnly = false, attachmentDisabled = false, attachments, onRemove, onUpload, onPaste, onDraw, action = "send", before, afterPrompt, actions, id, layoutKey, hideAttachments = false, sendLabel = "Send message" }: {
+export function Composer({ value, onChange, onSend, placeholder, disabled, readOnly = false, attachmentDisabled = false, attachments, onRemove, onUpload, onPaste, onDraw, action = "send", before, afterPrompt, actions, id, layoutKey, hideAttachments = false, sendLabel = "Send message", cancelWaitLabel = "Cancel wait" }: {
   value: string;
   onChange(value: string): void;
   onSend(): void;
@@ -34,7 +34,7 @@ export function Composer({ value, onChange, onSend, placeholder, disabled, readO
   onUpload(files: File[]): void;
   onPaste(): void;
   onDraw(): void;
-  action?: "send" | "stop" | "resume";
+  action?: "send" | "stop" | "cancel_wait" | "resume";
   before?: ReactNode;
   afterPrompt?: ReactNode;
   actions?: ReactNode;
@@ -42,6 +42,7 @@ export function Composer({ value, onChange, onSend, placeholder, disabled, readO
   layoutKey?: unknown;
   hideAttachments?: boolean;
   sendLabel?: string;
+  cancelWaitLabel?: string;
 }) {
   const textarea = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -94,9 +95,10 @@ export function Composer({ value, onChange, onSend, placeholder, disabled, readO
         <button className="composer-icon" type="button" aria-label="Paste text document" disabled={readOnly || attachmentDisabled} onClick={onPaste}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5.5V4h6v1.5M9 5.5h6M9 5.5H7v15h10v-15h-2M9 10h6m-6 4h6m-6 4h4"/></svg></button>
         <button className="composer-icon drawing-toggle" type="button" aria-label="Draw a picture" title="Draw a picture" disabled={readOnly || attachmentDisabled} onClick={onDraw}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 13 7-9a1.5 1.5 0 0 0-2-2l-9 7 4 4Z"/><path d="M10 9c-3-1-5 1-5 4 0 2-1 3-3 4 4 3 10 2 11-3l1-1"/></svg></button></>}
         <span className="composer-spacer" />{actions}
-        <button id={id ? "action" : undefined} className={`composer-icon send${action === "stop" ? " abort" : action === "resume" ? " resume" : ""}`} type="submit" disabled={disabled} aria-label={action === "send" ? sendLabel : action === "stop" ? "Cancel current work" : "Resume held messages"} title={action === "resume" ? "Resume: send the held messages" : undefined}>
+        <button id={id ? "action" : undefined} className={`composer-icon send${action === "stop" ? " abort" : action === "cancel_wait" ? " cancel-wait" : action === "resume" ? " resume" : ""}`} type="submit" disabled={disabled} aria-label={action === "send" ? sendLabel : action === "stop" ? "Cancel current work" : action === "cancel_wait" ? cancelWaitLabel : "Resume held messages"} title={action === "resume" ? "Resume: send the held messages" : undefined}>
           <svg className="send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 3 18 9-18 9 4-9-4-9Zm4 9h14"/></svg>
           <svg className="stop-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
+          <svg className="cancel-wait-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg>
           <svg className="resume-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12-7.5-12-7.5Z"/></svg>
         </button>
       </div>

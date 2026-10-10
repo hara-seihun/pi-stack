@@ -12,17 +12,18 @@ The local service runs inside the person's existing Unix account and mount names
 
 ## Execution state is an observation
 
-Remote publishes the shared `ThreadState` unchanged as `idle`, `running` or `waiting`. An explicit dependency can keep an agent waiting without a native execution. `held` is cancellation-in-progress or historical state, not a persistent Stopped UI state. Live Pi events can add thinking, tool, compaction or retry display details while the thread is running, and `activeTools` names every tool running right now. These details do not control execution or add lifecycle states. An inactive or stopped agent with no explicit dependency is idle, even while agents it launched are running or waiting. Launch provenance never contributes activity, a busy icon or a dependency. Each agent reports its own execution and explicit dependencies.
+Remote projects the owner's `Thread.lifecycle` unchanged. The closed union is Idle,
+Working, Waiting (typed target, reason and timestamp), Cancelling, Failed (reason and
+owned control), or Archived. Only owned execution has Cancel current work. Queued input,
+provider backoff and durable dependencies have Cancel wait. A future recovery wake alone
+leaves the thread Idle. Native execution recovery is Working, not client Reconnecting.
 
-The client's status line is composed from those facts and never from a status field of its own:
-
-| Reads | From |
-| --- | --- |
-| `Thinking`, `Running bash`, `Running bash and web_search`, `Running 3 tools`, `Compacting context`, `Retrying`, `Working` | `state: running` plus the live activity and `activeTools` |
-| `Waiting on agents` | Explicit `kind: agents` dependency, or observed live `thread_await`; never child activity alone |
-| `Idle`, with an unread dot until the person opens it | `state: idle` with no explicit dependency, plus `idleUnread` |
-| `Cancelling` | Runtime cancellation requested but not yet confirmed |
-| `Archived` | `archivedAt` |
+Web and Android consume the same lifecycle observation for lists, composer and status.
+Remote's activity fields are a projection of that union, not another state machine.
+Disposable native text/thinking/tool previews cannot override lifecycle. Classic wait
+indicators retain dependency details; unified manager presentation uses only Idle,
+Working or Typing and hides orchestration identities and controls. Launch provenance
+never makes an inactive parent busy.
 
 A failed execution is a notice in the thread's own transcript and an unread marker on its row. An owner-recorded execution failure also projects `executionError`; its reason stays visible rather than being presented as Idle. Owner-level failures follow the [error policy](errors.md): recoverable background attempts stay diagnostic; an owner that needs repair produces one compact consequence/action notice on Machine.
 

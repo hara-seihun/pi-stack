@@ -51,8 +51,29 @@ export function validateThreadObservation(value: unknown): void {
   requireState(row.activity, ACTIVITIES, "Thread activity");
 }
 
+export function validateLifecycle(value: unknown): void {
+  const row = stateObject(value, "Owner lifecycle");
+  const kind = requireState(row.kind, { idle: true, archived: true, working: true, waiting: true, cancelling: true, failed: true }, "Owner lifecycle kind");
+  switch (kind) {
+    case "idle": case "archived": case "cancelling": return;
+    case "working":
+      requireState(row.phase, { queued: true, admitting: true, starting: true, preparing: true, finishing: true, cancelling: true, recovering: true, thinking: true, responding: true, preparing_tool: true, waiting_for_model: true, waiting_on_agents: true, waiting_on_tool: true, compacting: true, retrying: true, waiting_for_capacity: true, waiting_to_retry: true }, "Working phase");
+      if (!Number.isFinite(row.since)) throw new Error("Working lifecycle: invalid timestamp");
+      return;
+    case "waiting":
+      requireState(row.target, { agents: true, job: true, deployment: true, message: true, capacity: true, retry: true, dispatch: true }, "Waiting target");
+      if (!stateString(row.reason, "Waiting reason").trim() || !Number.isFinite(row.since)) throw new Error("Waiting lifecycle: reason and timestamp required");
+      return;
+    case "failed":
+      if (!stateString(row.reason, "Failure reason").trim()) throw new Error("Failure lifecycle: reason required");
+      requireState(row.control, { stop: true, cancel_wait: true, none: true }, "Failure control");
+      return;
+  }
+}
+
 export function validateSession(value: unknown): asserts value is Session {
   validateThreadObservation(value);
+  validateLifecycle(stateObject(value, "Session").lifecycle);
   const row = stateObject(value, "Session");
   stateString(row.id, "Session id");
   if (row.taskDescription !== undefined) {
