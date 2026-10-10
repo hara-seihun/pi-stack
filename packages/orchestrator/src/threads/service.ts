@@ -357,7 +357,7 @@ export class ThreadService implements ThreadApi {
     if (metadata.foreground === undefined) metadata.foreground = !(this.options.workersOnly || row.parent_id || metadata.watchList || metadata.laneId);
     const wait = row.state === "running" ? executionWaitActivity(metadata) : undefined;
     const observed = row.state === "running" && !row.active_execution_at && pending && projection?.activity.activity === "finishing" ? undefined : projection?.activity;
-    const resuming = observed?.activity && !["waiting_for_capacity", "waiting_to_retry"].includes(observed.activity)
+    const resuming = observed?.activity && !["waiting_for_capacity", "waiting_to_retry", "queued", "admitting", "starting", "recovering", "preparing"].includes(observed.activity)
       && (observed.lastActivityAt ?? 0) > (wait?.lastActivityAt ?? wait?.activitySince ?? Infinity);
     const fallback = row.held ? "cancelling" : metadata.runnerReference || row.active_execution_at || !pending ? "recovering" : "queued";
     const executionActivity = row.state !== "running" ? undefined : wait && !resuming ? { ...wait, activeTools: [] }
@@ -989,7 +989,9 @@ export class ThreadService implements ThreadApi {
       if (runtime.busy) { this.admissionWait(id, { code: "unavailable", message: "Global agent capacity: retained native command is still executing", retryAt: Date.now() + 5_000 }); return false; }
     }
     await this.releaseCapacity(id);
-    this.clearAdmissionWait(id);
+    // Native custody recovery cannot clear an unrelated model admission wait.
+    if (this.get(id)?.metadata?.admissionWait?.message?.startsWith("Global agent capacity:"))
+      this.clearAdmissionWait(id);
     return true;
   }
   private serial<T>(id: string, operation: () => Promise<T>): Promise<T> {
