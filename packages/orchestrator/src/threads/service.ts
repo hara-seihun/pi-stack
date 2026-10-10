@@ -1286,7 +1286,9 @@ export class ThreadService implements ThreadApi {
         } else {
           this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.agentWait') WHERE id=?").run(thread.id);
         }
-        const wait = input.action === "clear" ? [] : ids.filter(id => id !== settlement?.threadId);
+        const settledPeer = registration.status === "already_arrived" ? registration.settlement.threadId : null;
+        const wait = registration.status === "registered" ? ids
+          : registration.status === "already_arrived" ? ids.filter(id => id !== settledPeer) : [];
         this.replaceDependencies(thread.id, [...new Set([...explicit, ...wait])], dependency?.kind === "agents" ? dependency.after : undefined, { explicit, wait });
         this.recordRequest(input.requestId, input, "agent-wait", thread.id);
         this.sql("UPDATE thread_request SET response=? WHERE id=?").run(JSON.stringify(registration), input.requestId);

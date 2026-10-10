@@ -80,6 +80,35 @@ it.each([false, true])("replaces wait-owned peers atomically while retaining exp
   expect(unwrap(await recovered.service.agentWait({ action: "set", kind: "job", threadId: "parent", requestId: "job", jobId: "job" })).dependencies).toEqual(["explicit"]);
 });
 
+it("a resumed registration preserves explicit custody without creating wait-owned custody", async () => {
+  const f = fixture(); for (const id of ["self", "explicit", "peer"]) await spawn(f, id);
+  unwrap(await f.service.control({ action: "dependencies", threadId: "self", threadIds: ["explicit"] }));
+  unwrap(await f.service.send({ requestId: "human", threadId: "self", text: "Continue local work" }));
+  const request = { action: "set" as const, kind: "message" as const, threadId: "self", requestId: "resumed", fromThreadId: "peer" };
+  const result = unwrap(await f.service.agentWait(request));
+  expect(result).toMatchObject({ dependencies: ["explicit"], waitRegistration: { status: "resumed" } });
+  expect(result.waitingOnAgents).toBeUndefined();
+  expect(f.service.get("explicit")?.metadata?.peerDependents).toEqual(["self"]);
+  expect(f.service.get("peer")?.metadata?.peerDependents ?? []).toEqual([]);
+  expect(unwrap(await f.service.agentWait(request)).dependencies).toEqual(["explicit"]);
+});
+
+it("a completed resumed background worker archives without cancelling its running peer", async () => {
+  const f = fixture(); await spawn(f, "self");
+  unwrap(await f.service.control({ action: "placement", threadId: "self", foreground: false }));
+  unwrap(await f.service.spawn({ requestId: "peer-work", id: "peer", cwd: f.root, message: "Continue peer work" }));
+  unwrap(await f.service.send({ requestId: "human", threadId: "self", text: "Complete this local assignment" }));
+  expect(unwrap(await f.service.agentWait({ action: "set", kind: "message", threadId: "self", requestId: "wait", fromThreadId: "peer" })).waitRegistration.status).toBe("resumed");
+  unwrap(await f.service.start());
+  await until(() => f.sessions.filter(s => s.commands.some(c => c.type === "prompt")).length === 2);
+  f.sessions.find(s => s.commands.some(c => c.workId === "human"))!.settle();
+  await until(() => f.service.get("self")?.metadata?.archived === true);
+  expect(f.service.latestSettlement("self")?.assignmentPending).toBeUndefined();
+  expect(f.service.get("peer")).toMatchObject({ state: "running", held: false });
+  expect(f.sessions.find(s => s.commands.some(c => c.workId === "peer-work"))!.commands.some(c => c.type === "abort")).toBe(false);
+  unwrap(await f.service.control({ action: "stop", threadId: "peer", descendants: false }));
+});
+
 it("a failed current-assignment probe does not change the accepted wait or subscriptions", async () => {
   const f = fixture(); for (const id of ["parent", "old", "next"]) await spawn(f, id);
   const accepted = unwrap(await f.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "first", threadIds: ["old"] }));
@@ -215,12 +244,15 @@ it.each([
   const result = unwrap(await registering);
   expect(result.waitingOnAgents).toBeUndefined();
   expect(result.waitRegistration).toEqual({ status: "resumed", messageIds: ["human"] });
+  expect(result.dependencies).toEqual([]);
+  expect(f.service.get(kind === "agents" ? "child" : "collaborator")?.metadata?.peerDependents ?? []).toEqual([]);
   expect(unwrap(await f.service.agentWait(request)).waitRegistration).toEqual(result.waitRegistration);
   expect(f.service.get("self")?.metadata?.agentWait).toBeUndefined();
   if (!completed) expect(f.service.pending("self")).toMatchObject([{ id: "human", source: "explicit" }]);
   await boundary(); unwrap(await f.service.close());
   const next = fixture(f.root);
   expect(next.service.get("self")?.waitingOnAgents).toBeUndefined();
+  expect(next.service.get("self")?.dependencies).toEqual([]);
   expect(unwrap(await next.service.agentWait(request)).waitRegistration).toEqual(result.waitRegistration);
 });
 
@@ -348,6 +380,7 @@ it.each([
   const result = unwrap(await f.service.agentWait({ requestId: "wait", threadId: "self", action: "set", ...dependency }));
   expect(result.waitingOnAgents).toBeUndefined();
   expect(result.waitRegistration).toEqual({ status: "resumed", messageIds: ["human"] });
+  expect(result.dependencies).toEqual([]);
   expect(f.service.pending("self")).toMatchObject([{ id: "human" }]);
   expect(f.sessions).toHaveLength(0);
 });
