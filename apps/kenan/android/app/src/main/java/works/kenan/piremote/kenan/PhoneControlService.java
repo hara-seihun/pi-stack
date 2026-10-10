@@ -295,6 +295,19 @@ public final class PhoneControlService extends Service {
     }
     private void dispatch(String command, JSONObject args, long deadline, java.util.function.BooleanSupplier authorized, Consumer<PhoneResult> done) {
         try {
+            if (command.equals("overlay.say") && args.has("receiptId")) {
+                RemoteSession.Identity owner = NotificationIdentity.get(this).current();
+                if (owner == null) { done.accept(PhoneResult.error("session_expired", "Reply owner is not authenticated")); return; }
+                String text = args.optString("text");
+                long duration = args.optLong("durationMs", Math.min(20000, 3000 + 50L * text.length()));
+                if (duration < 0) { done.accept(PhoneResult.error("invalid_args", "durationMs must be nonnegative")); return; }
+                OverlayReplyReceipts.deliver(this, owner.user, args, deadline, authorized, (drawn, failed) -> {
+                    PhoneAccessibilityService service = PhoneAccessibilityService.current;
+                    if (service == null) failed.accept(PhoneResult.error("not_displayed", "Phone accessibility service is unavailable"));
+                    else service.presentReply(text, duration, deadline, authorized, drawn, failed);
+                }, done);
+                return;
+            }
             if (NativeState.parse(NativeState.AccessibilityCommand.class, command).isPresent()
                 || NativeState.parse(NativeState.OverlayCommand.class, command).isPresent()) {
                 PhoneAccessibilityService service = PhoneAccessibilityService.current;

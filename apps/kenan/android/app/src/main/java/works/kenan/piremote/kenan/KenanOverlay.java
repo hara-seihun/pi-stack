@@ -75,6 +75,9 @@ final class KenanOverlay {
     private final Runnable home = this::goHome;
     private final Runnable clearBubble;
     private final Runnable clearHighlight;
+    private ReplyPresentation replyPresentation;
+    private record ReplyPresentation(String text, long duration, long deadline, java.util.function.BooleanSupplier authorized,
+                                     Runnable drawn, java.util.function.Consumer<PhoneResult> failed, Runnable timeout) {}
 
     KenanOverlay(AccessibilityService service) { this(service, false); }
     KenanOverlay(AccessibilityService service, boolean actionOnly) {
@@ -151,6 +154,7 @@ final class KenanOverlay {
 
     PhoneResult command(String command, JSONObject args, Function<String, Rect> resolve) throws Exception {
         if (closed) return PhoneResult.error("unavailable", "Kenan overlay is not running");
+        if (args.has("receiptId")) return PhoneResult.error("invalid_args", "Receipt presentation requires the authenticated phone-service receipt owner");
         var parsed = NativeState.parse(NativeState.OverlayCommand.class, command);
         if (parsed.isEmpty()) return PhoneResult.error("unsupported", "Unknown overlay command");
         return switch (parsed.get()) {
@@ -159,6 +163,7 @@ final class KenanOverlay {
                 yield PhoneResult.success(new JSONObject().put("visible", isVisible(service)));
             }
             case CLEAR -> {
+                cancelReply("superseded", "Reply was cleared before drawing");
                 main.removeCallbacks(clearBubble); main.removeCallbacks(clearHighlight); main.removeCallbacks(home);
                 scene.words = null; scene.highlight = null; scene.tip = false; goHome(); scene.invalidate();
                 yield PhoneResult.success(new JSONObject());
@@ -313,15 +318,48 @@ final class KenanOverlay {
         };
         reconcile.run();
     }
-    void say(String text, long duration) {
-        if (closed || actionOnly) return;
+    private void bubble(String text) {
         main.removeCallbacks(clearBubble);
-        if (text.isEmpty()) { scene.words = null; scene.invalidate(); return; }
-        scene.words = StaticLayout.Builder.obtain(text, 0, text.length(), scene.textPaint, Math.max(dp(100), Math.round(width() * .75f) - dp(28)))
+        scene.words = text.isEmpty() ? null : StaticLayout.Builder.obtain(text, 0, text.length(), scene.textPaint, Math.max(dp(100), Math.round(width() * .75f) - dp(28)))
             .setAlignment(Layout.Alignment.ALIGN_NORMAL).setIncludePad(false).setMaxLines(6)
             .setEllipsize(TextUtils.TruncateAt.END).setLineSpacing(dp(3), 1).build();
-        addLine("Kenan", text); scene.invalidate(); activity();
+        scene.invalidate(); activity();
+    }
+    void say(String text, long duration) {
+        if (closed || actionOnly) return;
+        cancelReply("superseded", "Reply was replaced before drawing");
+        bubble(text);
+        if (!text.isEmpty()) addLine("Kenan", text);
         if (duration > 0) main.postDelayed(clearBubble, duration);
+    }
+    private boolean canPresentReply() {
+        return !closed && !actionOnly && kenanVisible() && captures == 0 && scene.isAttachedToWindow()
+            && scene.isShown() && scene.getWindowVisibility() == View.VISIBLE
+            && ((android.os.PowerManager) service.getSystemService(Context.POWER_SERVICE)).isInteractive()
+            && !((android.app.KeyguardManager) service.getSystemService(Context.KEYGUARD_SERVICE)).isKeyguardLocked();
+    }
+    void presentReply(String text, long duration, long deadline, java.util.function.BooleanSupplier authorized,
+                      Runnable drawn, java.util.function.Consumer<PhoneResult> failed) {
+        if (!canPresentReply()) {
+            failed.accept(PhoneResult.error("not_displayed", "Overlay is not visible on an unlocked active display")); return;
+        }
+        if (replyPresentation != null) { failed.accept(PhoneResult.error("busy", "Another reply is waiting to draw")); return; }
+        if (!authorized.getAsBoolean() || System.currentTimeMillis() >= deadline) {
+            failed.accept(PhoneResult.error("expired", "Reply authorization or deadline expired before drawing")); return;
+        }
+        Runnable timeout = () -> cancelReply("not_displayed", "Reply did not draw before the command deadline");
+        replyPresentation = new ReplyPresentation(text, duration, deadline, authorized, drawn, failed, timeout);
+        bubble(text);
+        main.postDelayed(timeout, Math.max(1, deadline - System.currentTimeMillis()));
+    }
+    private void cancelReply(String code, String message) {
+        ReplyPresentation previous = replyPresentation;
+        if (previous == null) return;
+        replyPresentation = null;
+        main.removeCallbacks(previous.timeout());
+        scene.words = null;
+        scene.invalidate();
+        previous.failed().accept(PhoneResult.error(code, message));
     }
     private void error(String message) { state("idle"); say(message, 5000); }
     private void addLine(String who, String text) {
@@ -352,6 +390,7 @@ final class KenanOverlay {
     }
     void resetSession() {
         if (closed || actionOnly) return;
+        cancelReply("session_expired", "Session changed before reply drawing");
         closePanel(); main.removeCallbacksAndMessages(null); pending.clear(); transcript.clear(); threadId = null; draft = "";
         scene.words = null; scene.highlight = null; scene.tip = false; scene.gestureUntil = 0; state("idle"); goHome();
     }
@@ -431,7 +470,7 @@ final class KenanOverlay {
         ((InputMethodManager) service.getSystemService(Context.INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(panel.getWindowToken(), 0);
         remove(panel); panel = null; panelAt = null; input = null; history = null;
     }
-    void suspendCapture() { if (!closed) { captures++; restoreVisibility(); } }
+    void suspendCapture() { if (!closed) { cancelReply("not_displayed", "Capture hid the reply before drawing"); captures++; restoreVisibility(); } }
     void restoreCapture() { if (!closed) { if (captures > 0) captures--; restoreVisibility(); } }
     private void restoreVisibility() {
         if (closed) return;
@@ -441,6 +480,7 @@ final class KenanOverlay {
     }
     void close() {
         if (closed) return;
+        cancelReply("not_displayed", "Overlay closed before reply drawing");
         closePanel(); closed = true; main.removeCallbacksAndMessages(null); pending.clear();
         touch.cancel(); dot.setOnTouchListener(null); dot.removeCallbacks(dot.frame);
         if (flight != null) { flight.cancel(); flight.removeAllUpdateListeners(); flight = null; }
@@ -559,6 +599,10 @@ final class KenanOverlay {
         Scene() { super(service); textPaint.setColor(Color.WHITE); textPaint.setTextSize(dp(15)); setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS); }
         @Override protected void onDraw(Canvas canvas) {
             if (closed || !isShown() || getWindowVisibility() != View.VISIBLE) return;
+            if (replyPresentation != null && !canPresentReply()) cancelReply("not_displayed", "Reply display became unavailable before drawing");
+            if (replyPresentation != null && (!replyPresentation.authorized().getAsBoolean()
+                || System.currentTimeMillis() >= replyPresentation.deadline()))
+                cancelReply("expired", "Reply authorization or deadline expired before drawing");
             long now = SystemClock.uptimeMillis();
             paint.setStyle(Paint.Style.STROKE); paint.setStrokeWidth(dp(2)); paint.setColor(ACCENT); paint.setAlpha(255);
             if (highlight != null) {
@@ -595,6 +639,14 @@ final class KenanOverlay {
                 paint.setStyle(Paint.Style.STROKE); paint.setStrokeWidth(dp(1)); paint.setColor(0xff46516f);
                 canvas.drawRoundRect(bubble, dp(16), dp(16), paint);
                 canvas.save(); canvas.translate(left + dp(14), top + dp(12)); words.draw(canvas); canvas.restore();
+                ReplyPresentation rendered = replyPresentation;
+                if (rendered != null) {
+                    replyPresentation = null;
+                    main.removeCallbacks(rendered.timeout());
+                    addLine("Kenaznia", rendered.text());
+                    if (rendered.duration() > 0) main.postDelayed(clearBubble, rendered.duration());
+                    OverlayReplyReceipts.afterDraw(rendered.drawn());
+                }
             }
             if (dragging) {
                     float cx = dismissX(), cy = dismissY();

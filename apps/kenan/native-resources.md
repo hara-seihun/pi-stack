@@ -26,6 +26,16 @@ Screenshot suspension belongs to phone control, not one chat generation. Existin
 
 `PhoneControlService` reserves identities on main for in-flight duplicate rejection, then consumes the persistence receipt on main. Connection, identity and deadline are checked again before UI or data mutation. Rejected queue admission returns `rate_limited`; duplicate acceptance returns `unconfirmed`. Service teardown does not kill or replace the process-wide actor, preventing old snapshots from overwriting newer acceptance. There is no idle persistence timer.
 
+## Canonical reply presentation receipts
+
+`overlay.say` optionally carries `{text, receiptId}`. The Remote owner uses the immutable `manager-reply:<canonicalManagerThreadId>:<nativeExecutionId>` identity and a new transport command ID for each retry. `PhoneControlService` captures the authenticated account and routes receipt-bearing replies to `OverlayReplyReceipts`, independently of generic `PhoneCommandReplay` acceptance. Manual `overlay.say` without a receipt keeps its ordinary behavior.
+
+A process-owned bounded journal worker serializes private `overlay-reply-receipts` preferences. Keys hash account plus receipt identity; records retain only the text hash and `pending`/`displayed`, never reply text or credentials. Records are not evicted by the generic command ledger's 512-entry limit. Same-account text changes return `receipt_conflict`; another account cannot inherit acknowledgement. In-flight attempts return retryable `busy`.
+
+`pending` never acknowledges display. The overlay must be attached, visible, uncaptured, unlocked and interactive, and authorization/deadline are checked again during production `Scene.onDraw`. Closing, clearing, replacing, capturing, locking or switching account before drawing cancels that attempt and preserves a retryable pending receipt. Transcript insertion and the bubble expiration timer begin only when the Scene draws. Draw completion schedules durable `displayed` settlement on the independent journal worker; success is exactly `{displayed:true, receiptId, duplicate:false}`. A persisted displayed receipt returns the same acknowledgement with `duplicate:true` without creating a window or drawing again, including after lost transport acknowledgement or process restart. This records a native draw, not that the person read the message.
+
+Rendering and disk commit are not one transaction. A process death after drawing but before the displayed commit leaves a pending receipt, which is retryable and may repeat that draw. A detected commit failure returns `unconfirmed` and fences another draw for that receipt in the current process; neither acceptance nor a failed commit is promoted to displayed success. `OverlayReplyReceiptsTest` checks the pending/drawn boundaries, disk-only dedup, immutable account-scoped identity, actual production drawing and lock/account-switch cleanup; it does not exercise Android's system compositor or kill a real phone process.
+
 ## Screenshots
 
 `PhoneAccessibilityService` permits one in-flight capture/encode per service lifetime. Screenshot callbacks hand the hardware buffer to a service-owned worker; software copy, PNG compression and base64 encoding run there, not on main. Teardown closes admission and lets the bounded outstanding task retire. Buffers/bitmaps are closed or recycled on every encoding outcome. Capture rechecks command authorization, accessibility-service identity and deadline before encoding, before base64 conversion and before main-thread delivery. Completion restores capture visibility on main.
@@ -37,7 +47,7 @@ Capture rejects images exceeding 16 million pixels before a software copy, and `
 From `apps/kenan/android` after generated Capacitor sync:
 
 ```sh
-./gradlew testDebugUnitTest --tests '*KenanOverlayTest' --tests '*OverlayPositionTest' --tests '*PhoneAccessibilityServiceTest' --tests '*BoundedImageBytesTest' --tests '*PhoneCommandReplayTest' --tests '*PhoneReplayAcceptanceTest'
+./gradlew testDebugUnitTest --tests '*KenanOverlayTest' --tests '*OverlayPositionTest' --tests '*PhoneAccessibilityServiceTest' --tests '*BoundedImageBytesTest' --tests '*PhoneCommandReplayTest' --tests '*PhoneReplayAcceptanceTest' --tests '*OverlayReplyReceiptsTest'
 ```
 
 The lifecycle checks advance a virtual clock rather than sleeping. They cover disabled receipt/reconciliation cleanup, late-callback fences, one fresh scope on re-enable, finite action visuals, screenshot suspension across enablement, static idle versus active animation, unchanged geometry refresh, window-failure cleanup, bounded screenshot bytes and persistence-before-mutation. They do not manipulate the person's phone or deploy an APK.

@@ -94,6 +94,15 @@ public final class PhoneAccessibilityService extends AccessibilityService {
     @Override public void onDestroy() { if (current == this) current = null; screenshots.shutdown(); clearNodes(); closeOverlay(); PhoneControlService.refresh(); super.onDestroy(); }
 
     private void clearNodes() { for (AccessibilityNodeInfo node : nodes.values()) node.recycle(); nodes.clear(); }
+    void presentReply(String text, long duration, long deadline, BooleanSupplier authorized, Runnable drawn, Consumer<PhoneResult> failed) {
+        if (!authorized.getAsBoolean() || System.currentTimeMillis() >= deadline) {
+            failed.accept(PhoneResult.error("expired", "Reply authorization or deadline expired")); return;
+        }
+        KenanOverlay chat = ensureOverlay();
+        if (chat == null) failed.accept(PhoneResult.error("not_displayed", "Kenan overlay chat is disabled"));
+        else chat.presentReply(text, duration, deadline, authorized, drawn, failed);
+    }
+
     void dispatch(String command, JSONObject args, long deadline, BooleanSupplier authorized, Consumer<PhoneResult> done) {
         try {
             var overlayCommand = NativeState.parse(NativeState.OverlayCommand.class, command);
