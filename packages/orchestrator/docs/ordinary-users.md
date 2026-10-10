@@ -33,4 +33,19 @@ Existing UID-bound loopback broker listeners retain their original grants during
 
 No adoption step copies databases, replaces run IDs, reinitializes an unavailable partition, resets provider claims or retries uncertain effects. Core serves the same attempt receipts and native session history. [Completion custody](completions.md) defines the trusted alias registry and historical-settings replay contract.
 
+## Enrollment evidence
+
+A UID-bound transport declares `admissionDeltaPaths: []` when no later account has been admitted. Later enrollment appends a finite ordered chain of root-owned delta paths; it never replaces the original drained-stream receipt. [`BrokerAdmissionDelta`](../src/core/broker-transports.ts) defines the record:
+
+```text
+version: 1
+priorBindingsSha256, nextBindingsSha256, nextBindings
+registration: {templatePath, templateSha256, registrationId, requestId,
+               principalId, uid, admittedAt, planPath}
+```
+
+Binding hashes are SHA256 of `completionCanonical(bindings)` (object keys sorted, array order retained). The delta's template digest hashes exact file bytes; its root-owned registration plan also binds the semantic template hash, issuer/subject identity hash, stable registration/request IDs, exact person/UID and original native listener tuple. Evidence files must be bounded root-owned regular files without group/other write; final symlinks are refused. Keep referenced template bytes immutable when rotating the current enrollment template.
+
+Each delta may add only the newly registered UID to the exact existing principal/owner-UID/port named by the template. It cannot remove UIDs, alter original transport identity, add a port or widen another listener. Prior/next links, unique registrations and ordered admission times are checked; configured bindings must exactly equal the chain tip. This proves host admission only: source listener ceilings, live nft identity and unified resource permission still apply on every request.
+
 Broker cache keys and affinity headers are namespaced by the verified principal. Account labels are replaced by aliases in caller usage projections. Personal spending is aggregated once across declared retained ledgers at their original frozen rates. Response headers never expose provider authentication or cookies.

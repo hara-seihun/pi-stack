@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readFileSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { completionCanonical } from "../completion-contract.js";
 import type { CoreResult } from "./config.js";
@@ -14,7 +15,14 @@ export interface RetainedBrokerBinding {
   outputChain: string;
   inputChain: string;
 }
-export type RetainedBrokerListeners = { kind: "disabled" } | { kind: "uid-bound"; adoptionReceiptPath: string; bindings: RetainedBrokerBinding[] };
+export type RetainedBrokerListeners = { kind: "disabled" } | { kind: "uid-bound"; adoptionReceiptPath: string; admissionDeltaPaths: string[]; bindings: RetainedBrokerBinding[] };
+export interface BrokerAdmissionDelta {
+  version: 1;
+  priorBindingsSha256: string;
+  nextBindingsSha256: string;
+  nextBindings: RetainedBrokerBinding[];
+  registration: { templatePath: string; templateSha256: string; registrationId: string; principalId: string; uid: number; admittedAt: string; planPath: string; requestId: string };
+}
 const record = (value: unknown): value is Record<string, any> => !!value && typeof value === "object" && !Array.isArray(value);
 const same = (a: unknown, b: unknown) => completionCanonical(a) === completionCanonical(b);
 const members = (value: unknown): unknown[] => record(value) && Array.isArray(value.set) ? value.set : [value];
@@ -50,16 +58,66 @@ export function verifyUidBoundRules(value: unknown, binding: RetainedBrokerBindi
   return output && input;
 }
 
+const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
+export const brokerBindingsSha256 = (bindings: readonly RetainedBrokerBinding[]) => sha256(completionCanonical(bindings));
+const absolute = (value: unknown): value is string => typeof value === "string" && value.startsWith("/") && !value.includes("\0");
+const nonempty = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0;
+const hash = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+function rootEvidence(path: string): string {
+  if (!absolute(path)) throw Error("Admission evidence must use an absolute path");
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.uid !== 0 || (stat.mode & 0o022) !== 0 || stat.size > 4 * 1024 * 1024) throw Error("Admission evidence must be a bounded root-owned file without group/other write");
+    return readFileSync(fd, "utf8");
+  } finally { closeSync(fd); }
+}
 export function verifyBrokerDrainReceipt(config: Extract<RetainedBrokerListeners, { kind: "uid-bound" }>, ledgerPath: string): CoreResult<void> {
   try {
-    const stat = statSync(config.adoptionReceiptPath);
-    if (!stat.isFile() || stat.uid !== 0 || (stat.mode & 0o022) !== 0) return { ok: false, error: { code: "ownership-conflict", message: "Retained broker transports require a root-owned drain/host-identity receipt" } };
-    const receipt = JSON.parse(readFileSync(config.adoptionReceiptPath, "utf8")), ledger = statSync(ledgerPath, { bigint: true });
+    const receipt = JSON.parse(rootEvidence(config.adoptionReceiptPath)), ledger = statSync(ledgerPath, { bigint: true });
     const drainedAt = Date.parse(receipt.previousOwner?.drainedAt);
     if (receipt.version !== 1 || receipt.state !== "drained" || receipt.ledgerPath !== ledgerPath
       || receipt.databaseIdentity?.dev !== String(ledger.dev) || receipt.databaseIdentity?.ino !== String(ledger.ino)
       || typeof receipt.previousOwner?.identity !== "string" || !receipt.previousOwner.identity || !Number.isFinite(drainedAt) || drainedAt > Date.now()
-      || receipt.streams?.state !== "drained" || receipt.streams?.accepted !== 0 || !same(receipt.bindings, config.bindings)) return { ok: false, error: { code: "ownership-conflict", message: "Broker drain receipt does not bind the original ledger, exact UID listeners and settled streams" } };
+      || receipt.streams?.state !== "drained" || receipt.streams?.accepted !== 0 || !Array.isArray(receipt.bindings)) return { ok: false, error: { code: "ownership-conflict", message: "Broker drain receipt does not bind the original ledger, exact UID listeners and settled streams" } };
+    if (!Array.isArray(config.admissionDeltaPaths) || config.admissionDeltaPaths.length > 256 || new Set(config.admissionDeltaPaths).size !== config.admissionDeltaPaths.length) throw Error("Declare a finite unique ordered admission delta chain, empty when none");
+    let current: RetainedBrokerBinding[] = receipt.bindings, admittedAfter = drainedAt;
+    const registrations = new Set<string>();
+    for (const path of config.admissionDeltaPaths) {
+      const delta: BrokerAdmissionDelta = JSON.parse(rootEvidence(path));
+      const r = delta.registration;
+      if (delta.version !== 1 || !hash(delta.priorBindingsSha256) || delta.priorBindingsSha256 !== brokerBindingsSha256(current)
+        || !Array.isArray(delta.nextBindings) || !hash(delta.nextBindingsSha256) || delta.nextBindingsSha256 !== brokerBindingsSha256(delta.nextBindings)
+        || !record(r) || !nonempty(r.registrationId) || !nonempty(r.requestId) || !nonempty(r.principalId) || !Number.isSafeInteger(r.uid) || r.uid < 0 || !hash(r.templateSha256)
+        || registrations.has(r.registrationId)) throw Error("Admission delta does not bind its exact prior/next policy and unique registration");
+      const admittedAt = Date.parse(r.admittedAt);
+      if (!Number.isFinite(admittedAt) || admittedAt < admittedAfter || admittedAt > Date.now()) throw Error("Admission delta time is outside its ordered ownership chain");
+      const templateBytes = rootEvidence(r.templatePath), template = JSON.parse(templateBytes), admission = template.nativeModelAdmission;
+      if (sha256(templateBytes) !== r.templateSha256 || template.version !== 1 || !record(admission) || admission.kind !== "existing"
+        || template.principal?.kind !== "person" || template.principal?.id !== "{{principalId}}" || template.principal?.person !== "{{user}}" || template.scope?.custody?.uid !== "{{uid}}") throw Error("Admission requires its exact root-owned existing-listener enrollment template");
+      const plan = JSON.parse(rootEvidence(r.planPath));
+      // The registration producer verifies issuer/subject and materializes this plan.
+      if (plan.version !== 1 || !["prepared", "adopted"].includes(plan.state) || plan.registration?.id !== r.registrationId || plan.requestId !== r.requestId || plan.registration?.requestId !== r.requestId
+        || plan.registration?.scope?.principalId !== r.principalId || plan.registration?.scope?.custody?.uid !== r.uid || plan.user !== r.principalId
+        || plan.additions?.principal?.kind !== "person" || plan.additions?.principal?.id !== r.principalId || plan.additions?.principal?.person !== plan.user
+        || !same(plan.additions?.nativeModelAdmission, admission) || plan.registration?.creatorPrincipalId !== template.creatorPrincipalId
+        || plan.templateHash !== sha256(completionCanonical(template)) || !hash(plan.identityHash) || r.registrationId !== `oidc-account-${plan.identityHash}`) throw Error("Admission registration provenance differs from its root-owned plan");
+      let changed = 0;
+      if (current.length !== delta.nextBindings.length) throw Error("Enrollment cannot create or remove an original transport");
+      for (const [i, prior] of current.entries()) {
+        const next = delta.nextBindings[i]!;
+        if (!record(prior) || !record(next) || !same({ ...prior, authorizedUids: undefined }, { ...next, authorizedUids: undefined })) throw Error("Enrollment cannot change original listener identity");
+        if (same(prior.authorizedUids, next.authorizedUids)) continue;
+        if (prior.principalId !== admission.principalId || prior.uid !== admission.uid || prior.port !== admission.port
+          || !Array.isArray(prior.authorizedUids) || !Array.isArray(next.authorizedUids) || prior.authorizedUids.includes(r.uid)
+          || next.authorizedUids.length !== prior.authorizedUids.length + 1 || new Set(next.authorizedUids).size !== next.authorizedUids.length
+          || !next.authorizedUids.includes(r.uid) || prior.authorizedUids.some(uid => !next.authorizedUids.includes(uid))) throw Error("Enrollment may add only its registered UID to the template's exact existing listener");
+        changed++;
+      }
+      if (changed !== 1) throw Error("Admission delta must add exactly one registered listener UID");
+      registrations.add(r.registrationId); admittedAfter = admittedAt; current = delta.nextBindings;
+    }
+    if (!same(current, config.bindings)) return { ok: false, error: { code: "ownership-conflict", message: "Configured listener UID policy is not the immutable drain receipt plus its exact admission chain" } };
     return { ok: true, value: undefined };
   } catch (cause) { return { ok: false, error: { code: "unavailable", message: `Retained broker drain receipt unavailable: ${cause instanceof Error ? cause.message : String(cause)}` } }; }
 }

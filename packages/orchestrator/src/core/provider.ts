@@ -75,7 +75,7 @@ export function parseCoreProviderConfig(value: unknown, policy: PermissionPolicy
     || !Number.isSafeInteger(v.uid) || v.uid < 0 || !Number.isSafeInteger(v.gid) || v.gid < 0 || !policyPair(v)
     || typeof v.ownerPrincipal !== "string" || !v.ownerPrincipal || !record(v.retainedListeners)
     || !Array.isArray(v.retainedLedgers) || !Array.isArray(v.completionAliases) || !Array.isArray(v.ownerRoutes) || !Array.isArray(v.grantFootprints)) return invalid("Core provider requires explicit original configs, custody, per-controller meter policy, grant footprints and owner routes");
-  if (!(v.retainedListeners.kind === "disabled" || v.retainedListeners.kind === "uid-bound" && absolute(v.retainedListeners.adoptionReceiptPath) && Array.isArray(v.retainedListeners.bindings) && v.retainedListeners.bindings.length)) return invalid("Disable retained transports explicitly or declare exact UID-bound listeners and a drain receipt");
+  if (!(v.retainedListeners.kind === "disabled" || v.retainedListeners.kind === "uid-bound" && absolute(v.retainedListeners.adoptionReceiptPath) && ids(v.retainedListeners.admissionDeltaPaths) && v.retainedListeners.admissionDeltaPaths.length <= 256 && v.retainedListeners.admissionDeltaPaths.every(absolute) && Array.isArray(v.retainedListeners.bindings) && v.retainedListeners.bindings.length)) return invalid("Disable retained transports explicitly or declare exact UID-bound listeners, an immutable drain receipt and explicit admission delta paths (empty when none)");
   if (v.retainedListeners.kind === "uid-bound") {
     const ports = new Set<number>();
     for (const b of v.retainedListeners.bindings) {

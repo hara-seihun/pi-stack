@@ -115,6 +115,9 @@ test("provider registry requires explicit retained descriptors and exact alias i
   expect(parseCoreProviderConfig({ ...config, completionAliases: undefined }, policy, principal).ok).toBe(false);
   expect(parseCoreProviderConfig({ ...config, completionAliases: [...config.completionAliases, ...config.completionAliases] }, policy, principal).ok).toBe(false);
   expect(parseCoreProviderConfig({ ...config, completionAliases: [{ ...config.completionAliases[0], ownerId: "undeclared" }] }, policy, principal).ok).toBe(false);
+  const retainedListeners = { kind: "uid-bound", adoptionReceiptPath: "/drain.json", bindings: [{ principalId: "kenan", port: 19100, uid: 1000, authorizedUids: [0, 1000], family: "inet", table: "pi_user_access", inputChain: "input", outputChain: "output" }] };
+  expect(parseCoreProviderConfig({ ...config, retainedListeners }, policy, principal).ok).toBe(false);
+  expect(parseCoreProviderConfig({ ...config, retainedListeners: { ...retainedListeners, admissionDeltaPaths: [] } }, policy, principal).ok).toBe(true);
 });
 
 test("core adopts each exact ledger under its receipt/lock and serves old IDs without initialization or replay", async () => {
@@ -179,7 +182,7 @@ test("retained listeners keep immutable routes in the core and recheck host iden
   const address = reservation.address(); if (!address || typeof address === "string") throw Error("No reserved port");
   await new Promise<void>(resolve => reservation.close(() => resolve()));
   brokerConfig.listeners[0]!.port = address.port;
-  config.retainedListeners = { kind: "uid-bound", adoptionReceiptPath: join(config.agentDir, "broker-drain.json"), bindings: [{ principalId: "kenan", port: address.port, uid: process.getuid!(), authorizedUids: [0, process.getuid!()], family: "inet", table: "pi_user_access", inputChain: "input", outputChain: "output" }] };
+  config.retainedListeners = { kind: "uid-bound", adoptionReceiptPath: join(config.agentDir, "broker-drain.json"), admissionDeltaPaths: [], bindings: [{ principalId: "kenan", port: address.port, uid: process.getuid!(), authorizedUids: [0, process.getuid!()], family: "inet", table: "pi_user_access", inputChain: "input", outputChain: "output" }] };
   const mutablePolicy = { ...policy, grants: [...policy.grants] }, opened = createCoreProvider(config, mutablePolicy, [principal]);
   expect(opened.ok).toBe(true); if (!opened.ok) return;
   try {
@@ -196,7 +199,7 @@ test("retained listeners keep immutable routes in the core and recheck host iden
 
 test("an undrained old broker refuses adoption before acquiring or changing a ledger", () => {
   const { config, brokerConfig } = fixture();
-  config.retainedListeners = { kind: "uid-bound", adoptionReceiptPath: "/missing/drain", bindings: [] };
+  config.retainedListeners = { kind: "uid-bound", adoptionReceiptPath: "/missing/drain", admissionDeltaPaths: [], bindings: [] };
   vi.mocked(verifyBrokerDrainReceipt).mockReturnValueOnce({ ok: false, error: { code: "ownership-conflict", message: "Old broker still owns accepted streams" } });
   expect(createCoreProvider(config, policy, [principal])).toMatchObject({ ok: false, error: { code: "ownership-conflict" } });
   expect(existsSync(`${brokerConfig.ledgerPath}.core-owner.lock`)).toBe(false);
