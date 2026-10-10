@@ -25,6 +25,7 @@ import { oneKenanEnabled } from "kenan-memory/config";
 import { oneKenanConfig, custodyAuthenticate, custodyStatus } from "./one-kenan";
 import { EditorAccess, editorOriginAllowed, editorSocket } from "./editor-access";
 import { editorResponse } from "./editor-proxy";
+import { activatePersonalCore, preparedSupervisorHealth } from "./core-readiness";
 
 const PORT = Number(process.env.PI_REMOTE_ROUTER_PORT ?? "8788");
 const HOST = process.env.PI_REMOTE_ROUTER_HOST ?? "127.0.0.1";
@@ -114,18 +115,19 @@ async function systemctl(...args: string[]): Promise<{ ok: boolean; message: str
   return { ok: code === 0, message: (err || out).trim() };
 }
 
-async function supervisorHealthy(person: Person): Promise<boolean> {
+async function supervisorHealthy(person: Person, scopeId: string): Promise<boolean> {
   try {
     const response = await fetch(`http://127.0.0.1:${person.port}/v1/health`, { signal: AbortSignal.timeout(1_500) });
-    if (response.ok) activeUsers.add(person.user);
-    return response.ok;
+    const ready = response.ok && preparedSupervisorHealth(await response.json(), scopeId);
+    if (ready) activeUsers.add(person.user);
+    return ready;
   } catch { return false; }
 }
 
-async function waitForSupervisor(person: Person): Promise<boolean> {
+async function waitForSupervisor(person: Person, scopeId: string): Promise<boolean> {
   const deadline = Date.now() + UNLOCK_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    if (await supervisorHealthy(person)) return true;
+    if (await supervisorHealthy(person, scopeId)) return true;
     const state = await activeState(person);
     if (state === "failed" || state === "inactive") break;
     await Bun.sleep(200);
@@ -155,26 +157,27 @@ async function startPersonal(person: Person, key: string): Promise<StartResult> 
       const supplied = Buffer.from(key);
       if (retained.length !== supplied.length || !timingSafeEqual(retained, supplied)) return { ok: false, error: "Wrong key", status: 403 };
     }
-    return await waitForSupervisor(person)
-      ? { ok: true }
-      : { ok: false, error: "The supervisor did not become ready", status: 503 };
-  }
-  await mkdir(KEY_DIR, { recursive: true, mode: 0o700 });
-  await chmod(KEY_DIR, 0o700);
-  await writeFile(join(KEY_DIR, person.user), key, { mode: 0o600 });
-  try {
-    const started = await systemctl("start", unit(person));
-    if (!started.ok) {
+  } else {
+    await mkdir(KEY_DIR, { recursive: true, mode: 0o700 });
+    await chmod(KEY_DIR, 0o700);
+    await writeFile(join(KEY_DIR, person.user), key, { mode: 0o600 });
+    try {
+      const started = await systemctl("start", unit(person));
+      if (!started.ok) {
+        await forget(person);
+        return { ok: false, error: "Wrong key, or the supervisor could not start", status: 400 };
+      }
+    } catch {
       await forget(person);
-      return { ok: false, error: "Wrong key, or the supervisor could not start", status: 400 };
+      return { ok: false, error: "Could not start the supervisor", status: 500 };
     }
-    if (await waitForSupervisor(person)) return { ok: true };
-    await forget(person);
-    return { ok: false, error: person.unlock ? "Wrong key, or the folder would not open" : "The supervisor did not come up", status: 400 };
-  } catch {
-    await forget(person);
-    return { ok: false, error: "Could not start the supervisor", status: 500 };
   }
+  // The root resource owner waits for the exact private mount, activates its
+  // registered core scope, and only then permits a projection readiness probe.
+  const prepared = await activatePersonalCore(person.user);
+  if (!prepared.ok) { activeUsers.delete(person.user); return prepared; }
+  if (await waitForSupervisor(person, prepared.value.scopeId)) return { ok: true };
+  return { ok: false, error: "Your folder is open, but its shared core projection is not ready. Retry unlocking with the same account.", status: 503 };
 }
 
 async function forget(person: Person): Promise<{ ok: boolean; message: string }> {

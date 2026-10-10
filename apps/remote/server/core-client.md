@@ -10,6 +10,8 @@ The host supplies all configuration together:
 - `PI_CORE_CALLBACK_UID`: the explicit core Unix UID. It is the expected server peer for forward requests and the admitted client peer for callbacks.
 - `PI_CORE_CALLBACK_SOCKET`: exactly `/run/pi-stack/gateways/remote-SCOPE/callback.sock`.
 
+Unlock readiness is ordered: verify this registered person's credential, start the owner unit, activate the exact registered core scope through the fixed root resource helper, then wait for Remote health to report that same core scope before issuing a session. The helper owns private-mount observation and root enrollment/adoption validation; the router passes only the registered Unix user, never a key, PID, actor or arbitrary scope. A prepared resource receipt is not proof of a serving projection. Activation uncertainty or projection timeout keeps the opened resource available for same-account recovery and never becomes a second controller or a successful login.
+
 The core verifies Remote's Unix peer against the configured gateway principal, scopes and operation ceiling. Remote verifies the core server's kernel peer before sending bytes. Native `x-pi-thread-token` capabilities remain narrower than the gateway; actor headers and bearer credentials do not supply authority.
 
 The host prepares the root-owned `0755` gateway parent and the Remote-UID-owned `0755` scoped callback directory. Remote owns a `0600` callback socket and its exclusive owner lock. Recovery removes only an affirmatively refused, unchanged socket under the same custody. Shutdown drains accepted callback work before releasing the lock or closing presentation storage.

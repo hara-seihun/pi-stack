@@ -9,6 +9,8 @@ const persons = join(root, "persons");
 const bin = join(root, "bin");
 const units = join(root, "units");
 const keys = join(root, "keys");
+const activationFlags = join(root, "activation-flags");
+const activationTrace = join(root, "activation-trace");
 const portProbe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
 const port = portProbe.port;
 portProbe.stop(true);
@@ -27,7 +29,10 @@ function person(user: string, encrypted: boolean, remoteAccess: string[]) {
   const server = Bun.serve<UpstreamSocketData>({ hostname: "127.0.0.1", port: 0, fetch(req, httpServer) {
     if (!existsSync(join(units, `pi-remote@${user}.service`))) return new Response("Stopped", { status: 503 });
     const url = new URL(req.url);
-    if (url.pathname === "/v1/health" && healthChecks.has(user)) return healthChecks.get(user)!();
+    if (url.pathname === "/v1/health") {
+      if (healthChecks.has(user)) return healthChecks.get(user)!();
+      return Response.json({ ok: true, core: { scopeId: `person:${user}`, error: null } });
+    }
     if (url.pathname === "/v1/immutable-test") return new Response(req.headers.has("if-none-match") ? null : user, { status: req.headers.has("if-none-match") ? 304 : 200, headers: { "cache-control": "private, max-age=31536000, immutable", etag: '"file"' } });
     if (url.pathname === "/v1/encoded-test") return new Response(gzipSync(JSON.stringify({ user, text: "message".repeat(500) })), { headers: { "content-type": "application/json", "content-encoding": "gzip", "cache-control": "private, no-cache" } });
     if (url.pathname === "/v1/cache-test") return req.headers.get("if-none-match") === 'W/"cache"'
@@ -57,7 +62,7 @@ function person(user: string, encrypted: boolean, remoteAccess: string[]) {
 }
 
 beforeAll(async () => {
-  for (const directory of [persons, bin, units, keys]) mkdirSync(directory, { recursive: true });
+  for (const directory of [persons, bin, units, keys, activationFlags]) mkdirSync(directory, { recursive: true });
   const remote = Bun.serve<{ user: string; upstream: string; session: string | null }>({ hostname: "127.0.0.1", port: 0, fetch(req, httpServer) {
     remoteCalls++;
     const url = new URL(req.url);
@@ -93,11 +98,29 @@ case "$1" in
 esac
 `);
   chmodSync(join(bin, "systemctl"), 0o755);
+  writeFileSync(join(root, "activation-fixture.mjs"), `
+import { appendFileSync, existsSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+const root = ${JSON.stringify(root)}, user = process.argv[2];
+if (!existsSync(join(root, 'units', 'pi-remote@' + user + '.service'))) process.exit(1);
+appendFileSync(join(root, 'activation-trace'), user + '\\n');
+writeFileSync(join(root, 'activation-flags', user + '.entered'), '');
+while (existsSync(join(root, 'activation-flags', user + '.hold'))) await Bun.sleep(5);
+if (existsSync(join(root, 'activation-flags', user + '.fail'))) process.exit(1);
+const scopeId = existsSync(join(root, 'activation-flags', user + '.wrong-scope')) ? 'person:another' : 'person:' + user;
+console.log(JSON.stringify({ok:true,value:{protocol:'pi-core-person-activation-v1',user,scopeId,state:'prepared'}}));
+`);
+  writeFileSync(join(root, "activation-preload.mjs"), `
+const spawn = Bun.spawn.bind(Bun);
+Bun.spawn = (command, options) => Array.isArray(command) && command[0] === '/srv/pi/pi-orchestrator/host/core-person-activate'
+  ? spawn([process.execPath, ${JSON.stringify(join(root, "activation-fixture.mjs"))}, ...command.slice(1)], options)
+  : spawn(command, options);
+`);
   await startRouter();
 });
 
 async function startRouter(oidcConfig = "") {
-  router = Bun.spawn([process.execPath, join(import.meta.dir, "router.ts")], {
+  router = Bun.spawn([process.execPath, "--preload", join(root, "activation-preload.mjs"), join(import.meta.dir, "router.ts")], {
     stdout: "ignore", stderr: "pipe",
     env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, PI_REMOTE_ROUTER_PORT: String(port), PI_REMOTE_PERSONS_DIR: persons, PI_STACK_HOST_FILE: join(root, "host.json"), PI_REMOTE_KEY_DIR: keys, PI_REMOTE_UPSTREAM_CREDENTIAL_DIR: join(root, "upstream-credentials"), PI_REMOTE_UNLOCK_TIMEOUT_MS: "300", PI_REMOTE_OIDC_CONFIG: oidcConfig },
   });
@@ -186,6 +209,46 @@ test("bootstrap exposes persons, not endpoint access; Android can preflight sess
   expect(preflight.headers.get("access-control-allow-headers")).toContain("x-pi-remote-session");
 });
 
+test("mount/core activation completes before any projection probe or session admission", async () => {
+  const user = "jodie", hold = join(activationFlags, `${user}.hold`), entered = join(activationFlags, `${user}.entered`);
+  rmSync(join(units, `pi-remote@${user}.service`), { force: true });
+  rmSync(entered, { force: true });
+  writeFileSync(hold, "");
+  let probes = 0, settled = false;
+  healthChecks.set(user, async () => { probes++; return Response.json({ ok: true, core: { scopeId: `person:${user}`, error: null } }); });
+  const starting = unlock(user).then(response => { settled = true; return response; });
+  try {
+    await waitFor(() => existsSync(entered) ? true : undefined, "fixed core helper was not invoked");
+    expect(readFileSync(activationTrace, "utf8").trim().split("\n")).toContain(user);
+    expect(existsSync(join(units, `pi-remote@${user}.service`))).toBe(true);
+    expect(probes).toBe(0);
+    expect(settled).toBe(false);
+    rmSync(hold);
+    const response = await starting;
+    expect(response.status).toBe(200);
+    expect((await response.json()).session).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(probes).toBeGreaterThan(0);
+  } finally { rmSync(hold, { force: true }); healthChecks.delete(user); await starting; }
+});
+
+test("activation failure and a different core scope refuse admission while preserving mounted custody", async () => {
+  const user = "jodie";
+  const trace = readFileSync(activationTrace, "utf8");
+  expect((await unlock(user, "wrong-key")).status).toBe(403);
+  expect(readFileSync(activationTrace, "utf8")).toBe(trace);
+  for (const mode of ["fail", "wrong-scope"]) {
+    const flag = join(activationFlags, `${user}.${mode}`);
+    writeFileSync(flag, "");
+    try {
+      const response = await unlock(user);
+      expect(response.status).toBe(503);
+      expect((await response.json()).session).toBeUndefined();
+      expect(existsSync(join(units, `pi-remote@${user}.service`))).toBe(true);
+      expect(readFileSync(join(keys, user), "utf8")).toBe(`${user}-key`);
+    } finally { rmSync(flag, { force: true }); }
+  }
+});
+
 test.each([
   { user: "jodie", active: false },
   { user: "sybil", active: true },
@@ -195,6 +258,9 @@ test.each([
   if (active) {
     writeFileSync(unit, "");
     if (user !== "guest") writeFileSync(join(keys, user), `${user}-key`);
+  } else {
+    rmSync(unit, { force: true });
+    rmSync(join(keys, user), { force: true });
   }
   const probed = Promise.withResolvers<void>();
   const ready = Promise.withResolvers<Response>();
@@ -209,7 +275,7 @@ test.each([
     expect(first).toBe("probe");
     expect(existsSync(unit)).toBe(true);
     expect(settled).toBe(false);
-    ready.resolve(Response.json({ ok: true }));
+    ready.resolve(Response.json({ ok: true, core: { scopeId: `person:${user}`, error: null } }));
     const response = await starting;
     expect(response.status).toBe(200);
     const { session } = await response.json();
