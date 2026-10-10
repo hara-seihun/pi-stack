@@ -68,6 +68,8 @@ export class ScheduleService {
   private readonly now: () => number;
   private operations: Promise<void> = Promise.resolve();
   private closed = false;
+  private suspended = false;
+  suspend(): void { this.suspended = true; }
 
   constructor(private readonly options: ScheduleServiceOptions) {
     this.db = openSqlite(options.databasePath);
@@ -152,6 +154,7 @@ export class ScheduleService {
 
   create(input: CreateSchedule): Promise<ScheduleResult<Schedule>> {
     return this.exclusive(() => {
+      if (this.suspended) return bad("unavailable", "Schedule controller is suspended");
       const valid = this.validate(input);
       if (!valid.ok) return valid;
       const id = input.id ?? randomUUID();
@@ -200,6 +203,7 @@ export class ScheduleService {
 
   private setState(id: string, state: ScheduleState): Promise<ScheduleResult<Schedule>> {
     return this.exclusive(() => {
+      if (this.suspended) return bad("unavailable", "Schedule controller is suspended");
       const row = this.row(id);
       if (!row) return bad("not_found", `Schedule ${id} was not found`);
       this.db.prepare("UPDATE recurring_schedule SET state=?,updated_at=?,last_error=CASE WHEN ?='active' THEN NULL ELSE last_error END WHERE id=?")
@@ -210,6 +214,7 @@ export class ScheduleService {
 
   remove(id: string): Promise<ScheduleResult<{ id: string; removed: true }>> {
     return this.exclusive(() => {
+      if (this.suspended) return bad("unavailable", "Schedule controller is suspended");
       const removed = this.db.prepare("DELETE FROM recurring_schedule WHERE id=?").run(id).changes;
       return removed ? good({ id, removed: true }) : bad("not_found", `Schedule ${id} was not found`);
     });
@@ -217,8 +222,10 @@ export class ScheduleService {
 
   reconcile(): Promise<void> {
     return this.exclusive(async () => {
+      if (this.suspended) return;
       const rows = this.db.prepare("SELECT * FROM recurring_schedule WHERE state='active' ORDER BY next_run_at,id").all() as Row[];
       for (const initial of rows) {
+        if (this.suspended) return;
         const current = this.row(initial.id);
         if (!current || current.state !== "active") continue;
         const pending = this.db.prepare("SELECT * FROM schedule_occurrence WHERE schedule_id=? AND status='pending' ORDER BY scheduled_at LIMIT 1").get(current.id) as Row | undefined;
@@ -227,6 +234,7 @@ export class ScheduleService {
           continue;
         }
         if (!await this.previousFinished(current)) continue;
+        if (this.suspended) return;
         const now = this.now();
         if (current.next_run_at > now) continue;
         const missed = Math.floor((now - current.next_run_at) / current.interval_ms);
@@ -278,6 +286,7 @@ export class ScheduleService {
       admission: schedule.admission,
       metadata: { scheduleId: schedule.id, scheduledAt: occurrence.scheduled_at },
     });
+    if (this.suspended) return;
     const now = this.now();
     if (result.ok) {
       this.db.prepare("UPDATE schedule_occurrence SET status='accepted',error=NULL,updated_at=? WHERE schedule_id=? AND scheduled_at=?")
@@ -294,6 +303,7 @@ export class ScheduleService {
   }
 
   async close(): Promise<void> {
+    this.suspend();
     await this.operations.catch(() => {});
     if (this.closed) return;
     this.closed = true;

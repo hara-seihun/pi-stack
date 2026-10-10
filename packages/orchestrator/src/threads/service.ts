@@ -3288,9 +3288,13 @@ export class ThreadService implements ThreadApi {
       runtime.waiters.clear();
     }
   }
+  retirementPending(): { operations: number; halts: number; opening: number; attaching: number; dependencies: number } {
+    return { operations: this.operations.size, halts: this.halts.size, opening: this.opening.size, attaching: this.attaching.size, dependencies: this.dependencyOperations.size };
+  }
   async detach(): Promise<Result<void>> {
+    if (this.closed) return good(undefined);
     this.suspend();
-    await Promise.allSettled([...this.operations.values(), ...this.halts.values(), ...this.opening.values(), ...this.dependencyOperations.values()]);
+    await Promise.allSettled([...this.operations.values(), ...this.halts.values(), ...this.opening.values(), ...this.attaching.values(), ...this.dependencyOperations.values()]);
     // Native sessions outlive controllers, including idle ones. The successor
     // retires them with its context listener already serving; shutdown hooks
     // must not hold this listener's own handoff hostage.

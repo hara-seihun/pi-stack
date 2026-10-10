@@ -117,7 +117,16 @@ export async function dispatch(argv:string[]):Promise<void>{
     }
     output({names:Array.from({length:count},()=>getRandomName())});return;
   }
-  if(command==="daemon"){const store=Store.open(ledgerPath());try{await new Daemon(store,loadConfig()).start();}finally{store.close();}return;}
+  if(command==="daemon"){
+    const store=Store.open(ledgerPath());
+    try{
+      const retirement=await new Daemon(store,loadConfig()).start();
+      store.close();
+      // Only control-plane waits are retired here. Accepted execution belongs to independent owners.
+      process.exit(retirement.edges.some(edge=>edge.state==="error")?1:0);
+    }finally{if(!store.closed)store.close();}
+    return;
+  }
   if(command==="usage-evidence"){
     if(rest.length!==0&&(rest.length!==2||rest[0]!=="--ledger")){
       console.error("usage: pi-orchestrator usage-evidence [--ledger FILE]");process.exitCode=1;return;

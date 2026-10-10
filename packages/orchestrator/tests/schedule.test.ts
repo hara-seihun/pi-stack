@@ -138,6 +138,31 @@ it("pauses after a terminal spawn rejection and resumes without deleting its his
   await schedules.close();
 });
 
+it("preserves a pending occurrence when its admission acknowledgement arrives after suspension", async () => {
+  const path = database(), attempts: SpawnThread[] = [];
+  let accepted!: () => void, entered!: () => void;
+  const pending = new Promise<void>(resolve => { accepted = resolve; });
+  const ready = new Promise<void>(resolve => { entered = resolve; });
+  const fake = fakeThreads(async input => {
+    attempts.push(input); entered(); await pending;
+    return { ok: true, value: thread(input) };
+  });
+  const first = new ScheduleService({ databasePath: path, threads: fake.api, now: () => 50_000 });
+  await first.create({ id: "handoff", prompt: "Continue", cwd: "/work", intervalMs: 5_000, startAt: 50_000 });
+  const reconcile = first.reconcile(); await ready;
+  first.suspend();
+  const late = first.create({ id: "late", prompt: "No new admission", cwd: "/work", intervalMs: 5_000 });
+  accepted(); await reconcile;
+  expect(await late).toMatchObject({ ok: false, error: { code: "unavailable" } });
+  expect(first.get("handoff")).toMatchObject({ ok: true, value: { lastOccurrence: { state: "pending" } } });
+  await first.close();
+  const next = new ScheduleService({ databasePath: path, threads: fake.api, now: () => 80_000 });
+  await next.reconcile();
+  expect(attempts).toHaveLength(2);
+  expect(attempts[1]).toMatchObject({ requestId: attempts[0]!.requestId, id: attempts[0]!.id });
+  await next.close();
+});
+
 it("serves create, inspection, pause, resume, and explicit deletion routes", async () => {
   const fake = fakeThreads(async input => ({ ok: true, value: thread(input) }));
   const schedules = new ScheduleService({ databasePath: database(), threads: fake.api, now: () => 1_000 });

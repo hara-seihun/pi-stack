@@ -243,6 +243,7 @@ export class SharedOAuthAuth {
     alias: string,
     signal: AbortSignal,
     minLifetimeMs = TOKEN_MIN_LIFETIME_MS,
+    refreshSignal?: AbortSignal,
   ): Promise<OAuthCredential> {
     const release = await acquireLock(this.#path, signal);
     try {
@@ -252,7 +253,8 @@ export class SharedOAuthAuth {
       const state = rejection(current);
       if (state && (state.state === "login-required" || (state.retryAt ?? 0) > this.#now())) throw unavailable(alias, state);
       if (!state && current.expires > this.#now() + minLifetimeMs) return current;
-      return await this.#refreshLocked(auth, alias, current, signal, state !== undefined);
+      signal.throwIfAborted();
+      return await this.#refreshLocked(auth, alias, current, refreshSignal ?? signal, state !== undefined);
     } finally {
       release();
     }
@@ -284,6 +286,7 @@ export class SharedOAuthAuth {
     alias: string,
     rejectedAccessToken: string,
     signal: AbortSignal,
+    refreshSignal?: AbortSignal,
   ): Promise<OAuthCredential> {
     const release = await acquireLock(this.#path, signal);
     try {
@@ -293,7 +296,8 @@ export class SharedOAuthAuth {
       const state = rejection(current);
       if (state && (state.state === "login-required" || (state.retryAt ?? 0) > this.#now())) throw unavailable(alias, state);
       if (!state && current.access !== rejectedAccessToken) return current;
-      return await this.#refreshLocked(auth, alias, current, signal, true);
+      signal.throwIfAborted();
+      return await this.#refreshLocked(auth, alias, current, refreshSignal ?? signal, true);
     } finally {
       release();
     }
