@@ -2,15 +2,20 @@ import { createExecutionActivity, restoreExecutionActivity, settleExecutionActiv
 import type { ToolProgress } from "./tool-progress";
 import type { Session } from "./protocol";
 
-export function projectThreadActivity(thread: Pick<Thread, "lifecycle" | "executionActivity">): Pick<Session, "lifecycle" | "activity" | "activitySince" | "lastActivityAt" | "activityDetail" | "activeTools" | "executionError"> {
+export function projectThreadActivity(thread: Pick<Thread, "lifecycle" | "executionActivity">): Pick<Session, "state" | "lifecycle" | "activity" | "activitySince" | "lastActivityAt" | "activityDetail" | "activeTools" | "executionError"> {
   const lifecycle = thread.lifecycle;
-  const empty = { lifecycle, activeTools: [] as string[] };
+  // Public state and activity come from the same lifecycle observation.
+  // Persisted execution custody may remain running while model admission waits.
+  const state: Session["state"] = lifecycle.kind === "waiting" ? "waiting"
+    : lifecycle.kind === "working" || lifecycle.kind === "cancelling"
+      || (lifecycle.kind === "failed" && lifecycle.control === "stop") ? "running" : "idle";
+  const empty = { state, lifecycle, activeTools: [] as string[] };
   switch (lifecycle.kind) {
     case "idle": case "archived": return { ...empty, activity: "idle" };
     case "cancelling": return { ...empty, activity: "cancelling" };
     case "failed": return { ...empty, activity: "status_error", executionError: lifecycle.reason };
     case "waiting": return { ...empty, activity: "awaiting", activitySince: lifecycle.since, ...("reason" in lifecycle ? { activityDetail: lifecycle.reason } : {}) };
-    case "working": return { lifecycle, activity: lifecycle.phase, activitySince: lifecycle.since,
+    case "working": return { state, lifecycle, activity: lifecycle.phase, activitySince: lifecycle.since,
       activityDetail: lifecycle.detail, lastActivityAt: thread.executionActivity?.lastActivityAt,
       activeTools: thread.executionActivity?.activeTools ?? [] };
   }
