@@ -19,10 +19,10 @@ function fixture(): CoreScope {
   for (const path of [storage.databasePath, storage.capabilityKeyPath, storage.adoptionReceiptPath]) writeFileSync(path, "original bytes");
   const processStat = readFileSync(`/proc/${process.pid}/stat`, "utf8");
   const namespace = { kind: "process" as const, pid: process.pid, startTicks: processStat.slice(processStat.lastIndexOf(")") + 2).split(/\s+/)[19]!, mountNamespaceInode: statSync(`/proc/${process.pid}/ns/mnt`, { bigint: true }).ino.toString() };
-  return { id: "private", principalId: "fixture", resource: { id: "private", owner: "fixture", kind: "thread", privacy: "confidential", subjects: [], consent: "not-required" },
+  return { id: "private", principalId: "fixture", availability: { kind: "adopt" }, resource: { id: "private", owner: "fixture", kind: "thread", privacy: "confidential", subjects: [], consent: "not-required" },
     storage, custody: { uid: process.getuid!(), gid: process.getgid!(), dataDir: root, socketDir: root,
       namespace, retainedRunnerNamespace: namespace },
-    environment: {}, resources: [{ path: storage.sessionsDir, kind: "directory" }], manager: { kind: "none" } };
+    environment: {}, resources: [{ path: storage.sessionsDir, kind: "directory" }], manager: { kind: "none" }, managerRouting: { kind: "none" } };
 }
 const listen = (server: Server, path: string) => new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(path, resolve); });
 const close = (server: Server) => new Promise<void>(resolve => server.close(() => resolve()));

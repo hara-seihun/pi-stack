@@ -4,6 +4,7 @@ import { authorize, validatePermissionPolicy } from "../permissions.js";
 import type { CoreConfig, CoreScope } from "./contracts.js";
 import { parseCoreProviderConfig } from "./provider.js";
 import { parseCoreRootConfig } from "./root.js";
+import { parseCoreCallbackConfig } from "./callback-transports.js";
 import { parseCoreImagesConfig } from "./images.js";
 import { parseCoreMemoryConfig } from "./memory.js";
 import { parseCoreDutiesConfig } from "./duties-runtime.js";
@@ -65,6 +66,9 @@ export function parseCoreConfig(value: unknown): CoreResult<CoreConfig> {
   if (!broker.ok) return broker;
   const root = parseCoreRootConfig(value.root);
   if (!root.ok) return root;
+  const callbacks = parseCoreCallbackConfig(value.callbacks, { host: String(value.host), port: Number(value.port) });
+  if (!callbacks.ok) return callbacks;
+  if (callbacks.value.kind === "retained" && callbacks.value.listeners.some(listener => listener.subsystem === "root" ? root.value.kind === "disabled" : !record(value.memory) || value.memory.kind !== "configured")) return invalid("Retained callbacks require their canonical configured plugin");
   if (root.value.kind === "configured" && !scopeIds.has(root.value.consultationScopeId)) return invalid("Root consultation scope is unregistered");
   const images = parseCoreImagesConfig(value.images);
   if (!images.ok) return images;

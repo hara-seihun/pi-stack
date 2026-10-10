@@ -2,6 +2,7 @@ import type { PiEvent, Thread, ThreadInputState, ThreadMessage, ThreadSettlement
 import type { PermissionPolicy, Principal, Resource } from "../permissions.js";
 import type { CoreProviderConfig } from "./provider.js";
 import type { CoreRootConfig } from "./root.js";
+import type { CoreCallbackConfig } from "./callback-transports.js";
 import type { CoreImagesConfig } from "./images.js";
 import type { CoreMemoryConfig } from "./memory.js";
 import type { CoreDutiesConfig } from "./duties-runtime.js";
@@ -52,6 +53,7 @@ export type CoreConfig = {
   scopes: CoreScope[];
   broker: CoreProviderConfig;
   root: CoreRootConfig;
+  callbacks: CoreCallbackConfig;
   images: CoreImagesConfig;
   memory: CoreMemoryConfig;
   duties: CoreDutiesConfig;

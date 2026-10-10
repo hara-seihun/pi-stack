@@ -28,6 +28,16 @@ Root uses each request's exact adopted ThreadService, shared capacity and native
 
 Request/consent databases each require detached adoption receipts and exclusive ownership locks. The core reconciliation clock owns consent/request outboxes. Admin access requires unified principal/resource grants and the existing specialized capability. Only the chosen reply leaves the confidential session.
 
+## Retained callback transports
+
+`callbacks` is explicitly `{kind:"none"}` or `{kind:"retained",listeners:[...]}`. Each listener names `id`, `subsystem` (`root` or `memory`), exact loopback `host`/`port`, `previousOwner` identity and `detachmentReceiptPath`. Ports are distinct from each other and the canonical port. Root and memory integrations must already be configured.
+
+A protected root-owned receipt binds `{version:1,state:"detached",listenerId,subsystem,host,port,previousOwner:{identity,detachedAt}}`. The old listener must drain before that receipt is issued and the port rebinds. Missing listeners or absent PIDs are not proof of detachment.
+
+These are additional HTTP sockets in the same core process, forwarding exclusively to canonical embedded plugins. The memory port exposes only original memory/session/root-memory operations; the Root port exposes only original ask/admin operations. Each forwards its plugin's original health response and authentication unchanged; Root admin still passes through unified authorization. Neither can reach core/provider/image endpoints. Shutdown stops accepting and waits for accepted responses before stores close.
+
+Retirement is explicit: after retained clients referencing an old URL have drained or advanced to current endpoints, remove that listener from the registered configuration; use `{kind:"none"}` when all are retired. An idle socket or elapsed time does not prove its clients are gone. There is no automatic timeout retirement.
+
 ## Focused proof and deployment boundary
 
 `tests/core-custody.test.ts` attaches synthetic old-generation sockets through a real process descriptor, checks unchanged store identity/bytes, rejects changed PID birth and unregistered paths, proves atomic private-batch rejection and accepted judgment drain, and transports a large frame through the fixed Python bridge. Root managed-session tests exercise the actual shared ThreadService/capacity, exact queued original request adoption, replay fencing, terminal reply reuse and missing-owner errors.

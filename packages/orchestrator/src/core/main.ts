@@ -12,6 +12,7 @@ import { CoreDuties } from "./duties-runtime.js";
 import { createCoreProvider, type CoreProvider } from "./provider.js";
 import { createCoreRootIntegration, type CoreRootPlugin } from "./root.js";
 import { webRequest, writeResponse } from "./http.js";
+import { startCallbackTransports, type CallbackTransports } from "./callback-transports.js";
 
 export type RunningCore = { service: CoreService; close(): Promise<CoreResult<void>> };
 export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningCore>> {
@@ -19,6 +20,7 @@ export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningC
   const core = new CoreService(config, createCoreCustodyFactory(config.root.kind === "configured" ? [config.root.consultationScopeId, ...config.root.consultationOwners.map(owner => owner.scopeId)] : null));
   let provider: CoreProvider | undefined, root: CoreRootPlugin | null = null, images: CoreImages | undefined, memory: CoreMemoryAdapter | undefined;
   const duties = new CoreDuties(config.duties, { scopes: config.scopes, principals: config.principals, policy: config.policy, owner: id => core.owner(id), enabled: () => !shutdown.signal.aborted });
+  let callbacks: CallbackTransports | undefined;
   let server: Server | undefined, clock: ReturnType<typeof setInterval> | undefined;
   let reconciliation: Promise<void> | undefined, closing: Promise<CoreResult<void>> | undefined;
   let healthy = true;
@@ -28,6 +30,7 @@ export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningC
       shutdown.abort();
       if (clock) clearInterval(clock);
       try {
+        await callbacks?.close();
         await root?.drain();
         await reconciliation;
         await root?.close();
@@ -90,6 +93,9 @@ export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningC
     });
     if (!integrated.ok) { await close(); return integrated; }
     root = integrated.value;
+    const retained = await startCallbackTransports(config.callbacks, { root, memory: config.memory.kind === "configured" ? memory ?? null : null });
+    if (!retained.ok) { await close(); return retained; }
+    callbacks = retained.value;
     server = createServer((req, res) => {
       const abort = new AbortController();
       res.once("close", () => abort.abort());
