@@ -66,7 +66,12 @@ export async function runLegacyStartup(command) {
   });
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+// Invoked through the /srv/pi/pi-remote release pointer; compare real paths.
+const invokedDirectly = (() => {
+  try { return Boolean(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); }
+  catch { return false; }
+})();
+if (invokedDirectly) {
   const result = await runLegacyStartup(process.argv.slice(2));
   if (!result.ok) { console.error(JSON.stringify(result)); process.exitCode = 78; }
   else if (result.value.state === "candidate-exited") process.exitCode = result.value.exitCode;
