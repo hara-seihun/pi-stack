@@ -66,6 +66,16 @@ test("accepted watch spool remains in its existing store with metadata-only capt
   expect(result.evidence[0]!.watch.find((row: any) => row.table === "watch_wake").rows[0].id).toBe("immutable-occurrence");
   expect(JSON.stringify(result)).not.toContain("PRIVATE_BODY_NOT_EXPORTED");
 });
+test("watch custody can share the exact thread database without being attributed to the supervisor", () => {
+  const { plan } = fixture(), scope = plan.scopes[0]!;
+  const db = new Database(scope.threads!.path);
+  for (const table of ["watch_item", "watch_request", "watch_wake", "watch_delivery", "watch_schedule"]) db.exec(`CREATE TABLE ${table}(id TEXT,body TEXT)`);
+  db.query("INSERT INTO watch_delivery VALUES(?,?)").run("accepted-id", "PRIVATE_BODY_NOT_EXPORTED"); db.close();
+  scope.duties = { scopeId: scope.id, path: "/declared/duties.md", watch: { kind: "existing", databasePath: scope.supervisor!.path, acceptedSpool: "hold" } };
+  expect(() => captureAuxiliary(plan)).toThrow("exact configured");
+  scope.duties.watch.databasePath = scope.threads!.path;
+  expect(captureAuxiliary(plan).evidence[0]!.watch.find((row: any) => row.table === "watch_delivery").rows[0].id).toBe("accepted-id");
+});
 (process.getuid?.() === 0 ? test : test.skip)("detached capture retains early watermarks and includes post-baseline sources without skipping output", () => {
   const { plan, supervisorPath, dir, session } = fixture();
   const scope = plan.scopes[0]!;

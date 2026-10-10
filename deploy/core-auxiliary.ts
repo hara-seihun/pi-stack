@@ -114,10 +114,13 @@ export function captureAuxiliary(plan: AuxiliaryPlan) {
         const origins = (supervisor.query("SELECT key,value FROM metadata WHERE key LIKE 'manager-origin:%' ORDER BY key").all() as Array<{ key: string; value: string }>).map(row => ({ threadId: row.key.slice("manager-origin:".length), environmentId: row.value }));
         routing = { ...routing, relay: { ...routing.relay, adoptedOrigins: origins }, notices: { notificationOwnerId: owner, adoptedCursors } };
       } else need(routing.kind === "none", "Explicit manager routing required");
-      const watch = supervisor && supervisorTables.has("watch_item") ? ["watch_item", "watch_request", "watch_wake", "watch_delivery", "watch_schedule"].map(table => {
-        need(supervisorTables.has(table), "Incomplete original watch custody"); return digestRows(supervisor, table);
+      const watchStores = [{ db: threadDb, tables: threadTables, path: scope.threads.path }, ...(supervisor ? [{ db: supervisor, tables: supervisorTables, path: scope.supervisor!.path }] : [])].filter(store => store.tables.has("watch_item"));
+      need(watchStores.length <= 1, "Multiple original watch stores require separate explicit scope custody");
+      const watchStore = watchStores[0];
+      const watch = watchStore ? ["watch_item", "watch_request", "watch_wake", "watch_delivery", "watch_schedule"].map(table => {
+        need(watchStore.tables.has(table), "Incomplete original watch custody"); return digestRows(watchStore.db, table);
       }) : null;
-      need(!watch || scope.duties?.watch?.kind === "existing", "Original watch custody requires a configured existing-store duty owner");
+      need(!watchStore || scope.duties?.watch?.kind === "existing" && scope.duties.watch.databasePath === watchStore.path, "Original watch custody requires its exact configured existing-store duty owner");
       if (scope.duties) { need(scope.duties.scopeId === scope.id, "Duty scope mismatch"); entries.push(scope.duties); }
       let imageSources: ObjectValue[] | null = null;
       if (scope.images) {

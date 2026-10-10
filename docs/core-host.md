@@ -46,6 +46,8 @@ The original controller must supply its own detachment receipt. PID disappearanc
 
 ## Actual old-owner handoff
 
+[Auxiliary capture](core-auxiliary.md) preserves exact manager routing, notification cursors, accepted duties and image watermarks across this handoff. Capture its baseline while original image ingress is still alive; its final metadata requires the actual detachment receipt.
+
 `core-plan MIGRATION_DIRECTORY` writes protected metadata-only `host-plans`: original namespace pins, scope/store receipt paths, broker intake plans and a common resource candidate. It records source-census changes or missing resources as typed pending facts. These files are plans, never receipts or permission to activate.
 
 `node host/core-broker-handoff.mjs ROOT_PLAN` gates only the exact original broker's declared HTTP servers in its existing process. The finite loopback inspector operation binds PID/birth/UID and the actual loaded immutable source module. It replaces future request/upgrade intake with503 and calls `server.close()` without aborting accepted requests. Only all original close callbacks produce the protected positive `drained` proof. A pending result retains the same handoff and handler references; recovery never substitutes a new intent. The inspector closes after each bounded operation.
