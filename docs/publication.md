@@ -23,15 +23,17 @@ Reference services use `/srv/pi` as the installation layout. Deployment destinat
 
 There is no GitHub Actions workflow or self-hosted runner attached to this public repository. Opening a pull request does not execute its code on a deployment host. Maintainers review external source before accepting it into their trusted publication queue. Changing a workflow in a pull request does not grant host access.
 
-Run `npm ci --ignore-scripts` and `npm run check` in an environment appropriate for the source being evaluated. Run Android checks with the host's local build configuration. The configured publication owner runs the integration checks and records the exact commit, commands, artifacts, deployment results and service proof.
+Submit the exact committed source to the configured publication owner. That SHA is the delivery candidate; a later `main` neither replaces it nor requires it to qualify again. Source-history admission still protects public roots, retained owner repairs and each host's selected history.
+
+On kenan-server, publication builds the required artifacts and deploys immediately, with service-start recovery only: zero tests, doctors, qualification, warm-up or browser gates. Converge owns an independent lane with the minimal changed-source builds/tests and host health check. It cannot delay or roll back kenan-server. Tests, proofs and doctors outside that minimal remote lane run after serving and record their actual outcomes, not a global success gate. [Checks](checks.md) describes source-bound verdict reuse; [deployment](deployment.md#publication-owner) owns delivery and repair.
 
 ## Client before server activation
 
-After source integration and checks, publication delivers independently to each ready host. It installs and verifies that host's matching APK/web artifact **before activating that host's server**, not before activating every server. A meeting, native prerequisite, lock, transfer failure or activation failure on one host never prevents another ready host's client and server delivery. An older mobile bundle may reject a new server state and show an empty directory; the matching bundle must already be downloadable when that server changes. Existing open clients still need to apply the update.
+Each host installs its matching APK/web artifact **before activating its server**. An older mobile bundle may reject a new server state and show an empty directory; the matching bundle must already be downloadable when that server changes. Existing open clients still need to apply the update. Artifact hashes establish transfer integrity, not a test or qualification gate.
 
-`deploy/android-update bundle FILE` packages the checked installer and its validators into one portable Bun script. Publication transfers it with the artifact and verifies its hash before use, so publishing the client does not require changing the remote server checkout or its rollback selection. An artifact failure prevents only that host's server activation. Retries reuse the immutable APK/web bytes and retain successful delivery elsewhere.
+`deploy/android-update bundle FILE` packages the installer and its validators into one portable Bun script. Publication transfers it with the artifact and verifies its hash before use, without changing the remote server checkout or rollback selection. An artifact failure affects only that host. Retries reuse immutable bytes and retain successful delivery elsewhere.
 
-Each host's durable outcome records source, artifact and service proof. Its reservation ends after that proof, rather than after fleet completion. Newer checked requests may advance ready hosts while an older request waits remotely; the older request accepts valid checked descendant source and matching-artifact proofs instead of reinstalling its older bundle or requiring an exact selected SHA. Full success still means every configured host has the requested source or a checked descendant and valid matching artifacts. A source marker alone does not establish delivery.
+Each durable host outcome records the exact candidate, artifacts and serving result. Its reservation ends when its own delivery finishes, rather than after fleet completion. A meeting, native-history prerequisite, lock, transfer failure or activation failure on Converge never delays kenan-server. Failed hosts receive bounded automatic retry and an alert naming the host, source and failure; successful peers are not replayed or rolled back. Reports distinguish serving hosts, pending or failed hosts, and post-serving check outcomes instead of collapsing them into a global green result.
 
 ## Publication transport custody
 
@@ -47,20 +49,13 @@ proved delivery or prevent ready targets from advancing.
 
 ## Worker reboot recovery
 
-The worker records the kernel boot identity when an attempt starts. A different
-boot may resume an interrupted `integrate-main` or `confirm-integrated-main`
-within that attempt, only with passed integration checks and no host custody.
-The watchdog leaves that recovery to the worker rather than treating deadlines
-from the previous boot as command stalls. The receipt retains each interrupted
-command and both boot identities; at most three such recoveries are admitted.
-
-Recovery fetches main before acting. If the push already reached main it is not
-repeated; if main is still the checked base the immutable integration can be
-pushed. Changed main retains the previous integration and its evidence under a
-source ref and requires fresh integration checks. Incomplete checks, absent boot
-identity, same-boot interruptions, exhausted reboot recovery and host-stage
-interruptions keep their existing failure and repair custody. Reboot recovery
-never revives a failed or cancelled publication.
+The worker records boot identity, command progress and immutable source refs so
+restart recovery can distinguish an interrupted command from a completed effect.
+Recovery inspects retained effects before retrying; it resumes the same request
+and exact candidate. Moving `main` is not permission to replace or requalify an
+in-flight source. Per-host recovery retains successful peer delivery and native
+restoration custody. Failure, cancellation and exhausted recovery remain explicit
+outcomes, with their command evidence and repair owner.
 
 ## Public history
 
