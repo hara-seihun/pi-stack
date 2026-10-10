@@ -60,8 +60,12 @@ parameter schemas in the SDK and bundled Anthropic provider. Pi 0.87.1's non-str
 converter retained only root `properties` and `required`, erasing object unions
 used by life writes/policy/steering, thread control/wakes and Converge. The shared
 [`anthropic-tool-schema.js`](anthropic-tool-schema.js) retains all constraints and
-adds Anthropic's required root `type: "object"` when union/intersection branches
-already imply it. Non-object inputs fail explicitly; native registrations stay intact.
+requires an object input. Anthropic rejects root `anyOf`, `oneOf` and `allOf`, even
+with `type: "object"`; the adapter places those complete contracts under double
+negation (`not.not`) and advertises their field names at the object root. Nested
+branch constraints retain exactly the original accepted inputs, including permissive
+extras, closed branches and references. Non-object inputs fail explicitly; native
+registrations stay intact.
 Deployment hashes and applies both repair files. Orchestrator test preparation
 applies the same patch before provider payload tests.
 

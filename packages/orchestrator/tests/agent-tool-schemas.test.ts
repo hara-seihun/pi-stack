@@ -63,6 +63,7 @@ it("registered agent tools advertise usable wire parameters; only named zero-arg
   for (const name of tools.keys()) {
     const schema = wireSchema(name);
     expect(schema.type, name).toBe("object");
+    for (const keyword of ["anyOf", "oneOf", "allOf"]) expect(Object.hasOwn(schema, keyword), `${name}: forbidden root ${keyword}`).toBe(false);
     const fields = rootFields(schema);
     if (fields.length === 0) empty.push(name);
     expect(fields.length === 0, name).toBe(zeroArgumentTools.has(name));
@@ -90,8 +91,7 @@ it.each(Object.entries(affectedFields))("%s retains advertised fields and origin
   const original = JSON.parse(JSON.stringify(tools.get(name)!.parameters));
   const wire = wireSchema(name);
   expect(rootFields(wire)).toEqual([...fields].sort());
-  expect(wire.anyOf, `${name} operation branches`).toEqual(original.anyOf);
-  expect(wire.allOf, `${name} intersection constraints`).toEqual(original.allOf);
+  expect(wire.not, `${name} exact operation contract`).toEqual({ not: original });
   expect(Compile(wire).Check({}), `${name} must not accept an empty request`).toBe(false);
 });
 
