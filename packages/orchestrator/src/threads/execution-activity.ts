@@ -35,7 +35,8 @@ export function executionWaitActivity(metadata?: Record<string, any>): Execution
   if (!wait) return undefined;
   const runnerCapacity = !provider && !admission && !!startup && isRunnerCapacityFailure(String(startup.error ?? ""));
   const capacity = provider ? isRateLimitError(String(provider.failure ?? "")) && !isCompactionFailure(String(provider.failure ?? "")) : !!admission || runnerCapacity;
-  let activityDetail = runnerCapacity ? "Waiting for runner capacity" : capacity ? "Waiting for model capacity" : provider ? "Waiting to retry a provider failure" : "Runtime startup failed; retry scheduled";
+  const globalCapacity = !!admission && String(admission.message ?? "").startsWith("Global agent capacity:");
+    let activityDetail = globalCapacity ? String(admission.message) : runnerCapacity ? "Waiting for runner capacity" : capacity ? "Waiting for model capacity" : provider ? "Waiting to retry a provider failure" : "Runtime startup failed; retry scheduled";
   if (Number.isFinite(wait.retryAt)) activityDetail += `; next retry ${new Date(wait.retryAt).toISOString()}`;
   const since = Number.isFinite(wait.since) ? wait.since : undefined;
   return { activity: capacity ? "waiting_for_capacity" : "waiting_to_retry", activitySince: since,

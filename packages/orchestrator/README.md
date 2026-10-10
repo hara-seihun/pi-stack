@@ -1,6 +1,6 @@
 # Pi Orchestrator
 
-Pi Orchestrator launches ordinary background agents against pooled subscription accounts. Lanes, direct assignments and agents launched by other agents use the same [ThreadService and API](../../docs/threads.md). [Kena](../../docs/agents.md) owns the single-agent model and global 100-executing-agent budget. Shared runners execute many sessions without a process per agent. [Global admission](docs/agent-capacity.md) owns durable capacity custody, explicit host configuration and the all-owner initial census barrier.
+Pi Orchestrator launches ordinary background agents against pooled subscription accounts. Lanes, direct assignments and agents launched by other agents use the same [ThreadService and API](../../docs/threads.md). [Kena](../../docs/agents.md) owns the single-agent model and global execution custody. Shared runners execute many sessions without a process per agent. [Global admission](docs/agent-capacity.md) owns durable capacity custody, explicit host configuration and the all-owner initial census barrier.
 
 ## Ordinary users
 

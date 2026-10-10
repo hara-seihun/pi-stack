@@ -23,7 +23,7 @@ export async function recoverRootOwners(config: RootConfig, capacity?: AgentCapa
 }
 
 export class RootCapacityUnavailable extends Error {
-  constructor(readonly retryAt: number) { super("Waiting for the shared global 100-agent capacity"); }
+  constructor(readonly retryAt: number) { super("Waiting for the shared global execution capacity"); }
 }
 
 export class RootReplyUnavailable extends Error {

@@ -83,7 +83,7 @@ error. Unknown questions are not an empty successful list.
 
 ## Execution budget
 
-Across all Pi Stack hosts and owners, at most **100 agents may execute** at once.
+Across all Pi Stack hosts and owners, at most **unlimited agents may execute** at once.
 Foreground, background, fleet, application and privileged agents share the same
 budget. Dependency-waiting agents hold no execution slot. Additional runnable
 work queues with a capacity reason. Forced/live model admission is not an

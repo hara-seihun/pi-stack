@@ -51,7 +51,7 @@ export class AgentCapacityAuthority {
   }
   initialize(entries: CensusEntry[]): Result<void> {
     if (!Array.isArray(entries) || entries.some(entry => !isAgentExecution(entry) || !nonempty(entry.ownerId))) return fail("invalid_request", "Invalid active-execution census");
-    if (entries.length > GLOBAL_AGENT_LIMIT) return fail("unavailable", `Initial census has ${entries.length}/${GLOBAL_AGENT_LIMIT} existing executions; cutover is held until positive settlements reduce it`);
+
     if (new Set(entries.map(entry => entry.agentId)).size !== entries.length || new Set(entries.map(entry => entry.executionId)).size !== entries.length) return fail("conflict", "Census contains overlapping identities; resolve actual custody before cutover");
     return this.transaction(() => {
       if (this.status().initialized) return fail("conflict", "Authority already initialized; never replace its active census");
@@ -82,7 +82,7 @@ export class AgentCapacityAuthority {
       if (!status.initialized) return fail("unavailable", "Initial all-owner census cutover is not accepted; runnable work remains queued");
       const held = this.db.prepare("SELECT execution_id FROM capacity_request WHERE agent_id=? AND state='active'").get(execution.agentId) as { execution_id: string } | undefined;
       if (held) return fail("unavailable", `Agent retains uncertain or active execution custody ${held.execution_id}; runnable work remains queued`);
-      if (status.active >= GLOBAL_AGENT_LIMIT) return fail("unavailable", `Global agent limit ${status.active}/${GLOBAL_AGENT_LIMIT}; runnable work remains queued`);
+
       const leaseId = randomUUID();
       this.db.prepare("UPDATE capacity_request SET state='active',lease_id=? WHERE execution_id=? AND state='queued'").run(leaseId, execution.executionId);
       return { ok: true, value: { ...execution, leaseId } };

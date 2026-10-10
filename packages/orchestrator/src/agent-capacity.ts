@@ -2,7 +2,8 @@ import { readFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import type { Result, ThreadError } from "./threads/contracts.js";
 
-export const GLOBAL_AGENT_LIMIT = 100;
+/** No global execution cap; custody still prevents duplicate execution. */
+export const GLOBAL_AGENT_LIMIT = null;
 export const AGENT_CAPACITY_AUTHORITY = "pi-stack-global-agents-v1";
 export interface AgentExecution { agentId: string; executionId: string }
 export interface CapacityCustody extends AgentExecution { leaseId: string }
@@ -14,7 +15,7 @@ export interface AgentCapacity {
   inspect(execution: AgentExecution): Promise<Result<CapacityObservation>>;
   withdraw(execution: AgentExecution): Promise<Result<void>>;
 }
-export interface AgentCapacityStatus { authority: typeof AGENT_CAPACITY_AUTHORITY; limit: typeof GLOBAL_AGENT_LIMIT; initialized: boolean; active: number; queued: number }
+export interface AgentCapacityStatus { authority: typeof AGENT_CAPACITY_AUTHORITY; limit: number | null; initialized: boolean; active: number; queued: number }
 export type CapacityAcquireResult = Result<CapacityCustody>;
 const unavailable = <T>(message: string): Result<T> => ({ ok: false, error: { code: "unavailable", message: `Global agent capacity: ${message}`, retryAt: Date.now() + 5_000 } });
 const text = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 512;
@@ -58,8 +59,8 @@ export function createAgentCapacityClient(options: AgentCapacityClientOptions): 
       const result = await request("/v1/status");
       if (!result.ok) return result;
       const status = result.value as AgentCapacityStatus | null;
-      if (!status || status.authority !== AGENT_CAPACITY_AUTHORITY || status.limit !== GLOBAL_AGENT_LIMIT || typeof status.initialized !== "boolean"
-        || !Number.isSafeInteger(status.active) || status.active < 0 || status.active > GLOBAL_AGENT_LIMIT || !Number.isSafeInteger(status.queued) || status.queued < 0) return unavailable("authority returned invalid capacity status");
+      if (!status || status.authority !== AGENT_CAPACITY_AUTHORITY || (status.limit !== null && (!Number.isSafeInteger(status.limit) || status.limit <= 0)) || typeof status.initialized !== "boolean"
+        || !Number.isSafeInteger(status.active) || status.active < 0 || (status.limit !== null && status.active > status.limit) || !Number.isSafeInteger(status.queued) || status.queued < 0) return unavailable("authority returned invalid capacity status");
       return { ok: true, value: status };
     },
     async inspect(execution) {

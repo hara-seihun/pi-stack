@@ -1,6 +1,6 @@
 # Global agent execution capacity
 
-Pi Stack has one durable admission authority and a hard limit of **100 executing agents**, across every host, person, foreground/background placement, application, peer and root agent. Provider availability, explicit spending controls and native memory/residency limits are separate controls. None grants an execution-slot exemption. Dependency waits and settled warm sessions do not hold slots.
+Pi Stack has one durable admission authority with **no global execution-count limit**, across every host, person, foreground/background placement, application, peer and root agent. Provider availability, explicit spending controls and native memory/residency limits are separate controls. None grants an execution-slot exemption. Dependency waits and settled warm sessions do not hold slots.
 
 [`agent-capacity.ts`](../src/agent-capacity.ts) supplies the typed client. [`agent-capacity-authority.ts`](../src/agent-capacity-authority.ts) owns the SQLite ledger and HTTP server. The shared native runner continues hosting many sessions in one process; capacity does not create a process per agent.
 
@@ -55,7 +55,7 @@ An empty authority starts **uninitialized** and refuses fresh admission. Before 
 
 1. Hold dispatch/intake on every old ungated owner and select managed launchers. Existing native work continues under its existing custody; do not kill it to activate capacity.
 2. Capture each configured host's ThreadService execution receipts inside each person's authorized namespace. Include root, ordinary person and application owners. A paused owner and an idle retained runtime are not automatically absent execution. The scanner counts unfinished durable execution receipts and uncertain retained native custody, not `thread.state='running'`.
-3. Merge all host receipts under the same barrier identity. Initialization requires every configured owner/host pair and rejects overlapping agent identities. A census above100 returns an explicit overcapacity error and leaves the authority uninitialized. Retain existing work and recapture after positive natural settlements.
+3. Merge all host receipts under the same barrier identity. Initialization requires every configured owner/host pair and rejects overlapping agent identities. Census admission has no execution-count cap; existing execution identities and custody are retained.
 4. Initialize once, activate shared-gated sources/clients on every owner, then release the old intake barrier. New publication doctors and repair agents acquire ordinary slots too. They cannot use an initialization bypass.
 
 A census plan names exact authorized sources:
@@ -83,4 +83,4 @@ pi-agent-capacity initialize AUTHORITY_CONFIG GLOBAL_CENSUS
 
 The census tool cannot retroactively freeze code that never called it. The publication/host owner owns the old-source dispatch barrier, authorized source inventory and activation order. Only a barrier actually held across all producers makes initial admission safe. A second initialization is refused; never replace retained custody with an empty ledger or a fresh census to make queued work run.
 
-`GET /v1/status` with an owner credential returns only aggregate initialized/active/queued/limit data. It does not disclose another person's thread IDs or content. Authority failures retain custody and all consumers continue queuing.
+`GET /v1/status` with an owner credential returns only aggregate initialized/active/queued/limit data. The limit is null, meaning unlimited execution count. It does not disclose another person's thread IDs or content. Authority failures retain custody and all consumers continue queuing.
