@@ -4,7 +4,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 
 const root = resolve(import.meta.dirname, '..');
 const mode = process.argv[2];
-if (!['build', 'check'].includes(mode)) throw new Error('usage: node scripts/workspace-closure.mjs build|check');
+if (!['build', 'check', 'remote-check'].includes(mode)) throw new Error('usage: node scripts/workspace-closure.mjs build|check|remote-check');
 const areas = ['orchestrator', 'kenan-memory', 'kenan-root'];
 const paths = {};
 for (const area of areas) {
@@ -23,14 +23,23 @@ function files(directory) {
   });
 }
 const sources = areas.flatMap(area => files(join(root, 'packages', area, 'src')));
-const inputs = sources.filter(path => /\.(?:ts|mts)$/.test(path));
+let inputs = sources.filter(path => /\.(?:ts|mts)$/.test(path));
 if (mode === 'check') inputs.push(...files(join(root, 'packages/orchestrator/tests')).filter(path => /\.tsx?$/.test(path)), join(root, 'packages/orchestrator/vitest.config.ts'));
-const compilerOptions = {
+let compilerOptions = {
   target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.NodeNext, moduleResolution: ts.ModuleResolutionKind.NodeNext,
   strict: true, skipLibCheck: true, resolveJsonModule: true, declaration: true,
   rootDir: mode === 'check' ? root : join(root, 'packages'), outDir: join(root, 'packages'), noEmit: mode === 'check',
   types: ['node', 'bun'], typeRoots: [join(root, 'node_modules/@types')], paths,
 };
+if (mode === 'remote-check') {
+  const directory = join(root, 'apps/remote');
+  const loaded = ts.readConfigFile(join(directory, 'tsconfig.json'), ts.sys.readFile);
+  if (loaded.error) throw new Error(ts.flattenDiagnosticMessageText(loaded.error.messageText, '\n'));
+  const parsed = ts.parseJsonConfigFileContent(loaded.config, ts.sys, directory);
+  if (parsed.errors.length) throw new Error(parsed.errors.map(error => ts.flattenDiagnosticMessageText(error.messageText, '\n')).join('\n'));
+  inputs = parsed.fileNames;
+  compilerOptions = { ...parsed.options, paths, rootDir: root, noEmit: true };
+}
 const host = ts.createCompilerHost(compilerOptions);
 const program = ts.createProgram(inputs, compilerOptions, host);
 const diagnostics = ts.getPreEmitDiagnostics(program);

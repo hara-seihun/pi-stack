@@ -21,7 +21,7 @@
     "build:meet-adapter": "vite build --config vite.meet-adapter.config.ts",
     "build:phone-media": "vite build --config vite.phone-media.config.ts",
     "pretypecheck": "node prepare-check.mjs",
-    "typecheck": "tsc -p tsconfig.web.json && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.web.json && node ../../scripts/workspace-closure.mjs remote-check",
     "test": "node ../../scripts/build-workspace.mjs remote && node check.mjs"
   },
   "engines": {
