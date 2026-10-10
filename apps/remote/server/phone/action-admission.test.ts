@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { phoneIntent, reservePhoneAction, settlePhoneAction } from "./action-admission";
+import { callBrief } from "./policy";
 
 const brief = { requestId: "4208e41f-cafe-4bc5-991f-02dcb8f0f723", to: "+15555550123", purpose: "Confirm Tuesday appointment", shareableFacts: [], opening: "Hello", maxSeconds: 60 };
 function fixture() { const path = mkdtempSync(join(tmpdir(), "phone-actions-")); const actions = new ActionStore(path, "fixture"); return { actions, path, close() { actions.close(); rmSync(path, { recursive: true, force: true }); } }; }
@@ -26,6 +27,9 @@ test("20k-character purpose remains complete in payload with bounded stable iden
   const f = fixture();
   try {
     const thick = { ...brief, purpose: "Appointment detail. ".repeat(1000).padEnd(20_000, "x") };
+    expect(thick.purpose).toHaveLength(20_000);
+    expect(callBrief(thick)).toMatchObject({ ok: true, value: { purpose: thick.purpose } });
+    expect(callBrief({ ...thick, purpose: "x".repeat(32_000) })).toMatchObject({ ok: false, error: "Approved call context exceeds the Voice instruction limit" });
     const intent = phoneIntent(thick);
     expect(intent.intentKey.length).toBeLessThan(1000);
     expect(intent.intentKey).not.toContain("appointment detail");
