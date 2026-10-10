@@ -36,6 +36,7 @@ import { configuredPersonSpawnModel } from "./threads/person-spawn-model.js";
 import { resolveThreadSettings } from "./threads/settings.js";
 import type { RunContext } from "./domain.js";
 import { ScheduleService, scheduleHttp } from "./schedule.js";
+import { closeHttpServer } from "./http-shutdown.js";
 
 const HOST=process.env.PI_ORCHESTRATOR_HOST??"127.0.0.1";
 
@@ -137,7 +138,8 @@ export class Daemon {
     await this.schedules.close();
     for(const service of this.isolated.values()){const result=await service.detach();if(!result.ok)throw new Error(result.error.message);}
     this.opener.detach();
-    await new Promise<void>((resolve)=>server.close(()=>resolve()));
+    const httpClosed=await closeHttpServer(server,2_000);
+    if(!httpClosed.ok)throw new Error(httpClosed.error.message);
   }
 
   private waitForReconcile():Promise<void>{
