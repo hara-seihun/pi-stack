@@ -7,22 +7,14 @@ import { AgentsDirectory } from "./src/features/agents/AgentsScreen";
 const session = (id: string, changes: Partial<Session> = {}): Session => ({
   id, agentName: `Name ${id}`, name: `Task ${id}`, parentId: null, hasChildren: false,
   origin: "person", foreground: false, model: "test", provider: "test", cwd: "/fixture", workspaceName: "Home", environment: "test",
-<<<<<<< HEAD
-  state: "idle", lifecycle: { kind: "idle" }, activity: "idle", held: false, activeTools: [], createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
-=======
   state: "idle", lifecycle: { kind: "idle" }, humanAttention: true, activity: "idle", held: false, activeTools: [], createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
->>>>>>> ffe03030
   revision: 1, idleUnread: false, queuedMessages: [], archivedAt: null, ...changes,
 });
 const directory = [
   session("launcher", { foreground: true, agentName: "Renian", name: "Publish release" }),
   session("quiet", { parentId: "launcher" }),
   session("active", { parentId: "launcher", state: "running", lifecycle: { kind: "working", phase: "thinking", since: 1 }, activity: "thinking" }),
-<<<<<<< HEAD
-  session("waiting", { parentId: "active", state: "waiting", lifecycle: { kind: "waiting", target: "job", since: 1 }, activity: "awaiting", waitingOnAgents: { kind: "job", jobId: "compile", reason: "Wait for build", since: 1 } }),
-=======
   session("waiting", { parentId: "active", state: "waiting", lifecycle: { kind: "waiting", target: "job", reason: "Wait for build", since: 1 }, activity: "awaiting", waitingOnAgents: { kind: "job", jobId: "compile", reason: "Wait for build", since: 1 } }),
->>>>>>> ffe03030
   session("system", { origin: "fleet" }), session("watch", { watchList: true }), session("detached"),
   session("gone-parent", { parentId: "archived-launcher" }), session("closed", { archivedAt: "2026-01-02T00:00:00Z" }),
 ];
@@ -60,22 +52,16 @@ test("resource failure keeps a visibly stale usable directory, never a successfu
   expect(html).toContain("Task quiet");
   expect(html).toContain('class="agent-group" open=""');
   expect(html).toContain('data-status="waiting"');
-  expect(html).toContain("Waiting for job");
+  expect(html).toContain("Wait for build");
   expect(html).not.toContain("No background agents.");
 });
 
 test("task purpose and owned activity are readable without agent identity or opening a transcript", () => {
   const agents = [session("unnamed-task", { name: "Publish new release", agentName: undefined,
-<<<<<<< HEAD
-    taskDescription: "Install the Orchestrator changes on both machines.", state: "waiting", lifecycle: { kind: "waiting", target: "deployment", since: 1 }, activity: "awaiting",
-    waitingOnAgents: { kind: "deployment", publicationId: "PUB-test", reason: "Waiting for the Converge release to finish", since: 1 } }),
-    session("named-task", { name: "Fix account routing", agentName: "Renian", state: "running", lifecycle: { kind: "working", phase: "waiting_on_tool", since: 1 }, activity: "waiting_on_tool", activeTools: ["functions.read"] })];
-=======
-    taskDescription: "Install the Orchestrator changes on both machines.", state: "waiting", activity: "awaiting",
-    lifecycle: { kind: "waiting", target: "deployment", reason: "Waiting for the Converge release to finish", since: 1 },
+    state: "waiting", activity: "awaiting",
+    lifecycle: { kind: "waiting", target: "deployment", since: 1 },
     waitingOnAgents: { kind: "deployment", publicationId: "PUB-test", reason: "Waiting for the Converge release to finish", since: 1 } }),
     session("named-task", { name: "Fix account routing", agentName: "Renian", state: "running", lifecycle: { kind: "working", phase: "waiting_on_tool", since: 1, detail: "Running read" }, activity: "waiting_on_tool", activeTools: ["functions.read"] })];
->>>>>>> ffe03030
   const html = renderToStaticMarkup(<AgentsDirectory directory={{ state: "ready", sessions: agents }} onRefresh={() => {}} onOpen={() => {}} />);
   expect(html).toContain("Publish new release");
   expect(html).toContain("Waiting for deployment");
