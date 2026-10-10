@@ -4,6 +4,8 @@ import { extname, join } from "node:path";
 import { constants } from "node:fs";
 import { createHash } from "node:crypto";
 import { parseInlineImageTags, type InlineImage, type InlineImageErrorCode, type InlineImageSnapshot } from "./inline-image-contract.js";
+import { adoptImageSchema } from "./image-schema.js";
+export { adoptImageSchema } from "./image-schema.js";
 
 export type InlineImageGenerationResult = { ok: true; images: Array<{ id: string; bytes: Buffer }>; model: string; responseId: string; usage: unknown }
   | { ok: false; error: { message: string } };
@@ -30,35 +32,6 @@ async function durableFile(path: string, bytes: string | Buffer, owner?: Artifac
 async function syncDirectory(path: string, owner?: ArtifactOwner) {
   const file = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try { if (owner) await file.chown(owner.uid, owner.gid); await file.sync(); } finally { await file.close(); }
-}
-
-export function adoptImageSchema(db: Database) {
-  const tables = [
-    { name: "inline_images", columns: "session_id,image_id,value,attempt_dir", schema: "session_id TEXT NOT NULL REFERENCES core_image_threads(id) ON DELETE CASCADE,image_id TEXT NOT NULL,value TEXT NOT NULL,attempt_dir TEXT,PRIMARY KEY(session_id,image_id)" },
-    { name: "inline_image_versions", columns: "session_id,version", schema: "session_id TEXT PRIMARY KEY REFERENCES core_image_threads(id) ON DELETE CASCADE,version INTEGER NOT NULL" },
-    { name: "inline_image_messages", columns: "session_id,message_key", schema: "session_id TEXT NOT NULL REFERENCES core_image_threads(id) ON DELETE CASCADE,message_key TEXT NOT NULL,PRIMARY KEY(session_id,message_key)" },
-    { name: "core_image_acceptance", columns: "thread_id,message_key,text_hash", schema: "thread_id TEXT NOT NULL REFERENCES core_image_threads(id) ON DELETE CASCADE,message_key TEXT NOT NULL,text_hash TEXT NOT NULL,PRIMARY KEY(thread_id,message_key)" },
-  ];
-  db.exec("PRAGMA foreign_keys=OFF");
-  try {
-    db.transaction(() => {
-      db.exec("CREATE TABLE IF NOT EXISTS core_image_threads(id TEXT PRIMARY KEY)");
-      for (const table of tables) {
-        const exists = db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table.name);
-        if (!exists) { db.exec(`CREATE TABLE ${table.name}(${table.schema})`); continue; }
-        const id = table.name === "core_image_acceptance" ? "thread_id" : "session_id";
-        db.exec(`INSERT OR IGNORE INTO core_image_threads SELECT ${id} FROM ${table.name}`);
-        const references = db.query(`PRAGMA foreign_key_list(${table.name})`).all() as { table: string }[];
-        if (references.length === 1 && references[0]!.table === "core_image_threads") continue;
-        db.exec(`CREATE TABLE image_adoption_${table.name}(${table.schema});
-          INSERT INTO image_adoption_${table.name}(${table.columns}) SELECT ${table.columns} FROM ${table.name} ORDER BY rowid;
-          DROP TABLE ${table.name}; ALTER TABLE image_adoption_${table.name} RENAME TO ${table.name}`);
-      }
-      for (const table of tables) {
-        if (db.query(`PRAGMA foreign_key_check(${table.name})`).all().length) throw new Error(`Image adoption violates ${table.name} custody`);
-      }
-    })();
-  } finally { db.exec("PRAGMA foreign_keys=ON"); }
 }
 
 export class InlineImages {

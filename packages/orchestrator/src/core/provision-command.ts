@@ -35,6 +35,10 @@ export async function provisionRegisteredAccount(input: RegisteredAccountProvisi
     const scope = config.value.scopes.find(scope => scope.id === registration.scope?.id);
     if (!scope || !isDeepStrictEqual(scope, registration.scope)) return { ok: false, error: { code: "invalid-config", message: "Account creation registration must exactly match its owner-configured scope" } };
     if (scope.availability.kind !== "adopt") return { ok: false, error: { code: "unavailable", message: "Account registration cannot unlock locked or inactive storage" } };
+    if (!registration.images || !["none", "fresh"].includes(registration.images.kind)) return { ok: false, error: { code: "invalid-config", message: "Account registration must explicitly declare image provisioning" } };
+    if (registration.images.kind === "fresh" && (config.value.images.kind !== "configured" || !config.value.images.registries.some(spec => isDeepStrictEqual(spec, registration.images.kind === "fresh" ? registration.images.registry : null)))) return { ok: false, error: { code: "invalid-config", message: "Fresh image registration must exactly match its owner-configured registry" } };
+    if (registration.images.kind === "none" && config.value.images.kind === "configured" && config.value.images.registries.some(spec => spec.scopeId === scope.id)) return { ok: false, error: { code: "invalid-config", message: "A configured new account image registry requires explicit fresh provisioning" } };
+    const resourcesForGrant = [registration.operation, scope.resource, ...(registration.images.kind === "fresh" ? [registration.images.registry.dataResource] : [])];
     const ancestor = dirname(registration.directory);
     if (!scope.resources.some(resource => resource.kind === "directory" && resource.path === ancestor)) return { ok: false, error: { code: "invalid-config", message: "Fresh storage parent must be an explicitly registered directory" } };
     resources = new CustodyResources(scope.custody);
@@ -46,10 +50,10 @@ export async function provisionRegisteredAccount(input: RegisteredAccountProvisi
       policy: { revision: config.value.policy.revision,
         grants: config.value.policy.grants.filter(grant => {
           const selector = grant.resource;
-          return principalIds.has(grant.principal) && (selector.kind === "exact" ? [registration.operation.id, scope.resource.id].includes(selector.id)
-            : [registration.operation, scope.resource].some(resource => resource.owner === selector.owner && resource.kind === selector.resourceKind));
+          return principalIds.has(grant.principal) && (selector.kind === "exact" ? resourcesForGrant.some(resource => resource.id === selector.id)
+            : resourcesForGrant.some(resource => resource.owner === selector.owner && resource.kind === selector.resourceKind));
         }),
-        consents: config.value.policy.consents.filter(consent => principalIds.has(consent.principal) && [registration.operation.id, scope.resource.id].includes(consent.resource)) },
+        consents: config.value.policy.consents.filter(consent => principalIds.has(consent.principal) && resourcesForGrant.some(resource => resource.id === consent.resource)) },
     };
     const worker = fileURLToPath(new URL(import.meta.url.endsWith(".ts") ? "./provision-worker.ts" : "./provision-worker.js", import.meta.url));
     const command = resources.launch([process.execPath, worker]);

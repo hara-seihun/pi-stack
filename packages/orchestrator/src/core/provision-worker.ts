@@ -22,7 +22,9 @@ export async function prepareRegisteredStorage(input: ProvisionWorkerInput): Pro
     if (statSync("/proc/self/ns/mnt", { bigint: true }).ino.toString() !== input.namespaceInode) return { ok: false, error: { code: "ownership-conflict", message: "Provision worker is outside the owning namespace" } };
     const scope = registration.scope, ancestor = dirname(registration.directory);
     const markdown = registration.markdown.kind === "configured" ? registration.markdown.folder : undefined;
-    const exact = new Set([registration.directory, ancestor, registration.manager.cwd, ...Object.values(scope.storage), ...(markdown ? [markdown, `${markdown}/README.md`, `${markdown}/AGENTS.md`] : [])]);
+    const images = registration.images?.kind === "fresh" ? registration.images.registry : null;
+    const exact = new Set([registration.directory, ancestor, registration.manager.cwd, ...Object.values(scope.storage),
+      ...(images ? [images.databasePath, images.artifactRoot, images.adoptionReceiptPath, ...(scope.manager.kind === "existing" ? [`${scope.storage.sessionsDir}/${scope.manager.threadId}.jsonl`] : [])] : []), ...(markdown ? [markdown, `${markdown}/README.md`, `${markdown}/AGENTS.md`] : [])]);
     const provisioner = new CoreProvisioner([registration], { principals: input.principals, policy: input.policy, path(_scope, logical) {
       if (!isAbsolute(logical) || resolve(logical) !== logical || !exact.has(logical)) throw new Error("Unregistered fresh account resource");
       let existing = logical;

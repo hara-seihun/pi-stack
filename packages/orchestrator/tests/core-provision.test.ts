@@ -8,7 +8,8 @@ import { openSqlite } from "../src/sqlite.js";
 import { CoreProvisioner, type CoreProvisionRegistration } from "../src/core/provision.js";
 import { provisionRegisteredAccount } from "../src/core/provision-command.js";
 import { prepareRegisteredStorage } from "../src/core/provision-worker.js";
-import { acquireScopeOwnership } from "../src/core/ownership.js";
+import { acquireScopeOwnership, acquireDatabaseOwnership } from "../src/core/ownership.js";
+import { IMAGE_CUSTODY_TABLES } from "../src/core/image-schema.js";
 import { ThreadService } from "../src/threads/service.js";
 import { type PermissionPolicy, type Principal } from "../src/permissions.js";
 
@@ -20,7 +21,7 @@ function fixture() {
   const principals: Principal[] = [{ id: "registrar", kind: "service" }, { id: "alice", kind: "person", person: "alice" }];
   const registration: CoreProvisionRegistration = { id: "account-alice-v1", requestId: "account-alice-create", creatorPrincipalId: "registrar", source: "Authenticated account creation registration", operation: { id: "register-alice", kind: "operation", owner: "registrar", privacy: "private", subjects: [], consent: "not-required" }, directory,
     scope: { id: "alice-person", principalId: "alice", availability: { kind: "adopt" }, resource: { id: "alice-threads", kind: "thread", owner: "alice", privacy: "private", subjects: ["alice"], consent: "not-required" }, storage: { databasePath: join(directory, "threads.sqlite3"), sessionsDir: join(directory, "sessions"), capabilityKeyPath: join(directory, "capability.key"), adoptionReceiptPath: join(directory, "adoption.json") }, custody: { uid: process.getuid!(), gid: process.getgid!(), namespace: { kind: "host" }, retainedRunnerNamespace: { kind: "host" }, dataDir: directory, socketDir: root }, resources: [{ path: root, kind: "directory" }], environment: {}, callbackGateway: { kind: "none" }, manager: { kind: "existing", threadId: "alice-kenaznia" }, managerRouting: { kind: "none" } },
-    manager: { cwd: root, settings: { model: "sol", thinkingLevel: "low", speed: "ultrafast" } }, markdown: { kind: "none" } };
+    manager: { cwd: root, settings: { model: "sol", thinkingLevel: "low", speed: "ultrafast" } }, markdown: { kind: "none" }, images: { kind: "none" } };
   const policy: PermissionPolicy = { revision: 1, consents: [], grants: [
     { id: "register-authority", principal: "registrar", resource: { kind: "exact", id: "register-alice" }, actions: ["execute"], effect: "allow", validFrom: 0, validUntil: null, issuedBy: "account-owner", source: "Explicit account creation grant" },
     { id: "alice-scope", principal: "alice", resource: { kind: "exact", id: "alice-threads" }, actions: ["read", "dispatch", "control"], effect: "allow", validFrom: 0, validUntil: null, issuedBy: "account-owner", source: "Registered person scope grant" },
@@ -120,6 +121,59 @@ test("explicit Markdown bootstrap never overwrites existing owning text", async 
   unlinkSync(join(f.root, "AGENTS.md"));
   expect((await f.build().provision(f.input, "registrar")).ok).toBe(false);
   expect(existsSync(join(f.root, "AGENTS.md"))).toBe(false);
+});
+
+function withFreshImages(f: ReturnType<typeof fixture>) {
+  const registry = { scopeId: f.registration.scope.id, databasePath: join(f.directory, "images.sqlite3"), artifactRoot: join(f.directory, "images"), adoptionReceiptPath: join(f.directory, "image-adoption.json"), allowedRoots: ["/"], relatedThreadScopeIds: [] as string[],
+    dataResource: { id: "alice-images", kind: "data" as const, owner: "alice", privacy: "private" as const, subjects: ["alice"], consent: "not-required" as const } };
+  f.registration.images = { kind: "fresh", priorOwner: { kind: "none" }, registry };
+  f.policy.grants = [...f.policy.grants, { id: "alice-images", principal: "alice", resource: { kind: "exact", id: registry.dataResource.id }, actions: ["read", "execute", "use"], effect: "allow", validFrom: 0, validUntil: null, issuedBy: "registrar", source: "Explicit original account image authority" }];
+  return registry;
+}
+
+test("fresh registered image store adopts canonical seven tables and conserves data on retry", async () => {
+  const f = fixture(), spec = withFreshImages(f);
+  const payload = { registration: f.registration, principals: f.principals, policy: f.policy, input: f.input, actor: "registrar", namespaceInode: statSync("/proc/self/ns/mnt", { bigint: true }).ino.toString() };
+  const prepared = await prepareRegisteredStorage(payload); expect(prepared.ok).toBe(true);
+  const db = openSqlite(spec.databasePath);
+  try {
+    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[];
+    expect(tables.map(table => table.name).sort()).toEqual([...IMAGE_CUSTODY_TABLES].sort());
+    db.exec("INSERT INTO core_image_threads VALUES('alice-kenaznia'); INSERT INTO inline_image_versions VALUES('alice-kenaznia',42)");
+  } finally { db.close(); }
+  const ino = statSync(spec.databasePath).ino, receipt = readFileSync(spec.adoptionReceiptPath, "utf8");
+  const custody = acquireDatabaseOwnership({ id: `${spec.scopeId}:images`, databasePath: spec.databasePath, adoptionReceiptPath: spec.adoptionReceiptPath, uid: f.registration.scope.custody.uid, requiredTables: IMAGE_CUSTODY_TABLES }, path => path);
+  expect(custody.ok).toBe(true); if (custody.ok) custody.value.close();
+  expect(await f.build().provision(f.input, "registrar")).toEqual(prepared);
+  expect(statSync(spec.databasePath).ino).toBe(ino); expect(readFileSync(spec.adoptionReceiptPath, "utf8")).toBe(receipt);
+  const check = openSqlite(spec.databasePath, true);
+  try { expect(check.prepare("SELECT version FROM inline_image_versions").get()).toEqual({ version: 42 }); } finally { check.close(); }
+  unlinkSync(spec.databasePath);
+  expect((await f.build().provision(f.input, "registrar")).ok).toBe(false); expect(existsSync(spec.databasePath)).toBe(false);
+});
+
+test("partial image initialization resumes exact reservation without replacing rows or receipt", async () => {
+  const f = fixture(), spec = withFreshImages(f);
+  expect((await f.build().provision(f.input, "registrar")).ok).toBe(true);
+  const db = openSqlite(spec.databasePath);
+  try { db.exec("INSERT INTO core_image_threads VALUES('retained'); INSERT INTO inline_image_versions VALUES('retained',7)"); } finally { db.close(); }
+  const recordPath = join(f.directory, ".core-provision.json"), record = JSON.parse(readFileSync(recordPath, "utf8"));
+  record.state = "reserved"; record.images.state = "reserved"; writeFileSync(recordPath, JSON.stringify(record)); unlinkSync(spec.adoptionReceiptPath);
+  const inode = statSync(spec.databasePath).ino;
+  expect((await f.build().provision(f.input, "registrar")).ok).toBe(true);
+  expect(statSync(spec.databasePath).ino).toBe(inode);
+  const check = openSqlite(spec.databasePath, true);
+  try { expect(check.prepare("SELECT version FROM inline_image_versions").get()).toEqual({ version: 7 }); } finally { check.close(); }
+});
+
+test("image provisioning refuses absent authority, foreign paths and accepted missing receipts", async () => {
+  const f = fixture(), spec = withFreshImages(f); f.policy.grants = f.policy.grants.slice(0, -1);
+  expect((await f.build().provision(f.input, "registrar")).ok).toBe(false); expect(existsSync(f.directory)).toBe(false);
+  const g = fixture(), other = withFreshImages(g); other.relatedThreadScopeIds.push("foreign");
+  expect((await g.build().provision(g.input, "registrar")).ok).toBe(false); expect(existsSync(g.directory)).toBe(false);
+  const h = fixture(), valid = withFreshImages(h); expect((await h.build().provision(h.input, "registrar")).ok).toBe(true);
+  unlinkSync(valid.adoptionReceiptPath); expect((await h.build().provision(h.input, "registrar")).ok).toBe(false); expect(existsSync(valid.adoptionReceiptPath)).toBe(false);
+  expect(existsSync(spec.databasePath)).toBe(false);
 });
 
 test("same-process concurrent retries conserve one receipt and manager", async () => {

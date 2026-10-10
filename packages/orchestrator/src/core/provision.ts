@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { chownSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { chownSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { authorize, type PermissionPolicy, type Principal, type Resource } from "../permissions.js";
 import { openSqlite } from "../sqlite.js";
@@ -8,6 +8,10 @@ import { ThreadService } from "../threads/service.js";
 import { isThinkingLevel, type ThreadSettings } from "../threads/contracts.js";
 import type { CoreScope, CoreAdoptionReceipt } from "./contracts.js";
 import type { CoreResult } from "./config.js";
+import type { CoreImagesSpec } from "./images.js";
+import { IMAGE_CUSTODY_TABLES, initializeFreshImageSchema } from "./image-schema.js";
+
+export type FreshAccountImages = { kind: "none" } | { kind: "fresh"; priorOwner: { kind: "none" }; registry: CoreImagesSpec };
 
 /** Authenticated account creation owns these records, not a Remote request body.
  * The account creator registers explicit principals/grants before invoking this helper.
@@ -23,6 +27,7 @@ export type CoreProvisionRegistration = {
   scope: CoreScope;
   manager: { cwd: string; settings: ThreadSettings };
   markdown: { kind: "none" } | { kind: "configured"; folder: string; readme: string; agents: string };
+  images: FreshAccountImages;
 };
 export type CoreProvisionInput = { registrationId: string; requestId: string };
 export type CoreProvisionReceipt = { scope: CoreScope; managerThreadId: string; receiptPath: string };
@@ -40,6 +45,7 @@ type Reservation = {
   state: "reserved" | "ready";
   databaseIdentity?: { dev: string; ino: string };
   keySha256?: string;
+  images?: { databaseIdentity: { dev: string; ino: string } | null; artifactIdentity: { dev: string; ino: string } | null; state: "reserved" | "ready" };
 };
 const fail = (code: "invalid-config" | "ownership-conflict" | "unavailable" | "io", message: string): CoreResult<never> => ({ ok: false, error: { code, message } });
 const canonical = (path: string) => typeof path === "string" && isAbsolute(path) && resolve(path) === path && !path.includes("\0");
@@ -118,6 +124,23 @@ export class CoreProvisioner {
       || !scope.resources.some(resource => resource.kind === "directory" && resource.path === markdown.folder)
       || typeof markdown.readme !== "string" || !markdown.readme.trim() || markdown.readme.length > 100_000
       || typeof markdown.agents !== "string" || !markdown.agents.trim() || markdown.agents.length > 100_000)) return fail("invalid-config", "Markdown bootstrap must be explicitly unset or nonempty source text for an exact declared folder");
+    const images = registration.images;
+    if (!images || !["none", "fresh"].includes(images.kind)) return fail("invalid-config", "Fresh account images must be explicitly absent or registered with prior owner:none");
+    if (images.kind === "fresh") {
+      const spec = images.registry;
+      const imagePaths = [spec.databasePath, spec.artifactRoot, spec.adoptionReceiptPath];
+      if (stable(images.priorOwner) !== stable({ kind: "none" }) || spec.scopeId !== scope.id || !Array.isArray(spec.relatedThreadScopeIds) || spec.relatedThreadScopeIds.length
+        || imagePaths.some(path => !canonical(path) || dirname(path) !== registration.directory || paths.includes(path)
+          || [".core-provision.json", ".core-provision.lock"].includes(path.slice(registration.directory.length + 1))) || new Set(imagePaths).size !== imagePaths.length
+        || !Array.isArray(spec.allowedRoots) || !spec.allowedRoots.length || new Set(spec.allowedRoots).size !== spec.allowedRoots.length
+        || spec.allowedRoots.some(root => !canonical(root))
+        || spec.dataResource?.kind !== "data" || spec.dataResource.owner !== principal.person || stable(spec.dataResource.subjects) !== stable([principal.person])
+        || !["private", "confidential"].includes(spec.dataResource.privacy)) return fail("invalid-config", "Fresh images require distinct reserved own-scope storage, explicit UID-read reference roots and exact person-owned data resource");
+      for (const action of ["read", "execute", "use"] as const) {
+        const allowed = authorize(this.owners.policy, { principal, resource: spec.dataResource, action, now });
+        if (!allowed.ok) return fail("unavailable", `Fresh images ${action}: ${allowed.error.message}`);
+      }
+    }
     const settings = registration.manager.settings;
     if (!settings || typeof settings.model !== "string" || !settings.model.trim() || !isThinkingLevel(settings.thinkingLevel) || !["standard", "priority", "ultrafast"].includes(settings.speed)) return fail("invalid-config", "Manager model, thinking and speed must be explicit");
     if (!Number.isSafeInteger(scope.custody.uid) || scope.custody.uid < 0 || !Number.isSafeInteger(scope.custody.gid) || scope.custody.gid < 0
@@ -171,6 +194,61 @@ export class CoreProvisioner {
           owned(file, scope, false);
           if (!readFileSync(file, "utf8").trim()) return fail("ownership-conflict", "Existing Markdown bootstrap is empty; preserve it for explicit repair");
         }
+      }
+      if (registration.images.kind === "fresh") {
+        const spec = registration.images.registry;
+        const imageDb = path(spec.databasePath), artifact = path(spec.artifactRoot), imageReceipt = path(spec.adoptionReceiptPath);
+        if (!record.images) {
+          if (record.state === "ready" || existsSync(imageDb) || existsSync(artifact) || existsSync(imageReceipt)) return fail("ownership-conflict", "Fresh image storage already has an unregistered owner");
+          record = { ...record, images: { databaseIdentity: null, artifactIdentity: null, state: "reserved" } };
+          replaceRecord(recordPath, record, scope);
+        }
+        if (record.state === "ready" && record.images!.state !== "ready") return fail("ownership-conflict", "Accepted account has an incomplete image reservation");
+        if (record.images!.state === "ready" && (!record.images!.databaseIdentity || !record.images!.artifactIdentity)) return fail("ownership-conflict", "Ready image reservation lacks accepted storage identities");
+        if (record.images!.databaseIdentity) {
+          if (!existsSync(imageDb)) return fail("ownership-conflict", "Accepted image database is missing; never recreate it");
+          owned(imageDb, scope, false);
+          if (stable(record.images!.databaseIdentity) !== stable(identity(imageDb))) return fail("ownership-conflict", "Reserved image database identity changed");
+        } else {
+          if (!existsSync(imageDb)) writeOwned(imageDb, "", scope);
+          owned(imageDb, scope, false);
+          if (statSync(imageDb).size !== 0) return fail("ownership-conflict", "Unaccepted image database is nonempty; preserve it for repair");
+          record = { ...record, images: { ...record.images!, databaseIdentity: identity(imageDb) } }; replaceRecord(recordPath, record, scope);
+        }
+        if (record.images!.artifactIdentity) {
+          if (!existsSync(artifact)) return fail("ownership-conflict", "Accepted image artifacts are missing; never recreate them");
+          owned(artifact, scope, true);
+          if (stable(record.images!.artifactIdentity) !== stable(identity(artifact))) return fail("ownership-conflict", "Reserved image artifact identity changed");
+        } else {
+          if (!existsSync(artifact)) { mkdirSync(artifact, { mode: 0o700 }); chownSync(artifact, scope.custody.uid, scope.custody.gid); sync(directory); }
+          owned(artifact, scope, true);
+          if (readdirSync(artifact).length) return fail("ownership-conflict", "Unaccepted image artifacts are nonempty; preserve them for repair");
+          record = { ...record, images: { ...record.images!, artifactIdentity: identity(artifact) } }; replaceRecord(recordPath, record, scope);
+        }
+        const ready = record.images!.state === "ready";
+        const db = openSqlite(imageDb, ready);
+        try {
+          if (!ready) { initializeFreshImageSchema(db); db.exec("PRAGMA wal_checkpoint(TRUNCATE)"); }
+          const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[];
+          if (tables.length !== IMAGE_CUSTODY_TABLES.length || !IMAGE_CUSTODY_TABLES.every(name => tables.some(table => table.name === name))) return fail("ownership-conflict", "Image registry schema differs from registered table custody");
+        } finally { db.close(); }
+        sync(imageDb); sync(artifact);
+        const prior = { version: 1, scopeId: `${scope.id}:images`, databasePath: spec.databasePath, databaseIdentity: record.images!.databaseIdentity,
+          tableNames: [...IMAGE_CUSTODY_TABLES], priorOwner: { kind: "none" }, registrationId: registration.id, requestId: registration.requestId,
+          previousOwner: { identity: `account-provision:${registration.id}:images`, detachedAt: new Date().toISOString() }, state: "detached", nativeImageSources: [{ threadId: value.managerThreadId, path: join(scope.storage.sessionsDir, `${value.managerThreadId}.jsonl`),
+            revision: `fresh-account:${registration.id}`, lastOffset: -1, lastDigest: "", priorSource: { kind: "absent", observedAt: new Date().toISOString() } }] };
+        if (existsSync(imageReceipt)) {
+          owned(imageReceipt, scope, false);
+          const adopted = JSON.parse(readFileSync(imageReceipt, "utf8"));
+          if (adopted.scopeId !== prior.scopeId || adopted.databasePath !== prior.databasePath || stable(adopted.databaseIdentity) !== stable(prior.databaseIdentity)
+            || stable(adopted.tableNames) !== stable(prior.tableNames) || stable(adopted.priorOwner) !== stable(prior.priorOwner) || adopted.registrationId !== registration.id
+            || adopted.requestId !== registration.requestId || adopted.previousOwner?.identity !== prior.previousOwner.identity || adopted.state !== "detached") return fail("ownership-conflict", "Fresh image receipt conflicts with exact account registration");
+        } else {
+          if (ready) return fail("ownership-conflict", "Accepted image custody receipt is missing; never regenerate it");
+          if (existsSync(path(join(scope.storage.sessionsDir, `${value.managerThreadId}.jsonl`)))) return fail("ownership-conflict", "Fresh manager native source already exists; cannot claim prior absence");
+          writeOwned(imageReceipt, JSON.stringify(prior), scope); sync(directory);
+        }
+        record = { ...record, images: { ...record.images!, state: "ready" } }; replaceRecord(recordPath, record, scope);
       }
       if (record.state === "ready") {
         for (const file of [database, key, receipt]) owned(file, scope, false);
