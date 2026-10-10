@@ -1034,7 +1034,7 @@ function publicSession(row: any,
     wakeSchedule: row.wakeSchedule,
     model: (row.effectiveSettings ?? row.settings).model, name: row.name, color: row.color, cwd: row.cwd,
     workspaceName: workspaces.get(row.workspace_id)?.name ?? row.cwd,
-    environment: ENVIRONMENT_ID, state: row.state, held: Boolean(row.held),
+    environment: ENVIRONMENT_ID, held: Boolean(row.held),
     ...projectThreadActivity(row),
     provider: canonicalModelProvider(String(row.current_provider)).replace(/^openai-codex$/, "openai"),
     createdAt: row.created_at, updatedAt: row.updated_at,
@@ -1701,7 +1701,7 @@ const meetingRuntime = await MeetGateway.connect(db, {
   const runtime = liveProjections.get(row.id);
   // Ephemeral meeting workers are archived and held when they finish; the room must not show that as "Stopped".
   const finished = Boolean(row.archived_at) && row.state === "idle";
-  return { state: row.state, held: Boolean(row.held) && !finished, finished,
+  return { held: Boolean(row.held) && !finished, finished,
     ...projectThreadActivity(row),
     waitingOnAgents: row.waitingOnAgents,
     tools: row.executionActivity?.activeTools ?? [...(runtime?.activeTools.values() ?? [])], output: runtime?.liveText ?? "" };
