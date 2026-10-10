@@ -17,8 +17,9 @@ def properties(unit):
     return dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
 
 
-def detached_status(current, prior, kind, retirement):
-    if current.get('InvocationID') not in ('', prior['InvocationID']) or current.get('ActiveState') not in ('inactive', 'failed') or current.get('MainPID') != '0' or current.get('ExecMainPID') != prior['MainPID'] or current.get('ExecMainCode') != '1' or current.get('ExecMainStatus') != '0' or current.get('Result') != 'success':
+def detached_status(current, prior, kind, retirement, fleet_exit=None):
+    collected = kind == 'fleet' and fleet_exit is not None and current.get('ExecMainPID') == '0' and current.get('ExecMainCode') == '0'
+    if current.get('InvocationID') not in ('', prior['InvocationID']) or current.get('ActiveState') not in ('inactive', 'failed') or current.get('MainPID') != '0' or (not collected and (current.get('ExecMainPID') != prior['MainPID'] or current.get('ExecMainCode') != '1')) or current.get('ExecMainStatus') != '0' or current.get('Result') != 'success':
         raise ValueError('exact original process has not acknowledged a normal successful exit')
     if kind == 'fleet' and (retirement is None or retirement.get('state') != 'closed' or any(edge.get('state') != 'closed' for edge in retirement.get('edges', []))):
         raise ValueError('original fleet retirement has not positively closed every controller edge')
@@ -156,17 +157,24 @@ def drain(path):
     if current.get('MainPID') != '0' or current.get('ActiveState') not in ('inactive', 'failed'):
         return {'protocol': 'pi-core-owner-drain-v1', 'state': 'pending', 'unit': plan['unit']}
     retirement = None
+    fleet_exit = None
     if plan['kind'] == 'fleet':
-        journal = subprocess.run(['/usr/bin/journalctl', '--no-pager', '--output=json', f"_SYSTEMD_INVOCATION_ID={state['previous']['InvocationID']}", '--since', journal_since(state['startedAt'])], check=True, capture_output=True, text=True, timeout=3).stdout
+        journal = subprocess.run(['/usr/bin/journalctl', '--no-pager', '--all', '--output=json', f"_SYSTEMD_INVOCATION_ID={state['previous']['InvocationID']}", '--since', journal_since(state['startedAt'])], check=True, capture_output=True, text=True, timeout=3).stdout
         for line in journal.splitlines():
             row = json.loads(line)
             try:
                 record = json.loads(row.get('MESSAGE', ''))
-                if record.get('type') == 'fleet-controller-retired':
+                if record.get('type') == 'fleet-controller-retired' and row.get('_PID') == str(plan['pid']) and row.get('_SYSTEMD_UNIT') == plan['unit']:
                     retirement = record
             except (ValueError, TypeError):
                 continue
-    detached_status(current, state['previous'], plan['kind'], retirement)
+        if retirement is not None:
+            journal = subprocess.run(['/usr/bin/journalctl', '--no-pager', '--all', '--output=json', f"UNIT={plan['unit']}", f"INVOCATION_ID={state['previous']['InvocationID']}", '--since', journal_since(state['startedAt'])], check=True, capture_output=True, text=True, timeout=3).stdout
+            for line in journal.splitlines():
+                row = json.loads(line)
+                if row.get('_PID') == '1' and row.get('MESSAGE_ID') == '7ad2d189f7e94e70a38c781354912448':
+                    fleet_exit = {'kind': 'closed-controller-systemd-success', 'invocationId': state['previous']['InvocationID'], 'journalCursor': row['__CURSOR'], 'retirementSha256': hashlib.sha256(json.dumps(retirement, sort_keys=True, separators=(',', ':')).encode()).hexdigest()}
+    detached_status(current, state['previous'], plan['kind'], retirement, fleet_exit)
     native_proof = native_exit_custody(plan,state['previous']['InvocationID'],after=True) if plan['kind']=='remote' else None
     if plan['kind']=='remote' and native_proof is None:
         return {'protocol':'pi-core-owner-drain-v1','state':'pending','unit':plan['unit'],'waiting':'native-child-exit-witness'}
@@ -178,17 +186,62 @@ def drain(path):
         receipt = {'version': 1, **scope.get('receiptExtras', {}), 'state': 'detached', 'scopeId': scope['scopeId'],
                    'databasePath': scope['databasePath'], 'sessionsDir': scope['sessionsDir'], 'databaseIdentity': identities[scope['scopeId']],
                    'previousOwner': {'identity': f"{plan['unit']}:{plan['pid']}:{plan['startTicks']}:{state['previous']['InvocationID']}", 'detachedAt': timestamp},
-                   'detachmentEvidence': {'protocol': 'pi-core-owner-drain-v1', 'planSha256': digest, 'exitCode': 0, 'sourceProof': plan['sourceProof'], 'imageDrainProofs':state.get('imageDrainProofs',[]),'nativeExitCustody':native_proof}}
+                   'detachmentEvidence': {'protocol': 'pi-core-owner-drain-v1', 'planSha256': digest, 'exitCode': 0 if current.get('ExecMainCode') == '1' else None, 'fleetExitEvidence': fleet_exit, 'sourceProof': plan['sourceProof'], 'imageDrainProofs':state.get('imageDrainProofs',[]),'nativeExitCustody':native_proof}}
         publish(absolute(scope['receiptPath']), receipt)
     publish(state_path, {**state, 'state': 'detached', 'detachedAt': timestamp})
     return {'protocol': 'pi-core-owner-drain-v1', 'state': 'detached', 'unit': plan['unit'], 'receiptCount': len(plan['scopes'])}
 
 
+def extend_fleet(path):
+    plan = trusted(path)
+    if plan.get('version') != 1:
+        raise ValueError('explicit closed fleet census extension required')
+    original_path = absolute(plan['ownerPlanPath'])
+    original = trusted(original_path)
+    if original.get('kind') != 'fleet':
+        raise ValueError('only positively closed fleet owners admit census extension')
+    acknowledged = drain(original_path)
+    if acknowledged['state'] != 'detached':
+        raise ValueError('original fleet controller has not positively detached')
+    source = trusted(absolute(original['scopes'][0]['receiptPath']))
+    census_path, baseline_path = absolute(plan['censusPath']), absolute(plan['baselinePath'])
+    for key, value in [('censusSha256', census_path), ('baselineSha256', baseline_path)]:
+        if hashlib.sha256(value.read_bytes()).hexdigest() != plan[key]:
+            raise ValueError('pre-detachment owner census binding changed')
+    census, baseline = trusted(census_path), trusted(baseline_path)
+    if baseline.get('phase') != 'baseline':
+        raise ValueError('positive original pre-detachment baseline required')
+    rows = {row['id']: row for row in baseline['evidence']}
+    scopes = [row for row in census['scopes'] if row.get('ownerUnit') == original['unit']]
+    stores = []
+    for row in scopes:
+        old = rows.get(row['scopeId'], {}).get('threads')
+        if old is None or old['path'] != row['databasePath']:
+            raise ValueError('census store lacks an exact original baseline identity')
+        stores.append({'scopeId': row['scopeId'], 'databasePath': row['databasePath'], 'sessionsDir': row['sessionsDir'], 'namespace': row['source'], 'uid': row['uid'], 'gid': row['gid'], 'receiptPath': row['adoptionReceiptPath']})
+    identities = storage_identities(stores)
+    for row in stores:
+        old = rows[row['scopeId']]['threads']
+        if identities[row['scopeId']] != {'dev': old['dev'], 'ino': old['ino']}:
+            raise ValueError('closed original fleet store differs from pre-detachment physical identity')
+    evidence = {'protocol': 'pi-core-closed-fleet-census-v1', 'ownerPlanPath': str(original_path), 'ownerReceiptSha256': hashlib.sha256(absolute(original['scopes'][0]['receiptPath']).read_bytes()).hexdigest(), 'censusSha256': plan['censusSha256'], 'baselineSha256': plan['baselineSha256']}
+    for row in stores:
+        target = absolute(row['receiptPath'])
+        if target.exists():
+            existing = trusted(target)
+            if existing.get('previousOwner') != source['previousOwner'] or existing.get('databaseIdentity') != identities[row['scopeId']]:
+                raise ValueError('another original owner or generation already owns census receipt')
+            continue
+        receipt = {**source, 'scopeId': row['scopeId'], 'databasePath': row['databasePath'], 'sessionsDir': row['sessionsDir'], 'databaseIdentity': identities[row['scopeId']], 'censusExtension': evidence}
+        publish(target, receipt)
+    return {'protocol': 'pi-core-closed-fleet-census-v1', 'state': 'detached', 'unit': original['unit'], 'receiptCount': len(stores)}
+
+
 if __name__ == '__main__':
     try:
-        if os.geteuid() != 0 or len(sys.argv) != 2:
-            raise ValueError('usage: root core-drain ABSOLUTE_ROOT_PLAN')
-        print(json.dumps({'ok': True, 'value': drain(absolute(sys.argv[1]))}))
+        if os.geteuid() != 0 or len(sys.argv) not in (2, 3) or len(sys.argv) == 3 and sys.argv[1] != 'extend-fleet':
+            raise ValueError('usage: root core-drain [extend-fleet] ABSOLUTE_ROOT_PLAN')
+        print(json.dumps({'ok': True, 'value': extend_fleet(absolute(sys.argv[2])) if len(sys.argv) == 3 else drain(absolute(sys.argv[1]))}))
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         print(json.dumps({'ok': False, 'error': {'code': 'core-owner-drain-unconfirmed', 'message': str(error)}}))
         sys.exit(75)

@@ -14,6 +14,15 @@ class DetachmentEvidence(unittest.TestCase):
         self.assertEqual(result.returncode,0,result.stderr)
         with self.assertRaises(ValueError):drain.journal_since('2026-10-10T23:35:40.186884')
 
+    def test_collected_systemd_state_requires_positive_closed_fleet_evidence(self):
+        prior = {'MainPID': '42', 'InvocationID': 'original'}
+        current = {'MainPID': '0', 'ExecMainPID': '0', 'InvocationID': '', 'ActiveState': 'inactive', 'ExecMainCode': '0', 'ExecMainStatus': '0', 'Result': 'success'}
+        retired = {'state': 'closed', 'edges': [{'state': 'closed'}]}
+        with self.assertRaises(ValueError):drain.detached_status(current, prior, 'fleet', retired)
+        drain.detached_status(current, prior, 'fleet', retired, {'kind': 'closed-controller-systemd-success'})
+        with self.assertRaises(ValueError):drain.detached_status(current, prior, 'remote', retired, {'kind': 'closed-controller-systemd-success'})
+        with self.assertRaises(ValueError):drain.detached_status(current, prior, 'fleet', None, {'kind': 'closed-controller-systemd-success'})
+
     def test_only_exact_successful_original_exit_is_a_detachment(self):
         prior = {'MainPID': '42', 'InvocationID': 'original'}
         current = {'MainPID': '0', 'ExecMainPID': '42', 'InvocationID': '', 'ActiveState': 'inactive', 'ExecMainCode': '1', 'ExecMainStatus': '0', 'Result': 'success'}
