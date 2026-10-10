@@ -46,7 +46,7 @@ import { shouldUndoClose, UndoCloses } from "./undo-closes";
 import { toast, ToastViewport } from "./toasts";
 import { NotificationProvider } from "./notification-control";
 import { useSystemBack } from "./app/system-back";
-import { back, currentRoute, navigate, routeChatId, routeHome, routeThreadId, useRoute, withoutPanel, type Panel, type Route, type Tab } from "./app/routes";
+import { back, currentRoute, navigate, replacePanel, routeChatId, routeHome, routeThreadId, useRoute, withoutPanel, type Panel, type Route, type Tab } from "./app/routes";
 import { observeArtifactActions, recordFeatureUsage, resetFeatureCollection } from "./feature-usage";
 import { Inbox } from "./features/chats/Inbox";
 import { ConversationScreen, type Delivery } from "./features/conversation/ConversationScreen";
@@ -450,6 +450,9 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     panelPushed.current = true;
     navigate({ ...route, panel });
   }, [route]);
+  const openSettingsFromPanel = useCallback(() => {
+    replacePanel({ tab: "settings" }, panelPushed);
+  }, []);
   const closePanel = useCallback(() => {
     if (panelPushed.current) { panelPushed.current = false; back(); }
     else navigate(withoutPanel(route), { replace: true });
@@ -1303,7 +1306,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
         {fileDrag && aiId && <div className="file-drop-overlay" role="status">Drop files to attach to {selected?.name || "this conversation"}</div>}
         {/* The sheets and the paste dialog mount when they open, so their
             chunks arrive with the gesture that asks for them. */}
-        {!mono && selected && (panel === "inspector" || panel === "settings") && <Suspense fallback={null}><InspectorSheet key={selected.id} session={selected} sessions={knownSessions} open pending={pending} onClose={closePanel} onOpenThread={session => openThreadFromPanel(session.id)} onOpenThreadId={openThreadFromPanel} onArchive={() => { closePanel(); requestCloseChat({ id: `ai:${selected.id}`, kind: "ai", title: selected.name, name: agentName(selected), icon: "", label: "", session: selected }); }} onRestore={() => void selectThread(selected.id)} onBackground={() => {
+        {!mono && selected && (panel === "inspector" || panel === "settings") && <Suspense fallback={null}><InspectorSheet key={selected.id} session={selected} sessions={knownSessions} open pending={pending} onClose={closePanel} onOpenSettings={openSettingsFromPanel} onOpenThread={session => openThreadFromPanel(session.id)} onOpenThreadId={openThreadFromPanel} onArchive={() => { closePanel(); requestCloseChat({ id: `ai:${selected.id}`, kind: "ai", title: selected.name, name: agentName(selected), icon: "", label: "", session: selected }); }} onRestore={() => void selectThread(selected.id)} onBackground={() => {
           void api(API.sessionPlacement.method, API.sessionPlacement.path({ sessionId: selected.id }), { foreground: false }).then(() => { panelPushed.current = false; navigate({ tab: "chats", chat: null, panel: null }); kick(); }, cause => setControlError({ sessionId: selected.id, message: String(cause) }));
         }} debug={debugTools} /></Suspense>}
         {!mono && selected && panel === "queue" && <Suspense fallback={null}><QueueSheet open messages={selected.queuedMessages} held={selected.held} pending={pending} onClose={closePanel} onAction={(message, action) => void queueAction(message, action)} /></Suspense>}

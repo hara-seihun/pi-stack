@@ -13,7 +13,7 @@ const thread: Session = {
 const noop = () => {};
 const render = (session: Session, pending = false) => renderToStaticMarkup(<InspectorSheet
   session={session} sessions={[]} open pending={pending} autoCollapse onAutoCollapseChange={noop}
-  onClose={noop} onOpenThread={noop} onOpenThreadId={noop} onArchive={noop} onRestore={noop} onBackground={noop}
+  onClose={noop} onOpenSettings={noop} onOpenThread={noop} onOpenThreadId={noop} onArchive={noop} onRestore={noop} onBackground={noop}
 />);
 
 test("the permanent manager hides archive and background actions in the shared inspector", () => {

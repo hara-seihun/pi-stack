@@ -81,6 +81,12 @@ export function navigate(route: Route, options: { replace?: boolean } = {}) {
   window.dispatchEvent(new HashChangeEvent("hashchange", { oldURL: location.href, newURL: location.href }));
 }
 
+export function replacePanel(route: Route, panelPushed: { current: boolean }) {
+  // Consume the panel entry atomically; back() would race this navigation.
+  panelPushed.current = false;
+  navigate(route, { replace: true });
+}
+
 export function back() { history.back(); }
 
 /** The route's tab-level home, used when a screen wants to close itself and

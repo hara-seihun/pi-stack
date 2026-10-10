@@ -131,7 +131,7 @@ function InspectorFixture({ mode }: { mode: "idle" | "archived" | "agents" | "jo
     { method: "GET", match: url => url.pathname === `/v1/sessions/${current.id}/children`, reply: () => Response.json({ children }) },
     { method: "GET", match: url => url.pathname === `/v1/sessions/${current.id}/events`, reply: () => Response.json({ events: [{ seq: 1, time: new Date(epoch).toISOString(), type: "execution.started", phase: "thinking" }, { seq: 2, time: new Date(epoch).toISOString(), type: "tool.finished", detail: longToken, result: { ok: true } }] }) },
   ]);
-  return <InspectorSheet session={current} sessions={[current, session({ id: "peer", name: unicode }), ...children]} open={open} pending={false} onClose={() => setOpen(false)} onOpenThread={noop} onOpenThreadId={noop} onArchive={noop} onRestore={noop} onBackground={noop} />;
+  return <InspectorSheet session={current} sessions={[current, session({ id: "peer", name: unicode }), ...children]} open={open} pending={false} onClose={() => setOpen(false)} onOpenSettings={() => setOpen(false)} onOpenThread={noop} onOpenThreadId={noop} onArchive={noop} onRestore={noop} onBackground={noop} />;
 }
 function StatusMatrix() {
   const phases = Object.keys(ACTIVITIES) as Activity[];

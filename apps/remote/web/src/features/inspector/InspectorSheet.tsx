@@ -4,7 +4,6 @@ import type { SessionEvent } from "../../../../server/protocol";
 import { api } from "../../client";
 import { DismissibleError } from "../../dismissible-error";
 import type { Session } from "../../types";
-import { navigate } from "../../app/routes";
 import { Sheet } from "../../app/Sheet";
 import { StatusPill } from "../status/StatusPill";
 import { StatusIcon } from "../status/StatusIcon";
@@ -36,12 +35,13 @@ function WaitReference({ wait, sessions, onOpen }: { wait: NonNullable<Session["
   return assertNever(wait, "Inspector dependency");
 }
 
-export function InspectorSheet({ session, sessions, open, pending, onClose, onOpenThread, onOpenThreadId, onArchive, onRestore, onBackground, debug }: {
+export function InspectorSheet({ session, sessions, open, pending, onClose, onOpenSettings, onOpenThread, onOpenThreadId, onArchive, onRestore, onBackground, debug }: {
   session: Session;
   sessions: Session[];
   open: boolean;
   pending: boolean;
   onClose(): void;
+  onOpenSettings(): void;
   onOpenThread(session: Session): void;
   onOpenThreadId(id: string): void;
   onArchive(): void;
@@ -132,7 +132,7 @@ export function InspectorSheet({ session, sessions, open, pending, onClose, onOp
       </section>
       {debug && <section className="inspector-section"><h3>Debug</h3>{debug}</section>}
     </div>}
-    {tab === "settings" && <div className="inspector-panel"><button type="button" onClick={() => { onClose(); navigate({ tab: "settings" }); }}>Open Settings</button><p>Model, execution and display choices live in the central Settings area.</p></div>}
+    {tab === "settings" && <div className="inspector-panel"><button type="button" onClick={onOpenSettings}>Open Settings</button><p>Model, execution and display choices live in the central Settings area.</p></div>}
     {tab === "timeline" && <div className="inspector-panel">
       <p className="muted inspector-hint">Execution events recorded by the supervisor. This is operational metadata, not part of what the agent sees.</p>
       <DismissibleError message={eventsFailure} resetKey={attempt} />
