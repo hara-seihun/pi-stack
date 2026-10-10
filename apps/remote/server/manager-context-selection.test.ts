@@ -3,8 +3,16 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Thread } from "pi-orchestrator/api";
-import { reconcileThreadContextSelection } from "./manager-context-selection";
+import { reconcileThreadContextSelection, storedThreadContextSelection } from "./manager-context-selection";
 import { contextFilesPrompt, listContextFiles } from "./thread-context-files";
+test("foreign context projection uses only owner-supplied selection without inventing unavailable metadata", () => {
+  expect(storedThreadContextSelection({ manager: true, contextSelection: "all", contextFiles: ["OWNER.md"] })).toEqual({ mode: "all", files: ["OWNER.md"] });
+  expect(storedThreadContextSelection({ contextFiles: ["MANUAL.md"] })).toEqual({ mode: "manual", files: ["MANUAL.md"] });
+  expect(storedThreadContextSelection(undefined)).toBeUndefined();
+  expect(storedThreadContextSelection({ manager: true, contextFiles: ["UNCONFIRMED.md"] })).toBeUndefined();
+  expect(storedThreadContextSelection({ manager: true, contextSelection: "unknown", contextFiles: [] })).toBeUndefined();
+  expect(storedThreadContextSelection({ contextFiles: [42] })).toBeUndefined();
+});
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 function fixture() {
