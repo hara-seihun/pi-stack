@@ -1,4 +1,5 @@
 import { afterAll, expect, mock, test } from "bun:test";
+import type { MeetThreadState } from "../server/meet/protocol";
 
 mock.module("./src/meet/pcm.worklet.js?raw", () => ({ default: "" }));
 const replaced = new Map<string, PropertyDescriptor | undefined>();
@@ -80,18 +81,19 @@ const { startMeetAdapter, MeetAdapterStartError } = await import("./src/meet/ada
 const { meetThreadStatus } = await import("./src/meet/media");
 const { VoiceSession } = await import("./src/voice");
 
-const thread = (patch: Record<string, unknown> = {}) => ({
-  id: "thread", name: "Thread", state: "idle", held: false, activity: "idle", tools: [], output: "", events: [], ...patch,
-}) as any;
+const thread = (patch: Partial<MeetThreadState> = {}): MeetThreadState => ({
+  id: "thread", name: "Thread", state: "idle", lifecycle: { kind: "idle" }, held: false, activity: "idle", tools: [], output: "", events: [], ...patch,
+});
 
-test("meeting thread labels follow the shared held, activity and multi-tool rules", () => {
+test("meeting thread labels consume canonical lifecycle and preserve archived task completion", () => {
   expect(meetThreadStatus(thread({ held: true }))).toMatchObject({ label: "Idle" });
-  // A finished meeting worker is archived and held by its owner; the room shows Done, not Stopped (fvz-oicq-hes, September 28).
-  expect(meetThreadStatus(thread({ held: false, finished: true }))).toMatchObject({ label: "Done", attention: false });
-  expect(meetThreadStatus(thread({ state: "running", activity: "thinking" }))).toMatchObject({ label: "Thinking" });
-  expect(meetThreadStatus(thread({ state: "running", activity: "compacting" }))).toMatchObject({ label: "Compacting context" });
-  expect(meetThreadStatus(thread({ state: "running", activity: "waiting_on_tool", tools: ["bash", "web_search"] }))).toMatchObject({ label: "Running bash and web search" });
-  expect(meetThreadStatus(thread({ state: "running", activity: "waiting_on_tool", tools: ["bash", "web_search", "agent_browser"] }))).toMatchObject({ label: "Running 3 tools", title: "bash, web search, agent browser" });
+  expect(meetThreadStatus(thread({ lifecycle: { kind: "archived" }, finished: true }))).toMatchObject({ label: "Done", attention: false });
+  for (const phase of ["thinking", "compacting", "waiting_on_tool"] as const) {
+    expect(meetThreadStatus(thread({ lifecycle: { kind: "working", phase, since: 1 }, state: "idle", activity: "idle" }))).toMatchObject({ label: "Working", busy: true });
+  }
+  expect(meetThreadStatus(thread({ lifecycle: { kind: "working", phase: "responding", since: 1 } }))).toMatchObject({ label: "Typing" });
+  expect(meetThreadStatus(thread({ lifecycle: { kind: "working", phase: "waiting_on_tool", since: 1, detail: "bash, web search, agent browser" }, tools: ["bash", "web_search", "agent_browser"] }))).toMatchObject({ label: "Working", title: "bash, web search, agent browser" });
+  expect(meetThreadStatus(thread({ lifecycle: { kind: "waiting", target: "job", reason: "Build receipt", since: 1 }, state: "running" }))).toMatchObject({ busy: false, title: "Build receipt" });
 });
 
 test("failed startup stops capture and retains its unfinished PCM until recovery closes", async () => {

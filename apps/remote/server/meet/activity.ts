@@ -3,7 +3,7 @@ import type { MeetThreadState } from "./protocol";
 /** The steps a thread has taken recently, newest last. */
 export type RecentActivity = (sessionId: string) => Array<{ seq: number; type: string; [key: string]: unknown }>;
 
-type LiveActivity = Pick<MeetThreadState, "state" | "held" | "finished" | "activity" | "tools" | "output" | "activitySince" | "lastActivityAt" | "activityDetail" | "executionError" | "waitingOnAgents">;
+type LiveActivity = Pick<MeetThreadState, "lifecycle" | "state" | "held" | "finished" | "activity" | "tools" | "output" | "activitySince" | "lastActivityAt" | "activityDetail" | "executionError" | "waitingOnAgents">;
 const preview = (value: unknown, limit = 2400): string => {
   const text = typeof value === "string" ? value : value == null ? "" : JSON.stringify(value, null, 2);
   return text.length > limit ? `${text.slice(0, limit)}\n… continued in thread` : text;
@@ -20,7 +20,7 @@ export function meetingActivity(recent: RecentActivity, rows: Array<{ id: string
     }));
     return {
       id: String(row.id), name: row.id === rootId ? "Meeting thread" : String(row.name),
-      state: current.state, held: current.held, ...(current.finished ? { finished: true } : {}), activity: current.activity, tools: current.tools,
+      lifecycle: current.lifecycle, state: current.state, held: current.held, ...(current.finished ? { finished: true } : {}), activity: current.activity, tools: current.tools,
       activitySince: current.activitySince, lastActivityAt: current.lastActivityAt, activityDetail: current.activityDetail,
       executionError: current.executionError, waitingOnAgents: current.waitingOnAgents,
       output: preview(current.output || [...events].reverse().find((event) => event.kind === "assistant")?.text || ""),

@@ -14,7 +14,7 @@ const at = Date.parse("2026-10-09T10:00:00Z");
 const session: Session = {
   id: sessionIds.ready, name: "Retained synthetic conversation", agentName: "Kenan", parentId: null, hasChildren: false,
   origin: "person", foreground: true, model: "openai/gpt-6.1-sol", provider: "openai", cwd: "/synthetic", workspaceName: "Synthetic", environment: "synthetic",
-  state: "idle", held: false, activity: "idle", activeTools: [], revision: 1, idleUnread: false, queuedMessages: [], archivedAt: null,
+  state: "idle", lifecycle: { kind: "idle" }, held: false, activity: "idle", activeTools: [], revision: 1, idleUnread: false, queuedMessages: [], archivedAt: null,
   createdAt: new Date(at).toISOString(), updatedAt: new Date(at).toISOString(),
 };
 validateSession(session);

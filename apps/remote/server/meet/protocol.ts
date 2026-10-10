@@ -2,7 +2,7 @@ import type { ThreadState } from "pi-orchestrator/api";
 import type { Activity, Session } from "../protocol";
 
 export interface MeetParticipant { id: string; name: string; host: boolean }
-export interface MeetThreadState extends Partial<Pick<Session, "activitySince" | "lastActivityAt" | "activityDetail" | "executionError" | "waitingOnAgents">> {
+export interface MeetThreadState extends Pick<Session, "lifecycle">, Partial<Pick<Session, "activitySince" | "lastActivityAt" | "activityDetail" | "executionError" | "waitingOnAgents">> {
   id: string;
   name: string;
   state: ThreadState;

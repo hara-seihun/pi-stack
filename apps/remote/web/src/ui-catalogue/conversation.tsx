@@ -36,20 +36,22 @@ type Observation = { kind: "idle" } | { kind: "held" } | { kind: "cancelling" } 
   | { kind: "running"; phase: Exclude<Activity, "idle" | "awaiting" | "status_error" | "waiting_on_agents" | "waiting_on_tool"> }
   | { kind: "tools"; tools: [string, ...string[]] } | { kind: "agent-tool" }
   | { kind: "dependency"; wait: NonNullable<Session["waitingOnAgents"]> };
-type ObservationKeys = "state" | "held" | "activity" | "activeTools" | "archivedAt" | "executionError" | "waitingOnAgents";
-function observationFields(observation: Observation): Pick<Session, "state" | "held" | "activity" | "activeTools" | "archivedAt"> & Partial<Pick<Session, "executionError" | "waitingOnAgents">> {
-  const idle = { state: "idle", held: false, activity: "idle", activeTools: [], archivedAt: null } satisfies Pick<Session, "state" | "held" | "activity" | "activeTools" | "archivedAt">;
+type ObservationKeys = "lifecycle" | "state" | "held" | "activity" | "activeTools" | "archivedAt" | "executionError" | "waitingOnAgents";
+function observationFields(observation: Observation): Pick<Session, "lifecycle" | "state" | "held" | "activity" | "activeTools" | "archivedAt"> & Partial<Pick<Session, "executionError" | "waitingOnAgents">> {
+  const idle = { lifecycle: { kind: "idle" as const }, state: "idle", held: false, activity: "idle", activeTools: [], archivedAt: null } satisfies Pick<Session, "lifecycle" | "state" | "held" | "activity" | "activeTools" | "archivedAt">;
   switch (observation.kind) {
     case "idle": return idle;
     case "held": return { ...idle, held: true };
-    case "archived": return { ...idle, archivedAt: new Date(epoch).toISOString() };
-    case "error": return { ...idle, executionError: observation.message };
-    case "reporting-error": return { ...idle, state: "running", activity: "status_error" };
-    case "cancelling": return { ...idle, state: "running", held: true, activity: "cancelling" };
-    case "running": return { ...idle, state: "running", activity: observation.phase };
-    case "tools": return { ...idle, state: "running", activity: "waiting_on_tool", activeTools: observation.tools };
-    case "agent-tool": return { ...idle, state: "running", activity: "waiting_on_agents", activeTools: ["functions.thread_await"] };
-    case "dependency": return { ...idle, state: "waiting", activity: "awaiting", waitingOnAgents: observation.wait };
+    case "archived": return { ...idle, lifecycle: { kind: "archived" }, archivedAt: new Date(epoch).toISOString() };
+    case "error": return { ...idle, lifecycle: { kind: "failed", reason: observation.message, control: "none" }, executionError: observation.message };
+    case "reporting-error": return { ...idle, lifecycle: { kind: "failed", reason: "Execution owner did not report its phase", control: "stop" }, state: "running", activity: "status_error" };
+    case "cancelling": return { ...idle, lifecycle: { kind: "cancelling" }, state: "running", held: true, activity: "cancelling" };
+    case "running": return { ...idle, lifecycle: observation.phase === "waiting_for_capacity" || observation.phase === "waiting_to_retry"
+      ? { kind: "waiting", target: observation.phase === "waiting_for_capacity" ? "capacity" : "retry", reason: "Synthetic model admission delay", since: epoch }
+      : { kind: "working", phase: observation.phase, since: epoch }, state: "running", activity: observation.phase };
+    case "tools": return { ...idle, lifecycle: { kind: "working", phase: "waiting_on_tool", since: epoch, detail: `Running ${observation.tools.join(", ")}` }, state: "running", activity: "waiting_on_tool", activeTools: observation.tools };
+    case "agent-tool": return { ...idle, lifecycle: { kind: "working", phase: "waiting_on_agents", since: epoch, detail: "Awaiting synthetic agent results during execution" }, state: "running", activity: "waiting_on_agents", activeTools: ["functions.thread_await"] };
+    case "dependency": return { ...idle, lifecycle: { kind: "waiting", target: observation.wait.kind, reason: observation.wait.reason, since: observation.wait.since, dependency: observation.wait }, state: "waiting", activity: "awaiting", waitingOnAgents: observation.wait };
   }
 }
 export function conversationSession(patch: Partial<Omit<Session, ObservationKeys>> & { observation?: Observation } = {}): Session {
