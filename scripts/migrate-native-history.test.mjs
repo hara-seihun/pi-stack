@@ -192,15 +192,21 @@ test("deleted-thread orphans are named preserved-only warnings, including captur
   snapshot.close();
 });
 
-test("mapped capture-only native loss is an explicit recovery issue", async t => {
+test("capture-only native loss remains explicit snapshot custody without a manufactured native file", async t => {
   const f = await fixture(t);
   const db = new DatabaseSync(f.options.supervisorDb);
   db.exec("DELETE FROM message_facts; DROP TABLE session_contexts; CREATE TABLE session_contexts(session_id TEXT,context TEXT); INSERT INTO session_contexts VALUES('s','original captured history')");
   db.close();
   await rm(f.native);
   const result = await migrateNativeHistory(f.options);
-  assert.equal(result.error.code, "missing-native");
-  assert.ok(names(f.options.supervisorDb).includes("session_contexts"));
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(result.value.preservedCaptureOnly, [{ nativeState: 'unavailable', sessions: 1 }]);
+  assert.equal(result.value.promoted, 0);
+  const saved = new DatabaseSync(result.value.supervisorSnapshot, { readOnly: true });
+  assert.equal(saved.prepare("SELECT context FROM session_contexts WHERE session_id='s'").get().context, 'original captured history');
+  saved.close();
+  await assert.rejects(stat(f.native), { code: 'ENOENT' });
+  assert.deepEqual(await migrateNativeHistory(f.options), result);
 });
 
 test("crash after prepared receipt but before native rename replays the original preimage", async t => {

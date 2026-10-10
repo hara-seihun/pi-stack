@@ -55,6 +55,19 @@ test('accepted execution stays with its controller without maintenance attachmen
   assert.deepEqual(owner.calls, []);
 });
 
+test('accepted execution without a consumer reattaches its exact producer without dispatch or state changes', async () => {
+  const owner = service(idle);
+  owner.runtimes.clear();
+  owner.execution = () => ({ id: 'accepted-execution' });
+  owner.get = () => ({ metadata: { runnerReference: { control: '/owned.sock' } } });
+  owner.attach = async id => { owner.calls.push(['attach', id]); owner.runtimes.set(id, owner.runtime); return owner.runtime; };
+  owner.rpc = async () => { throw new Error('Must not reinterpret accepted execution'); };
+  await reconcileLegacyRuntime(owner, 'thread');
+  await reconcileLegacyRuntime(owner, 'thread');
+  assert.deepEqual(owner.calls, [['attach', 'thread']]);
+  assert.equal(owner.runtime.busy, true);
+});
+
 test('execution or dispatch beginning during attachment defers idle reconciliation', async () => {
   for (const race of ['execution', 'dispatch', 'opening', 'halt']) {
     const owner = service(idle);
