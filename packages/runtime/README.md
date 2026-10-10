@@ -53,6 +53,25 @@ The current package additionally includes controlled empty-input clearing from n
 
 [`patch-browser-semantic-fill.mjs`](patch-browser-semantic-fill.mjs) repairs the pinned native semantic-action compiler's empty-versus-unset text validation. A supplied `text: ""` clears a field through selector, label and role routes; omitted text stays a typed validation error. Non-string values remain invalid, and zero, whitespace and nonempty strings are preserved exactly. Deployment hashes this repair into the immutable dependency identity and rejects unexpected upstream source. [`patch-browser-semantic-fill.test.mjs`](patch-browser-semantic-fill.test.mjs) exercises the actual compiled module. The host browser doctor checks DOM and controlled React state after empty/zero/nonempty fills on all three routes and raw fill, plus unset-text rejection, before accepting the release.
 
+## Anthropic tool parameter schemas
+
+[`patch-anthropic-tool-schema.mjs`](patch-anthropic-tool-schema.mjs) preserves complete
+parameter schemas in the SDK and bundled Anthropic provider. Pi 0.87.1's non-strict
+converter retained only root `properties` and `required`, erasing object unions
+used by life writes/policy/steering, thread control/wakes and Converge. The shared
+[`anthropic-tool-schema.js`](anthropic-tool-schema.js) retains all constraints and
+adds Anthropic's required root `type: "object"` when union/intersection branches
+already imply it. Non-object inputs fail explicitly; native registrations stay intact.
+Deployment hashes and applies both repair files. Orchestrator test preparation
+applies the same patch before provider payload tests.
+
+[`anthropic-tool-schema.test.mjs`](anthropic-tool-schema.test.mjs) captures real SDK
+and bundled provider payloads without network requests and checks unchanged schema
+validation. [`agent-tool-schemas.test.ts`](../orchestrator/tests/agent-tool-schemas.test.ts)
+checks registered agent tools, explicit zero-argument exceptions and affected
+operations; [`thread-wait-schema.test.ts`](../orchestrator/tests/thread-wait-schema.test.ts)
+requires dependency constraints on Anthropic and both OpenAI APIs.
+
 ## Anthropic error tool-result content
 
 [`patch-anthropic-error-content.mjs`](patch-anthropic-error-content.mjs) normalizes
