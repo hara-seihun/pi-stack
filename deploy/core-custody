@@ -131,7 +131,9 @@ def apply(addition, namespace):
                 raise ValueError('registered mount target does not exist in common view')
             current = logical.stat()
             if (current.st_dev, current.st_ino) != (device, inode):
-                command(['/usr/bin/mount', '--bind', f'/proc/self/fd/{descriptor}', str(logical)])
+                libc = ctypes.CDLL(None, use_errno=True)
+                if libc.mount(os.fsencode(f'/proc/self/fd/{descriptor}'), os.fsencode(logical), None, 4096, None) != 0:
+                    raise OSError(ctypes.get_errno(), 'bind exact registered resource handle')
                 mounted.append(logical)
             actual = logical.stat()
             if (actual.st_dev, actual.st_ino) != (device, inode) or not os.access(logical, os.R_OK):
