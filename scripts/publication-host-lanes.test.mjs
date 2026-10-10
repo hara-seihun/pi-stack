@@ -249,6 +249,44 @@ test("explicit recovery owns terminal custody without erasing failure or replayi
   assert.equal(request.hostDelivery[targets[0].id].recovery.status, "completed");
 });
 
+test('native recovery receipts are additive across hosts, stable across checkpoints and retained with older history', t => {
+  const h = harness(t);
+  const request = initial();
+  const legacy = { at: '2026-01-01T00:00:00Z', hosts: ['converge', 'kenan-server'], status: 'failed' };
+  request.nativeHistoryRecoveries = [legacy];
+  rollForwardHosts(request, targets, { ...h.operations, active: () => false, launch(target, inputPath) {
+    runHostLane(inputPath, { bind() {}, recover() {}, deliver() { return { status: 'failed', failure: { message: 'activation failed' } }; } });
+    return { ok: true };
+  } });
+  for (const target of targets) {
+    let checkpoint;
+    const inputPath = hostLaneInputPath(h.laneRoot, requestId, integrationSha, target.id);
+    assert.deepEqual(runHostLaneRecovery(inputPath, { bind(local, save) { checkpoint = save; }, recover(local) {
+      const receipt = { at: '2026-02-01T00:00:00Z', hosts: [], status: 'running' };
+      (local.nativeHistoryRecoveries ??= []).push(receipt);
+      checkpoint(local);
+      mergeHostLanes(request, h.laneRoot, targets);
+      const running = request.nativeHistoryRecoveries.find(item => item.laneHostId === target.id);
+      assert.equal(running.status, 'running');
+      receipt.hosts.push(target.id);
+      receipt.status = 'restored';
+      checkpoint(local);
+    } }), { ok: true });
+  }
+  mergeHostLanes(request, h.laneRoot, targets);
+  assert.equal(request.nativeHistoryRecoveries.length, 3);
+  assert.deepEqual(request.nativeHistoryRecoveries[0], legacy);
+  const receipts = request.nativeHistoryRecoveries.slice(1);
+  assert.equal(new Set(receipts.map(item => item.laneRecoveryId)).size, 2, 'same timestamps on independent hosts are distinct receipts');
+  for (const target of targets) {
+    const receipt = receipts.find(item => item.laneHostId === target.id);
+    assert.equal(receipt.status, 'restored');
+    assert.deepEqual(receipt.hosts, [target.id]);
+  }
+  mergeHostLanes(request, h.laneRoot, targets);
+  assert.equal(request.nativeHistoryRecoveries.length, 3, 'read/restart does not append another copy');
+});
+
 test('settled readiness observation retains causal failure and custody with a revision fence', t => {
   const h = harness(t);
   const request = initial();

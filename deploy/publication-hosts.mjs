@@ -128,6 +128,12 @@ export function mergeHostLanes(request, root, targets) {
       step: lane.step, progress: clone(lane.progress), worker: clone(lane.worker),
       timings: clone(lane.timings), recovery: clone(lane.recovery), recoveries: clone(lane.recoveries),
     };
+    for (const receipt of lane.nativeHistoryRecoveries ?? []) {
+      const retained = request.nativeHistoryRecoveries ??= [];
+      const index = retained.findIndex(item => item.laneRecoveryId === receipt.laneRecoveryId);
+      if (index === -1) retained.push(clone(receipt));
+      else retained[index] = clone(receipt);
+    }
     if (terminal.has(lane.state)) {
       request.hosts[id] = clone(lane.outcome);
       if (lane.state === "waiting" && previous?.status === "waiting"
@@ -153,7 +159,8 @@ function queueLane(request, root, hostId, previousLane) {
     step: local.step ?? null, progress: local.progress ?? null, timings: {}, worker: null,
     history: previousLane ? [...previousLane.history, { token: previousLane.token, state: previousLane.state,
       outcome: previousLane.outcome ?? null, inputPath: previousLane.inputPath, updatedAt: previousLane.updatedAt,
-      fields: previousLane.fields, timings: previousLane.timings, recoveries: previousLane.recoveries ?? [] }] : [],
+      fields: previousLane.fields, timings: previousLane.timings, recoveries: previousLane.recoveries ?? [],
+      nativeHistoryRecoveries: previousLane.nativeHistoryRecoveries ?? [] }] : [],
   };
   atomicWrite(inputPath, { version: 1, token, root, request: local, hostId });
   atomicWrite(journalPath(root, request.requestId, request.integrationSha, hostId), lane);
@@ -252,6 +259,10 @@ function workerContext(inputPath, operations) {
   const local = isolate(snapshot, hostId);
   apply(local, hostId, lane.fields);
   if (lane.timings) local.stageTimings = clone(lane.timings);
+  const priorRecoveryCount = snapshot.nativeHistoryRecoveries?.length ?? 0;
+  if (lane.nativeHistoryRecoveries?.length) local.nativeHistoryRecoveries = [
+    ...(local.nativeHistoryRecoveries ?? []), ...clone(lane.nativeHistoryRecoveries),
+  ];
   const path = journalPath(root, snapshot.requestId, snapshot.integrationSha, hostId);
   const context = { lane, local, hostId };
   context.checkpoint = request => {
@@ -259,7 +270,10 @@ function workerContext(inputPath, operations) {
     if (request.requestId !== lane.requestId || request.integrationSha !== lane.integrationSha) throw new Error("Host worker changed its immutable integration identity");
     if (current.token !== token || current.revision !== context.lane.revision) throw new Error("Host lane checkpoint lost custody");
     context.lane = { ...context.lane, revision: context.lane.revision + 1, updatedAt: now(), fields: capture(request, hostId),
-      step: request.step ?? null, progress: request.progress ?? null, timings: clone(request.stageTimings ?? {}) };
+      step: request.step ?? null, progress: request.progress ?? null, timings: clone(request.stageTimings ?? {}),
+      nativeHistoryRecoveries: (request.nativeHistoryRecoveries ?? []).slice(priorRecoveryCount).map((receipt, index) => ({
+        ...clone(receipt), laneHostId: hostId, laneRecoveryId: `${token}:${index}`,
+      })) };
     atomicWrite(path, context.lane);
   };
   operations.bind(local, context.checkpoint);
