@@ -30,6 +30,8 @@ export interface ContextEntry {
   argumentsTruncated?: boolean;
   messageTimestamp?: number;
   inputId?: string;
+  promptDelivery?: import("./features/conversation/optimistic-prompts").PromptDelivery;
+  promptRequestId?: string;
   inputState?: import("../../../../packages/orchestrator/src/threads/contracts").ThreadInputState;
   identity?: import("../../server/message-protocol").MessageIdentity;
   reactions?: import("../../server/message-protocol").MessageReaction[];

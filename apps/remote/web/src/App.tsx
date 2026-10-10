@@ -13,6 +13,7 @@ import { UnlockDialog } from "./UnlockDialog";
 import { reportWebReady, bootstrapUrl, pinnedFetch } from "./native";
 import { PromptOutbox, type PromptOutboxEntry, type PromptOutboxScope, type PromptOutboxTransport } from "./prompt-outbox";
 import { PromptSubmissions } from "./prompt-submissions";
+import { capturedPromptIds, reconcilePromptEntries } from "./features/conversation/optimistic-prompts";
 import { PromptOutboxStatus } from "./PromptOutboxStatus";
 import { PromptStorage, type PromptStorageState, type PromptStorageResult } from "./prompt-storage";
 import { useChatDrawing } from "./chat-drawing";
@@ -349,6 +350,8 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const undoCloses = useMemo(() => new UndoCloses(), []);
   const undoState = useSyncExternalStore(undoCloses.subscribe, undoCloses.snapshot, undoCloses.snapshot);
   const [prompt, setPrompt] = useState("");
+  const promptDraft = useRef(prompt);
+  useLayoutEffect(() => { promptDraft.current = prompt; }, [prompt]);
   const [reply, setReply] = useState<ReplyTarget | null>(null);
   const replyRef = useRef<ReplyTarget | null>(null);
   const replyDrafts = useMemo(() => new ReplyDrafts(localStorage, replyKey), []);
@@ -565,10 +568,27 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const storageFailure = useRef<string | null>(null);
   const [storageState, setStorageState] = useState<PromptStorageState<OutboxOwner>>({ kind: "loading" });
   const ensureOutbox = useCallback((): Promise<PromptStorageResult<OutboxOwner>> => promptStorage.current?.ensure()
-    ?? Promise.resolve({ ok: false, error: { kind: "unavailable", message: "Prompt storage is initializing. Your draft is retained; try Send again." } }), []);
+    ?? Promise.resolve({ ok: false, error: { kind: "unavailable", message: "Prompt storage is initializing. Retry when storage is ready." } }), []);
   const [outboxEntries, setOutboxEntries] = useState<PromptOutboxEntry[]>([]);
   const [outboxBusy, setOutboxBusy] = useState<string | null>(null);
+  const localPrompts = useRef(new Map<string, PromptOutboxEntry>());
+  const localPromptDrafts = useRef(new Map<string, { sessionId: string; draft: string; replyVersion: number }>());
+  const settlePromptDraft = useCallback((requestId: string) => {
+    const source = localPromptDrafts.current.get(requestId);
+    if (!source) return;
+    if (loadDraft(source.sessionId) === source.draft) saveDraft(source.sessionId, "");
+    replyDrafts.accept(source.sessionId, source.replyVersion);
+    localPromptDrafts.current.delete(requestId);
+  }, [replyDrafts]);
+  const [localPromptEntries, setLocalPromptEntries] = useState<PromptOutboxEntry[]>([]);
+  const [activePromptIds, setActivePromptIds] = useState<ReadonlySet<string>>(new Set());
+  const [sentPrompt, setSentPrompt] = useState<{ sessionId: string; requestId: string } | null>(null);
+  const updateLocalPrompt = useCallback((entry: PromptOutboxEntry) => {
+    localPrompts.current.set(entry.requestId, entry);
+    setLocalPromptEntries([...localPrompts.current.values()]);
+  }, []);
   const ownedPrompts = useRef(new Map<string, string>());
+  const interruptedPromptIds = useRef(new Set<string>());
   const promptSubmissions = useRef(new PromptSubmissions());
   const drainingPrompts = useRef(false);
   const refreshOutbox = useCallback(async () => {
@@ -622,6 +642,11 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     void storage.ensure();
     const reset = () => {
       ownedPrompts.current.clear();
+      localPrompts.current.clear();
+      localPromptDrafts.current.clear();
+      setLocalPromptEntries([]);
+      setActivePromptIds(new Set());
+      setSentPrompt(null);
       setOutboxEntries([]);
       storage.invalidate();
       void storage.ensure();
@@ -637,30 +662,54 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
       if (promptStorage.current === storage) { promptStorage.current = null; outbox.current = null; }
     };
   }, [person, stateRef]);
-  const submitSavedPrompt = useCallback(async (requestId: string) => {
+  const submitSavedPrompt = useCallback((requestId: string) => {
+    interruptedPromptIds.current.delete(requestId);
     const expectedEnvironment = stateRef.current.bootstrap?.environmentId;
-    const initialized = await ensureOutbox();
-    if (!initialized.ok) { toast.error(initialized.error.message); return; }
-    const owner = initialized.value;
-    if (outbox.current !== owner || expectedEnvironment !== owner.scope.environment) { toast.error("The saved prompt belongs to another environment."); return; }
-    return promptSubmissions.current.run(owner.store, requestId, async () => {
+    const fail = (message: string) => {
+      const local = localPrompts.current.get(requestId);
+      if (local) updateLocalPrompt({ ...local, outcome: { kind: "pending", reason: "transport", message } });
+      else if (!interruptedPromptIds.current.has(requestId)) toast.error(message);
+      ownedPrompts.current.delete(requestId);
+    };
+    return promptSubmissions.current.run(localPrompts.current, requestId, async () => {
       setOutboxBusy(requestId);
+      setActivePromptIds(current => new Set(current).add(requestId));
       try {
+        const initialized = await ensureOutbox();
+        if (!initialized.ok) { fail(initialized.error.message); return; }
+        const owner = initialized.value;
+        if (outbox.current !== owner || expectedEnvironment !== owner.scope.environment) { fail("The saved prompt belongs to another environment."); return; }
+        const local = localPrompts.current.get(requestId);
+        if (local) {
+          const entry = await owner.store.enqueue(local.sessionId, JSON.parse(local.bodyJson));
+          if (outbox.current !== owner) return;
+          if (entry.ok) settlePromptDraft(requestId);
+          if (interruptedPromptIds.current.has(requestId)) { fail("Sending stopped. Tap Retry to check this same message."); return; }
+          if (!entry.ok) {
+            fail(entry.error.message);
+            if (entry.error.kind === "storage_unavailable" || entry.error.kind === "storage_corrupt") promptStorage.current?.fail(entry.error.message);
+            return;
+          }
+          updateLocalPrompt(entry.value);
+          setOutboxEntries(current => [...current.filter(item => item.requestId !== requestId), entry.value]);
+        }
+        if (interruptedPromptIds.current.has(requestId)) { fail("Sending stopped. Tap Retry to check this same message."); return; }
         const result = await owner.store.submit(requestId, owner.transport);
         if (outbox.current !== owner) return;
-        if (!result.ok) { ownedPrompts.current.delete(requestId); toast.error(result.error.message); }
-        else if (result.value.outcome.kind !== "pending") {
-          ownedPrompts.current.delete(requestId);
-          if (result.value.outcome.kind === "accepted") {
-            const removed = await owner.store.acknowledge(requestId);
-            if (!removed.ok) toast.error(removed.error.message);
-            kick();
-          }
+        if (!result.ok) fail(result.error.message);
+        else {
+          if (localPrompts.current.has(requestId)) updateLocalPrompt(result.value);
+          setOutboxEntries(current => [...current.filter(item => item.requestId !== requestId), result.value]);
+          if (result.value.outcome.kind !== "pending") ownedPrompts.current.delete(requestId);
+          if (result.value.outcome.kind === "accepted") kick();
         }
         await refreshOutbox();
-      } finally { setOutboxBusy(current => current === requestId ? null : current); }
+      } finally {
+        setOutboxBusy(current => current === requestId ? null : current);
+        setActivePromptIds(current => { const next = new Set(current); next.delete(requestId); return next; });
+      }
     });
-  }, [kick, refreshOutbox, ensureOutbox, stateRef]);
+  }, [kick, refreshOutbox, ensureOutbox, stateRef, updateLocalPrompt, settlePromptDraft]);
   const interruptPrompts = useCallback((sessionId: string, descendants: boolean) => {
     const ids = new Set([sessionId]);
     if (descendants) {
@@ -672,18 +721,22 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     }
     const requests = new Set(outboxEntries.filter(entry => ids.has(entry.sessionId)).map(entry => entry.requestId));
     for (const [id, thread] of ownedPrompts.current) if (ids.has(thread)) requests.add(id);
-    for (const id of requests) { outbox.current?.store.interrupt(id); ownedPrompts.current.delete(id); }
+    for (const id of requests) { interruptedPromptIds.current.add(id); outbox.current?.store.interrupt(id); ownedPrompts.current.delete(id); }
   }, [outboxEntries, stateRef]);
   const discardSavedPrompt = useCallback(async (requestId: string) => {
+    interruptedPromptIds.current.add(requestId);
     ownedPrompts.current.delete(requestId);
+    settlePromptDraft(requestId);
+    localPrompts.current.delete(requestId);
+    setLocalPromptEntries([...localPrompts.current.values()]);
     const initialized = await ensureOutbox();
     if (!initialized.ok) { toast.error(initialized.error.message); return; }
     const owner = initialized.value;
     if (outbox.current !== owner) return;
     const result = await owner.store.discard(requestId);
-    if (!result.ok) toast.error(result.error.message);
+    if (!result.ok && result.error.kind !== "not_found") toast.error(result.error.message);
     await refreshOutbox();
-  }, [refreshOutbox, ensureOutbox]);
+  }, [refreshOutbox, ensureOutbox, settlePromptDraft]);
   const healthyPromptFeed = useRef(false);
   const feedActivity = useCallback((healthy: boolean) => {
     notificationFeedActivity(healthy);
@@ -712,8 +765,14 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
       switch (event.type) {
         case "hello":
         case "bootstrap": {
-          if (outbox.current && outbox.current.scope.environment !== event.bootstrap.environmentId) {
+          if (outbox.current && outbox.current.scope.environment !== event.bootstrap.environmentId
+            || stateRef.current.bootstrap && stateRef.current.bootstrap.environmentId !== event.bootstrap.environmentId) {
             ownedPrompts.current.clear();
+            localPrompts.current.clear();
+            localPromptDrafts.current.clear();
+            setLocalPromptEntries([]);
+            setActivePromptIds(new Set());
+            setSentPrompt(null);
             setOutboxEntries([]);
             promptStorage.current?.invalidate();
           }
@@ -733,6 +792,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
             const before = current.sessions.find(row => row.id === threadId);
             const after = sessions.find(row => row.id === threadId);
             if (before && (!after || after.held && !before.held)) {
+              interruptedPromptIds.current.add(requestId);
               outbox.current?.store.interrupt(requestId);
               ownedPrompts.current.delete(requestId);
             }
@@ -1081,11 +1141,10 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     const sessionAttachments = stateRef.current.attachments.filter((file) => file.sessionId === session.id);
     if (sessionAttachments.some((file) => file.uploading)) return;
     const attachments = sessionAttachments.filter((file) => file.path);
-    const draft = prompt;
+    const draft = promptDraft.current;
     const text = draft.trim();
     if (!text && !attachments.length) return;
     sending.current = true;
-    const expectedEnvironment = stateRef.current.bootstrap?.environmentId;
     const selectedReply = replyRef.current;
     const replyVersion = replyDrafts.version(session.id);
     const command = text.startsWith("/") ? state.slashCommands.find((candidate) => candidate.name === text.slice(1).split(/\s/, 1)[0]) : null;
@@ -1096,26 +1155,26 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
       const bodyText = [text, attachmentText].filter(Boolean).join("\n\n");
       if (command && !attachments.length && !selectedReply) await api(API.sessionCommand.method, API.sessionCommand.path({ sessionId: session.id }), { requestId: crypto.randomUUID(), name: command.name, args: text.slice(command.name.length + 2).trim() }, 130_000);
       else {
-        const initialized = await ensureOutbox();
-        if (!initialized.ok) throw new Error(initialized.error.message);
-        const owner = initialized.value;
-        const environment = await window.KenanRemote?.getState();
-        if (outbox.current !== owner || window.PiRemotePerson.get() !== person || !environment
-          || environment.id !== owner.scope.environment || expectedEnvironment !== owner.scope.environment) {
-          throw new Error("The prompt's person or environment changed. Your draft is retained; send it from the intended chat.");
-        }
-        const entry = await owner.store.enqueue(session.id, { requestId: crypto.randomUUID(), text: bodyText, delivery, ...(selectedReply ? { replyTo: selectedReply.identity.id } : {}) });
-        if (!entry.ok) {
-          if (entry.error.kind === "storage_unavailable" || entry.error.kind === "storage_corrupt") promptStorage.current?.fail(entry.error.message);
-          throw new Error(entry.error.message);
-        }
-        ownedPrompts.current.set(entry.value.requestId, session.id);
-        await refreshOutbox();
-        void submitSavedPrompt(entry.value.requestId);
+        const requestId = crypto.randomUUID();
+        const entry: PromptOutboxEntry = { requestId, sessionId: session.id, createdAt: Date.now(),
+          bodyJson: JSON.stringify({ requestId, text: bodyText, delivery, ...(selectedReply ? { replyTo: selectedReply.identity.id } : {}) }),
+          outcome: { kind: "pending", reason: "saved", message: "Saving and sending this message." } };
+        localPromptDrafts.current.set(requestId, { sessionId: session.id, draft, replyVersion });
+        updateLocalPrompt(entry);
+        setSentPrompt({ sessionId: session.id, requestId });
+        if (hasNewer(stateRef.current.transcript)) void showNewer(true);
+        ownedPrompts.current.set(requestId, session.id);
+        void submitSavedPrompt(requestId);
       }
-      if (selectedAiId(stateRef.current) === session.id) setPrompt(current => current === draft ? "" : current);
-      if (loadDraft(session.id) === draft) saveDraft(session.id, "");
-      if (replyDrafts.accept(session.id, replyVersion) && selectedAiId(stateRef.current) === session.id) {
+      if (selectedAiId(stateRef.current) === session.id) {
+        if (promptDraft.current === draft) promptDraft.current = "";
+        setPrompt(current => current === draft ? "" : current);
+      }
+      if (command && !attachments.length && !selectedReply) {
+        if (loadDraft(session.id) === draft) saveDraft(session.id, "");
+        replyDrafts.accept(session.id, replyVersion);
+      }
+      if (replyDrafts.version(session.id) === replyVersion && selectedAiId(stateRef.current) === session.id) {
         replyRef.current = null;
         setReply(null);
       }
@@ -1176,7 +1235,12 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     return chain;
   }, [selected, knownSessions]);
   const visibleAttachments = state.attachments.filter((file) => file.sessionId === aiId);
-  const contextEntries = useMemo(() => {
+  const pendingPromptEntries = useMemo(() => {
+    const entries = new Map(outboxEntries.map(entry => [entry.requestId, entry]));
+    for (const entry of localPromptEntries) entries.set(entry.requestId, entry);
+    return [...entries.values()].filter(entry => entry.sessionId === aiId);
+  }, [outboxEntries, localPromptEntries, aiId]);
+  const durableEntries = useMemo(() => {
     if (state.transcript === null) return [];
     const inputs = new Map(selected?.inputs?.map(input => [input.id, input]));
     const source = state.transcript.items.map(head => head.kind === "user" && head.inputId && inputs.has(head.inputId)
@@ -1184,6 +1248,25 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     const heads = mono ? monoTranscript(source) : source;
     return heads.length ? entriesFromHeads(heads) : mono ? [] : [WAITING_ENTRY];
   }, [state.transcript, mono, selected?.inputs]);
+  const contextEntries = useMemo(() => reconcilePromptEntries(durableEntries, pendingPromptEntries,
+    new Set([...activePromptIds, ...localPromptEntries.filter(entry => entry.outcome.kind === "pending" && entry.outcome.reason === "saved").map(entry => entry.requestId)])),
+    [durableEntries, pendingPromptEntries, activePromptIds, localPromptEntries]);
+  useEffect(() => {
+    const owner = outbox.current;
+    if (!owner) return;
+    const captured = capturedPromptIds(durableEntries, pendingPromptEntries);
+    if (!captured.length) return;
+    void (async () => {
+      for (const requestId of captured) {
+        const removed = await owner.store.acknowledge(requestId);
+        if (outbox.current !== owner) return;
+        if (!removed.ok && removed.error.kind !== "not_found") { toast.error(removed.error.message); return; }
+        localPrompts.current.delete(requestId);
+      }
+      setLocalPromptEntries([...localPrompts.current.values()]);
+      await refreshOutbox();
+    })();
+  }, [durableEntries, pendingPromptEntries, refreshOutbox]);
   const bodies = useMemo(() => aiId ? new ItemBodies(aiId, undefined, cache) : null, [aiId, cache]);
   // The newest head of a window, and of every update, carries its body when it
   // is small. Taking it here is what lets the step a person opens first render
@@ -1250,10 +1333,10 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const conversation = roomId
     ? <RoomConversation key={roomId} id={roomId} people={roomDirectory.people} onBack={closeDetail} showBack={layout === "phone"} showIdentity={showConversationIdentity} onRefresh={roomDirectory.refresh} />
     : selected
-    ? <ItemBodiesContext.Provider value={bodies}><LiveConversation outbox={<PromptOutboxStatus entries={outboxEntries.filter(entry => entry.sessionId === selected.id)} busyRequestId={outboxBusy} storage={{ state: storageState, retry: () => void ensureOutbox() }} onRetry={id => void submitSavedPrompt(id)} onDiscard={id => void discardSavedPrompt(id)} />} live={liveText} session={selected} mono={mono && manager ? { hintSeen: manager.hintSeen, onClassic: () => void updateManager("classic"), onHintSeen: () => void updateManager("mono", true), saving: managerSaving } : undefined} ancestors={ancestors} entries={contextEntries} images={images} offline={state.offline} syncing={state.threadSyncing} pending={pending} home={home} prompt={prompt}
+    ? <ItemBodiesContext.Provider value={bodies}><LiveConversation sentPromptId={sentPrompt?.sessionId === selected.id ? sentPrompt.requestId : undefined} onRetryPrompt={id => void submitSavedPrompt(id)} onDiscardPrompt={id => void discardSavedPrompt(id)} outbox={<PromptOutboxStatus entries={[]} busyRequestId={outboxBusy} storage={localPromptEntries.length ? undefined : { state: storageState, retry: () => void ensureOutbox() }} onRetry={id => void submitSavedPrompt(id)} onDiscard={id => void discardSavedPrompt(id)} />} live={liveText} session={selected} mono={mono && manager ? { hintSeen: manager.hintSeen, onClassic: () => void updateManager("classic"), onHintSeen: () => void updateManager("mono", true), saving: managerSaving } : undefined} ancestors={ancestors} entries={contextEntries} images={images} offline={state.offline} syncing={state.threadSyncing} pending={pending} home={home} prompt={prompt}
         onVisibleRange={onVisibleHeads} newerAvailable={hasNewer(state.transcript)} onShowNewer={() => void showNewer(false)} onJumpLatest={() => void showNewer(true)} earlierAvailable={hasEarlier(state.transcript)} loadingEarlier={state.loadingEarlier} earlierError={state.earlierError} onShowEarlier={showEarlier} onThinkingOpen={thinkingOpen} autoCollapse={autoCollapse}
         attachments={visibleAttachments.map(file => ({ id: file.localId, name: file.name, uploading: file.uploading }))} slashCommands={state.slashCommands} drawing={drawing} uploadError={uploadError?.sessionId === aiId ? uploadError.message : ""} controlError={controlError?.sessionId === aiId ? controlError.message : ""} questionsResource={pendingQuestions?.sessionId === aiId ? pendingQuestions : undefined} onRetryQuestions={retryQuestions} showBack={layout === "phone" || manager?.view === "mono"} showIdentity={showConversationIdentity}
-        onBack={closeDetail} onOpenInspector={() => openPanel("inspector")} onOpenAncestor={session => openThreadId(session.id)} onOpenQueue={() => openPanel("queue")} questions={pendingQuestions?.sessionId === selected.id ? prioritizeQuestion(pendingQuestions.questions, route.tab === "chats" ? route.questionId : undefined) : []} onQuestionAccepted={id => { setPendingQuestions(current => current?.sessionId === selected.id ? { ...current, questions: current.questions.filter(question => question.id !== id) } : current); }} onEdit={editFrom} reply={reply} onReply={target => { replyRef.current = target; setReply(target); replyDrafts.save(selected.id, target); }} onCancelReply={() => { replyRef.current = null; setReply(null); replyDrafts.save(selected.id, null); }} onPrompt={text => { setPrompt(text); if (aiId) saveDraft(aiId, text); }} onSend={delivery => void send(delivery)} onStop={() => stopThread(selected)} onResume={() => void controlThread(selected.id, "resume")} onReconnect={reconnect}
+        onBack={closeDetail} onOpenInspector={() => openPanel("inspector")} onOpenAncestor={session => openThreadId(session.id)} onOpenQueue={() => openPanel("queue")} questions={pendingQuestions?.sessionId === selected.id ? prioritizeQuestion(pendingQuestions.questions, route.tab === "chats" ? route.questionId : undefined) : []} onQuestionAccepted={id => { setPendingQuestions(current => current?.sessionId === selected.id ? { ...current, questions: current.questions.filter(question => question.id !== id) } : current); }} onEdit={editFrom} reply={reply} onReply={target => { replyRef.current = target; setReply(target); replyDrafts.save(selected.id, target); }} onCancelReply={() => { replyRef.current = null; setReply(null); replyDrafts.save(selected.id, null); }} onPrompt={text => { promptDraft.current = text; setPrompt(text); if (aiId) saveDraft(aiId, text); }} onSend={delivery => void send(delivery)} onStop={() => stopThread(selected)} onResume={() => void controlThread(selected.id, "resume")} onReconnect={reconnect}
         onRemoveAttachment={id => { const file = visibleAttachments.find(item => item.localId === id); if (file) void removeAttachment(file); }} onUpload={files => void uploadFiles(files)} onPaste={() => setPasteSessionId(aiId)} onDraw={() => drawing.open()} onDismissControlError={() => setControlError(null)} /></ItemBodiesContext.Provider>
     : routeChat && state.syncing
         ? <section className="empty-state"><strong>Opening…</strong></section>

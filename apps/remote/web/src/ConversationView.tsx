@@ -6,7 +6,7 @@ import type { ChatDrawing } from "./chat-drawing";
 
 export const SCROLL_GESTURE_IDLE_MS = 180;
 
-export function ConversationView({ active, label, drawing, editImages = true, transcript, children, newerAvailable = false, onJumpLatest }: {
+export function ConversationView({ active, label, drawing, editImages = true, transcript, children, newerAvailable = false, onJumpLatest, sentPromptId }: {
   active: boolean;
   label: string;
   drawing: ChatDrawing;
@@ -15,6 +15,7 @@ export function ConversationView({ active, label, drawing, editImages = true, tr
   children?: ReactNode;
   newerAvailable?: boolean;
   onJumpLatest?(): void;
+  sentPromptId?: string;
 }) {
   const scrollback = useRef<HTMLDivElement>(null);
   const anchor = useRef<ReadingAnchor | null>(null);
@@ -76,6 +77,11 @@ export function ConversationView({ active, label, drawing, editImages = true, tr
       window.removeEventListener("blur", releaseContacts);
     };
   }, [owner]);
+  useLayoutEffect(() => {
+    if (!sentPromptId || !active || !scrollback.current) return;
+    owner.anchor.jumpLatest(scrollback.current);
+    setAway(false);
+  }, [sentPromptId, owner, active]);
   const editImage = (event: SyntheticEvent) => {
     if (!editImages || !active) return;
     const image = drawingImage(event.target);
