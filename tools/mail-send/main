@@ -6,7 +6,7 @@ Composes UTF-8 mail, threads replies correctly, and refuses to send unless
 from Proton Pass at runtime and are never printed. Bridge files the outgoing
 copy in Sent itself; this tool does not append.
 """
-import argparse, email.utils, imaplib, json, mimetypes, os, smtplib, ssl, subprocess, sys
+import argparse, base64, email.utils, imaplib, json, mimetypes, os, re, smtplib, ssl, subprocess, sys, unicodedata, uuid
 from email.header import decode_header, make_header
 from email.message import EmailMessage
 
@@ -42,6 +42,49 @@ def journal_finish(ticket, outcome, detail):
         print(f"# mail outcome {outcome}; journal outcome pending; do not resend: {error}", file=sys.stderr)
 
 
+def action(command, payload):
+    cli = os.environ.get("PI_KENAN_ACTION_CLI", "/srv/pi/runtime/node_modules/kenan-memory/src/actions-cli.ts")
+    try:
+        result = subprocess.run(["bun", cli, command], input=json.dumps(payload),
+                                capture_output=True, text=True, timeout=15)
+        value = json.loads(result.stdout)
+        if not isinstance(value, dict) or not isinstance(value.get("ok"), bool) or result.returncode and value.get("ok"):
+            raise ValueError("invalid or interrupted ActionResult")
+        return value
+    except (OSError, subprocess.TimeoutExpired, ValueError) as error:
+        return {"ok": False, "error": "unavailable", "message": f"Action authority unavailable; no replay permitted: {error}"}
+
+
+def report(value):
+    print(json.dumps(value, ensure_ascii=False))
+    return 0 if value.get("ok") else 2
+
+
+def finish_action(ticket, outcome, result, detail):
+    kind = {"succeeded": "provider-receipt", "failed-before-effect": "provider-rejection", "uncertain": "operator-observation"}[outcome]
+    receipt = action("finish", {"ticket": ticket, "outcome": outcome, "result": result,
+                                "evidence": {"kind": kind, "reference": f"smtp:{ticket['id']}", "detail": detail}})
+    if not receipt["ok"]:
+        return {"ok": False, "error": "receipt-pending", "message": "Dispatch outcome could not commit; inspect action, never resend automatically.",
+                "actionId": ticket["id"], "observedOutcome": outcome, "result": result, "authority": receipt}
+    return receipt
+
+
+def purpose(subject, parent_id):
+    if parent_id:
+        return "email.reply:" + parent_id
+    normalized = unicodedata.normalize("NFKC", subject).strip().casefold()
+    normalized = re.sub(r"^(?:(?:re|fw|fwd)\s*:\s*)+", "", normalized)
+    return "email.subject:" + " ".join(normalized.split())
+
+
+def recipients(values):
+    addresses = [address for _, address in email.utils.getaddresses(values)]
+    if not addresses or any(not re.fullmatch(r"[^<>\s@]+@[^<>\s@]+", address) for address in addresses):
+        raise ValueError("All recipients must have explicit email addresses")
+    return sorted(set(address.lower() for address in addresses))
+
+
 def creds():
     # Delegated access: a JSON file {"email":..., "password":...} named by
     # MAIL_BRIDGE_CREDENTIAL_FILE bypasses Proton Pass. Used to grant another
@@ -56,7 +99,7 @@ def creds():
     env.setdefault("PROTON_PASS_AGENT_REASON", "Read Proton Bridge local mail-client credentials")
     out = subprocess.run(["pass-cli", "item", "view", "--vault-name", "Agent",
                           "--item-title", "Proton Mail Bridge", "--output", "json"],
-                         capture_output=True, text=True, check=True, env=env).stdout
+                         capture_output=True, text=True, check=True, env=env, timeout=15).stdout
     c = json.loads(out)["item"]["content"]["content"]["Login"]
     return c["email"], c["password"]
 
@@ -102,7 +145,7 @@ def main():
     p.add_argument("--to", action="append", default=[], help="recipient; repeatable")
     p.add_argument("--cc", action="append", default=[], help="cc; repeatable")
     p.add_argument("--subject")
-    p.add_argument("--body-file", required=True, help="UTF-8 plain-text body")
+    p.add_argument("--body-file", help="UTF-8 plain-text body; required except for inspection")
     p.add_argument("--from-name", default="Kenan")
     p.add_argument("--from-addr", help="send as this address of the Proton account "
                    "(default: the Bridge login address). Project threads use their own "
@@ -113,7 +156,20 @@ def main():
                    help="attach a file; repeatable")
     p.add_argument("--send", action="store_true",
                    help="actually send; without it the composed message is printed only")
+    p.add_argument("--canonical-intent", "--intent-key", dest="intent_key", help="stable purpose key; otherwise reply parent Message-ID or normalized subject")
+    p.add_argument("--request-id", help="request identity; changing it never bypasses intent/contact fencing")
+    p.add_argument("--prior-action", help="resolved successful contact being explicitly followed up")
+    p.add_argument("--prior-revision", type=int, help="exact inspected revision of prior action")
+    p.add_argument("--prior-resolution", help="accountable observation that prior purpose is resolved and this is a new contact")
+    p.add_argument("--inspect-action", help="inspect an action without sending")
     a = p.parse_args()
+    if a.inspect_action:
+        return report(action("inspect", {"id": a.inspect_action}))
+    if a.body_file is None:
+        p.error("--body-file is required unless --inspect-action is used")
+    prior = [a.prior_action is not None, a.prior_revision is not None, a.prior_resolution is not None]
+    if any(prior) and (not all(prior) or not a.intent_key or not a.send):
+        p.error("followup requires --send, --canonical-intent and all --prior-action/--prior-revision/--prior-resolution flags")
 
     user, password = creds()
     with open(a.body_file, encoding="utf-8") as body_file:
@@ -123,13 +179,14 @@ def main():
     sender = a.from_addr or user
     msg["From"] = email.utils.formataddr((a.from_name, sender))
     msg["Date"] = email.utils.formatdate(localtime=True)
-    msg["Message-ID"] = email.utils.make_msgid(domain=sender.split("@")[-1])
+    parent_id = None
 
     if a.reply_to:
         folder, _, num = a.reply_to.rpartition("/")
         parent = parent_headers(folder, num, user, password)
         if parent["message_id"]:
-            msg["In-Reply-To"] = parent["message_id"]
+            parent_id = parent["message_id"]
+            msg["In-Reply-To"] = parent_id
             msg["References"] = " ".join(parent["references"] + [parent["message_id"]])
         subject = a.subject or parent["subject"]
         if not subject.lower().startswith("re:"):
@@ -171,32 +228,71 @@ def main():
         print("\n# not sent (pass --send)", file=sys.stderr)
         return
 
-    s = smtplib.SMTP(BRIDGE_HOST, SMTP_PORT)
-    s.starttls(context=loopback_ctx())
-    s.login(user, password)
-    if not journal_enabled():
-        s.send_message(msg)
-        s.quit()
-        print(f"\n# sent {msg['Message-ID']}", file=sys.stderr)
-        return
-    ticket = None
+    envelope = recipients(a.to + a.cc)
+    payload = {"from": str(msg["From"]), "to": recipients(a.to), "cc": recipients(a.cc) if a.cc else [],
+               "subject": str(msg["Subject"]), "body": body, "inReplyTo": parent_id,
+               "references": str(msg.get("References", "")),
+               "attachments": [{"filename": part.get_filename(), "contentType": part.get_content_type(),
+                                "base64": base64.b64encode(part.get_payload(decode=True)).decode("ascii")}
+                               for part in msg.iter_attachments()]}
+    actor = os.environ.get("PI_THREAD_ID") or os.environ.get("PI_REMOTE_SESSION_ID") or "mail-send"
+    intent = {"intentKey": a.intent_key if a.intent_key is not None else purpose(str(msg["Subject"]), parent_id),
+              "recipients": envelope, "transport": "email.send", "payload": payload,
+              "requestId": a.request_id if a.request_id is not None else str(uuid.uuid4()), "threadId": actor}
+    if a.prior_action:
+        submitted = action("followup", {"priorId": a.prior_action, "expectedRevision": a.prior_revision,
+                                       "input": intent, "evidence": {"kind": "operator-observation", "reference": actor,
+                                                                    "detail": a.prior_resolution}})
+    else:
+        submitted = action("submit", intent)
+    if not submitted["ok"]:
+        return report(submitted)
+    reservation = submitted["value"]
+    if reservation["disposition"] not in ("created", "existing") or reservation["action"]["state"] != "accepted":
+        return report(submitted)
+    claimed = action("claim", {"id": reservation["action"]["id"], "actor": actor})
+    if not claimed["ok"]:
+        return report(claimed)
+    ticket = claimed["value"]
+    msg["Message-ID"] = f"<kenan-action-{ticket['id']}@{sender.split('@')[-1]}>"
+    projection = None
+    s = None
+    dispatch_entered = False
     try:
-        ticket = journal("begin", {"action": "email.send", "recipients": a.to + a.cc,
-                                   "summary": f"{msg['Subject']}: {body}",
-                                   "externalId": str(msg["Message-ID"])})
-        try:
-            refused = s.send_message(msg)
-        except (smtplib.SMTPRecipientsRefused, smtplib.SMTPSenderRefused, smtplib.SMTPDataError) as error:
-            journal_finish(ticket, "failed", type(error).__name__)
-            raise
-        except Exception:
-            journal_finish(ticket, "unconfirmed", "SMTP did not confirm; mail may have been accepted. Do not resend automatically.")
-            raise
-        journal_finish(ticket, "confirmed", f"SMTP accepted {msg['Message-ID']}" + (f"; refused recipients: {list(refused)}" if refused else ""))
+        if journal_enabled():
+            projection = journal("begin", {"action": "email.send", "recipients": envelope,
+                                           "summary": f"{msg['Subject']}: {body}",
+                                           "externalId": str(msg["Message-ID"]), "threadId": actor})
+        s = smtplib.SMTP(BRIDGE_HOST, SMTP_PORT, timeout=20)
+        s.starttls(context=loopback_ctx())
+        s.login(user, password)
+        permitted = action("dispatch", {"ticket": ticket})
+        if not permitted["ok"]:
+            journal_finish(projection, "unconfirmed", "Dispatch authority withheld permission; no SMTP send entered; inspect action")
+            return report(permitted)
+        dispatch_entered = True
+        refused = s.send_message(msg, from_addr=sender, to_addrs=envelope)
+        result = {"messageId": str(msg["Message-ID"]), "refusedRecipients": sorted(refused),
+                  "acceptedRecipients": [address for address in envelope if address not in refused]}
+        detail = "SMTP accepted " + str(msg["Message-ID"]) + ("; partial recipient rejection" if refused else "")
+        receipt = finish_action(ticket, "succeeded", result, detail)
+        journal_finish(projection, "confirmed", detail)
+    except Exception as error:
+        rejected = (isinstance(error, smtplib.SMTPRecipientsRefused)
+                    or isinstance(error, (smtplib.SMTPSenderRefused, smtplib.SMTPDataError))
+                    and 400 <= error.smtp_code <= 599)
+        outcome = "failed-before-effect" if not dispatch_entered or rejected else "uncertain"
+        detail = ("No SMTP DATA accepted: " if outcome == "failed-before-effect" else "SMTP acceptance unknown; do not resend: ") + type(error).__name__
+        receipt = finish_action(ticket, outcome, {"error": type(error).__name__, "messageId": str(msg["Message-ID"])}, detail)
+        journal_finish(projection, "failed" if outcome == "failed-before-effect" else "unconfirmed", detail)
     finally:
-        s.close()
-    print(f"\n# sent {msg['Message-ID']}", file=sys.stderr)
+        if s is not None:
+            try:
+                s.close()
+            except Exception:
+                print("# SMTP connection cleanup failed; action receipt remains authoritative", file=sys.stderr)
+    return report(receipt)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
