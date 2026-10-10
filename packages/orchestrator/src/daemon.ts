@@ -36,12 +36,13 @@ import { configuredPersonSpawnModel } from "./threads/person-spawn-model.js";
 import { resolveThreadSettings } from "./threads/settings.js";
 import type { RunContext } from "./domain.js";
 import { ScheduleService, scheduleHttp } from "./schedule.js";
+import { retireController, type ControllerRetirement } from "./controller-retirement.js";
 
 const HOST=process.env.PI_ORCHESTRATOR_HOST??"127.0.0.1";
 
 function json(res:ServerResponse,status:number,body:unknown):void{const text=JSON.stringify(body);res.writeHead(status,{"content-type":"application/json","content-length":Buffer.byteLength(text)});res.end(text);}
 async function body(req:IncomingMessage):Promise<any>{const chunks:Buffer[]=[];for await(const chunk of req)chunks.push(Buffer.from(chunk));return chunks.length?JSON.parse(Buffer.concat(chunks).toString("utf8")):{};}
-function exec(command:string,cwd?:string,timeout=30_000):Promise<string>{return new Promise((resolve,reject)=>execFile("bash",["-lc",command],{cwd,timeout,maxBuffer:4*1024*1024},(error,stdout,stderr)=>error?reject(new Error(stderr.trim()||error.message)):resolve(stdout.trim())));}
+function exec(command:string,cwd?:string,timeout=30_000,signal?:AbortSignal):Promise<string>{return new Promise((resolve,reject)=>execFile("bash",["-lc",command],{cwd,timeout,signal,maxBuffer:4*1024*1024},(error,stdout,stderr)=>error?reject(new Error(stderr.trim()||error.message)):resolve(stdout.trim())));}
 
 export class Daemon {
   private manifestMtime=0;
@@ -53,6 +54,7 @@ export class Daemon {
   private reconciling=false;
   private laneAdmissionQueue:Promise<unknown>=Promise.resolve();
   private stopped=false;
+  private readonly observation=new AbortController();
   private releasePath:string;
   private readonly releaseCommit:string|null;
   private readonly ledgerPath:string;
@@ -104,12 +106,12 @@ export class Daemon {
     }
   }
 
-  async start():Promise<void>{
-    try { await this.startOwned(); }
+  async start():Promise<ControllerRetirement>{
+    try { return await this.startOwned(); }
     finally { this.fleet.detach(); }
   }
 
-  private async startOwned():Promise<void>{
+  private async startOwned():Promise<ControllerRetirement>{
     await this.loadManifest();
     if(!this.config.modelBrokerUrl)reconcileCompletionReceipts(this.completions,join(this.config.agentDir,"completion-receipts"));
     for(const row of this.store.db.prepare("SELECT value FROM control WHERE key LIKE 'thread-boundary:%'").all() as {value:string}[]){const boundary=JSON.parse(row.value);this.isolatedService(boundary.cwd,boundary.context);}
@@ -128,16 +130,38 @@ export class Daemon {
     const completionTimer=setInterval(()=>this.completionPool.tick(),1_000);
     await this.reconcile();
     console.log(`pi-orchestrator daemon listening on ${this.config.listenHost??HOST}:${this.port}`);
-    await new Promise<void>((resolve)=>{for(const signal of ["SIGINT","SIGTERM"] as const)process.once(signal,resolve);});
-    this.stopped=true;clearInterval(timer);clearInterval(completionTimer);
-    await this.waitForReconcile();
-    await this.completionPool.close();
+    await new Promise<void>((resolve)=>{
+      const stop=()=>{process.off("SIGINT",stop);process.off("SIGTERM",stop);resolve();};
+      process.once("SIGINT",stop);process.once("SIGTERM",stop);
+    });
+    clearInterval(timer);clearInterval(completionTimer);
+    return this.retire(server);
+  }
+
+  private async retire(server:ReturnType<typeof createServer>):Promise<ControllerRetirement>{
+    this.stopped=true;
     this.threads.suspend();
-    const detached=await this.threads.detach();if(!detached.ok)throw new Error(detached.error.message);
-    await this.schedules.close();
-    for(const service of this.isolated.values()){const result=await service.detach();if(!result.ok)throw new Error(result.error.message);}
+    for(const service of this.isolated.values())service.suspend();
+    this.schedules.suspend();
+    this.fleet.detach();
+    this.observation.abort(new Error("Fleet controller retiring; execution remains independently owned"));
     this.opener.detach();
-    await new Promise<void>((resolve)=>server.close(()=>resolve()));
+    const listener=new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
+    server.closeAllConnections();
+    const detach=async(service:ThreadService)=>{const result=await service.detach();if(!result.ok)throw new Error(result.error.message);};
+    const outcome=await retireController([
+      {edge:"reconcile",close:()=>this.waitForReconcile()},
+      {edge:"completion-owner",close:async()=>this.completionPool.detach()},
+      {edge:"threads",close:()=>detach(this.threads)},
+      {edge:"schedules",close:()=>this.schedules.close()},
+      ...[...this.isolated].map(([id,service])=>({edge:`application:${id}`,close:()=>detach(service)})),
+      {edge:"http-listener",close:()=>listener},
+    ],15_000,event=>{
+      const service=event.edge==="threads"?this.threads:event.edge.startsWith("application:")?this.isolated.get(event.edge.slice("application:".length)):undefined;
+      console.error(JSON.stringify({version:1,type:"fleet-controller-retirement",...event,...(event.state==="retained"&&service?{pending:service.retirementPending()}: {})}));
+    });
+    console.error(JSON.stringify({version:1,type:"fleet-controller-retired",...outcome}));
+    return outcome;
   }
 
   private waitForReconcile():Promise<void>{
@@ -171,7 +195,8 @@ export class Daemon {
     try{
       await this.loadManifest();
       if(!this.config.modelBrokerUrl)reconcileCompletionReceipts(this.completions,join(this.config.agentDir,"completion-receipts"));
-      const samples=this.codexMeters&&this.anthropicMeters?(await Promise.all([this.codexMeters.sample(),this.anthropicMeters.sample()])).flat():[];
+      const samples=this.codexMeters&&this.anthropicMeters?(await Promise.all([this.codexMeters.sample(Date.now(),this.observation.signal),this.anthropicMeters.sample(Date.now(),this.observation.signal)])).flat():[];
+      if(this.stopped)return;
       for(const account of this.store.accounts()){
         // A disabled account is never sampled again, so whatever failure it
         // reported last would stay in status for good. Suspension answers the
@@ -193,11 +218,15 @@ export class Daemon {
         }
       }
       await Promise.all([this.refreshReadiness(),this.refreshRepairReadiness()]);
+      if(this.stopped)return;
       if(!this.config.modelBrokerUrl)for(const run of prioritizeReservedCompletions(this.store,this.store.admissionQueue())){
+        if(this.stopped)return;
         if(this.completions.byRun(run.id))await this.launch(run);
       }
+      if(this.stopped)return;
       this.threads.reconcile();
       await this.schedules.reconcile();
+      if(this.stopped)return;
       await this.fillCapacity();
     }finally{this.reconciling=false;}
   }
@@ -206,12 +235,13 @@ export class Daemon {
     if(!this.snapshotCommand||Date.now()-this.readinessAt<30_000)return;
     this.readinessAt=Date.now();
     try{
-      const snapshot=JSON.parse(await exec(this.snapshotCommand)) as LaneReadiness;
+      const snapshot=JSON.parse(await exec(this.snapshotCommand,undefined,30_000,this.observation.signal)) as LaneReadiness;
+      if(this.stopped)return;
       if(typeof snapshot.revision!=="string"||!snapshot.lanes||typeof snapshot.lanes!=="object"||Array.isArray(snapshot.lanes))throw new Error("invalid lane readiness snapshot");
       for(const [id,value] of Object.entries(snapshot.lanes))if(!value||typeof value.ready!=="boolean"||Object.keys(value).some((key)=>key!=="ready"))throw new Error(`lane ${id} requires ready: boolean, not a worker count`);
       for(const lane of this.store.lanes().filter(lane=>!lane.repair))if(!Object.hasOwn(snapshot.lanes,lane.id))throw new Error(`readiness snapshot omitted lane ${lane.id}`);
       this.readiness=snapshot;this.store.setControl("readiness_error","");
-    }catch(error){this.readiness=undefined;this.store.setControl("readiness_error",String(error));}
+    }catch(error){if(this.stopped)return;this.readiness=undefined;this.store.setControl("readiness_error",String(error));}
   }
 
   private async refreshRepairReadiness():Promise<void>{
@@ -220,10 +250,11 @@ export class Daemon {
       if(previous&&Date.now()-previous.at<30_000)return;
       const at=Date.now();
       try{
-        const probe=JSON.parse(await exec(lane.repair!.readinessCommand)) as {revision:string;ready:boolean};
+        const probe=JSON.parse(await exec(lane.repair!.readinessCommand,undefined,30_000,this.observation.signal)) as {revision:string;ready:boolean};
+        if(this.stopped)return;
         if(!probe||typeof probe.revision!=="string"||typeof probe.ready!=="boolean"||Object.keys(probe).some(key=>key!=="revision"&&key!=="ready"))throw new Error("repair readiness requires {revision:string,ready:boolean}");
         this.repairReadiness.set(lane.id,{at,...probe});this.store.setControl(`repair-readiness-error:${lane.id}`,"");
-      }catch(error){this.repairReadiness.set(lane.id,{at,ready:false});this.store.setControl(`repair-readiness-error:${lane.id}`,String(error));}
+      }catch(error){if(this.stopped)return;this.repairReadiness.set(lane.id,{at,ready:false});this.store.setControl(`repair-readiness-error:${lane.id}`,String(error));}
     }));
   }
 
@@ -241,7 +272,7 @@ export class Daemon {
   private async fillCapacity():Promise<void>{
     if(this.store.control("launches")==="paused")return;
     const failed=new Set<string>(),admittedLanes=new Set<string>();
-    while(true){
+    while(!this.stopped){
       const running=this.threads.runningSummary();
       const custody=this.threads.laneCustody();
       const lanes=this.store.lanes().filter((lane)=>this.laneEnabled(lane.id)&&this.laneReady(lane.id,running.repairOwner)
@@ -264,7 +295,7 @@ export class Daemon {
           if(lane.repair||this.snapshotCommand)this.store.setControl(`readiness-admitted:${lane.id}`,String(lane.repair?this.repairReadiness.get(lane.id)!.at:this.readinessAt));
           admittedLanes.add(lane.id);
           this.store.setControl(`refusal:${key}`,"");
-        }catch(error){failed.add(key);this.store.setControl(`refusal:${key}`,String(error));continue;}
+        }catch(error){if(this.stopped)return;failed.add(key);this.store.setControl(`refusal:${key}`,String(error));continue;}
         admitted=true;break;
       }
       if(!admitted)break;
@@ -273,6 +304,7 @@ export class Daemon {
 
   private spawnLane(id:string,input:SpawnThread):Promise<Result<Thread>>{
     const operation=this.laneAdmissionQueue.then(()=>{
+      if(this.stopped)return{ok:false as const,error:{code:"unavailable" as const,message:"Fleet controller is retiring; queued admission remains with its owner"}};
       const lane=this.store.lane(id);
       if(!lane)return{ok:false as const,error:{code:"not_found" as const,message:`Lane ${id} no longer exists`}};
       if(lane.maxActive!==undefined&&(this.threads.laneCustody().get(id)??0)>=lane.maxActive)
@@ -292,14 +324,14 @@ export class Daemon {
   private async lanePrompt(lane:LaneSpec):Promise<string>{
     let prompt=lane.prompt;
     if(lane.openingProbe){
-      const values=JSON.parse(await exec(lane.openingProbe,lane.cwd,55_000));
+      const values=JSON.parse(await exec(lane.openingProbe,lane.cwd,55_000,this.observation.signal));
       if(!values||typeof values!=="object"||Array.isArray(values))throw new Error(`lane ${lane.id} opening probe must print one JSON object`);
       prompt=prompt.replace(/\{\{([a-zA-Z0-9_.-]+)\}\}/g,(_whole,key)=>{
         const value=values[key];if(!["string","number","boolean"].includes(typeof value))throw new Error(`lane ${lane.id} probe omitted ${key}`);return String(value);
       });
     }
     if(lane.doctrineUrl){
-      const response=await fetch(lane.doctrineUrl,{signal:AbortSignal.timeout(10_000)});
+      const response=await fetch(lane.doctrineUrl,{signal:AbortSignal.any([this.observation.signal,AbortSignal.timeout(10_000)])});
       if(!response.ok)throw new Error(`lane ${lane.id} doctrine returned HTTP ${response.status}`);
       prompt=`# Lane doctrine\n\n${await response.text()}\n\n# Assignment\n\n${prompt}`;
     }
@@ -337,7 +369,7 @@ export class Daemon {
       if(!process.env.PI_REMOTE_THREAD_OWNER_URL&&(!Number.isInteger(port)||port<1||port>65535))throw new Error(`Registered person ${registryPath} has no valid PI_REMOTE_PORT`);
       const url=new URL(process.env.PI_REMOTE_THREAD_OWNER_URL??`http://${environment?.PI_REMOTE_HOST??"127.0.0.1"}:${port}/v1/thread-owner`);
       if(!["http:","https:"].includes(url.protocol)||url.pathname!=="/v1/thread-owner")throw new Error("PI_REMOTE_THREAD_OWNER_URL must name the authorized person's local /v1/thread-owner endpoint");
-      owners.push({id:"person",api:createThreadClient(url.toString().replace(/\/$/,""))});
+      owners.push({id:"person",api:createThreadClient(url.toString().replace(/\/$/,""),fetch,{signal:this.observation.signal})});
     }
     const directory=new ThreadDirectory({id:"fleet",api:this.threads},owners);
     this.threads.setDirectory(directory);
@@ -358,6 +390,7 @@ export class Daemon {
       :{...shared,PI_ORCHESTRATOR_AUTH:this.config.authPath};
   }
   private async launch(run:Run):Promise<boolean>{
+    if(this.stopped)return false;
     const choice=assignCompletion(this.store,run.id,run.profile,this.config,new ModelAvailabilityStore(modelAvailabilityPath()));
     if(!choice.assignment){this.store.setControl(`refusal:${run.id}`,choice.refusals.map(r=>`${r.accountId}: ${r.reason}`).join("; "));return false;}
     if(!this.store.assignRun(run.id,{...choice.assignment,unit:`completion:${run.id}`,releasePath:this.releasePath}))return false;
@@ -365,6 +398,7 @@ export class Daemon {
   }
 
   private async request(req:IncomingMessage,res:ServerResponse):Promise<void>{
+    if(this.stopped){json(res,503,{error:"Fleet controller is retiring; reconcile accepted request identities with the successor"});return;}
     try{
       const url=new URL(req.url??"/",`http://${HOST}:${this.port}`),method=req.method??"GET";
       if(method==="GET"&&url.pathname==="/v1/health"){
@@ -392,7 +426,7 @@ export class Daemon {
         if(res.destroyed)cancel();
         try{
           const headers=new Headers(Object.entries(req.headers).flatMap(([key,value])=>value===undefined?[]:[[key,Array.isArray(value)?value.join(","):value] as [string,string]]));
-          const response=await threadHttp(api,new Request(url,{method,headers,signal:cancellation.signal,...(method==="POST"?{body:JSON.stringify(input)}:{})}),application?`/v1/applications/${application[1]}/threads`:localOwner?"/v1/thread-owner":"/v1/threads",admissionFor(this.callers,caller));
+          const response=await threadHttp(api,new Request(url,{method,headers,signal:AbortSignal.any([cancellation.signal,this.observation.signal]),...(method==="POST"?{body:JSON.stringify(input)}:{})}),application?`/v1/applications/${application[1]}/threads`:localOwner?"/v1/thread-owner":"/v1/threads",admissionFor(this.callers,caller));
           if(res.destroyed)return;
           if(response){res.writeHead(response.status,Object.fromEntries(response.headers));res.end(await response.text());return;}
         }finally{res.off("close",cancel);}
@@ -527,7 +561,7 @@ export class Daemon {
         this.store.setControl(input.key,input.value);return json(res,200,{ok:true});
       }
       json(res,404,{error:"not found"});
-    }catch(error){json(res,500,{error:String(error)});}
+    }catch(error){if(!res.destroyed)json(res,500,{error:String(error)});}
   }
 
   private status():unknown{

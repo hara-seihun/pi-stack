@@ -3,8 +3,7 @@
 // imports the same file, so a field renamed on one side fails to compile on
 // the other instead of silently reading undefined at runtime.
 
-import type { AgentWait, ThreadWakeSchedule, ExecutionPhase, ThreadState, ThreadLifecycle, Delivery as ThreadDelivery } from "pi-orchestrator/api";
-import type { ThreadInputState } from "../../../packages/orchestrator/src/threads/contracts";
+import type { AgentWait, ThreadWakeSchedule, ExecutionPhase, ThreadState, ThreadLifecycle, Delivery as ThreadDelivery, ThreadInputState } from "pi-orchestrator/api";
 import type { ReconcileFrame } from "../shared/reconcile.js";
 export type ChatId = `ai:${string}` | `room:${string}`;
 export type FileBrowserEntry = { name: string; path: string; kind: "directory" | "file" | "other" };

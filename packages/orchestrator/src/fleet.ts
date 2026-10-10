@@ -45,6 +45,7 @@ export class Fleet {
     const candidate = { provider: settings.model.slice(0, slash), model: settings.model.slice(slash + 1), thinking: settings.thinkingLevel };
     const codex = settings.speed === "ultrafast" ? builtinProviders().find(provider => provider.id === candidate.provider && provider.id === "openai-codex") : undefined;
     const excluded = codex ? await codexTierExclusions(this.store, providerOAuth(codex, this.config.authPath), candidate.model, settings.speed, new Set()) : new Set<string>();
+    if (this.detached) return { ok: false, error: { code: "unavailable", message: "Fleet controller detached during account observation; no execution was admitted" } };
     return this.store.transaction(() => {
       const leaseId = `thread:${executionId}`;
       const held = recovering ? this.store.db.prepare("SELECT account_id FROM lease WHERE id=? AND run_id=?").get(leaseId, thread.id) as { account_id: string } | undefined : undefined;

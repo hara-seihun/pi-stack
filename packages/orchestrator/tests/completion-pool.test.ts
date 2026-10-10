@@ -5,7 +5,7 @@ import { expect, it } from "vitest";
 import { Store } from "../src/store.js";
 import { loadConfig } from "../src/config.js";
 import { CompletionService } from "../src/completion.js";
-import { CompletionPool } from "../src/host/completion-pool.js";
+import { CompletionExecutionPool as CompletionPool } from "../src/host/completion-execution.js";
 import { assignCompletion } from "../src/policy.js";
 import { noModelPolicy } from "./fixtures/model-availability.js";
 import { reservationKey } from "../src/admission-reservation.js";

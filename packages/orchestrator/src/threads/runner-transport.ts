@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { setMaxListeners } from "node:events";
 import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
 import { dirname, join, resolve } from "node:path";
@@ -20,9 +21,12 @@ function socketAbsent(error: unknown): boolean {
   const failure = error as NodeJS.ErrnoException;
   return failure?.syscall === "connect" && ["ENOENT", "ECONNREFUSED"].includes(failure.code ?? "");
 }
-function runnerRequest(path: string, value: unknown, timeout = 5000): Promise<any> {
+function runnerRequest(path: string, value: unknown, timeout = 5000, signal?: AbortSignal): Promise<any> {
+  if (signal?.aborted) return Promise.reject(signal.reason);
   return new Promise((resolve, reject) => {
     const socket = createConnection(path);
+    const abort = () => socket.destroy(new Error("Runner observation detached; native command custody is unchanged"));
+    signal?.addEventListener("abort", abort, { once: true });
     let input = "";
     const timer = setTimeout(() => { socket.destroy(); reject(new Error("Thread runner control timed out")); }, timeout);
     socket.on("connect", () => socket.write(`${JSON.stringify(value)}\n`));
@@ -35,10 +39,11 @@ function runnerRequest(path: string, value: unknown, timeout = 5000): Promise<an
       catch (error) { reject(error); }
     });
     socket.on("error", error => { clearTimeout(timer); reject(error); });
-    socket.on("close", () => { clearTimeout(timer); reject(new Error("Thread runner control closed")); });
+    socket.on("close", () => { signal?.removeEventListener("abort", abort); clearTimeout(timer); reject(new Error("Thread runner control closed")); });
   });
 }
-function connect(path: string, output: (event: PiEvent) => void, exit: (code: number) => void, onAttached: () => void): Promise<Connection> {
+function connect(path: string, output: (event: PiEvent) => void, exit: (code: number) => void, onAttached: () => void, signal?: AbortSignal): Promise<Connection> {
+  if (signal?.aborted) return Promise.reject(signal.reason);
   return new Promise((resolve, reject) => {
     let socket: Socket;
     let connected = false, attached = false, detached = false, ended = false;
@@ -51,8 +56,10 @@ function connect(path: string, output: (event: PiEvent) => void, exit: (code: nu
         const line = `${JSON.stringify({ type: "command", value: command })}\n`;
         if (connected && socket.writable) socket.write(line); else unsent.push(line);
       },
-      detach() { detached = true; clearTimeout(retry); socket.destroy(); unsent.length = 0; },
+      detach() { detached = true; clearTimeout(retry); socket?.destroy(); unsent.length = 0; signal?.removeEventListener("abort", abort); },
     };
+    const abort = () => { connection.detach(); reject(new Error("Runner stream detached; execution remains native-owned")); };
+    signal?.addEventListener("abort", abort, { once: true });
     function finish(code = 1) { if (!ended) { ended = true; clearTimeout(retry); exit(code); } }
     function open() {
       if (detached || ended) return;
@@ -150,9 +157,10 @@ function boundary(options: PiSessionOptions) {
   const isolation = options.args.includes("--orchestrator-context") ? `isolated:${options.cwd}` : "normal";
   return hash(JSON.stringify([import.meta.url, process.getuid?.(), options.env.HOME ?? process.env.HOME, options.env.PI_CODING_AGENT_DIR ?? "", options.env.PI_ORCHESTRATOR_EXECUTION ?? "user", options.env.PI_MODEL_BROKER_URL ?? "direct", isolation]));
 }
-async function ensureRunner(control: string, options: PiSessionOptions, durable: boolean, currentGeneration = true): Promise<void> {
+async function ensureRunner(control: string, options: PiSessionOptions, durable: boolean, currentGeneration = true, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
   if (existsSync(control)) {
-    try { await runnerRequest(control, { type: currentGeneration ? "retain" : "status" }); return; }
+    try { await runnerRequest(control, { type: currentGeneration ? "retain" : "status" }, 5000, signal); return; }
     catch (error) { if (!["ENOENT", "ECONNREFUSED"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error; }
   }
   if (underMemoryPressure()) throw new Error("Runner capacity busy: memory pressure");
@@ -191,6 +199,7 @@ async function ensureRunner(control: string, options: PiSessionOptions, durable:
       `--unit=${unit}`);
   }
   if (root) command.unshift("sudo", "-n", "--preserve-env");
+  signal?.throwIfAborted();
   const host = spawn(command[0]!, command.slice(1), {
     cwd: env.HOME, detached: true, stdio: ["ignore", "inherit", "inherit"], env,
   });
@@ -199,11 +208,12 @@ async function ensureRunner(control: string, options: PiSessionOptions, durable:
   host.on("error", error => { launchError = error; });
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
+    signal?.throwIfAborted();
     if (launchError) throw launchError;
     if (host.exitCode !== null && host.exitCode !== 75) throw new Error(`Thread runner exited ${host.exitCode}`);
     if (existsSync(control)) {
       try {
-        const status = await runnerRequest(control, { type: "status" });
+        const status = await runnerRequest(control, { type: "status" }, 5000, signal);
         if (durable) {
           // A concurrent launch may have won the control lock; its owner names the live unit.
           if (typeof status.unit !== "string") throw new Error("Durable thread runner did not report its controller unit");
@@ -214,7 +224,7 @@ async function ensureRunner(control: string, options: PiSessionOptions, durable:
       }
       catch (error) { if (!["ENOENT", "ECONNREFUSED"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error; }
     }
-    await delay(25);
+    await delay(25, undefined, { signal });
   }
   throw new Error("Thread runner startup has not acknowledged ownership");
 }
@@ -250,6 +260,9 @@ export function createSharedPiSessionOpener({ dataDir, durable = false }: { data
   const socketDir = runnerSocketDirectory(dataDir);
   const connections = new Set<Connection>();
   const controls = new Map<string, boolean>();
+  const observation = new AbortController();
+  setMaxListeners(0, observation.signal);
+  const request = (path: string, value: unknown, timeout = 5000) => runnerRequest(path, value, timeout, observation.signal);
   function validate(reference: PiRunnerReference): PiRunnerReference {
     if (!reference || typeof reference.control !== "string" || typeof reference.socketPath !== "string") throw new Error("Invalid recorded runner reference");
     const control = resolve(reference.control), socketPath = resolve(reference.socketPath);
@@ -259,15 +272,15 @@ export function createSharedPiSessionOpener({ dataDir, durable = false }: { data
   async function attach({ control, socketPath }: PiRunnerReference, output: (event: PiEvent) => void, exit: (code: number) => void, residency = true): Promise<PiSession> {
     let connection: Connection | undefined;
     let exited = false;
-    connection = await connect(socketPath, output, code => { exited = true; if (connection) connections.delete(connection); exit(code); }, () => output({ type: "runner_attached", control, socketPath }));
+    connection = await connect(socketPath, output, code => { exited = true; if (connection) connections.delete(connection); exit(code); }, () => output({ type: "runner_attached", control, socketPath }), observation.signal);
     const attached = connection;
     if (!exited) connections.add(attached);
     controls.set(control, residency);
     return {
       command: async command => { attached.send(command); },
-      setActive: async active => { if (residency) await runnerRequest(control, { type: "activity", socketPath, active }); },
+      setActive: async active => { if (residency) await request(control, { type: "activity", socketPath, active }); },
       close: async () => {
-        await runnerRequest(control, { type: "close", socketPath }, 35_000);
+        await request(control, { type: "close", socketPath }, 35_000);
         attached.detach(); connections.delete(attached);
       },
     };
@@ -276,7 +289,7 @@ export function createSharedPiSessionOpener({ dataDir, durable = false }: { data
     if (reference === undefined) return null;
     const recorded = validate(reference);
     let status: any;
-    try { status = await runnerRequest(recorded.control, { type: "status" }); }
+    try { status = await request(recorded.control, { type: "status" }); }
     catch (error) {
       if (!socketAbsent(error)) throw error;
       if (!controlOwnerAbsent(recorded.control)) throw new RunnerRecoveryError("ownership-uncertain", `Native runner still owns unreachable control: ${recorded.control}`);
@@ -288,7 +301,7 @@ export function createSharedPiSessionOpener({ dataDir, durable = false }: { data
       if (!socketAbsent(error)) throw error;
       if (status.threadIds?.some((id: string) => recorded.socketPath.endsWith(`.${hash(id)}.sock`))) throw new RunnerRecoveryError("ownership-uncertain", `Native ownership remains without a session socket: ${recorded.socketPath}`);
       // Fence an earlier open whose acknowledgement was lost. Native close shares its serial queue.
-      try { await runnerRequest(recorded.control, { type: "close", socketPath: recorded.socketPath }, 35_000); }
+      try { await request(recorded.control, { type: "close", socketPath: recorded.socketPath }, 35_000); }
       catch (closing) {
         if (!socketAbsent(closing)) throw closing;
         if (!controlOwnerAbsent(recorded.control)) throw new RunnerRecoveryError("ownership-uncertain", `Native absence fence lost its owner: ${recorded.control}`);
@@ -325,7 +338,7 @@ export function createSharedPiSessionOpener({ dataDir, durable = false }: { data
       const starting = starts.get(reference.control);
       if (starting) await starting;
       let status: any;
-      try { status = await runnerRequest(reference.control, { type: "status" }); }
+      try { status = await request(reference.control, { type: "status" }); }
       catch (error) {
         if (!socketAbsent(error)) throw error;
         if (!controlOwnerAbsent(reference.control) || existsSync(reference.socketPath)) throw new RunnerRecoveryError("ownership-uncertain", `Cannot establish native absence: ${reference.control}`);
@@ -339,7 +352,7 @@ export function createSharedPiSessionOpener({ dataDir, durable = false }: { data
       if (status.threadIds.includes(threadId)) throw new RunnerRecoveryError("ownership-uncertain", `Native thread owns a missing session socket: ${threadId}`);
       // Status is not serialized with open. Close fences an open still waiting in the native queue.
       try {
-        const closed = await runnerRequest(reference.control, { type: "close", socketPath: reference.socketPath }, 35_000);
+        const closed = await request(reference.control, { type: "close", socketPath: reference.socketPath }, 35_000);
         if (closed?.ok !== true) throw new RunnerRecoveryError("ownership-uncertain", `Native runner did not acknowledge absence fence: ${reference.control}`);
       } catch (error) {
         if (!socketAbsent(error)) throw error;
@@ -359,17 +372,17 @@ export function createSharedPiSessionOpener({ dataDir, durable = false }: { data
     const currentControl = join(socketDir, "thread-runners", `${group}.sock`);
     if (retained && retained.control !== currentControl) {
       let status: any;
-      try { status = await runnerRequest(retained.control, { type: "status" }); }
+      try { status = await request(retained.control, { type: "status" }); }
       catch (error) { if (!socketAbsent(error)) throw error; }
       const recoveringLive = options.env.PI_THREAD_RECOVERING === "1" && status?.threadIds?.includes(options.threadId);
       // Request drain before closing the last idle resident: its close can remove the control socket.
       // Recovery keeps accepted sessions, not obsolete empty generations, even after a controller crash.
       if (typeof status?.activeSessions === "number") {
-        try { await runnerRequest(retained.control, { type: "drain" }); }
+        try { await request(retained.control, { type: "drain" }); }
         catch (error) { if (!socketAbsent(error)) throw error; }
       }
       if (!recoveringLive && status && status.sessions !== 0) {
-        try { await runnerRequest(retained.control, { type: "close", socketPath: retained.socketPath }, 35_000); }
+        try { await request(retained.control, { type: "close", socketPath: retained.socketPath }, 35_000); }
         catch (error) { if (!socketAbsent(error)) throw error; }
       }
       if (!recoveringLive) retained = undefined;
@@ -382,17 +395,18 @@ export function createSharedPiSessionOpener({ dataDir, durable = false }: { data
     mkdirSync(dirname(socketPath), { recursive: true, mode: 0o700 });
     let starting = starts.get(control);
     if (!starting) {
-      starting = ensureRunner(control, options, durable, control === currentControl).finally(() => starts.delete(control));
+      starting = ensureRunner(control, options, durable, control === currentControl, observation.signal).finally(() => starts.delete(control));
       starts.set(control, starting);
     }
     await starting;
     const { threads: _threads, ...serializable } = options;
     if (!options.env.PI_THREAD_API_URL) throw new Error("Shared Pi sessions require their owning PI_THREAD_API_URL");
-    await runnerRequest(control, { type: "open", options: { ...serializable, socketPath, priority: options.env.PI_THREAD_ADMISSION !== "background" } }, 35_000);
-    const status = retained ? await runnerRequest(control, { type: "status" }) : undefined;
+    await request(control, { type: "open", options: { ...serializable, socketPath, priority: options.env.PI_THREAD_ADMISSION !== "background" } }, 35_000);
+    const status = retained ? await request(control, { type: "status" }) : undefined;
     return attach(reference, output, exit, !status || typeof status.activeSessions === "number");
   };
   return { openSession, attachSession, recoverSession, detach() {
+    observation.abort(new Error("Runner controller detached; accepted execution remains native-owned"));
     for (const connection of connections) connection.detach(); connections.clear();
     for (const [control, residency] of controls) if (residency) void runnerRequest(control, { type: "drain" }).catch(error => { if (!socketAbsent(error) && (error as NodeJS.ErrnoException).code !== "EPIPE") console.error("Runner generation drain failed:", error); });
     controls.clear();

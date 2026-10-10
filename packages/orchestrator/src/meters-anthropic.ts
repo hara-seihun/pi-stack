@@ -1,6 +1,6 @@
 import type { OAuthCredential } from "@earendil-works/pi-ai";
 import type { SharedOAuthAuth } from "./auth/shared-oauth.js";
-import { meterCredential } from "./auth/meter-credential.js";
+import { meterCredential, meterRequestSignal } from "./auth/meter-credential.js";
 import type { Store } from "./store.js";
 
 /**
@@ -77,6 +77,7 @@ export interface AnthropicUsageReading {
 
 export type AnthropicSampleOutcome =
   | "recorded"
+  | "cancelled"
   | "not-due"
   | "no-credential"
   | "credential-failed"
@@ -182,10 +183,12 @@ async function fetchAnthropicJson(
   accessToken: string,
   fetchFn: FetchLike,
   requestTimeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<unknown> {
+  signal?.throwIfAborted();
   const response = await fetchFn(url, {
     headers: requestHeaders(accessToken),
-    signal: AbortSignal.timeout(requestTimeoutMs),
+    signal: meterRequestSignal(requestTimeoutMs, signal),
   });
   if (response.status === 401) throw new AnthropicUnauthorizedError(label, response.status);
   if (!response.ok) throw new Error(`anthropic ${label} HTTP ${response.status}`);
@@ -196,9 +199,10 @@ export async function fetchAnthropicUsage(
   accessToken: string,
   fetchFn: FetchLike,
   requestTimeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<AnthropicUsageReading> {
   return parseAnthropicUsage(
-    await fetchAnthropicJson(USAGE_URL, "usage", accessToken, fetchFn, requestTimeoutMs),
+    await fetchAnthropicJson(USAGE_URL, "usage", accessToken, fetchFn, requestTimeoutMs, signal),
   );
 }
 
@@ -257,20 +261,24 @@ export class AnthropicMeterSampler {
    * is caught and repaired. A 401 that survives a fresh token is a real
    * authorization problem and is reported.
    */
-  private async read(accountId: string, credential: OAuthCredential): Promise<AnthropicUsageReading> {
+  private async read(accountId: string, credential: OAuthCredential, signal?: AbortSignal): Promise<AnthropicUsageReading> {
     try {
-      return await fetchAnthropicUsage(credential.access, this.fetchFn, this.requestTimeoutMs);
+      return await fetchAnthropicUsage(credential.access, this.fetchFn, this.requestTimeoutMs, signal);
     } catch (error) {
+      signal?.throwIfAborted();
       if (!(error instanceof AnthropicUnauthorizedError)) throw error;
       const repaired = await this.auth.refreshRejected(
         accountId,
         credential.access,
+        meterRequestSignal(this.requestTimeoutMs, signal),
         AbortSignal.timeout(this.requestTimeoutMs),
       );
+      signal?.throwIfAborted();
       try {
-        return await fetchAnthropicUsage(repaired.access, this.fetchFn, this.requestTimeoutMs);
+        return await fetchAnthropicUsage(repaired.access, this.fetchFn, this.requestTimeoutMs, signal);
       } catch (second) {
-        if (second instanceof AnthropicUnauthorizedError) await this.auth.reject(accountId, repaired.access, AbortSignal.timeout(this.requestTimeoutMs));
+        signal?.throwIfAborted();
+        if (second instanceof AnthropicUnauthorizedError) await this.auth.reject(accountId, repaired.access, meterRequestSignal(this.requestTimeoutMs, signal));
         throw second;
       }
     }
@@ -282,9 +290,10 @@ export class AnthropicMeterSampler {
    * custody domain are skipped, not failed: their own owner polls them. Never
    * throws — a provider outage is a gap in evidence, not a controller fault.
    */
-  async sample(now = Date.now()): Promise<AnthropicSampleReport[]> {
+  async sample(now = Date.now(), signal?: AbortSignal): Promise<AnthropicSampleReport[]> {
     const reports: AnthropicSampleReport[] = [];
     for (const account of this.ledger.accounts()) {
+      if (signal?.aborted) break;
       if (account.provider !== ANTHROPIC_PROVIDER) continue;
       // Disabled accounts are unschedulable, so sampling them buys no
       // evidence and their failures would linger in status forever.
@@ -294,16 +303,19 @@ export class AnthropicMeterSampler {
         continue;
       }
       this.attemptedAt.set(account.id, now);
-      const credential = await meterCredential(this.auth, account.id, this.requestTimeoutMs);
+      const credential = await meterCredential(this.auth, account.id, this.requestTimeoutMs, signal);
       if (!credential.ok) {
         reports.push({ accountId: account.id, outcome: credential.outcome, detail: credential.detail });
+        if (signal?.aborted) this.attemptedAt.delete(account.id);
         continue;
       }
       let usage: AnthropicUsageReading;
       try {
-        usage = await this.read(account.id, credential.credential);
+        usage = await this.read(account.id, credential.credential, signal);
+        signal?.throwIfAborted();
       } catch (error) {
-        reports.push({ accountId: account.id, outcome: "request-failed", detail: String(error) });
+        reports.push({ accountId: account.id, outcome: signal?.aborted ? "cancelled" : "request-failed", detail: String(error) });
+        if (signal?.aborted) this.attemptedAt.delete(account.id);
         continue;
       }
       for (const scope of usage.unmappedScopes) {

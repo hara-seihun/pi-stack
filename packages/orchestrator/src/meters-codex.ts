@@ -2,7 +2,7 @@ import { request as httpsRequest } from "node:https";
 import type { OAuthCredential } from "@earendil-works/pi-ai";
 import type { Store } from "./store.js";
 import type { SharedOAuthAuth } from "./auth/shared-oauth.js";
-import { meterCredential } from "./auth/meter-credential.js";
+import { meterCredential, meterRequestSignal } from "./auth/meter-credential.js";
 import { claimCodexReset, codexResetAttempt, confirmCodexReset, recordCodexResetResult } from "./codex-resets.js";
 
 /**
@@ -93,6 +93,7 @@ export interface CodexWindowUsage {
 
 export type CodexSampleOutcome =
   | "recorded"
+  | "cancelled"
   | "reset-credits-unreadable"
   | "reset-pending"
   | "reset-failed"
@@ -178,6 +179,7 @@ export async function fetchCodexResetCredits(
   requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
   signal?: AbortSignal,
 ): Promise<CodexResetCredits> {
+  signal?.throwIfAborted();
   const response = await fetchFn(RESET_CREDITS_URL, {
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -186,7 +188,7 @@ export async function fetchCodexResetCredits(
       "User-Agent": USER_AGENT,
       originator: USER_AGENT,
     },
-    signal: AbortSignal.any([AbortSignal.timeout(requestTimeoutMs), ...(signal ? [signal] : [])]),
+    signal: meterRequestSignal(requestTimeoutMs, signal),
     redirect: "error",
   });
   if (!response.ok) throw new Error(`codex reset credits HTTP ${response.status}`);
@@ -230,6 +232,7 @@ export async function fetchCodexUsage(
   now = Date.now(),
   signal?: AbortSignal,
 ): Promise<CodexWindowUsage[]> {
+  signal?.throwIfAborted();
   const response = await fetchFn(USAGE_URL, {
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -238,7 +241,7 @@ export async function fetchCodexUsage(
       "User-Agent": USER_AGENT,
       originator: USER_AGENT,
     },
-    signal: AbortSignal.any([AbortSignal.timeout(requestTimeoutMs), ...(signal ? [signal] : [])]),
+    signal: meterRequestSignal(requestTimeoutMs, signal),
     redirect: "error",
   });
   if (!response.ok) {
@@ -314,23 +317,28 @@ export class CodexMeterSampler {
     credential: OAuthCredential,
     chatgptAccountId: string,
     now: number,
+    signal?: AbortSignal,
   ): Promise<{ windows: CodexWindowUsage[]; access: string }> {
     try {
-      return { windows: await fetchCodexUsage(credential.access, chatgptAccountId, this.fetchFn, this.requestTimeoutMs, now), access: credential.access };
+      return { windows: await fetchCodexUsage(credential.access, chatgptAccountId, this.fetchFn, this.requestTimeoutMs, now, signal), access: credential.access };
     } catch (thrown) {
+      signal?.throwIfAborted();
       if (!(thrown instanceof CodexUnauthorizedError)) throw thrown;
       try {
         const repaired = await this.auth.refreshRejected(
           accountId,
           credential.access,
+          meterRequestSignal(this.requestTimeoutMs, signal),
           AbortSignal.timeout(this.requestTimeoutMs),
         );
+        signal?.throwIfAborted();
         // The repaired token is what the rest of this pass reads with; the
         // rejected one would only earn a second refusal.
         try {
-          return { windows: await fetchCodexUsage(repaired.access, chatgptAccountId, this.fetchFn, this.requestTimeoutMs, now), access: repaired.access };
+          return { windows: await fetchCodexUsage(repaired.access, chatgptAccountId, this.fetchFn, this.requestTimeoutMs, now, signal), access: repaired.access };
         } catch (error) {
-          if (error instanceof CodexUnauthorizedError) await this.auth.reject(accountId, repaired.access, AbortSignal.timeout(this.requestTimeoutMs));
+          signal?.throwIfAborted();
+          if (error instanceof CodexUnauthorizedError) await this.auth.reject(accountId, repaired.access, meterRequestSignal(this.requestTimeoutMs, signal));
           throw error;
         }
       } catch (error) {
@@ -345,9 +353,10 @@ export class CodexMeterSampler {
    * declared window. Never throws: a provider outage is a gap in evidence,
    * not a controller fault.
    */
-  async sample(now = Date.now()): Promise<CodexSampleReport[]> {
+  async sample(now = Date.now(), signal?: AbortSignal): Promise<CodexSampleReport[]> {
     const reports: CodexSampleReport[] = [];
     for (const account of this.ledger.accounts()) {
+      if (signal?.aborted) break;
       if (account.provider !== CODEX_PROVIDER) continue;
       // A disabled account cannot be admitted, so its meters measure nothing
       // schedulable. Polling one only keeps its last failure alive in status:
@@ -367,7 +376,8 @@ export class CodexMeterSampler {
         continue;
       }
       this.attemptedAt.set(account.id, now);
-      reports.push(...await this.sampleAccount(account.id, now));
+      reports.push(...await this.sampleAccount(account.id, now, signal));
+      if (signal?.aborted) this.attemptedAt.delete(account.id);
     }
     return reports;
   }
@@ -381,17 +391,19 @@ export class CodexMeterSampler {
    * in place and is reported without raising a meter alarm, because metering
    * itself is unaffected.
    */
-  private async readResetCredits(accountId: string, accessToken: string, chatgptAccountId: string): Promise<{ report: CodexSampleReport; credits?: CodexResetCredits }> {
+  private async readResetCredits(accountId: string, accessToken: string, chatgptAccountId: string, signal?: AbortSignal): Promise<{ report: CodexSampleReport; credits?: CodexResetCredits }> {
     try {
-      const credits = await fetchCodexResetCredits(accessToken, chatgptAccountId, this.fetchFn, this.requestTimeoutMs);
+      const credits = await fetchCodexResetCredits(accessToken, chatgptAccountId, this.fetchFn, this.requestTimeoutMs, signal);
+      signal?.throwIfAborted();
       this.ledger.recordResetCredits(accountId, { at: Date.now(), available: credits.available, nextExpiresAt: credits.nextExpiresAt });
       return { report: { accountId, outcome: "recorded", bankedResets: credits.available }, credits };
     } catch (thrown) {
-      return { report: { accountId, outcome: "reset-credits-unreadable", detail: String(thrown) } };
+      return { report: { accountId, outcome: signal?.aborted ? "cancelled" : "reset-credits-unreadable", detail: String(thrown) } };
     }
   }
 
-  private async resetExhausted(accountId: string, access: string, chatgptAccountId: string, windows: CodexWindowUsage[], credits: CodexResetCredits | undefined, observedAt: number): Promise<CodexSampleReport | undefined> {
+  private async resetExhausted(accountId: string, access: string, chatgptAccountId: string, windows: CodexWindowUsage[], credits: CodexResetCredits | undefined, observedAt: number, signal?: AbortSignal): Promise<CodexSampleReport | undefined> {
+    if (signal?.aborted) return { accountId, outcome: "cancelled" };
     if (!this.autoReset || !this.ledger.accounts().some((account) => account.id === accountId && account.enabled)) return;
     const weekly = windows.find((usage) => Math.abs(usage.windowSeconds - 604800) <= 60480);
     if (!weekly) return;
@@ -406,6 +418,7 @@ export class CodexMeterSampler {
     }
     const creditId = credits?.creditIds?.[0];
     if (!creditId) return;
+    // After the durable claim, redemption owns its result through shutdown.
     const attempt = claimCodexReset(this.ledger, accountId, creditId, weekly.resetAt);
     if (!attempt) return;
     try {
@@ -427,23 +440,26 @@ export class CodexMeterSampler {
     }
   }
 
-  async sampleAccount(accountId: string, now = Date.now()): Promise<CodexSampleReport[]> {
+  async sampleAccount(accountId: string, now = Date.now(), signal?: AbortSignal): Promise<CodexSampleReport[]> {
       const reports: CodexSampleReport[] = [];
-      const credential = await meterCredential(this.auth, accountId, this.requestTimeoutMs);
+      const credential = await meterCredential(this.auth, accountId, this.requestTimeoutMs, signal);
       if (!credential.ok) return [{ accountId, outcome: credential.outcome, detail: credential.detail }];
       const chatgptAccountId = credential.credential.accountId;
       if (typeof chatgptAccountId !== "string" || !chatgptAccountId) return [{ accountId, outcome: "credential-failed", detail: "missing ChatGPT account id" }];
       let read: { windows: CodexWindowUsage[]; access: string };
       try {
-        read = await this.read(accountId, credential.credential, chatgptAccountId, now);
+        read = await this.read(accountId, credential.credential, chatgptAccountId, now, signal);
+        signal?.throwIfAborted();
       } catch (thrown) {
-        return [{ accountId, outcome: "request-failed", detail: String(thrown) }];
+        return [{ accountId, outcome: signal?.aborted ? "cancelled" : "request-failed", detail: String(thrown) }];
       }
       const windows = read.windows;
-      const resetCredits = await this.readResetCredits(accountId, read.access, chatgptAccountId);
+      const resetCredits = await this.readResetCredits(accountId, read.access, chatgptAccountId, signal);
       reports.push(resetCredits.report);
-      const reset = await this.resetExhausted(accountId, read.access, chatgptAccountId, windows, resetCredits.credits, now);
+      if (signal?.aborted) return reports;
+      const reset = await this.resetExhausted(accountId, read.access, chatgptAccountId, windows, resetCredits.credits, now, signal);
       if (reset) reports.push(reset);
+      if (signal?.aborted) return [...reports, { accountId, outcome: "cancelled" }];
       if (windows.length === 0) return [...reports, { accountId, outcome: "unreadable-response" }];
       for (const usage of windows) {
         const meterId = this.meterFor(usage.windowSeconds);
