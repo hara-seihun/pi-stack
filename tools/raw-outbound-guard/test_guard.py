@@ -124,6 +124,54 @@ class DeploymentContract(unittest.TestCase):
         self.assertEqual(sum('--add' in call for call in self.calls), 1)
         self.assertEqual(json.loads((self.root / 'etc/pi-stack/raw-outbound-transports.json').read_text()), providers)
 
+    def test_interrupted_cutover_recovers_without_losing_previous_evidence(self):
+        phases = ['boundary-persisted', 'msmtp-diverted', 'signal-provider-retained',
+                  'declaration-persisted', 'signal-original-guarded', 'entrypoints-guarded']
+        class Interrupted(BaseException):
+            pass
+        for phase in phases:
+            with self.subTest(phase=phase):
+                self.diverted = False
+                self.calls.clear()
+                with tempfile.TemporaryDirectory() as temporary:
+                    self.root = pathlib.Path(temporary)
+                    self.create('/srv/pi/tools/raw-outbound-guard/main', 'guard')
+                    self.create('/usr/bin/msmtp', 'smtp provider')
+                    self.create('/opt/signal-fixture/bin/signal-cli', 'signal provider')
+                    route = self.root / 'usr/local/bin/signal-cli'
+                    route.parent.mkdir(parents=True)
+                    route.symlink_to('/opt/signal-fixture/bin/signal-cli')
+                    previous = '{ "sendmail": "/usr/sbin/sendmail" }\n'
+                    self.create('/etc/pi-stack/raw-outbound-transports.json', previous)
+                    self.create('/usr/sbin/sendmail', 'system local mail')
+                    def crash(point):
+                        if point == phase:
+                            raise Interrupted()
+                    with self.assertRaises(Interrupted):
+                        deployment['install'](self.root, self.tools, self.dpkg, crash)
+                    state_file = self.root / 'etc/pi-stack/outbound-transport-transition.json'
+                    pending = json.loads(state_file.read_text())
+                    self.assertEqual(pending['phase'], 'installing')
+                    self.assertEqual(pending['boundary'], 'host-declared-provider-v1')
+                    self.assertEqual(pending['previous']['declaration'], {'state': 'set', 'text': previous})
+                    self.assertEqual(pending['previous']['routes']['/usr/local/bin/signal-cli'],
+                                     {'kind': 'symlink', 'target': '/opt/signal-fixture/bin/signal-cli'})
+                    recovered = deployment['install'](self.root, self.tools, self.dpkg)
+                    complete = json.loads(state_file.read_text())
+                    self.assertEqual(complete['phase'], 'installed')
+                    self.assertEqual(complete['previous'], pending['previous'])
+                    self.assertEqual(sum('--add' in call for call in self.calls), 1)
+                    self.assertEqual(recovered['signal-cli'], '/opt/signal-fixture/bin/signal-cli-provider')
+                    self.assertEqual(os.readlink(self.root / 'opt/signal-fixture/bin/signal-cli'),
+                                     '/srv/pi/tools/raw-outbound-guard/main')
+                    self.assertEqual((self.root / 'usr/sbin/sendmail').read_text(), 'system local mail')
+
+    def test_malformed_boundary_does_not_reconstruct_permission(self):
+        self.create('/etc/pi-stack/outbound-transport-transition.json', '{"version":2}')
+        with self.assertRaises(deployment['InstallationError']):
+            deployment['install'](self.root, self.tools, self.dpkg)
+        self.assertFalse(self.calls)
+
     def test_host_without_transports_gets_explicit_empty_declaration(self):
         self.assertEqual(deployment['install'](self.root, self.tools, self.dpkg), {})
         self.assertFalse(self.calls)

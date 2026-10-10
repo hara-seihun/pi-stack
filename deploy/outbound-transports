@@ -1,6 +1,8 @@
 #!/usr/bin/python3
-"""Install read-only raw transport entrypoints, retaining explicit owner providers."""
+"""Install raw transport guards under a durable forward-only provider boundary."""
 import argparse
+import fcntl
+import hashlib
 import json
 import os
 import pathlib
@@ -8,12 +10,56 @@ import shutil
 import subprocess
 import sys
 
+BOUNDARY = 'host-declared-provider-v1'
+TRANSITION = '/etc/pi-stack/outbound-transport-transition.json'
+
 
 class InstallationError(Exception):
     pass
 
 
-def install(root, tools, run=subprocess.run):
+def durable_json(destination, value):
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix('.new')
+    with temporary.open('w') as output:
+        os.fchmod(output.fileno(), 0o644)
+        json.dump(value, output, sort_keys=True)
+        output.write('\n')
+        output.flush()
+        os.fsync(output.fileno())
+    temporary.replace(destination)
+    sync_directory(destination.parent)
+
+
+def sync_directory(directory):
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def evidence(path):
+    if path.is_symlink():
+        return {'kind': 'symlink', 'target': os.readlink(path)}
+    if not path.exists():
+        return {'kind': 'unset'}
+    if not path.is_file():
+        raise InstallationError('Transport route is not a file or symlink')
+    status = path.stat()
+    return {'kind': 'file', 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+            'mode': status.st_mode & 0o7777, 'uid': status.st_uid, 'gid': status.st_gid}
+
+
+def install(root, tools, run=subprocess.run, checkpoint=lambda phase: None):
+    lock = root / 'etc/pi-stack/.outbound-transport.lock'
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with lock.open('a') as owner:
+        fcntl.flock(owner.fileno(), fcntl.LOCK_EX)
+        return install_locked(root, tools, run, checkpoint)
+
+
+def install_locked(root, tools, run, checkpoint):
     def path(value):
         return root / value.lstrip('/')
 
@@ -21,10 +67,50 @@ def install(root, tools, run=subprocess.run):
     if not path(guard).is_file():
         raise InstallationError('Selected tools release has no raw transport guard')
     config = path('/etc/pi-stack/raw-outbound-transports.json')
-    providers = json.loads(config.read_text()) if config.exists() else {}
+    declaration = config.read_text() if config.exists() else None
+    providers = json.loads(declaration) if declaration is not None else {}
     if not isinstance(providers, dict) or any(name not in ('msmtp', 'signal-cli', 'sendmail') or not isinstance(value, str) or not pathlib.Path(value).is_absolute() for name, value in providers.items()):
         raise InstallationError('Invalid transport declaration')
-    signal_original = None
+
+    transition_path = path(TRANSITION)
+    if transition_path.exists():
+        transition = json.loads(transition_path.read_text())
+        if not isinstance(transition, dict) or transition.get('version') != 1 or transition.get('boundary') != BOUNDARY or transition.get('phase') not in ('installing', 'installed') or not isinstance(transition.get('previous'), dict) or 'signal' not in transition:
+            raise InstallationError('Unknown provider transition; retain selection and repair its evidence')
+        signal_spec = transition['signal']
+        if signal_spec is not None and (not isinstance(signal_spec, dict) or set(signal_spec) != {'original', 'provider'} or any(not isinstance(value, str) or not pathlib.Path(value).is_absolute() for value in signal_spec.values())):
+            raise InstallationError('Invalid retained Signal transition')
+    else:
+        signal_spec = None
+        signal = path('/usr/local/bin/signal-cli')
+        if signal.exists() or signal.is_symlink():
+            if 'signal-cli' in providers:
+                retained = path(providers['signal-cli'])
+                if retained.name != 'signal-cli-provider':
+                    raise InstallationError('Signal provider declaration has unknown custody')
+                original = retained.with_name('signal-cli')
+            else:
+                original = path(os.readlink(signal)) if root != pathlib.Path('/') and signal.is_symlink() else signal.resolve()
+            if original.name != 'signal-cli' or original.parent.name != 'bin' or not original.is_file():
+                raise InstallationError('Signal launcher is not the declared installed distribution')
+            signal_spec = {'original': '/' + str(original.relative_to(root)),
+                           'provider': '/' + str(original.with_name('signal-cli-provider').relative_to(root))}
+            if path(signal_spec['provider']).exists() and providers.get('signal-cli') != signal_spec['provider']:
+                raise InstallationError('Unregistered retained Signal provider already exists')
+        registered = run(['dpkg-divert', '--listpackage', '/usr/bin/msmtp'], check=True, capture_output=True, text=True).stdout.strip() if path('/usr/bin/msmtp').exists() or path('/usr/lib/pi-stack/providers/msmtp').exists() else None
+        routes = ['/usr/bin/msmtp', '/usr/local/bin/msmtp', '/usr/local/bin/signal-cli',
+                  '/usr/local/bin/sendmail', '/usr/local/sbin/sendmail']
+        if signal_spec is not None:
+            routes.append(signal_spec['original'])
+        transition = {'version': 1, 'boundary': BOUNDARY, 'phase': 'installing',
+                      'signal': signal_spec,
+                      'previous': {'declaration': {'state': 'unset'} if declaration is None else {'state': 'set', 'text': declaration},
+                                   'routes': {route: evidence(path(route)) for route in routes},
+                                   'msmtpDiversionOwner': registered}}
+    transition['phase'] = 'installing'
+    transition['tools'] = tools
+    durable_json(transition_path, transition)
+    checkpoint('boundary-persisted')
 
     def link(target, source):
         source.parent.mkdir(parents=True, exist_ok=True)
@@ -32,10 +118,11 @@ def install(root, tools, run=subprocess.run):
         temporary.unlink(missing_ok=True)
         temporary.symlink_to(target)
         temporary.replace(source)
+        sync_directory(source.parent)
 
     msmtp = path('/usr/bin/msmtp')
     retained_msmtp = '/usr/lib/pi-stack/providers/msmtp'
-    if msmtp.exists() or path(retained_msmtp).exists():
+    if msmtp.exists() or msmtp.is_symlink() or path(retained_msmtp).exists():
         path(retained_msmtp).parent.mkdir(parents=True, exist_ok=True)
         registered = run(['dpkg-divert', '--listpackage', '/usr/bin/msmtp'], check=True,
                          capture_output=True, text=True).stdout.strip()
@@ -47,60 +134,61 @@ def install(root, tools, run=subprocess.run):
         else:
             run(['dpkg-divert', '--local', '--add', '--rename', '--divert', retained_msmtp,
                  '/usr/bin/msmtp'], check=True, capture_output=True, text=True)
+        checkpoint('msmtp-diverted')
         if not path(retained_msmtp).is_file():
             raise InstallationError('Diverted msmtp provider is missing')
         providers['msmtp'] = retained_msmtp
 
-    signal = path('/usr/local/bin/signal-cli')
-    if (signal.exists() or signal.is_symlink()) and not (signal.is_symlink() and os.readlink(signal) == guard):
-        original = signal.resolve()
-        if root != pathlib.Path('/'):
-            # A staging-root fixture uses absolute host links without following them outside it.
-            if signal.is_symlink():
-                original = path(os.readlink(signal))
-        if original.name != 'signal-cli' or original.parent.name != 'bin' or not original.is_file():
-            raise InstallationError('Signal launcher is not the declared installed distribution')
-        retained = original.with_name('signal-cli-provider')
-        retained_name = '/' + str(retained.relative_to(root))
-        if retained.exists():
-            if providers.get('signal-cli') != retained_name:
-                raise InstallationError('Unregistered retained Signal provider already exists')
-        else:
-            shutil.copy2(original, retained)
-        providers['signal-cli'] = retained_name
-        signal_original = original
+    if signal_spec is not None:
+        original, retained = path(signal_spec['original']), path(signal_spec['provider'])
+        if not retained.exists():
+            if original.is_symlink() or not original.is_file():
+                raise InstallationError('Signal source launcher is unavailable; preserve pending boundary')
+            temporary = retained.with_suffix('.new')
+            shutil.copy2(original, temporary)
+            with temporary.open('rb') as source:
+                os.fsync(source.fileno())
+            temporary.replace(retained)
+            sync_directory(retained.parent)
+        expected = transition['previous'].get('routes', {}).get(signal_spec['original'], {})
+        if expected.get('kind') == 'file' and hashlib.sha256(retained.read_bytes()).hexdigest() != expected.get('sha256'):
+            raise InstallationError('Retained Signal provider differs from the cutover evidence')
+        checkpoint('signal-provider-retained')
+        providers['signal-cli'] = signal_spec['provider']
     if 'signal-cli' in providers and not path(providers['signal-cli']).is_file():
         raise InstallationError('Declared Signal provider is missing')
-
     if path('/usr/sbin/sendmail').is_file():
         providers['sendmail'] = '/usr/sbin/sendmail'
 
-    config.parent.mkdir(parents=True, exist_ok=True)
-    temporary = config.with_suffix('.new')
-    temporary.write_text(json.dumps(providers, sort_keys=True) + '\n')
-    temporary.chmod(0o644)
-    temporary.replace(config)
-    if signal_original is not None:
-        link(guard, signal_original)
+    durable_json(config, providers)
+    checkpoint('declaration-persisted')
+    if signal_spec is not None:
+        link(guard, path(signal_spec['original']))
+        checkpoint('signal-original-guarded')
     if 'msmtp' in providers:
         link(guard, msmtp)
     for name in providers:
-        if name not in ('msmtp', 'signal-cli', 'sendmail'):
-            raise InstallationError('Unknown declared transport')
         link(guard, path('/usr/local/bin/' + name))
     if 'sendmail' in providers:
         link(guard, path('/usr/local/sbin/sendmail'))
+    checkpoint('entrypoints-guarded')
+    transition['phase'] = 'installed'
+    durable_json(transition_path, transition)
     return providers
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--tools', required=True, help='Selected immutable tools release path')
+    parser.add_argument('--remote', required=True, help='Selected provider-capable Remote release')
     args = parser.parse_args()
     if os.geteuid() != 0:
         print(json.dumps({'ok': False, 'error': 'administrator-required'}), file=sys.stderr)
         return 77
     try:
+        contract = json.loads((pathlib.Path(args.remote) / 'provider-contract.json').read_text())
+        if contract != {'version': 1, 'rawOutboundProviders': BOUNDARY}:
+            raise InstallationError('Selected Remote cannot consume the host provider declaration')
         providers = install(pathlib.Path('/'), args.tools)
     except (InstallationError, OSError, ValueError, subprocess.CalledProcessError) as error:
         print(json.dumps({'ok': False, 'error': 'transport-installation-failed',

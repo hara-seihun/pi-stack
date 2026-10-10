@@ -22,6 +22,7 @@ export const remoteResources = [
   { source: "apps/remote/package.json", destination: "package.json", kind: "file" },
   { source: "apps/remote/meeting-runtime.json", destination: "meeting-runtime.json", kind: "file" },
   { source: "apps/remote/data-contract.json", destination: "data-contract.json", kind: "file" },
+  { source: "apps/remote/provider-contract.json", destination: "provider-contract.json", kind: "file" },
   {
     source: "apps/remote/server", destination: "server", kind: "tree",
     required: ["manager-prompt.md", "voice/delegation-policy.md", "meet/transcriber.ts", "pi-editor-launch", "phone/dist/retell-sdk.js", "native-history-startup.mjs", "native-history-startup-legacy.mjs"],

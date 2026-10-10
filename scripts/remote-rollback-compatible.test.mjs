@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
-import { rollbackCompatibility } from "../deploy/remote-rollback-compatible.mjs";
+import { rollbackCompatibility, providerRestartCompatibility } from "../deploy/remote-rollback-compatible.mjs";
 
 function releases(t, current, previous) {
   const root = mkdtempSync(join(tmpdir(), "remote-rollback-"));
@@ -32,4 +32,45 @@ test("unmarked, malformed and unknown contracts never manufacture safe rollback"
     assert.equal(rollbackCompatibility(...releases(t, naming, invalid)).ok, false);
     assert.equal(rollbackCompatibility(...releases(t, invalid, naming)).ok, false);
   }
+});
+
+test("persisted and interrupted provider cutovers refuse old restart while retaining forward-capable intake", t => {
+  const paths = releases(t, naming, naming);
+  const transition = join(paths[0], "host-transition.json");
+  const boundary = { version: 1, boundary: "host-declared-provider-v1", phase: "installing" };
+  writeFileSync(join(paths[0], "provider-contract.json"), JSON.stringify({ version: 1, rawOutboundProviders: boundary.boundary }));
+  for (const phase of ["installing", "installed"]) {
+    writeFileSync(transition, JSON.stringify({ ...boundary, phase }));
+    assert.deepEqual(providerRestartCompatibility(paths[0], transition), { ok: true });
+    assert.equal(providerRestartCompatibility(paths[1], transition).ok, false);
+    assert.match(rollbackCompatibility(paths[0], paths[1], transition).error, /old-provider restart is forbidden/);
+  }
+  writeFileSync(join(paths[1], "provider-contract.json"), JSON.stringify({ version: 1, rawOutboundProviders: boundary.boundary }));
+  assert.deepEqual(rollbackCompatibility(paths[0], paths[1], transition), { ok: true });
+});
+
+test("unknown boundary evidence and provider contract fail closed; absent boundary has no expanded rule", t => {
+  const [selected] = releases(t, naming, naming);
+  const transition = join(selected, "host-transition.json");
+  assert.deepEqual(providerRestartCompatibility(selected, transition), { ok: true });
+  for (const value of ["broken-json", JSON.stringify({ version: 2 }), JSON.stringify({ version: 1, boundary: "host-declared-provider-v1", phase: "unknown" })]) {
+    writeFileSync(transition, value);
+    assert.equal(providerRestartCompatibility(selected, transition).ok, false);
+  }
+  writeFileSync(transition, JSON.stringify({ version: 1, boundary: "host-declared-provider-v1", phase: "installed" }));
+  for (const value of [{ version: 2, rawOutboundProviders: "host-declared-provider-v1" }, { version: 1, rawOutboundProviders: "unknown" }, {}]) {
+    writeFileSync(join(selected, "provider-contract.json"), JSON.stringify(value));
+    assert.equal(providerRestartCompatibility(selected, transition).ok, false);
+  }
+});
+
+test("host gates provider capability before changing router or restarting rollback supervisors", () => {
+  const source = readFileSync("deploy/host", "utf8");
+  const activate = source.slice(source.indexOf("activate_remote() {"), source.indexOf("activate_daemons() {"));
+  const restartGate = activate.indexOf("remote-rollback-compatible.mjs\" --restart");
+  assert.ok(restartGate >= 0);
+  assert.ok(restartGate < activate.indexOf("systemctl restart pi-remote-router.service"));
+  const rollback = source.slice(source.indexOf("if (( smoke_failed )); then"));
+  assert.ok(rollback.indexOf("remote-rollback-compatible.mjs") < rollback.indexOf('mv -Tf "$candidate" "$remote"'));
+  assert.ok(rollback.indexOf("remote-rollback-compatible.mjs") < rollback.indexOf("systemctl reset-failed"));
 });

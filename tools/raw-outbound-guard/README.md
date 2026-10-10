@@ -7,6 +7,7 @@ Dispatch commands fail with exit77 and JSON `canonical-action-required`, `effect
 ## Installed custody
 
 - `/etc/pi-stack/raw-outbound-transports.json` is the root-owned declaration of installed absolute providers. Missing/invalid declarations and missing providers yield typed errors, never a PATH fallback. Signal's canonical supervisor reads this declaration; a profile may explicitly declare an absolute `options.rawExecutable` (or existing `options.binary`), but cannot configure both.
+- `/etc/pi-stack/outbound-transport-transition.json` is the durable positive forward-only boundary, fsynced before any provider mutation. It preserves the exact prior declaration (including unset), route symlink/hash/mode/ownership evidence and prior diversion custody. Its `installing` and `installed` phases both require a Remote release advertising `provider-contract.json` protocol `host-declared-provider-v1`. Unknown evidence refuses restart, not a guessed rollback.
 - `/usr/bin/msmtp` is diverted using `dpkg-divert --local --rename` to `/usr/lib/pi-stack/providers/msmtp`. The original absolute entrypoint and `/usr/local/bin/msmtp` point at the selected guard. Package upgrades retain this diversion.
 - The installed custom Signal launcher's original path and `/usr/local/bin/signal-cli` point at the guard. Its adjacent `signal-cli-provider` preserves the distribution's relative Java classpath and is declared for the canonical supervisor, including device provisioning. An unregistered preexisting retained launcher refuses installation rather than overwriting evidence.
 - `/usr/local/bin/sendmail`, `/usr/local/sbin/sendmail` and account command links point at the guard. `/usr/sbin/sendmail` remains the Postfix system provider; local delivery and existing system notifications are not rerouted through Proton or guessed to be external mail.
@@ -28,7 +29,11 @@ Universal agent enforcement therefore requires a genuine provider UID/credential
 
 ## Operations
 
-Host deployment runs `python3 deploy/outbound-transports --tools /srv/pi/tools` as root. It is idempotent and refuses unrelated package diversions. The selected tools tree supplies the guard; the host declaration supplies providers, so upgrading the guard does not replace credentials or mailbox state.
+Host deployment runs `python3 deploy/outbound-transports --tools /srv/pi/tools --remote /srv/pi/pi-remote` as root. It verifies the selected Remote provider contract, serializes installation with an owner lock, and refuses unrelated package diversions. The selected tools tree supplies the guard; the host declaration supplies providers, so upgrading the guard does not replace credentials or mailbox state.
+
+An interrupted cutover retains `installing` and its original evidence. Re-running the same owning installer recovers the diverted executable, retained Signal launcher, declaration and guard links without repeating the diversion or replacing the baseline evidence; completion fsyncs `installed`. Temporary launcher copies and declarations are atomically installed. This remains true when interrupted after diversion, provider copy, declaration, Signal replacement or all entrypoint replacements.
+
+`deploy/remote-rollback-compatible.mjs` checks this boundary before host rollback changes the selected Remote, resets start limits or restarts supervisors. `activate_remote` also checks before restarting the router or handing off any supervisor. A target lacking the provider contract is refused even if its SQLite schema is compatible. The current accepting intake and forward selection are retained for repair; the guard is never lifted to make an old generation start. Capability-compatible rollback remains supported. Six interrupted-cutover fixtures and restart/rollback gate fixtures cover the owning recovery route.
 
 Synthetic acceptance, without real recipients, credentials or provider network traffic:
 
@@ -37,4 +42,4 @@ python3 -B tools/raw-outbound-guard/test_guard.py
 bun test apps/remote/server/messaging/signal-provider.test.ts apps/remote/server/messaging/signal.test.ts
 ```
 
-Administrator removal is an explicit owning deployment change: unlink the guarded `/usr/bin/msmtp` and remove its local diversion with `dpkg-divert --local --remove --rename --divert /usr/lib/pi-stack/providers/msmtp /usr/bin/msmtp`; restore Signal's original launcher from its declared adjacent provider; remove installed guard links and declaration after changing the command manifest and Signal provider configuration. Preserve Signal account state and Bridge/Postfix mailbox state.
+Administrator removal is an explicit owning deployment change that must also reconcile the positive transition boundary and intended Remote capability; ordinary release rollback does not remove it: unlink the guarded `/usr/bin/msmtp` and remove its local diversion with `dpkg-divert --local --remove --rename --divert /usr/lib/pi-stack/providers/msmtp /usr/bin/msmtp`; restore Signal's original launcher from its declared adjacent provider; remove installed guard links and declaration after changing the command manifest and Signal provider configuration. Preserve Signal account state and Bridge/Postfix mailbox state.
