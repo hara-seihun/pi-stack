@@ -866,17 +866,17 @@ test("fenced capacity repricing preserves live unestimated work and journals sam
     assert.equal(journal.length, 1);
     assert.equal(JSON.parse(journal[0].old_plan_json).intent, "unestimated");
     assert.deepEqual(JSON.parse(journal[0].new_plan_json), repriced.capacity);
-    assert.throws(() => run(args, f.env), /accepts unestimated plans or source-only to budgeted expansion/);
+    assert.throws(() => run(args.map(value => value === "budgeted" ? "source-only" : value), f.env), /accepts unestimated plans or source-only\/budgeted to budgeted expansion/);
     assert.equal(db.prepare("SELECT count(*) AS n FROM workspace_capacity_repricing").get().n, 1);
     db.close();
   } finally { f.close(); }
 });
 
-test("source-only build expansion preserves custody and conserves its original admission on refusal", () => {
+for (const priorIntent of ["source-only", "budgeted"]) test(`${priorIntent} build expansion preserves custody and conserves its original admission on refusal`, () => {
   const f = fixture();
   try {
     const created = JSON.parse(run(["create", "--root", f.workspaces, "--name", "build-expansion", "--repo", f.source,
-      "--intent", "source-only", "--headroom-gib", "1", "--growth-mib", "8", "--json"], f.env));
+      "--intent", priorIntent, "--headroom-gib", "1", "--growth-mib", "8", "--json"], f.env));
     writeFileSync(path.join(created.path, "file.txt"), "unpublished source\n");
     writeFileSync(path.join(created.path, "generated.bin"), Buffer.alloc(80 * 1024 ** 2));
     const db = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
@@ -907,15 +907,19 @@ test("source-only build expansion preserves custody and conserves its original a
     assert.equal(journal.length, 1);
     assert.equal(journal[0].old_plan_json, oldCapacity.plan_json);
     assert.deepEqual(JSON.parse(journal[0].new_plan_json), repriced.capacity);
+    assert.equal(repriced.capacity.repricing.priorIntent, priorIntent);
+    assert.throws(() => run(args.map(value => value === "128" ? "1" : value), f.env), /cannot reduce headroom or total growth budget/);
+    assert.deepEqual(JSON.parse(db.prepare("SELECT plan_json FROM workspace_capacity WHERE workspace_id=?").get(created.id).plan_json), repriced.capacity);
+    assert.equal(db.prepare("SELECT count(*) AS n FROM workspace_capacity_repricing").get().n, 1);
     db.close();
   } finally { f.close(); }
 });
 
-test("concurrent source-only build expansions cannot reuse filesystem capacity", async () => {
+test("concurrent budgeted build expansions cannot reuse filesystem capacity", async () => {
   const f = fixture();
   try {
     const created = ["first", "second"].map(name => JSON.parse(run(["create", "--root", path.join(f.root, name),
-      "--name", "expand", "--repo", f.source, "--intent", "source-only", "--headroom-gib", "1", "--growth-mib", "8", "--json"], f.env)));
+      "--name", "expand", "--repo", f.source, "--intent", "budgeted", "--headroom-gib", "1", "--growth-mib", "8", "--json"], f.env)));
     const db = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
     const before = created.map(record => db.prepare("SELECT * FROM workspace WHERE id=?").get(record.id));
     const stats = statfsSync(f.root);

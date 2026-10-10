@@ -2569,13 +2569,13 @@ function repriceCapacityCommand(database, args, statePath) {
     const row = database.prepare("SELECT device_id,plan_json FROM workspace_capacity WHERE workspace_id=?").get(record.id);
     if (row === undefined) fail("capacity repricing requires an existing capacity plan");
     const oldPlan = JSON.parse(row.plan_json);
-    const expandingSourceOnly = oldPlan.intent === "source-only" && intent.intent === "budgeted";
-    if (oldPlan.intent !== "unestimated" && !expandingSourceOnly) fail("capacity repricing accepts unestimated plans or source-only to budgeted expansion");
+    const expandingBudget = ["source-only", "budgeted"].includes(oldPlan.intent) && intent.intent === "budgeted";
+    if (oldPlan.intent !== "unestimated" && !expandingBudget) fail("capacity repricing accepts unestimated plans or source-only/budgeted to budgeted expansion");
     capacityRequirement(oldPlan, []);
     if (record.durableSourceCommit === null) fail("capacity repricing requires immutable source custody");
-    const plan = expandingSourceOnly ? { ...oldPlan, ...intent } : sourceCapacityPlan(record.path,
+    const plan = expandingBudget ? { ...oldPlan, ...intent } : sourceCapacityPlan(record.path,
       record.durableSourceCommit, intent, statfsSync(record.path).bsize, git(record.path, ["rev-parse", "--absolute-git-dir"]));
-    if (!expandingSourceOnly) plan.completedAllocationBytes = plan.constructionBytes;
+    if (!expandingBudget) plan.completedAllocationBytes = plan.constructionBytes;
     withResourceLock(statePath, `capacity:${row.device_id}`, () => {
       const measurement = cachedWorkspaceAllocation(database, record.id, record.path, row.device_id);
       if (!measurement.ok) fail(`capacity repricing requires a fresh allocated-block sample: ${measurement.error}; run measure-capacity first`);
@@ -2583,8 +2583,8 @@ function repriceCapacityCommand(database, args, statePath) {
       const sampledGrowthBytes = Math.max(0, sample.bytes - capacityAllocationBaseline(plan, record.state));
       plan.growthBytes += sampledGrowthBytes;
       capacityRequirement(plan, []);
-      if (expandingSourceOnly && (plan.headroomBytes < oldPlan.headroomBytes || plan.growthBytes < oldPlan.growthBytes)) {
-        fail("source-only to budgeted expansion cannot reduce headroom or total growth budget");
+      if (expandingBudget && (plan.headroomBytes < oldPlan.headroomBytes || plan.growthBytes < oldPlan.growthBytes)) {
+        fail("budget expansion cannot reduce headroom or total growth budget");
       }
       plan.repricing = { priorIntent: oldPlan.intent, sampledGrowthBytes, remainingGrowthBytes: intent.growthBytes,
         measurementStartedAt: sample.startedAt, measurementCompletedAt: sample.completedAt, marginBytes: measurement.marginBytes };
