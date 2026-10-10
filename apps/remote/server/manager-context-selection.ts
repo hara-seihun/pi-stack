@@ -3,6 +3,15 @@ import { listContextFiles, type ContextFileSources } from "./thread-context-file
 
 export type ThreadContextSelection = { mode: "all" | "manual"; files: string[] };
 
+export function storedThreadContextSelection(metadata: Thread["metadata"]): ThreadContextSelection | undefined {
+  if (!Array.isArray(metadata?.contextFiles) || !metadata.contextFiles.every(file => typeof file === "string")) return undefined;
+  if (metadata.manager === true) {
+    if (metadata.contextSelection !== "all" && metadata.contextSelection !== "manual") return undefined;
+    return { mode: metadata.contextSelection, files: [...metadata.contextFiles] };
+  }
+  return { mode: "manual", files: [...metadata.contextFiles] };
+}
+
 export function reconcileThreadContextSelection(thread: Pick<Thread, "metadata">, sources: ContextFileSources | null,
   persist: (metadata: { contextSelection: "all"; contextFiles: string[] }) => Result<Pick<Thread, "metadata">>): Result<ThreadContextSelection> {
   if (thread.metadata?.manager !== true) {
