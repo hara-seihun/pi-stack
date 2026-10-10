@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { API } from "../api";
+import { ActionStore } from "kenan-memory/actions";
 import { createMessagingService, messagingRoot } from "./index";
 
 const request = (path: string, method = "GET", body?: unknown) => new Request(`http://localhost${path}`, {
@@ -14,7 +15,8 @@ test("new encrypted accounts have no implicit profile and only accepted tool rou
   const data = join(root, "data");
   mkdirSync(data);
   const operations: string[] = [];
-  const endpoint = createMessagingService(data, root, true, operation => operations.push(operation));
+  const actions = new ActionStore(join(root, ".kenan-actions"), "fixture-alice");
+  const endpoint = createMessagingService(data, root, true, operation => operations.push(operation), actions);
   try {
     expect(JSON.parse(readFileSync(join(data, "messaging", "profiles.json"), "utf8"))).toEqual({ version: 1, profiles: [] });
     expect(endpoint.snapshot()).toMatchObject({ ok: true, value: { backends: [], conversations: [] } });
@@ -26,6 +28,7 @@ test("new encrypted accounts have no implicit profile and only accepted tool rou
     expect(operations).toEqual(["messaging"]);
   } finally {
     await endpoint.close();
+    actions.close();
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -44,6 +47,29 @@ test("unavailable Signal endpoints return typed failure and HTTP 503 instead of 
     await endpoint.close();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("missing canonical authority cannot create a competing local store", async () => {
+  const root = mkdtempSync(join(tmpdir(), "signal-endpoint-"));
+  try {
+    const endpoint = createMessagingService(root, root, true);
+    expect(endpoint.snapshot()).toMatchObject({ ok: false, error: { code: "signal_unavailable" } });
+    expect((await endpoint.handle(request(API.messaging.path())))?.status).toBe(503);
+    await endpoint.close();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("shared action authority cannot escape the encrypted account through a symlink", async () => {
+  const root = mkdtempSync(join(tmpdir(), "signal-endpoint-"));
+  const outside = mkdtempSync(join(tmpdir(), "signal-authority-outside-"));
+  try {
+    const data = join(root, "data");
+    mkdirSync(data);
+    symlinkSync(outside, join(root, ".kenan-actions"));
+    const endpoint = createMessagingService(data, root, true);
+    expect(endpoint.snapshot()).toMatchObject({ ok: false, error: { code: "signal_unavailable", message: "Action authority cannot escape the encrypted account through a symlink" } });
+    await endpoint.close();
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); }
 });
 
 test("action journal cannot escape the encrypted account through a symlink", () => {

@@ -65,6 +65,8 @@ export interface MessagingMessage {
   timestamp: number;
   status: "received" | "sending" | "sent" | "failed" | "unknown";
   error: string | null;
+  /** Shared owner-bound dispatch authority, not a retry identity. */
+  actionId?: string;
   attachments: MessagingAttachment[];
   identity?: MessageIdentity;
   reactions?: MessageReaction[];
@@ -88,7 +90,13 @@ export interface MessagingHistoryChanges {
   removed: string[];
   revision: number;
 }
-export interface MessagingSend {
+export interface MessagingPurpose {
+  /** Stable accountable purpose; absent uses a digest of recipient and effect bytes. */
+  intentKey?: string;
+  /** Accountable new effect, atomically releasing a settled prior purpose. */
+  followup?: { actionId: string; revision: number; evidence: string };
+}
+export interface MessagingSend extends MessagingPurpose {
   requestId: string;
   text: string;
   attachmentIds: string[];

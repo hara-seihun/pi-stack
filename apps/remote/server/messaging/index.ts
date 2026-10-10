@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from
 import { isAbsolute, join, relative } from "node:path";
 import { API } from "../api";
 import { API_CORS_HEADERS } from "../cors";
-import { MessagingService, messagingConfig } from "./service";
+import { MessagingService, messagingConfig, type MessagingActionStore } from "./service";
 import type { MessagingResult, MessagingSnapshot } from "./protocol";
 import type { MessageReaction } from "../message-protocol";
 
@@ -29,14 +29,17 @@ export function messagingRoot(data: string, privateDir: string, encrypted: boole
   return root;
 }
 
-export function createMessagingService(data: string, privateDir: string, encrypted: boolean, onToolUse?: (operation: string) => void): MessagingEndpoint {
+export function createMessagingService(data: string, privateDir: string, encrypted: boolean, onToolUse?: (operation: string) => void, actionStore?: MessagingActionStore): MessagingEndpoint {
   try {
     const root = messagingRoot(data, privateDir, encrypted);
     const configPath = join(root, "profiles.json");
     if (!existsSync(configPath)) writeFileSync(configPath, JSON.stringify({ version: 1, profiles: messagingConfig(undefined) }, null, 2) + "\n", { mode: 0o600 });
     const config = JSON.parse(readFileSync(configPath, "utf8"));
     if (config?.version !== 1 || !Array.isArray(config.profiles)) throw new Error("Messaging profiles.json must contain version 1 and a profiles array");
-    const service = new MessagingService(root, messagingConfig(JSON.stringify(config.profiles)));
+    const actionDir = join(realpathSync(privateDir), ".kenan-actions");
+    if (existsSync(actionDir) && realpathSync(actionDir) !== actionDir) throw new Error("Action authority cannot escape the encrypted account through a symlink");
+    if (!actionStore) throw new Error("Action authority unavailable; the trusted supervisor must inject this owner's canonical authority");
+    const service = new MessagingService(root, messagingConfig(JSON.stringify(config.profiles)), undefined, undefined, undefined, undefined, actionStore);
     void service.start();
     return {
       snapshot: () => ({ ok: true, value: service.snapshot() }),

@@ -1,6 +1,8 @@
 import { Database } from "bun:sqlite";
 import { ActionJournal, actionPerson, journalWarning, type ActionTicket } from "kenan-memory/journal";
-import { copyFileSync, existsSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import { openActionStore, canonicalRecipient, type ActionStore, type ActionRecord, type ActionTicket as DispatchTicket } from "kenan-memory/actions";
+import { createHash } from "node:crypto";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { API } from "../api";
 import { isReactionEmoji, messageReference, parseMessageReference, type MessageReaction, type MessageReply } from "../message-protocol";
@@ -8,7 +10,7 @@ import { API_CORS_HEADERS } from "../cors";
 import { inlineSafe, servedFileResponse } from "../files";
 import { storeUpload, uploadName } from "../uploads";
 import type { BackendAttachment, BackendConversation, BackendMessage, BackendReaction, BackendReply, BackendSender, MessagingPlugin, MessagingPluginFactory } from "./plugin";
-import type { MessagingAttachment, MessagingBackendConfig, MessagingBackendInfo, MessagingConversation, MessagingHistory, MessagingHistoryChanges, MessagingLink, MessagingMessage, MessagingResult, MessagingSend, MessagingSnapshot } from "./protocol";
+import type { MessagingAttachment, MessagingBackendConfig, MessagingBackendInfo, MessagingConversation, MessagingHistory, MessagingHistoryChanges, MessagingLink, MessagingMessage, MessagingResult, MessagingSend, MessagingSnapshot, MessagingPurpose } from "./protocol";
 
 const DEVICE_NAME = /^[\p{L}\p{N} .,'()_-]{1,64}$/u;
 
@@ -89,6 +91,13 @@ interface AttachmentRow { id: string; conversation_id: string; message_id: strin
 interface Backend { config: MessagingBackendConfig; info: MessagingBackendInfo; plugin?: MessagingPlugin; attempts: number; retry?: ReturnType<typeof setTimeout> }
 type ReactionReceipt = MessagingResult<MessageReaction[]>;
 interface ReactionRequestRow { request_body: string; receipt: string | null }
+export type MessagingActionStore = Pick<ActionStore, "submit" | "followup" | "claim" | "dispatch" | "finish" | "inspect" | "holdRecipient" | "linkRecipients" | "close">;
+const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+const validPurpose = (value: MessagingPurpose): boolean =>
+  (value.intentKey === undefined || typeof value.intentKey === "string" && !!value.intentKey.trim() && value.intentKey.length <= 1000)
+  && (value.followup === undefined || !!value.followup && typeof value.followup.actionId === "string" && ID.test(value.followup.actionId)
+    && Number.isSafeInteger(value.followup.revision) && value.followup.revision > 0 && typeof value.followup.evidence === "string"
+    && !!value.followup.evidence.trim() && value.followup.evidence.length <= 1000);
 
 /**
  * A backend that fails to start used to stay dead until the next supervisor
@@ -132,6 +141,8 @@ async function loadPlugin(config: MessagingBackendConfig): Promise<MessagingPlug
 export class MessagingService {
   private readonly db: Database;
   private readonly journal: Pick<ActionJournal, "begin" | "finish">;
+  private readonly actions: MessagingActionStore;
+  private readonly ownsActions: boolean;
   private readonly backends = new Map<string, Backend>();
   private readonly sends = new Map<string, Promise<MessagingMessage>>();
   private readonly receives = new Set<Promise<void>>();
@@ -141,8 +152,10 @@ export class MessagingService {
   private closed = false;
   private started: Promise<void> | null = null;
   private closeTask: Promise<void> | null = null;
-  constructor(readonly root: string, configs: MessagingBackendConfig[], private readonly factory = loadPlugin, private readonly onChange: () => void = () => {}, private readonly retry: MessagingRetry = MESSAGING_RETRY, journal?: Pick<ActionJournal, "begin" | "finish">) {
+  constructor(readonly root: string, configs: MessagingBackendConfig[], private readonly factory = loadPlugin, private readonly onChange: () => void = () => {}, private readonly retry: MessagingRetry = MESSAGING_RETRY, journal?: Pick<ActionJournal, "begin" | "finish">, actions?: MessagingActionStore) {
     mkdirSync(root, { recursive: true, mode: 0o700 });
+    this.actions = actions ?? openActionStore();
+    this.ownsActions = actions === undefined;
     this.journal = journal ?? new ActionJournal({ enabled: () => true, directory: join(root, "action-journal"), person: actionPerson() });
     this.db = new Database(join(root, "messages.sqlite3"));
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
@@ -184,12 +197,16 @@ export class MessagingService {
           UPDATE conversations SET revision=COALESCE((SELECT MAX(revision) FROM messages WHERE conversation_id=conversations.id),0);
           UPDATE messaging_state SET revision=COALESCE((SELECT MAX(seq) FROM messages),0);`);
       }
+      this.db.exec(`CREATE TABLE IF NOT EXISTS messaging_action_requests(request_id TEXT PRIMARY KEY,action_id TEXT NOT NULL,ticket TEXT,kind TEXT NOT NULL CHECK(kind IN ('message','reaction')));
+        CREATE INDEX IF NOT EXISTS messaging_action_id ON messaging_action_requests(action_id);`);
       this.db.exec(REVISION_SCHEMA);
       this.db.query("UPDATE messaging_reaction_requests SET receipt=? WHERE receipt IS NULL").run(JSON.stringify({ ok: false, error: { code: "unknown", message: "Supervisor stopped before the backend confirmed this reaction. Check the recipient before reacting again." } }));
       this.db.exec(`UPDATE messages SET status='unknown',error='Supervisor stopped before the backend confirmed this send. Check the recipient before sending again.' WHERE status='sending';
         UPDATE conversations SET updated_at=COALESCE((SELECT MAX(timestamp) FROM messages WHERE conversation_id=conversations.id),0);
         UPDATE messaging_state SET version=version+1;`);
     })();
+    for (const sender of this.db.query("SELECT backend_id,id FROM messaging_senders").all() as { backend_id: string; id: string }[]) this.linkSenderAliases(sender.backend_id, sender.id);
+    this.adoptOutboundRequests();
     for (const config of configs) this.backends.set(config.id, { config, attempts: 0, info: { id: config.id, plugin: config.plugin, icon: "", label: config.label, status: "connecting", detail: "Starting messaging backend", capabilities: { attachments: false, groups: false }, linkable: false, link: null } });
   }
   start(): Promise<void> {
@@ -358,9 +375,109 @@ export class MessagingService {
         changes += this.db.query(`INSERT INTO messaging_sender_aliases(backend_id,alias,sender_id) VALUES(?,?,?)
           ON CONFLICT(backend_id,alias) DO UPDATE SET sender_id=excluded.sender_id WHERE messaging_sender_aliases.sender_id<>excluded.sender_id`).run(backendId, alias, value.id).changes;
       }
+      if (changes > 0) this.linkSenderAliases(backendId, value.id);
       return changes > 0;
     })();
     if (changed) this.changed();
+  }
+  private linkSenderAliases(backendId: string, senderId: string): void {
+    const aliases = this.db.query("SELECT alias FROM messaging_sender_aliases WHERE backend_id=? AND sender_id=?").all(backendId, senderId) as { alias: string }[];
+    const identities = [...new Set([senderId, ...aliases.map(item => item.alias)].map(id => canonicalRecipient(id).startsWith("tel:") ? canonicalRecipient(id) : `signal:${id}`))];
+    if (identities.length < 2) return;
+    const linked = this.actions.linkRecipients(identities, "messaging-provider-directory");
+    if (!linked.ok) throw new MessagingFailure(linked.message, 503, `action_${linked.error}`);
+  }
+  private adoptOutboundRequests(): void {
+    const pending: Array<Parameters<MessagingService["adoptRequest"]>> = [];
+    const rows = this.db.query(`SELECT m.* FROM messages m LEFT JOIN messaging_action_requests r ON r.request_id=m.id
+      WHERE m.request_body IS NOT NULL AND r.request_id IS NULL ORDER BY m.seq DESC`).all() as MessageRow[];
+    for (const row of rows) {
+      const conversation = this.conversationRow(row.conversation_id);
+      const input = JSON.parse(row.request_body!) as MessagingSend;
+      const attachments = input.attachmentIds.map(id => this.db.query("SELECT * FROM attachments WHERE id=?").get(id) as AttachmentRow | null);
+      const reply = row.quote_author !== null && row.quote_timestamp !== null && row.quote_text !== null
+        ? { author: row.quote_author, timestamp: row.quote_timestamp, text: row.quote_text } : undefined;
+      const payload = attachments.every((item): item is AttachmentRow => item !== null && existsSync(item.path))
+        ? this.effectPayload(conversation, row.text, attachments, reply)
+        : { operation: "message", target: this.actionRecipient(conversation), text: row.text, attachments: { state: "historical-content-unavailable", count: attachments.length }, reply: reply ?? null };
+      pending.push([conversation, row.id, "message", input.intentKey ?? `signal.message:${digest(payload)}`, payload,
+        row.status === "sent" ? "succeeded" : row.status === "failed" ? "failed-before-effect" : "uncertain",
+        row.external_id ?? row.error ?? "Historical send outcome unknown"]);
+    }
+    const reactions = this.db.query(`SELECT m.* FROM messaging_reaction_requests m LEFT JOIN messaging_action_requests r ON r.request_id=m.request_id
+      WHERE r.request_id IS NULL ORDER BY m.rowid DESC`).all() as (ReactionRequestRow & { request_id: string })[];
+    for (const request of reactions) {
+      const input = JSON.parse(request.request_body) as { messageId: string; emoji: string; remove: boolean; intentKey?: string };
+      const row = this.db.query("SELECT * FROM messages WHERE id=?").get(input.messageId) as MessageRow | null;
+      if (!row) throw new Error("Historical reaction request lost its target; cannot safely initialize messaging authority");
+      const conversation = this.conversationRow(row.conversation_id);
+      const payload = { operation: "reaction", target: this.actionRecipient(conversation), author: this.messageSender(row, conversation.backend_id), timestamp: row.timestamp, emoji: input.emoji, remove: input.remove };
+      const receipt = request.receipt ? JSON.parse(request.receipt) as ReactionReceipt : null;
+      pending.push([conversation, request.request_id, "reaction", input.intentKey ?? `signal.reaction:${digest(payload)}`, payload,
+        receipt?.ok ? "succeeded" : receipt && !receipt.ok && receipt.error.code !== "unknown" ? "failed-before-effect" : "uncertain",
+        receipt?.ok ? "Historical confirmed reaction receipt" : receipt && !receipt.ok ? receipt.error.message : "Historical reaction outcome unknown"]);
+    }
+    const priority = { uncertain: 0, succeeded: 1, "failed-before-effect": 2 };
+    pending.sort((a, b) => priority[a[5]] - priority[b[5]]);
+    for (const request of pending) this.adoptRequest(...request);
+  }
+  private adoptRequest(conversation: ConversationRow, requestId: string, kind: "message" | "reaction", intentKey: string, payload: unknown, state: "succeeded" | "failed-before-effect" | "uncertain", detail: string): void {
+    const reservation = this.reserve(conversation, requestId, intentKey, payload);
+    if (state === "uncertain" && reservation.disposition === "recipient-held" && reservation.action.state !== "uncertain") {
+      for (const recipient of this.actionRecipients(conversation)) {
+        const hold = this.actions.holdRecipient(recipient, `Historical unknown Signal request ${requestId} must be reconciled before further contact`, "messaging-migration");
+        if (!hold.ok) throw new Error(hold.message);
+      }
+    }
+    if (reservation.disposition === "created" && reservation.action.state === "accepted") {
+      const claim = this.actions.claim(reservation.action.id, "messaging-migration");
+      if (!claim.ok) throw new Error(claim.message);
+      const finished = this.actions.finish(claim.value, state, null, { kind: state === "succeeded" ? "provider-receipt" : state === "failed-before-effect" ? "provider-rejection" : "operator-observation", reference: `historical-signal:${requestId}`, detail: detail.slice(0, 1000) || "Historical native receipt" });
+      if (!finished.ok) throw new Error(finished.message);
+    }
+    this.db.query("INSERT INTO messaging_action_requests VALUES(?,?,NULL,?)").run(requestId, reservation.action.id, kind);
+  }
+  private effectPayload(conversation: ConversationRow, text: string, attachments: AttachmentRow[], reply?: BackendReply) {
+    return { operation: "message", target: this.actionRecipient(conversation), text,
+      attachments: attachments.map(item => ({ name: item.name, mimeType: item.mime_type, size: item.size, sha256: createHash("sha256").update(readFileSync(item.path)).digest("hex") })),
+      reply: reply ? { ...reply, author: this.canonical(conversation.backend_id, reply.author) } : null };
+  }
+  private actionRecipient(conversation: ConversationRow): string {
+    if (conversation.kind === "group") return `signal:${conversation.external_id}`;
+    const sender = this.canonical(conversation.backend_id, conversation.external_id);
+    const aliases = this.db.query("SELECT alias FROM messaging_sender_aliases WHERE backend_id=? AND sender_id=? ORDER BY alias").all(conversation.backend_id, sender) as { alias: string }[];
+    const identities = [conversation.external_id, sender, ...aliases.map(item => item.alias)].map(canonicalRecipient);
+    return identities.find(id => id.startsWith("tel:")) ?? `signal:${sender}`;
+  }
+  private actionRecipients(conversation: ConversationRow): string[] {
+    if (conversation.kind === "group") return [this.actionRecipient(conversation)];
+    const sender = this.canonical(conversation.backend_id, conversation.external_id);
+    const aliases = this.db.query("SELECT alias FROM messaging_sender_aliases WHERE backend_id=? AND sender_id=?").all(conversation.backend_id, sender) as { alias: string }[];
+    return [...new Set([conversation.external_id, sender, ...aliases.map(item => item.alias)].map(id => canonicalRecipient(id).startsWith("tel:") ? canonicalRecipient(id) : `signal:${id}`))];
+  }
+  private reserve(conversation: ConversationRow, requestId: string, intentKey: string, payload: unknown, followup?: MessagingPurpose["followup"]) {
+    const input = { intentKey, recipients: this.actionRecipients(conversation), transport: "signal", payload, requestId: `signal:${requestId}`, threadId: "messaging-owner" };
+    const result = followup ? this.actions.followup(followup.actionId, followup.revision, input, { kind: "operator-observation", reference: `signal:${requestId}`, detail: followup.evidence }) : this.actions.submit(input);
+    if (!result.ok) throw new MessagingFailure(result.message, result.error === "unavailable" ? 503 : 409, `action_${result.error}`);
+    return result.value;
+  }
+  private projectMessageAction(row: MessageRow, action: ActionRecord): MessagingMessage {
+    const saved = action.result as MessagingResult<{ externalId: string; timestamp: number }> | null;
+    if (action.state === "succeeded" && saved?.ok && typeof saved.value?.externalId === "string" && Number.isSafeInteger(saved.value.timestamp)
+      && (row.status !== "sent" || row.external_id !== saved.value.externalId)) {
+      this.db.query("UPDATE messages SET external_id=?,timestamp=?,status='sent',error=NULL WHERE id=?").run(saved.value.externalId, saved.value.timestamp, row.id);
+      this.changed();
+      Object.assign(row, { external_id: saved.value.externalId, timestamp: saved.value.timestamp, status: "sent", error: null });
+    }
+    return this.message(row);
+  }
+  private finishAction(ticket: DispatchTicket, result: MessagingResult<unknown>): string | null {
+    const outcome = result.ok ? "succeeded" : result.error.code === "unknown" ? "uncertain" : "failed-before-effect";
+    const finished = this.actions.finish(ticket, outcome, result, {
+      kind: result.ok ? "provider-receipt" : result.error.code === "unknown" ? "operator-observation" : "provider-rejection",
+      reference: ticket.id, detail: result.ok ? "Signal provider accepted the effect" : result.error.message.slice(0, 1000) || "Provider rejected the effect",
+    });
+    return finished.ok ? null : `Action receipt unavailable: ${finished.message}. Do not resend; action remains fenced.`;
   }
   private readyBackend(id: string): Backend & { plugin: MessagingPlugin } {
     const backend = this.backends.get(id);
@@ -416,16 +533,20 @@ export class MessagingService {
     if (changed) this.changed();
   }
   /** The id is the local messaging message id, not the Signal timestamp or universal reference. */
-  react(messageId: string, emoji: string, remove: boolean, requestId: string): Promise<ReactionReceipt> {
+  react(messageId: string, emoji: string, remove: boolean, requestId: string, intentKey?: string, followup?: MessagingPurpose["followup"]): Promise<ReactionReceipt> {
     const error = (code: string, message: string): Promise<ReactionReceipt> => Promise.resolve({ ok: false, error: { code, message } });
     if (this.closing || this.closed) return error("closed", "Messaging is handing over");
-    if (typeof requestId !== "string" || !ID.test(requestId) || typeof messageId !== "string" || !messageId || typeof emoji !== "string" || !isReactionEmoji(emoji) || typeof remove !== "boolean")
+    if (typeof requestId !== "string" || !ID.test(requestId) || typeof messageId !== "string" || !messageId || typeof emoji !== "string" || !isReactionEmoji(emoji) || typeof remove !== "boolean" || !validPurpose({ intentKey, followup }))
       return error("invalid_reaction", "A valid requestId, message id, single emoji and remove boolean are required");
-    const body = JSON.stringify({ messageId, emoji, remove });
+    const body = JSON.stringify({ messageId, emoji, remove, ...(intentKey !== undefined ? { intentKey } : {}), ...(followup !== undefined ? { followup } : {}) });
     const existing = this.db.query("SELECT request_body,receipt FROM messaging_reaction_requests WHERE request_id=?").get(requestId) as ReactionRequestRow | null;
     if (existing) {
       if (existing.request_body !== body) return error("request_conflict", "This requestId belongs to a different reaction");
-      if (existing.receipt !== null) return Promise.resolve(JSON.parse(existing.receipt) as ReactionReceipt);
+      if (existing.receipt !== null) {
+        const projection = this.db.query("SELECT action_id FROM messaging_action_requests WHERE request_id=?").get(requestId) as { action_id: string } | null;
+        const action = projection ? this.actions.inspect(projection.action_id) : null;
+        return action?.ok ? this.restoreReaction(requestId, messageId, emoji, remove, action.value, existing.receipt) : Promise.resolve(JSON.parse(existing.receipt) as ReactionReceipt);
+      }
       const admitted = this.reactionRequests.get(requestId);
       if (!admitted) throw new Error("An admitted reaction has no settlement task");
       return admitted;
@@ -436,8 +557,24 @@ export class MessagingService {
     const backend = this.backends.get(conversation.backend_id);
     if (!backend?.plugin?.react) return error("reactions_unsupported", "This messaging backend does not support reactions");
     if (backend.info.status !== "ready") return error("backend_unavailable", backend.info.detail);
-    this.db.query("INSERT INTO messaging_reaction_requests(request_id,request_body) VALUES(?,?)").run(requestId, body);
-    const task = Promise.resolve().then(() => this.dispatchReaction(backend.plugin!, conversation, row, emoji, remove, requestId)).catch(cause => ({ ok: false as const, error: { code: "unknown", message: `Reaction outcome unknown: ${failureText(cause)}` } })).then(receipt => {
+    const payload = { operation: "reaction", target: this.actionRecipient(conversation), author: this.messageSender(row, conversation.backend_id), timestamp: row.timestamp, emoji, remove };
+    let reservation: { action: ActionRecord; disposition: "created" | "existing" | "recipient-held" };
+    try { reservation = this.reserve(conversation, requestId, intentKey ?? `signal.reaction:${digest(payload)}`, payload, followup); }
+    catch (cause) { return error(cause instanceof MessagingFailure ? cause.code ?? "action_unavailable" : "action_unavailable", failureText(cause)); }
+    if (reservation.disposition !== "created" || reservation.action.state !== "accepted") {
+      const prior = this.db.query("SELECT m.request_id,receipt FROM messaging_reaction_requests m JOIN messaging_action_requests r ON r.request_id=m.request_id WHERE r.action_id=? AND r.kind='reaction' LIMIT 1").get(reservation.action.id) as { request_id: string; receipt: string | null } | null;
+      if (reservation.disposition === "existing" && prior) {
+        if (prior.receipt) return this.restoreReaction(prior.request_id, messageId, emoji, remove, reservation.action, prior.receipt);
+        const task = this.reactionRequests.get(prior.request_id);
+        if (task) return task;
+      }
+      if (reservation.disposition !== "existing" || reservation.action.state !== "accepted") return error("action_fenced", `Action ${reservation.action.id} is ${reservation.action.state}; inspect and reconcile, do not retry.`);
+    }
+    this.db.transaction(() => {
+      this.db.query("INSERT INTO messaging_reaction_requests(request_id,request_body) VALUES(?,?)").run(requestId, body);
+      this.db.query("INSERT INTO messaging_action_requests VALUES(?,?,NULL,'reaction')").run(requestId, reservation.action.id);
+    })();
+    const task = Promise.resolve().then(() => this.dispatchReaction(backend.plugin!, conversation, row, emoji, remove, requestId, reservation.action.id)).catch(cause => ({ ok: false as const, error: { code: "unknown", message: `Reaction outcome unknown: ${failureText(cause)}` } })).then(receipt => {
       this.db.query("UPDATE messaging_reaction_requests SET receipt=? WHERE request_id=?").run(JSON.stringify(receipt), requestId);
       return receipt;
     });
@@ -445,14 +582,36 @@ export class MessagingService {
     void task.then(() => this.reactionRequests.delete(requestId), () => this.reactionRequests.delete(requestId));
     return this.track(task);
   }
-  private async dispatchReaction(plugin: MessagingPlugin, conversation: ConversationRow, row: MessageRow, emoji: string, remove: boolean, requestId: string): Promise<ReactionReceipt> {
+  private async restoreReaction(requestId: string, messageId: string, emoji: string, remove: boolean, action: ActionRecord, receipt: string): Promise<ReactionReceipt> {
+    const previous = JSON.parse(receipt) as ReactionReceipt;
+    const saved = action.result as MessagingResult<{ timestamp: number; sender: string }> | null;
+    if (previous.ok || action.state !== "succeeded" || !saved?.ok || !Number.isSafeInteger(saved.value?.timestamp) || typeof saved.value?.sender !== "string") return previous;
+    const row = this.db.query("SELECT * FROM messages WHERE id=?").get(messageId) as MessageRow | null;
+    if (!row) return { ok: false, error: { code: "message_not_found", message: "Confirmed action exists but its native reaction target is unavailable" } };
+    const conversation = this.conversationRow(row.conversation_id);
+    await this.receiveReaction(conversation.backend_id, { conversation: { id: conversation.external_id, title: conversation.title, kind: conversation.kind }, target: { author: row.direction === "outgoing" ? saved.value.sender : row.sender, timestamp: row.timestamp }, account: saved.value.sender, sender: saved.value.sender, emoji, remove, timestamp: saved.value.timestamp });
+    const restored: ReactionReceipt = { ok: true, value: this.reactions(row) };
+    this.db.query("UPDATE messaging_reaction_requests SET receipt=? WHERE request_id=?").run(JSON.stringify(restored), requestId);
+    return restored;
+  }
+  private async dispatchReaction(plugin: MessagingPlugin, conversation: ConversationRow, row: MessageRow, emoji: string, remove: boolean, requestId: string, actionId: string): Promise<ReactionReceipt> {
+    const claim = this.actions.claim(actionId, "messaging-owner");
+    if (!claim.ok) return { ok: false, error: { code: `action_${claim.error}`, message: claim.message } };
+    this.db.query("UPDATE messaging_action_requests SET ticket=? WHERE request_id=?").run(JSON.stringify(claim.value), requestId);
     let ticket: ActionTicket | null;
     try { ticket = this.journal.begin({ action: `${conversation.backend_id}.reaction`, recipients: [conversation.title, conversation.external_id], summary: `${remove ? "Removed" : "Sent"} reaction ${emoji}`, externalId: requestId }); }
-    catch (cause) { return { ok: false, error: { code: "journal_unavailable", message: `Not dispatched: ${failureText(cause)}` } }; }
+    catch (cause) {
+      this.actions.finish(claim.value, "failed-before-effect", null, { kind: "provider-rejection", reference: "dispatch-not-started", detail: `Local journal rejected before provider invocation: ${failureText(cause)}` });
+      return { ok: false, error: { code: "journal_unavailable", message: `Not dispatched: ${failureText(cause)}` } };
+    }
     let result;
+    const dispatch = this.actions.dispatch(claim.value);
+    if (!dispatch.ok) return { ok: false, error: { code: `action_${dispatch.error}`, message: dispatch.message } };
     try { result = await plugin.react!({ id: conversation.external_id, title: conversation.title, kind: conversation.kind }, { author: this.messageSender(row, conversation.backend_id), timestamp: row.timestamp }, emoji, remove); }
     catch (cause) { result = { ok: false as const, error: { code: "unknown", message: `Reaction outcome unknown: ${failureText(cause)}` } }; }
-    const warning = journalWarning(this.journal.finish(ticket, result.ok ? "confirmed" : result.error.code === "unknown" ? "unconfirmed" : "failed", result.ok ? `Reaction accepted at ${result.value.timestamp}` : result.error.message));
+    const authorityWarning = this.finishAction(claim.value, result);
+    const journalResult = journalWarning(this.journal.finish(ticket, result.ok ? "confirmed" : result.error.code === "unknown" ? "unconfirmed" : "failed", result.ok ? `Reaction accepted at ${result.value.timestamp}` : result.error.message));
+    const warning = authorityWarning ?? journalResult;
     if (warning) { this.db.query("UPDATE messages SET error=? WHERE id=?").run(warning, row.id); this.changed(); }
     if (!result.ok) return result;
     await this.receiveReaction(conversation.backend_id, { conversation: { id: conversation.external_id, title: conversation.title, kind: conversation.kind }, target: { author: row.direction === "outgoing" ? result.value.sender : row.sender, timestamp: row.timestamp }, account: result.value.sender, sender: result.value.sender, emoji, remove, timestamp: result.value.timestamp });
@@ -490,7 +649,8 @@ export class MessagingService {
     const account = prepared ? prepared.account : row.direction === "outgoing" && row.sender === "You"
       ? (this.db.query(`SELECT sender_id FROM messaging_accounts WHERE backend_id=(SELECT backend_id FROM conversations WHERE id=?)`).get(row.conversation_id) as { sender_id: string } | null)?.sender_id ?? null : null;
     const reply = this.reply(row);
-    return { id: row.id, seq: row.seq, requestId: row.request_body ? row.id : null, conversationId: row.conversation_id, externalId: row.external_id, direction: row.direction, sender: row.sender, ...(sender?.name ? { senderName: sender.name } : {}), text: row.text, timestamp: row.timestamp, status: row.status, error: row.error, attachments,
+    const action = this.db.query("SELECT action_id FROM messaging_action_requests WHERE request_id=?").get(row.id) as { action_id: string } | null;
+    return { ...(action ? { actionId: action.action_id } : {}), id: row.id, seq: row.seq, requestId: row.request_body ? row.id : null, conversationId: row.conversation_id, externalId: row.external_id, direction: row.direction, sender: row.sender, ...(sender?.name ? { senderName: sender.name } : {}), text: row.text, timestamp: row.timestamp, status: row.status, error: row.error, attachments,
       ...((row.status === "received" || row.status === "sent") && row.external_id ? {
         identity: { id: messageReference({ transport: "messaging", messageId: row.id }), timestamp: row.timestamp, sender: { id: account ?? row.sender, ...(sender?.name ? { name: sender.name } : {}), ...(row.direction === "outgoing" ? { own: true } : {}) } },
       } : {}),
@@ -613,12 +773,16 @@ export class MessagingService {
     if (!input || typeof input.requestId !== "string" || !ID.test(input.requestId) || typeof input.text !== "string" || input.text.length > 200_000
       || !Array.isArray(input.attachmentIds) || input.attachmentIds.length > 32 || input.attachmentIds.some(id => typeof id !== "string")
       || new Set(input.attachmentIds).size !== input.attachmentIds.length || (!input.text.trim() && !input.attachmentIds.length)
+      || !validPurpose(input)
+      || Object.hasOwn(input, "source")
       || (input.replyTo !== undefined && (typeof input.replyTo !== "string" || !parseMessageReference(input.replyTo)))) throw new MessagingFailure("Valid requestId, reply reference and a message or attachments are required");
-    const body = JSON.stringify({ conversationId, text: input.text, attachmentIds: input.attachmentIds, ...(input.replyTo !== undefined ? { replyTo: input.replyTo } : {}) });
+    const body = JSON.stringify({ conversationId, text: input.text, attachmentIds: input.attachmentIds, ...(input.replyTo !== undefined ? { replyTo: input.replyTo } : {}), ...(input.intentKey !== undefined ? { intentKey: input.intentKey } : {}), ...(input.followup !== undefined ? { followup: input.followup } : {}) });
     const existing = this.db.query("SELECT * FROM messages WHERE id=?").get(input.requestId) as MessageRow | null;
     if (existing) {
       if (existing.request_body !== body) throw new MessagingFailure("This requestId belongs to a different message", 409);
-      const message = this.message(existing);
+      const projection = this.db.query("SELECT action_id FROM messaging_action_requests WHERE request_id=?").get(input.requestId) as { action_id: string } | null;
+      const inspected = projection ? this.actions.inspect(projection.action_id) : null;
+      const message = inspected?.ok ? this.projectMessageAction(existing, inspected.value) : this.message(existing);
       return { message, settled: this.sends.get(input.requestId) ?? Promise.resolve(message) };
     }
     const reference = input.replyTo ? parseMessageReference(input.replyTo) : null;
@@ -627,12 +791,24 @@ export class MessagingService {
       .get(reference.messageId, conversationId) as MessageRow | null : null;
     if (input.replyTo && !target) throw new MessagingFailure("Reply target must be a confirmed message in this conversation", 409);
     const reply: BackendReply | undefined = target ? { author: this.messageSender(target, row.backend_id), timestamp: target.timestamp, text: target.text } : undefined;
+    const attachments = input.attachmentIds.map(id => this.attachmentRow(id));
+    if (attachments.some(item => item.conversation_id !== conversationId)) throw new MessagingFailure("Attachments must belong to this conversation's draft or a confirmed failed send", 409);
+    const payload = this.effectPayload(row, input.text, attachments, reply);
+    const reservation = this.reserve(row, input.requestId, input.intentKey ?? `signal.message:${digest(payload)}`, payload, input.followup);
+    if (reservation.disposition !== "created" || reservation.action.state !== "accepted") {
+      const prior = this.db.query("SELECT m.* FROM messages m JOIN messaging_action_requests r ON r.request_id=m.id WHERE r.action_id=? AND r.kind='message' ORDER BY m.seq LIMIT 1").get(reservation.action.id) as MessageRow | null;
+      if (prior && reservation.disposition === "existing") {
+        const message = this.projectMessageAction(prior, reservation.action);
+        return { message, settled: this.sends.get(prior.id) ?? Promise.resolve(message) };
+      }
+      if (reservation.disposition !== "existing" || reservation.action.state !== "accepted") throw new MessagingFailure(`Action ${reservation.action.id} is ${reservation.action.state}; recipient contact is unresolved. Inspect and reconcile it, do not retry.`, 409, "action_fenced");
+    }
+    if (attachments.some(item => item.message_id && !(this.db.query("SELECT id FROM messages WHERE id=? AND status='failed'").get(item.message_id)))) throw new MessagingFailure("Attachments must belong to this conversation's draft or a confirmed failed send", 409);
     const backend = this.readyBackend(row.backend_id);
     if (input.attachmentIds.length && !backend.info.capabilities.attachments) throw new MessagingFailure("This backend does not support attachments");
-    const attachments = input.attachmentIds.map(id => this.attachmentRow(id));
-    if (attachments.some(item => item.conversation_id !== conversationId || (item.message_id && !(this.db.query("SELECT id FROM messages WHERE id=? AND status='failed'").get(item.message_id))))) throw new MessagingFailure("Attachments must belong to this conversation's draft or a confirmed failed send", 409);
     const timestamp = Date.now();
     this.db.transaction(() => {
+      this.db.query("INSERT INTO messaging_action_requests VALUES(?,?,NULL,'message')").run(input.requestId, reservation.action.id);
       this.db.query("INSERT INTO messages(id,conversation_id,direction,sender,text,timestamp,status,request_body,quote_author,quote_timestamp,quote_text,quote_message_id) VALUES(?,?,'outgoing','You',?,?,'sending',?,?,?,?,?)").run(input.requestId, conversationId, input.text, timestamp, body, reply?.author ?? null, reply?.timestamp ?? null, reply?.text ?? null, target?.id ?? null);
       for (const item of attachments) {
         this.db.query("UPDATE attachments SET message_id=? WHERE id=?").run(input.requestId, item.id);
@@ -642,22 +818,37 @@ export class MessagingService {
     })();
     this.changed();
     const message = this.message(this.db.query("SELECT * FROM messages WHERE id=?").get(input.requestId) as MessageRow);
-    const task = this.dispatch(backend.plugin, row, input, attachments, reply);
+    const task = this.dispatch(backend.plugin, row, input, attachments, reservation.action.id, reply);
     this.sends.set(input.requestId, task);
     void task.then(() => this.sends.delete(input.requestId), () => this.sends.delete(input.requestId));
     return { message, settled: task };
   }
-  private async dispatch(plugin: MessagingPlugin, conversation: ConversationRow, input: MessagingSend, attachments: AttachmentRow[], reply?: BackendReply): Promise<MessagingMessage> {
+  private async dispatch(plugin: MessagingPlugin, conversation: ConversationRow, input: MessagingSend, attachments: AttachmentRow[], actionId: string, reply?: BackendReply): Promise<MessagingMessage> {
+    const claim = this.actions.claim(actionId, "messaging-owner");
+    if (!claim.ok) {
+      this.db.query("UPDATE messages SET status='unknown',error=? WHERE id=?").run(claim.message, input.requestId);
+      this.changed();
+      return this.message(this.db.query("SELECT * FROM messages WHERE id=?").get(input.requestId) as MessageRow);
+    }
+    this.db.query("UPDATE messaging_action_requests SET ticket=? WHERE request_id=?").run(JSON.stringify(claim.value), input.requestId);
     let ticket: ActionTicket | null;
     try {
       ticket = this.journal.begin({ action: `${conversation.backend_id}.message`, recipients: [conversation.title, conversation.external_id], summary: `${input.text} (${attachments.length} attachments)`, externalId: input.requestId });
     } catch (cause) {
+      this.actions.finish(claim.value, "failed-before-effect", null, { kind: "provider-rejection", reference: "dispatch-not-started", detail: `Local journal rejected before provider invocation: ${failureText(cause)}` });
       this.db.query("UPDATE messages SET status='failed',error=? WHERE id=?").run(`Not dispatched: action journal unavailable: ${failureText(cause)}`, input.requestId);
+      this.changed();
+      return this.message(this.db.query("SELECT * FROM messages WHERE id=?").get(input.requestId) as MessageRow);
+    }
+    const dispatch = this.actions.dispatch(claim.value);
+    if (!dispatch.ok) {
+      this.db.query("UPDATE messages SET status='unknown',error=? WHERE id=?").run(dispatch.message, input.requestId);
       this.changed();
       return this.message(this.db.query("SELECT * FROM messages WHERE id=?").get(input.requestId) as MessageRow);
     }
     try {
       const result = await plugin.send({ id: conversation.external_id, title: conversation.title, kind: conversation.kind }, { requestId: input.requestId, text: input.text, attachments: attachments.map(item => ({ path: item.path, name: item.name, mimeType: item.mime_type, size: item.size })), ...(reply ? { reply } : {}) });
+      const authority = this.finishAction(claim.value, result);
       if (result.ok) {
         const redundant: AttachmentRow[] = [];
         this.db.transaction(() => {
@@ -684,7 +875,9 @@ export class MessagingService {
           }
         }
       } else this.db.query("UPDATE messages SET status=?,error=? WHERE id=?").run(result.error.code === "unknown" ? "unknown" : "failed", result.error.message, input.requestId);
+      if (authority) this.db.query("UPDATE messages SET error=? WHERE id=?").run(authority, input.requestId);
     } catch (cause) {
+      this.finishAction(claim.value, { ok: false, error: { code: "unknown", message: failureText(cause) } });
       this.db.query("UPDATE messages SET status='unknown',error=? WHERE id=?").run(`Backend did not confirm the send: ${failureText(cause)}`, input.requestId);
     }
     const row = this.db.query("SELECT * FROM messages WHERE id=?").get(input.requestId) as MessageRow;
@@ -741,9 +934,9 @@ export class MessagingService {
       const reaction = API.messagingReact.match(req.method, url.pathname);
       if (reaction) {
         const body = await req.json();
-        if (!body || typeof body !== "object") throw new MessagingFailure("A reaction body is required");
-        const receipt = await this.react(reaction.messageId, body.emoji, body.remove === undefined ? false : body.remove, body.requestId);
-        return json(receipt, receipt.ok ? 200 : receipt.error.code === "message_not_found" ? 404 : receipt.error.code === "request_conflict" || receipt.error.code === "unknown" ? 409 : receipt.error.code === "closed" || receipt.error.code === "backend_unavailable" || receipt.error.code === "journal_unavailable" ? 503 : 400);
+        if (!body || typeof body !== "object" || Object.hasOwn(body, "source")) throw new MessagingFailure("An agent reaction body is required");
+        const receipt = await this.react(reaction.messageId, body.emoji, body.remove === undefined ? false : body.remove, body.requestId, body.intentKey, body.followup);
+        return json(receipt, receipt.ok ? 200 : receipt.error.code === "message_not_found" ? 404 : receipt.error.code === "request_conflict" || receipt.error.code === "unknown" || receipt.error.code === "action_fenced" || receipt.error.code === "action_payload-conflict" ? 409 : receipt.error.code === "closed" || receipt.error.code === "backend_unavailable" || receipt.error.code === "journal_unavailable" || receipt.error.code === "action_unavailable" ? 503 : 400);
       }
       if (API.messagingOpen.match(req.method, url.pathname)) {
         const body = await req.json();
@@ -819,6 +1012,7 @@ export class MessagingService {
       const errors = closing.filter(result => result.status === "rejected");
       if (errors.length) throw new Error(`Messaging cleanup failed: ${errors.map(result => failureText(result.reason)).join("; ")}`);
       this.db.close();
+      if (this.ownsActions) this.actions.close();
       this.closed = true;
     })().catch(cause => { this.closeTask = null; throw cause; });
   }
