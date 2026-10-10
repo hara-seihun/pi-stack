@@ -177,7 +177,6 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, autoCollapse
   const message = <div className={entry.kind === "user" && !sender ? "transcript-message-human" : "transcript-message-agent"} data-transcript-seq={entry.seq} data-transcript-source={entry.key}>{sender
     ? <AgentDisclosure route={route} open={open} onOpen={setOpen}>{content}</AgentDisclosure>
     : content}
-    {bubble?.timestamp && <time className="chat-group-time" dateTime={new Date(bubble.timestamp).toISOString()}>{new Date(bubble.timestamp).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}</time>}
   </div>;
   return bubble ? <div className="chat-row" data-side={entry.kind} data-group-start={bubble.starts} data-group-end={bubble.ends}>
     {bubble.day && <div className="chat-day" role="separator" aria-label={bubble.day}>{bubble.day}</div>}{message}

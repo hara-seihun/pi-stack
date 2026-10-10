@@ -96,8 +96,6 @@ button.agent-route-name:hover, button.agent-route-name:focus-visible { text-deco
 .manager-conversation .chat-row[data-side="assistant"][data-group-end="true"] .chat-bubble { border-bottom-left-radius: 4px; }
 .manager-conversation .transcript-message-human .message-input-status { text-align: right; padding-top: 4px; }
 .chat-day { margin: 16px auto 18px; color: var(--muted); font-size: 12px; font-weight: 500; text-align: center; }
-.chat-group-time { display: block; margin: 4px 8px 0; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
-.transcript-message-human .chat-group-time { text-align: right; }
 .chat-message-detail-time { display: block; margin-top: 8px; color: inherit; opacity: .75; font-size: 11px; }
 .manager-conversation .live-answer { margin-top: 12px; }
 .manager-conversation .live-answer > .chat-bubble { width: fit-content; min-width: 0; max-width: min(80%, 68ch); border-bottom-left-radius: 4px; }
@@ -118,6 +116,7 @@ button.agent-route-name:hover, button.agent-route-name:focus-visible { text-deco
 .message-input-status { color: var(--muted); font-size: 12px; padding: 0 14px 6px; overflow-wrap: anywhere; }
 .message-input-failed { color: var(--danger); }
 .prompt-delivery { padding: 3px 8px 0; color: var(--muted); font-size: 11px; text-align: right; }
+.prompt-delivery:not([data-delivery="failed"]) { white-space: nowrap; }
 .prompt-delivery[data-delivery="failed"] { color: var(--danger); }
 .prompt-delivery button { min-height: 36px; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
 .prompt-delivery-error { display: block; overflow-wrap: anywhere; }
