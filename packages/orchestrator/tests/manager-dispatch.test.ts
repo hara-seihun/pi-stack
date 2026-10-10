@@ -35,18 +35,17 @@ async function create(f: ReturnType<typeof fixture>) {
   value(await f.service.spawn({ requestId: "manager-create", id: "manager", cwd: f.root, metadata: { manager: true } }));
   value(await f.service.spawn({ requestId: "worker-create", id: "worker", cwd: f.root }));
 }
-it("all manager ingress is high-priority steer; human input is FIFO ahead of machine traffic without dropping any accepted input", async () => {
+it("manager human hard steers stay FIFO ahead of unchanged machine steers without dropping accepted input", async () => {
   const f = fixture(); await create(f);
   for (let i = 0; i < 20; i++) expect(value(await f.service.send({ threadId: "manager", senderId: "worker", requestId: `machine-${i}`, text: "Progress", delivery: "queue" })).priority).toBe("manager");
   for (const id of ["human-1", "human-2"]) value(await f.service.send({ threadId: "manager", requestId: id, text: id, delivery: "queue", humanActivity: true }));
   expect(f.service.pending("manager").map(m => m.id)).toEqual(["human-1", "human-2", ...Array.from({ length: 20 }, (_, i) => `machine-${i}`)]);
-  value(await f.service.start()); await until(() => f.sessions[0]?.commands.filter(c => c.type === "prompt" || c.type === "steer").length === 22);
-  const commands = f.sessions[0]!.commands.filter(c => c.type === "prompt" || c.type === "steer");
-  expect(commands[0]!.workId).toBe("human-1"); expect(commands[1]!.workId).toBe("human-2");
-  expect(commands.map(command => command.inputOrigin)).toEqual(["human", "human", ...Array(20).fill("machine")]);
-  expect(commands.filter(c => c.type === "prompt")).toHaveLength(1);
+  expect(f.service.pending("manager").map(m => m.delivery)).toEqual(["hardSteer", "hardSteer", ...Array(20).fill("steer")]);
   expect(value(await f.service.inspect("manager")).inputs).toHaveLength(22);
-  expect(f.sessions[0]!.options.env.PI_THREAD_MANAGER).toBe("1");
+  value(await f.service.close()); const resumed = fixture(f.root);
+  expect(resumed.service.pending("manager").map(m => [m.id, m.delivery])).toEqual([
+    ["human-1", "hardSteer"], ["human-2", "hardSteer"], ...Array.from({ length: 20 }, (_, i) => [`machine-${i}`, "steer"]),
+  ]);
 });
 it("old machine receipts are projected as machine, human literal envelopes stay human and silent settlements retain evidence", async () => {
   const f = fixture(); await create(f);
@@ -97,19 +96,26 @@ it("human input arriving during machine admission wins the next unentered execut
   expect(f.sessions[0]!.commands.find(c => c.type === "prompt")!.workId).toBe("human"); expect(released).toBeGreaterThan(0);
   expect(f.sessions[0]!.commands.some(c => c.type === "abort")).toBe(false);
 });
-it("manager hard steer cannot cancel accepted effects; native queued receipts are distinct from landed execution and survive restart", async () => {
+it("manager human sends abort the local turn immediately and run next without replaying the request", async () => {
   const f = fixture(); await create(f);
   value(await f.service.send({ threadId: "manager", requestId: "accepted", text: "Coordinate" }));
   value(await f.service.start()); await until(() => f.sessions[0]?.commands.some(c => c.workId === "accepted") === true);
-  const sent = value(await f.service.send({ threadId: "manager", requestId: "urgent", text: "Reply now", humanActivity: true, delivery: "hardSteer" }));
-  expect(sent.delivery).toBe("steer");
-  await until(() => f.sessions[0]!.commands.some(c => c.workId === "urgent"));
-  expect(f.sessions[0]!.commands.some(c => c.type === "abort")).toBe(false);
+  const input = { threadId: "manager", requestId: "urgent", text: "Reply now", humanActivity: true, delivery: "steer" as const };
+  const sent = value(await f.service.send(input));
+  expect(sent.delivery).toBe("hardSteer");
+  await until(() => f.sessions[1]?.commands.some(c => c.workId === "urgent") === true);
+  expect(f.sessions[0]!.commands.filter(c => c.type === "abort")).toHaveLength(1);
+  expect(f.service.latestSettlement("manager")?.outcome).toBe("cancelled");
+  expect(f.sessions[1]!.commands.find(c => c.workId === "urgent")?.type).toBe("prompt");
+  expect(f.sessions[1]!.options.env.PI_THREAD_MANAGER).toBe("1");
+  expect(value(await f.service.send(input)).id).toBe(sent.id);
+  await boundary();
+  expect(f.sessions.flatMap(s => s.commands).filter(c => c.workId === "urgent")).toHaveLength(1);
   const queued = value(await f.service.inspect("manager")).inputs!.find(m => m.id === "urgent")!;
-  expect(queued.state).toBe("dispatched"); expect(queued.insertedAt).not.toBeNull(); expect(queued.landedAt).toBeNull();
-  f.sessions[0]!.emit({ type: "message_start", inputWorkId: "urgent", message: { role: "user", timestamp: 100, content: [] } });
+  expect(queued.state).toBe("dispatched"); expect(queued.insertedAt).not.toBeNull(); expect(queued.landedAt).not.toBeNull();
+  f.sessions[1]!.emit({ type: "message_start", inputWorkId: "urgent", message: { role: "user", timestamp: 100, content: [] } });
   expect(value(await f.service.inspect("manager")).inputs!.find(m => m.id === "urgent")!.landedAt).not.toBeNull();
-  f.sessions[0]!.settle(); await until(() => f.service.pending("manager").length === 0);
+  f.sessions[1]!.settle(); await until(() => f.service.pending("manager").length === 0);
   value(await f.service.close()); const next = fixture(f.root);
   expect(value(await next.service.inspect("manager")).inputs!.find(m => m.id === "urgent")).toMatchObject({ state: "done", outcome: "complete", priority: "human" });
 });

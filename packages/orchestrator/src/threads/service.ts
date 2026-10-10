@@ -328,7 +328,7 @@ export class ThreadService implements ThreadApi {
     }
     if (!(this.sql("PRAGMA table_info(thread_work)").all() as { name: string }[]).some(column => column.name === "priority")) this.db.exec("ALTER TABLE thread_work ADD COLUMN priority INTEGER NOT NULL DEFAULT 0 CHECK(priority IN (0,1,2))");
     this.db.exec(`UPDATE thread_work SET priority=CASE WHEN EXISTS(SELECT 1 FROM thread_human_activity h WHERE h.work_id=thread_work.id) THEN 2 ELSE 1 END,
-      delivery=CASE WHEN id LIKE 'thread-wake:manager-inactivity:%' THEN delivery ELSE 'steer' END,
+      delivery=CASE WHEN id LIKE 'thread-wake:manager-inactivity:%' THEN delivery WHEN input_origin='human' AND sender_id IS NULL AND source='explicit' THEN 'hardSteer' ELSE 'steer' END,
       front=CASE WHEN id LIKE 'thread-wake:manager-inactivity:%' THEN front ELSE 0 END WHERE thread_id IN (SELECT id FROM thread WHERE json_extract(metadata,'$.manager')=1) AND status='queued';
       DROP INDEX IF EXISTS thread_work_queue;
       CREATE INDEX thread_work_queue ON thread_work(thread_id,status,priority DESC,front DESC,ordinal);`);
@@ -1441,7 +1441,7 @@ export class ThreadService implements ThreadApi {
       this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.agentWait') WHERE id=?").run(input.threadId);
     }
     const manager = current?.metadata?.manager === true;
-    const delivery = manager && !id.startsWith(MANAGER_WATCHDOG_PREFIX) ? "steer" : resolveDelivery(input);
+    const delivery = manager && !id.startsWith(MANAGER_WATCHDOG_PREFIX) ? humanActivity ? "hardSteer" : "steer" : resolveDelivery(input);
     const inputOrigin = humanActivity ? "human" : input.senderId || input.source === "notification" || input.humanActivity === false ? "machine" : null;
     this.sql("INSERT INTO thread_work(id,thread_id,sender_id,text,images,delivery,source,reply_to,front,settings,created_at,priority,input_origin) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)")
       .run(id, input.threadId, input.senderId ?? null, input.text, JSON.stringify(input.images ?? []), delivery, input.source ?? "explicit", input.replyTo ?? null, manager && !id.startsWith(MANAGER_WATCHDOG_PREFIX) ? 0 : front ? Date.now() : 0, JSON.stringify(settings), Date.now(), manager ? humanActivity ? 2 : 1 : 0, inputOrigin);
@@ -2063,7 +2063,7 @@ export class ThreadService implements ThreadApi {
       });
       this.changed(thread.id);
       const runtime = this.runtimes.get(thread.id);
-      if (thread.metadata?.manager !== true && input.delivery === "hardSteer" && (runtime || this.opening.has(thread.id) || this.execution(thread.id) || thread.metadata?.runnerReference)) void this.halt(thread.id).then(() => this.wake(thread.id));
+      if (message.delivery === "hardSteer" && (runtime || this.opening.has(thread.id) || this.execution(thread.id) || thread.metadata?.runnerReference)) void this.halt(thread.id).then(() => this.wake(thread.id));
       this.wake(thread.id); return good(message);
     } catch (error) { return bad("unavailable", errorText(error)); }
   }
