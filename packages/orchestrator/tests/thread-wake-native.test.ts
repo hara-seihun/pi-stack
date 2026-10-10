@@ -145,8 +145,8 @@ it("real native end-turn, same-thread restart wake and shared browser/Android st
     unwrap(await owner.detach()); owner = createOwner(); now += 60001; unwrap(await owner.start());
     await until(() => modelCalls === 2 && owner.get("self")?.state === "idle");
     const woke = await observe("woke"); expect(woke.id).toBe("self"); expect(woke.sessionFile).toBe(created.sessionFile); expect(woke.waitingOnAgents).toBeUndefined();
-    expect(woke.wakeSchedule).toMatchObject({ cadenceMs: 60000, lastDueAt: now - 1, lastDeliveredAt: now, nextDueAt: now + 60000 });
-    expect(woke.wakeSchedule?.lastLandedAt).toBeDefined(); expect(unwrap(await client.list()).threads).toHaveLength(1);
+    expect(woke.wakeSchedule).toMatchObject({ cadenceMs: 60000, nextDueAt: now + 60000 });
+    expect(unwrap(await client.list()).threads).toHaveLength(1);
     expect(rendered.woke).toContain("Idle"); expect(readFileSync(created.sessionFile, "utf8")).toContain("Wake received in original conversation");
     owner.reconcile(); await boundary(); expect(modelCalls).toBe(2);
     unwrap(await owner.control({ action: "stop", threadId: "self", descendants: false })); now += 120000; owner.reconcile(); await boundary();

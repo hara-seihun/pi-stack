@@ -32,7 +32,7 @@ test("placement and provenance never override unread, unseen or live retention",
 
 test("automatic retention keeps outstanding subscribers, not their settled producers", async () => {
   const calls: unknown[] = [];
-  const rows = [row("dependent", { dependencies: ["dependency"] }), row("dependency", { state: "running" }), row("waiting", { waitingOnAgents: { kind: "message", fromThreadId: "sender", since: 1, reason: "Need answer" } }), row("sender"), row("independent")];
+  const rows = [row("dependent", { dependencies: ["dependency"] }), row("dependency", { state: "running" }), row("waiting", { waitingOnAgents: { kind: "message", fromThreadId: "sender", since: 1 } }), row("sender"), row("independent")];
   expect(await archiveInactiveThreads(apiFor(rows, calls), 1000, 10000)).toBe(2);
   expect(calls.at(-1)).toEqual({ threadId: "independent", action: "archiveInactive", inactiveBefore: 9000 });
 });

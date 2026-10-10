@@ -17,7 +17,7 @@ function lifecycleStatus(lifecycle: ThreadLifecycle, unread: boolean, lastActivi
     case "archived": return { key: "archived", label: "Archived", short: "Archived", busy: false, attention: false };
     case "cancelling": return { key: "stopping", label: "Cancelling", short: "Cancelling", busy: true, attention: false };
     case "failed": return { key: "error", label: "Failed", short: "Failed", title: lifecycle.reason, busy: false, attention: true };
-    case "waiting": return { key: "waiting", label: `Waiting for ${lifecycle.target === "agents" ? "agent results" : lifecycle.target === "dispatch" ? "execution" : lifecycle.target}`, short: "Waiting", title: lifecycle.reason, busy: false, attention: false, since: lifecycle.since };
+    case "waiting": return { key: "waiting", label: `Waiting for ${lifecycle.target === "agents" ? "agent results" : lifecycle.target === "dispatch" ? "execution" : lifecycle.target}`, short: "Waiting", ...("reason" in lifecycle ? { title: lifecycle.reason } : {}), busy: false, attention: false, since: lifecycle.since };
     case "working": {
       const typing = lifecycle.phase === "responding";
       return { key: typing ? "typing" : "working", label: typing ? "Typing" : "Working", short: typing ? "Typing" : "Working", busy: true, attention: false, title: lifecycle.detail, since: lifecycle.since, lastActivityAt };

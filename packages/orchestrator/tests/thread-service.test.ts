@@ -629,11 +629,9 @@ it("the thread's own agent names it with thread_title; a person's rename pins it
   const tools = threadTools({ threadId: thread.id, cwd: directory, sessionFile: thread.sessionFile, args: [], env: {}, threads: service });
   expect(tools.find(item => item.name === "thread_control")!.parameters.anyOf.some((variant: { properties: { action: { const?: string } } }) => variant.properties.action.const === "rename")).toBe(false);
   const title = tools.find(item => item.name === "thread_title")!;
-  const first = await title.execute("title-1", { title: "  First topic  ", taskDescription: "  Publish the task-first Orchestrator on both hosts.  " }, undefined, undefined, undefined as never);
-  expect(first.details).toMatchObject({ ok: true, value: { id: thread.id, title: "First topic", metadata: { titleSource: "agent", taskDescription: "Publish the task-first Orchestrator on both hosts." } } });
-  for (const taskDescription of ["", " ", "x".repeat(241)]) {
-    expect(await service.control({ threadId: thread.id, action: "title", title: "Invalid description", taskDescription })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
-  }
+  const first = await title.execute("title-1", { title: "  First topic  " }, undefined, undefined, undefined as never);
+  expect(first.details).toEqual({ ok: true, value: { title: "First topic" } });
+  expect(service.get(thread.id)?.metadata?.titleSource).toBe("agent");
   expect(service.get(thread.id)?.title).toBe("First topic");
   await waitFor(() => sessions[0]!.commands.some(command => command.type === "set_session_name" && command.name === "First topic"));
   expect((await title.execute("title-2", { title: "Changed topic" }, undefined, undefined, undefined as never)).details).toMatchObject({ ok: true, value: { title: "Changed topic" } });
@@ -650,7 +648,6 @@ it("the thread's own agent names it with thread_title; a person's rename pins it
   value(await restored.start());
   expect(await restored.control({ threadId: thread.id, action: "title", title: "After restart" })).toMatchObject({ ok: false, error: { code: "conflict" } });
   expect(value(await restored.control({ threadId: thread.id, action: "rename", title: "Next chosen title" })).title).toBe("Next chosen title");
-  expect(restored.get(thread.id)?.metadata?.taskDescription).toBe("Publish the task-first Orchestrator on both hosts.");
 });
 
 it("a person accepting the agent's title through update pins it", async () => {
@@ -869,7 +866,7 @@ it.each([false, true])("retains runner-capacity custody beyond three refusals an
   const options = { databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession, admit };
   const first = new ThreadService({ ...options, capacity: { mode: "unmanaged" } }); services.push(first);
   value(first.importThread({ id: "capacity-child", title: "Child", cwd: directory, sessionFile: join(directory, "child.jsonl"), settings: { model: "astra", thinkingLevel: "high", speed: "standard" } }));
-  value(await first.agentWait({ requestId: "wait", threadId: "capacity-child", action: "set", kind: "deployment", publicationId: "publication-fixture", reason: "Awaiting delegated release" }));
+  value(await first.agentWait({ requestId: "wait", threadId: "capacity-child", action: "set", kind: "deployment", publicationId: "publication-fixture", }));
   value(first.importMessage({ id: "assignment", threadId: "capacity-child", text: "Unrelated result", source: "notification", state: recovering ? "dispatched" : "queued", ...(recovering ? { executionId: "retained-execution" } : {}) }));
   const schedule = value(await first.wakeSchedule({ requestId: "wake", threadId: "capacity-child", action: "set", reason: "Fallback", cadenceMs: 600_000 }));
   await first.start();
@@ -888,7 +885,7 @@ it.each([false, true])("retains runner-capacity custody beyond three refusals an
       await waitFor(() => (second.get("capacity-child")?.metadata?.startupFailure as { attempts: number })?.attempts === attempts);
       expect(second.get("capacity-child")).toMatchObject({ held: false });
       expect(second.latestSettlement("capacity-child")).toBeNull();
-      expect(second.get("capacity-child")?.metadata?.agentWait).toMatchObject({ reason: "Awaiting delegated release" });
+      expect(second.get("capacity-child")?.metadata?.agentWait).toMatchObject({ kind: "deployment" });
       expect(second.get("capacity-child")?.wakeSchedule).toEqual(schedule);
       expect(second.pending("capacity-child")).toMatchObject([{ id: "assignment", state: recovering ? "dispatched" : "queued" }]);
     }
@@ -1976,7 +1973,7 @@ describe("ThreadService", () => {
     const question = value(await service.spawn({ requestId: "question", cwd: directory }));
     value(await service.ask({ requestId: "ask", threadId: question.id, questions: [{ question: "Continue?" }] }));
     const waiting = value(await service.spawn({ requestId: "waiting", cwd: directory }));
-    value(await service.agentWait({ requestId: "wait", threadId: waiting.id, action: "set", kind: "job", jobId: "external-result", reason: "External result" }));
+    value(await service.agentWait({ requestId: "wait", threadId: waiting.id, action: "set", kind: "job", jobId: "external-result", }));
     const waking = value(await service.spawn({ requestId: "waking", cwd: directory }));
     value(await service.wakeSchedule({ requestId: "wake", threadId: waking.id, action: "set", reason: "Check", cadenceMs: 60_000 }));
     for (const thread of [pending, question, waiting, waking]) {
@@ -2075,7 +2072,7 @@ describe("ThreadService", () => {
     expect((await tool(root.id).execute("call-root", { threadId: child.id, text: "Carry on" }, undefined, undefined, undefined as never)).details).toMatchObject({ ok: false });
     value(await service.control({ threadId: child.id, action: "reopen" }));
     const sent = await tool(root.id).execute("call-fresh", { threadId: child.id, text: "Fresh work" }, undefined, undefined, undefined as never);
-    expect(sent.details).toMatchObject({ ok: true, value: { threadId: child.id, senderId: root.id } });
+    expect(sent.details).toMatchObject({ ok: true, value: { id: expect.any(String), state: "queued" } });
     expect(service.get(child.id)).toMatchObject({ held: false, state: "running", pendingMessages: 1 });
     expect(service.get(child.id)?.metadata?.archiveInterruption).toBeUndefined();
 

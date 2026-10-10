@@ -35,8 +35,8 @@ type AppCaseState = "empty" | "loading" | "failure" | "waiting-close" | "close-f
 function AppFixture({ state }: { state: AppCaseState }) {
   const at = Date.now();
   const root: Session = { id: "ui-root", name: "Synthetic waiting parent", agentName: "Kenan", parentId: null, hasChildren: true, origin: "person", foreground: true,
-    model: "openai/gpt-6.1-sol", provider: "openai", cwd: "/synthetic", workspaceName: "Synthetic", environment: "synthetic", state: "waiting", lifecycle: { kind: "waiting", target: "agents", reason: "Waiting for the synthetic worker's result", since: at }, held: false, activity: "awaiting", activeTools: [],
-    waitingOnAgents: { kind: "agents", threadIds: ["ui-worker"], after: {}, since: at, reason: "Waiting for the synthetic worker's result" },
+    model: "openai/gpt-6.1-sol", provider: "openai", cwd: "/synthetic", workspaceName: "Synthetic", environment: "synthetic", state: "waiting", lifecycle: { kind: "waiting", target: "agents", since: at }, held: false, activity: "awaiting", activeTools: [],
+    waitingOnAgents: { kind: "agents", threadIds: ["ui-worker"], after: {}, since: at },
     createdAt: new Date(at).toISOString(), updatedAt: new Date(at).toISOString(), revision: 1, idleUnread: false, queuedMessages: [], archivedAt: null };
   const child: Session = { ...root, id: "ui-worker", name: "Synthetic active worker", parentId: root.id, hasChildren: false, foreground: false, state: "running", lifecycle: { kind: "working", phase: "thinking", since: at }, activity: "thinking", waitingOnAgents: undefined };
   validateSession(root); validateSession(child);

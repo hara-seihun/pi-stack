@@ -6,7 +6,8 @@ export type ThreadLifecycle =
   | { kind: "archived" }
   | { kind: "working"; phase: ExecutionPhase; since: number; detail?: string }
   | { kind: "cancelling" }
-  | { kind: "waiting"; target: "agents" | "job" | "deployment" | "message" | "capacity" | "retry" | "dispatch"; reason: string; since: number; dependency?: AgentWait }
+  | { kind: "waiting"; target: "capacity" | "retry"; reason: string; since: number }
+  | { kind: "waiting"; target: "agents" | "job" | "deployment" | "message" | "dispatch"; since: number; dependency?: AgentWait }
   | { kind: "failed"; reason: string; control: "stop" | "cancel_wait" | "none" };
 
 export type LifecycleObservation = {
@@ -35,12 +36,12 @@ export function deriveThreadLifecycle(source: LifecycleObservation): ThreadLifec
     if (!phase) return { kind: "failed", reason: "Execution owner did not report its activity", control: "stop" };
     return { kind: "working", phase, since: execution.activity.activitySince ?? execution.since, ...(execution.activity.activityDetail ? { detail: execution.activity.activityDetail } : {}) };
   }
-  if (pending) return { kind: "waiting", target: "dispatch", reason: "Waiting for execution dispatch", since: pending.since };
+  if (pending) return { kind: "waiting", target: "dispatch", since: pending.since };
   if (dependency) {
-    if (!validateWaitDependency(dependency).ok || !dependency.reason?.trim() || !Number.isFinite(dependency.since)) return { kind: "failed", reason: "Invalid owned dependency wait", control: "cancel_wait" };
-    return { kind: "waiting", target: dependency.kind, reason: dependency.reason, since: dependency.since, dependency };
+    if (!validateWaitDependency(dependency).ok || !Number.isFinite(dependency.since)) return { kind: "failed", reason: "Invalid owned dependency wait", control: "cancel_wait" };
+    return { kind: "waiting", target: dependency.kind, since: dependency.since, dependency };
   }
-  if (source.subscriptions.length) return { kind: "waiting", target: "agents", reason: "Waiting for subscribed results", since: source.updatedAt };
+  if (source.subscriptions.length) return { kind: "waiting", target: "agents", since: source.updatedAt };
   return { kind: "idle" };
 }
 

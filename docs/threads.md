@@ -67,7 +67,7 @@ that observation; they do not reconcile scheduler flags or infer work from a wak
 | --- | --- | --- |
 | `idle` | Send | No current execution or dependency |
 | `working` | Cancel current work | Owned local execution; observed phase can distinguish Typing |
-| `waiting` | Cancel wait | Dispatch, capacity, retry, agent, job, deployment or message dependency; includes reason |
+| `waiting` | Cancel wait | Dispatch, capacity, retry, agent, job, deployment or message dependency; capacity and retry carry the provider's reason |
 | `cancelling` | None | Cancellation requested, not yet confirmed |
 | `failed` | Owner-selected control | Failure reason with precisely the control still justified by custody |
 | `archived` | None | Retained history, no automatic execution |
@@ -118,11 +118,11 @@ still awaits a result, but subscribers do not prevent a completed B from archivi
 `thread_wait` sets a scheduling wait and ends the native turn without polling:
 
 ```json
-{"action":"set","kind":"agents","reason":"Need the implementation result","threadIds":["peer-id"]}
+{"action":"set","kind":"agents","threadIds":["peer-id"]}
 ```
 
 The other variants identify `jobId`, `publicationId`, or a collaborator
-`fromThreadId`. Every variant has a concrete reason and dependency identity;
+`fromThreadId`. Every variant has a concrete dependency identity;
 there is no available-for-assignment or generic external wait. Peer waits use
 optional owner settlement cursors in `after`. Registration probes the current
 assignment: an older settlement or its parked notification cannot satisfy a peer
@@ -134,7 +134,7 @@ error. Historical notifications are still delivered, without releasing the wait.
 Bounded
 `thread_await` still reads historical results according to its explicit cursors.
 
-Every successful request returns the current thread snapshot plus a durable
+Every successful owner request returns the current thread snapshot plus a durable
 `waitRegistration` outcome: `registered` contains the accepted wait;
 `already_arrived` contains the current assignment settlement; `resumed` identifies
 new input by `messageIds`; `cleared` confirms release. A retry returns the same
@@ -142,6 +142,15 @@ registration outcome even if subsequent input has already removed the active wai
 Only a still-active `registered` wait terminates the native turn. An already-arrived
 result or resuming input remains available for the agent to handle; success without
 an explanation for an absent wait is not a valid registration outcome.
+
+Agent tools return only what the calling agent acts on, through
+[`agent-results.ts`](../packages/orchestrator/src/threads/agent-results.ts):
+`thread_wait` returns the registration status (with `messageIds` or the
+settlement's final text when it matters), `thread_send` the message ID and state,
+`thread_spawn` the new thread's ID and agent name, and thread listings a compact
+view with identity, title, lifecycle, pending input, dependencies and wake. The
+owner API keeps full records for clients; tool results never echo what the
+caller just sent.
 
 `set` atomically replaces the previous wait and its peer subscriptions, retaining
 independently declared explicit subscriptions even when a peer belonged to both.
@@ -211,11 +220,7 @@ promoting the recipient. Merely inspecting an agent is not a human view.
   The agent names its thread when it starts and again whenever it judges the topic
   has changed enough. Nothing else titles a thread automatically. While a person's
   rename pins the title, `title` returns a conflict and changes nothing. Older
-  `titleSource: "auto"` titles count as agent titles and are not pinned. The optional
-  `taskDescription` is a nonempty sentence of at most 240 characters describing the
-  task's intended outcome. It is stored with the title and projected into the
-  Orchestrator; omitted descriptions stay unset or retain an already supplied one.
-  No model is called to infer a description from private transcript content.
+  `titleSource: "auto"` titles count as agent titles and are not pinned.
 - `settings`: future model/thinking/speed preferences; `effectiveSettings` names
   already accepted current/queued work.
 - `retryWaiting`: apply selected settings to dormant provider/admission waiting
@@ -270,8 +275,8 @@ asynchronous descendants do not inherit an expired deadline indefinitely.
 ## Scheduled work
 
 `thread_wake` owns a recovery schedule on the same existing agent, not a new
-agent. It accepts set/list/cancel with reason, `cadenceMs` (at least 60 seconds)
-and optional epoch-ms `nextDueAt`. Due events coalesce while busy; archived agents
+agent. It accepts set/list/cancel with a reason, `cadenceMs` (at least 60 seconds)
+and optional epoch-ms `nextDueAt`. The reason is the text of the wake message, the instruction the agent reads when the check lands. Due events coalesce while busy; archived agents
 do not wake. Stable receipt identity and SQLite transactions prevent repeated
 inputs after restart. Cancel removes future and unstarted wake work, not tools
 already executing. External job/publication waits should register recovery

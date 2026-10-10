@@ -268,8 +268,8 @@ test("tick caches work/questions; read leaves questions pending; only fresh repl
 
 test("room wait evidence survives projection and unsupported owner phases are explicit defects", () => {
   const id = crypto.randomUUID();
-  const dependency: AgentWait = { kind: "job", jobId: "job-1", reason: "Result", since: 100 };
-  const thread = { id, title: "House", lifecycle: { kind: "waiting", target: "job", reason: dependency.reason, since: dependency.since, dependency } as ThreadLifecycle,
+  const dependency: AgentWait = { kind: "job", jobId: "job-1", since: 100 };
+  const thread = { id, title: "House", lifecycle: { kind: "waiting", target: "job", since: dependency.since, dependency } as ThreadLifecycle,
     state: "waiting" as const, metadata: { room: { id, members: people.slice(0, 2) }, agentWait: dependency } };
   const snapshot = publicRoomSnapshot(thread, { messages: [], live: "" });
   expect(snapshot).toMatchObject({ lifecycle: thread.lifecycle, activity: "awaiting", waitingOnAgents: dependency });

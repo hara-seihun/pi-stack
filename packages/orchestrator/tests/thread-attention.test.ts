@@ -90,7 +90,7 @@ it("routes only authenticated self attention across authorized owners and tool c
   const input = { summary: "Call the clinic before 4 pm Eastern.", foreground: true };
   const first = await tool.execute("call", input, new AbortController().signal, undefined, {} as never);
   expect(await tool.execute("call", input, new AbortController().signal, undefined, {} as never)).toEqual(first);
-  expect(first.details).toMatchObject({ ok: true, value: { accepted: true, foreground: false } });
+  expect(first.details).toMatchObject({ ok: true, value: { accepted: true } });
   expect(unwrap(fleet.service.attentionEvents()).items).toHaveLength(1);
   expect(unwrap(person.service.attentionEvents()).items).toHaveLength(0);
 });

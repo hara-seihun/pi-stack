@@ -95,7 +95,7 @@ it("closing an idle result waiter publishes cancellation without inventing nativ
   const shared = authority(), f = fixture(client(shared, "host-a/alice"));
   unwrap(await f.service.spawn({ id: "waiter", requestId: "waiter", cwd: f.root }));
   unwrap(await f.service.spawn({ id: "producer", requestId: "producer", cwd: f.root }));
-  unwrap(await f.service.agentWait({ action: "set", kind: "message", requestId: "wait", threadId: "waiter", fromThreadId: "producer", reason: "Need result" }));
+  unwrap(await f.service.agentWait({ action: "set", kind: "message", requestId: "wait", threadId: "waiter", fromThreadId: "producer", }));
   unwrap(await f.service.control({ action: "close", threadId: "producer" }));
   expect(f.service.latestSettlement("producer")?.outcome).toBe("cancelled");
   expect(f.service.get("waiter")?.dependencies).toEqual([]);
@@ -135,7 +135,7 @@ it("dependency waiting releases its slot and the same agent acquires a new execu
   const shared = authority(), f = fixture(client(shared, "host-a/alice"));
   unwrap(await f.service.spawn({ id: "waiter", requestId: "first", cwd: f.root, message: "work" })); unwrap(await f.service.start()); await until(() => f.sessions.get("waiter")?.busy === true);
   const first = shared.entries()[0]!;
-  unwrap(await f.service.agentWait({ action: "set", kind: "job", threadId: "waiter", requestId: "wait", reason: "Durable external job", jobId: "job" }));
+  unwrap(await f.service.agentWait({ action: "set", kind: "job", threadId: "waiter", requestId: "wait", jobId: "job" }));
   f.sessions.get("waiter")!.settle(); await until(() => f.service.get("waiter")?.state === "waiting" && shared.status().active === 0);
   unwrap(await f.service.send({ threadId: "waiter", requestId: "next", text: "Job result" })); await until(() => shared.status().active === 1 && f.sessions.get("waiter")?.busy === true);
   expect(shared.entries()[0]!.agentId).toBe(first.agentId);

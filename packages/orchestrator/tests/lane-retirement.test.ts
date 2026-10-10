@@ -115,7 +115,7 @@ it("preserves queued continuation and warm interactive, unbounded, live and wait
       await until(() => f.sessions.at(-1)?.streaming === true);
       const session = f.sessions.at(-1)!;
       if (id === "waiting") {
-        const waiting = unwrap(await f.service.agentWait({ requestId: "wait", threadId: created.id, action: "set", kind: "job", jobId: "durable-job", reason: "durable job" }));
+        const waiting = unwrap(await f.service.agentWait({ requestId: "wait", threadId: created.id, action: "set", kind: "job", jobId: "durable-job", }));
         expect(waiting.waitingOnAgents).toMatchObject({ kind: "job", jobId: "durable-job" });
       }
       if (id === "scheduled") unwrap(await f.service.wakeSchedule({ requestId: "wake", threadId: created.id, action: "set", reason: "recovery", cadenceMs: 60000 }));

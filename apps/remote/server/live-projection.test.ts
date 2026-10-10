@@ -4,7 +4,7 @@ import { createLiveProjection, projectThreadActivity, restoreLiveProjection, set
 test("the owner lifecycle is the only source of execution observation", () => {
   const stale = { activity: "thinking" as const, activitySince: 10, lastActivityAt: 20, activeTools: ["bash"] };
   expect(projectThreadActivity({ lifecycle: { kind: "idle" }, executionActivity: stale })).toEqual({ lifecycle: { kind: "idle" }, activity: "idle", activeTools: [] });
-  expect(projectThreadActivity({ lifecycle: { kind: "waiting", target: "job", reason: "Publication", since: 10 }, executionActivity: stale })).toMatchObject({ activity: "awaiting", activeTools: [], activityDetail: "Publication" });
+  expect(projectThreadActivity({ lifecycle: { kind: "waiting", target: "job", since: 10 }, executionActivity: stale })).toMatchObject({ activity: "awaiting", activeTools: [], activitySince: 10 });
   expect(projectThreadActivity({ lifecycle: { kind: "failed", reason: "Missing result", control: "none" }, executionActivity: stale })).toMatchObject({ activity: "status_error", executionError: "Missing result", activeTools: [] });
 });
 test("native phase evidence projects without a second Remote lifecycle machine", () => {
