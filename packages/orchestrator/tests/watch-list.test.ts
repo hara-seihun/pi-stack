@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
 import { ThreadService } from "../src/threads/service.js";
 import { ThreadDirectory } from "../src/threads/directory.js";
@@ -20,7 +21,7 @@ function fixture(openSession?: OpenPiSession, intervalMs?: number) {
   const owner = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(root, "threads.sqlite"), sessionsDir: join(root, "sessions"), openSession: async (options, output, exit) => { opened.push(options); if (openSession) return openSession(options, output, exit); throw Error("no model calls in this fixture"); } });
   cleanups.push(() => owner.close());
   const options = { databasePath: join(root, "threads.sqlite"), threads: owner,
-    placement: () => ({ ok: true as const, value: { cwd: root, metadata: { profileId: "home" } } }), intervalMs, onError: vi.fn(), recoveryEvidence: (id: string) => owner.watchRecoveryEvidence(id) };
+    placement: () => ({ ok: true as const, value: { cwd: root, metadata: { profileId: "home" } } }), intervalMs, onError: vi.fn(), checkOutcome: (id: string) => owner.watchCheckOutcome(id) };
   const watch = new WatchList(options); owner.setWatchList(watch);
   cleanups.push(() => watch.close());
   const add = async (what = "Check a fixture", nextDueAt = 100) => value(await watch.watch({ threadId: "agent", action: "add", requestId: `add:${what}`, item: { what, why: "Fixture state matters", nextDueAt } })) as { item: WatchItem };
@@ -53,7 +54,7 @@ it("makes no calls when empty or not due, and creates exactly one visible Opus 5
   expect(thread).toMatchObject({ parentId: null, role: "agent", title: "Watch list check", metadata: { watchList: true }, settings: { model: "anthropic/claude-opus-5-5", thinkingLevel: "high", speed: "standard" } });
   expect(owner.pending(thread.id)[0]?.text).toContain("request_user_input_async");
   expect(owner.pending(thread.id)[0]?.text).toContain("A future check");
-  expect(value(await watch.watch({ action: "list", threadId: "agent" }))).toMatchObject({ items: [{ id: item.id, lastThreadId: thread.id, nextDueAt: 200 + 45 * 60_000 }] });
+  expect(value(await watch.watch({ action: "list", threadId: "agent" }))).toMatchObject({ items: [{ id: item.id, lastCheck: { threadId: thread.id, status: "scheduled" }, nextDueAt: 200 + 45 * 60_000 }] });
   value(await watch.tick(1e8)); expect(spawn).toHaveBeenCalledTimes(1);
   expect(opened).toHaveLength(0);
   expect(await owner.spawn({ requestId: "recursive", parentId: thread.id, cwd: thread.cwd, message: "delegate" })).toMatchObject({ ok: true, value: { role: "agent", parentId: thread.id } });
@@ -81,21 +82,85 @@ it("dispatches a real ordinary thread with the pinned model and watch tools, the
   expect(value(await owner.list()).threads[0]?.state).toBe("idle");
   value(await watch.tick(101)); expect(opened).toHaveLength(1);
 });
-it("keeps unanswered decisions from repeating while checking unrelated due items", async () => {
+it("keeps a check with an unanswered decision open, keeps checking its items, and tells the next check not to repeat the question", async () => {
   const { watch, owner, add } = fixture();
   await add(); value(await watch.tick(100));
   const first = value(await owner.list()).threads[0]!;
   value(await owner.control({ threadId: first.id, action: "cancel" }));
   const asked = value(await owner.ask({ threadId: first.id, requestId: "decision", questions: [{ question: "Commit to this?" }] }));
-  value(await watch.tick(1e8)); expect(value(await owner.list()).threads).toHaveLength(1);
-  await add("Unrelated check", 150); value(await watch.tick(1e8));
+  value(await watch.tick(1e8));
   const second = value(await owner.list()).threads.find(thread => thread.id !== first.id)!;
-  expect(owner.pending(second.id)[0]?.text).toContain("Unrelated check");
-  expect(owner.pending(second.id)[0]?.text).not.toContain('"what": "Check a fixture"');
+  expect(owner.pending(second.id)[0]?.text).toContain('"what": "Check a fixture"');
+  expect(owner.pending(second.id)[0]?.text).toContain("Commit to this?");
+  expect(owner.get(first.id)?.metadata?.archived).toBeUndefined();
   value(await owner.control({ threadId: second.id, action: "cancel" }));
   value(await owner.answer({ threadId: first.id, questionId: asked.questionIds[0]!, selectedSuggestionIds: [], text: "No commitment" }));
   expect(owner.pending(first.id)[0]?.text).toContain("No commitment");
-  value(await watch.tick(2e8)); expect(value(await owner.list()).threads).toHaveLength(2);
+});
+function settlingFixture(finalText: string) {
+  let emit: (event: PiEvent) => void = () => {};
+  const prompted: string[] = [];
+  const built = fixture(async (_options, output) => {
+    emit = output;
+    return { close: async () => {}, command: async command => {
+      if (command.type === "prompt") prompted.push(command.message as string);
+      output({ type: "response", command: command.type, id: command.id, success: true, data: { isStreaming: false, pendingMessageCount: 0 } });
+    } };
+  }, 60_000);
+  const settle = async () => {
+    for (let i = 0; i < 100 && !prompted.length; i++) await new Promise<void>(resolve => setImmediate(resolve));
+    prompted.length = 0;
+    emit({ type: "agent_settled", lastAssistantMessage: { role: "assistant", content: finalText ? [{ type: "text", text: finalText }] : [], stopReason: "stop" } });
+  };
+  return { ...built, settle };
+}
+async function settled(owner: ThreadService, id: string) {
+  for (let i = 0; i < 200 && !(owner.latestSettlement(id) && owner.get(id)?.state === "idle"); i++) await new Promise<void>(resolve => setImmediate(resolve));
+  for (let i = 0; i < 50; i++) await new Promise<void>(resolve => setImmediate(resolve));
+}
+it("archives a completed check like any background worker and records it as a complete check on its items", async () => {
+  const { watch, owner, add, settle } = settlingFixture("Checked; nothing changed.");
+  await owner.start(); const { item } = await add(); value(await watch.tick(100));
+  const first = value(await owner.list()).threads[0]!;
+  await settle(); await settled(owner, first.id);
+  expect(owner.get(first.id)?.metadata?.archived).toBe(true);
+  value(await watch.tick(100 + 60_000));
+  const items = (value(await watch.watch({ action: "list", threadId: "agent" })) as { items: WatchItem[] }).items;
+  const next = items[0]!.lastCheck!;
+  expect(next).toMatchObject({ status: "scheduled" });
+  expect(next.threadId).not.toBe(first.id);
+  expect(value(await owner.list({ id: next.threadId, limit: 1 })).threads).toHaveLength(1);
+  expect(items[0]!.id).toBe(item.id);
+});
+it("records a check that ends without a final result as a failed check, disposes of it, and checks the item again when due", async () => {
+  const { watch, owner, add, settle } = settlingFixture("");
+  await owner.start(); const { item } = await add(); value(await watch.tick(100));
+  const first = value(await owner.list()).threads[0]!;
+  await settle(); await settled(owner, first.id);
+  expect(owner.latestSettlement(first.id)).toMatchObject({ outcome: "failed", error: expect.stringContaining("without a final result") });
+  expect(owner.get(first.id)?.metadata?.archived).toBe(true);
+  value(await watch.tick(101));
+  expect(value(await watch.watch({ action: "list", threadId: "agent" }))).toMatchObject({ items: [{ id: item.id, lastCheck: { threadId: first.id, status: "failed", error: expect.stringContaining("without a final result") } }] });
+  value(await watch.tick(100 + 60_000));
+  const items = (value(await watch.watch({ action: "list", threadId: "agent" })) as { items: WatchItem[] }).items;
+  expect(items[0]!.lastCheck).toMatchObject({ status: "scheduled" });
+  expect(items[0]!.lastCheck!.threadId).not.toBe(first.id);
+});
+it("migrates items that name only their last worker and reconciles that worker's outcome", async () => {
+  const { watch, owner, options, add } = fixture();
+  const { item } = await add(); value(await watch.tick(100));
+  const first = value(await owner.list()).threads[0]!;
+  value(await owner.control({ threadId: first.id, action: "update", archived: true }));
+  await watch.close(); cleanups.pop();
+  const db = new DatabaseSync(options.databasePath);
+  const { lastCheck: _check, ...body } = JSON.parse((db.prepare("SELECT body FROM watch_item WHERE id=?").get(item.id) as { body: string }).body) as WatchItem;
+  db.prepare("UPDATE watch_item SET body=? WHERE id=?").run(JSON.stringify({ ...body, lastThreadId: first.id }), item.id); db.close();
+  const restored = new WatchList(options); cleanups.push(() => restored.close());
+  expect(value(await restored.watch({ action: "list", threadId: "agent" }))).toEqual({ items: [expect.not.objectContaining({ lastThreadId: expect.anything() })] });
+  value(await restored.tick(101));
+  expect(value(await restored.watch({ action: "list", threadId: "agent" }))).toMatchObject({ items: [{ lastCheck: { threadId: first.id, status: "failed", error: expect.any(String) } }] });
+  value(await restored.tick(100 + 45 * 60_000));
+  expect(value(await owner.list()).threads).toHaveLength(2);
 });
 it("enforces the person's wake interval across short cadences, new items, retiming, and restart", async () => {
   const interval = 4 * 60 * 60_000;
@@ -169,6 +234,7 @@ function routedFixture(origins: Record<string, string>, root = mkdtempSync(join(
   const owner = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(root, "threads.sqlite"), sessionsDir: join(root, "sessions"), openSession: async () => { throw Error("no model calls in this fixture"); } });
   cleanups.push(() => owner.close());
   const options = { databasePath: join(root, "threads.sqlite"), threads: owner, intervalMs: 4 * 60 * 60_000, onError: vi.fn(),
+    checkOutcome: (id: string) => owner.watchCheckOutcome(id),
     destinations: ["personal", "home"], defaultDestination: "home",
     // As the Remote supervisor does: a thread's own profile, including watch checks spawned into one.
     destinationOf: (threadId: string) => origins[threadId] ?? owner.get(threadId)?.metadata?.profileId as string | undefined,
@@ -203,24 +269,26 @@ it("places each item in its adding thread's destination and checks each destinat
   for (const what of ["Converge job terminal", "Fleet-forwarded check", "Sandboxed caller"]) expect(homePrompt).toContain(what);
   expect(homePrompt).not.toContain("Medication continuity");
   const items = (value(await watch.watch({ action: "list", threadId: "x" })) as { items: WatchItem[] }).items;
-  expect(Object.fromEntries(items.map(item => [item.what, item.lastThreadId]))).toEqual({
+  expect(Object.fromEntries(items.map(item => [item.what, item.lastCheck?.threadId]))).toEqual({
     "Medication continuity": personal.id, "Permit reply": personal.id, "Converge job terminal": home.id, "Fleet-forwarded check": home.id, "Sandboxed caller": home.id });
   // A check thread adds into the destination it runs in, and an update can move an item.
   expect((await add(personal.id, "Follow-up from the personal check")).destination).toBe("personal");
   expect((value(await watch.watch({ threadId: home.id, action: "update", requestId: "move", id: job.id, patch: { destination: "personal" } })) as { item: WatchItem }).item.destination).toBe("personal");
   expect((value(await watch.watch({ threadId: home.id, action: "update", requestId: "retime", id: meds.id, patch: { nextDueAt: 5 } })) as { item: WatchItem }).item.destination).toBe("personal");
   // The global floor holds across destinations: nothing new until the interval passes, even with every check stopped.
-  // Items whose stopped check still holds their undelivered prompt stay with it; the new follow-up starts a personal check.
+  // A stopped check is a failed check: its items are checked again when due, by a fresh check in their destination.
   for (const thread of threads) value(await owner.control({ threadId: thread.id, action: "stop", descendants: false }));
   value(await watch.tick(101)); expect(value(await owner.list()).threads).toHaveLength(2);
   value(await watch.tick(100 + 4 * 60 * 60_000));
   const next = value(await owner.list()).threads.filter(thread => !threads.some(prior => prior.id === thread.id));
-  expect(next.map(thread => thread.metadata?.profileId)).toEqual(["personal"]);
-  expect(owner.pending(next[0]!.id)[0]!.text).toContain("Follow-up from the personal check");
+  expect(next.map(thread => thread.metadata?.profileId).sort()).toEqual(["home", "personal"]);
+  const nextPersonal = owner.pending(next.find(thread => thread.metadata?.profileId === "personal")!.id)[0]!.text;
+  expect(nextPersonal).toContain("Follow-up from the personal check"); expect(nextPersonal).toContain("Medication continuity");
 });
 it("backfills pre-destination items from their adding thread and leaves unresolved origins on the default", async () => {
   const root = mkdtempSync(join(tmpdir(), "watch-backfill-"));
-  const legacy = new WatchList({ databasePath: join(root, "threads.sqlite"), threads: {} as never, placement: () => ({ ok: false, error: { code: "unavailable", message: "unused" } }), onError: vi.fn() });
+  const legacy = new WatchList({ databasePath: join(root, "threads.sqlite"), threads: {} as never, placement: () => ({ ok: false, error: { code: "unavailable", message: "unused" } }), onError: vi.fn(),
+    checkOutcome: () => ({ ok: false, error: { code: "unavailable", message: "unused" } }) });
   const old = async (threadId: string, what: string) => (value(await legacy.watch({ threadId, action: "add", requestId: what, item: { what, why: "Before destinations", nextDueAt: 100 } })) as { item: WatchItem }).item;
   const personal = await old("personal-thread", "House exit"), engineering = await old("fleet-thread", "T4r job"), gone = await old("deleted", "Gone thread");
   expect([personal, engineering, gone].every(item => item.destination === undefined)).toBe(true);
