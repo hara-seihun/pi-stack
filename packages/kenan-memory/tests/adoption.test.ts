@@ -5,6 +5,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { adoptMarkdown, type AdoptionOptions } from "../src/adoption.js";
+import { authorityHead } from "../src/authority.js";
 import { memoryFolderPrompt } from "../src/markdown.js";
 function fixture() {
   const directory = mkdtempSync(join(tmpdir(), "memory-adoption-"));
@@ -61,5 +62,30 @@ test("no grants or weaker custody cannot export", () => {
     expect(adoptMarkdown({ ...options, policy: { revision: 1, grants: [], consents: [] } })).toMatchObject({ ok: false, error: { code: "denied" } });
     expect(adoptMarkdown({ ...options, destination: { ...options.destination, resource: { ...options.destination.resource, privacy: "public" } } })).toMatchObject({ ok: false, error: { code: "denied" } });
     expect(memoryFolderPrompt(undefined)).toMatchObject({ ok: false, error: { code: "unset" } });
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("cutover re-adopts every version and updates only its expected prior head; unrelated owning notes fail closed", () => {
+  const { directory, options } = fixture();
+  try {
+    const snapshot = adoptMarkdown(options);
+    if (!snapshot.ok || !snapshot.value.currentHead) throw new Error("Missing snapshot authority receipt");
+    const db = new Database(options.source.path);
+    const { key } = db.query("SELECT key FROM life_keys WHERE subject=?").get("alice") as { key: Uint8Array };
+    const nonce = randomBytes(12), cipher = createCipheriv("aes-256-gcm", key, nonce);
+    cipher.setAAD(Buffer.from(JSON.stringify(["alice", "policy", "opaque-policy", 2])));
+    const value = { id: "policy", revision: 2, recordedBy: "alice", value: { status: "active", delegation: "Current only", provenance: { factClass: "stated", validFrom: null, validUntil: null, evidence: [] } } };
+    const payload = Buffer.concat([cipher.update(JSON.stringify(value)), cipher.final()]);
+    db.query("INSERT INTO life_versions VALUES(?,?,?,?,?)").run("alice", "policy", "opaque-policy", 2, Buffer.concat([nonce, cipher.getAuthTag(), payload]).toString("base64"));
+    db.query("UPDATE life_heads SET revision=2 WHERE subject='alice' AND lane='policy'").run(); db.close();
+    expect(adoptMarkdown(options)).toMatchObject({ ok: false, error: { code: "destination-conflict" } });
+    const final = adoptMarkdown({ ...options, expectedAuthority: snapshot.value.currentHead });
+    expect(final).toMatchObject({ ok: true, value: { records: 5, currentHead: { revision: 2 } } });
+    const head = authorityHead(readFileSync(join(options.destination.path, "authority.md"), "utf8"));
+    expect(head?.revision).toBe(2);
+    const prompt = memoryFolderPrompt(options.destination.path); if (!prompt.ok) throw new Error(prompt.error.message);
+    expect(prompt.value).toContain("Current only"); expect(prompt.value).not.toContain("private-source");
+    writeFileSync(join(options.destination.path, "authority.md"), "# Unrelated stale delegation\n");
+    expect(adoptMarkdown(options)).toMatchObject({ ok: false, error: { code: "destination-conflict" } });
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });

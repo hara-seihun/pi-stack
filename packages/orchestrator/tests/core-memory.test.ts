@@ -4,7 +4,7 @@ import type { Principal } from "../src/permissions.js";
 const principals: Principal[] = [{ kind: "person", id: "alice", person: "alice" }, { kind: "service", id: "private-consultation" }];
 const config: CoreMemoryConfig = {
   kind: "configured", id: "memory", uid: 1001, custodyScopeId: "custody", databasePath: "/fixture/memory.sqlite3", adoptionReceiptPath: "/fixture/memory-adoption.json", authFile: "/fixture/auth.json",
-  roomAudience: { kind: "none" }, timezones: { kind: "none" }, datasets: [],
+  roomAudience: { kind: "none" }, timezones: { kind: "none" }, datasets: [], markdownOwners: [], projectionMaintenancePrincipalId: null,
   identities: [{ kind: "supervisor", person: "alice", principalId: "alice" }, { kind: "person-role", person: "alice", role: "person", threadId: null, principalId: "alice" }, { kind: "root-service", principalId: "private-consultation" }, { kind: "person-role", person: "alice", role: "root", threadId: null, principalId: "private-consultation" }],
   resources: [{ id: "alice-memory", kind: "memory", owner: "alice", privacy: "private", subjects: ["alice"], consent: "not-required" }],
   routes: [{ principalId: "alice", route: "/v1/memory", operation: "read", resourceId: "alice-memory", action: "read" }, { principalId: "alice", route: "/v1/sessions", operation: null, resourceId: "alice-memory", action: "execute" }],

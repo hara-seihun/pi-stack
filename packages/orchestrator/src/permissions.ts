@@ -5,7 +5,7 @@ export type Principal =
   | { kind: "service"; id: string }
   | { kind: "room"; id: string; audience: readonly string[] };
 export type ResourceKind = "operation" | "model" | "thread" | "memory" | "data" | "tool";
-export type PermissionAction = "read" | "write" | "delete" | "execute" | "use" | "dispatch" | "control" | "disclose" | "grant";
+export type PermissionAction = "read" | "write" | "delete" | "execute" | "use" | "dispatch" | "control" | "disclose" | "grant" | "invalidate";
 export type Resource = {
   id: string;
   kind: ResourceKind;
@@ -39,7 +39,7 @@ export type Consent = {
 export type PermissionPolicy = { revision: number; grants: readonly Grant[]; consents: readonly Consent[] };
 export type PermissionRequest = { principal: Principal; resource: Resource; action: PermissionAction; now: number };
 export type Authorization = { policyRevision: number; principal: string; resource: string; action: PermissionAction; grantIds: readonly string[]; consentIds: readonly string[]; audience: readonly string[] };
-const actions = new Set<string>(["read", "write", "delete", "execute", "use", "dispatch", "control", "disclose", "grant"]);
+const actions = new Set<string>(["read", "write", "delete", "execute", "use", "dispatch", "control", "disclose", "grant", "invalidate"]);
 const kinds = new Set<string>(["operation", "model", "thread", "memory", "data", "tool"]);
 const text = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0;
 const list = (value: unknown): value is string[] => Array.isArray(value) && value.every(text) && new Set(value).size === value.length;

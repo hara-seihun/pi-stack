@@ -24,7 +24,7 @@ export function managedRootSession(spec: Omit<RootSessionSpec, "sessionFile">, f
     if (existsSync(enteredPath)) throw new Error("Interrupted root execution cannot be replayed");
     writeFileSync(enteredPath, JSON.stringify({ threadId: spec.id, enteredAt: Date.now() }) + "\n", { mode: 0o600 });
     entered = true; spec.onExecution?.();
-    try { native = await factory({ ...spec, sessionFile: options.sessionFile, onExecution: undefined }); }
+    try { native = await factory({ ...spec, env: { ...options.env, ...spec.env, PI_KENAN_MEMORY_FOLDER: options.env.PI_KENAN_MEMORY_FOLDER, PI_STACK_HOST_CONFIG: options.env.PI_STACK_HOST_CONFIG }, sessionFile: options.sessionFile, onExecution: undefined }); }
     catch (error) { factoryFailure = error; throw error; }
     return {
       prompt: async text => {

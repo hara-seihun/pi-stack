@@ -23,7 +23,7 @@ async function fixture() {
   };
   const runtime = createCoreInProcessRuntime();
   const databasePath = join(root, "threads.sqlite3"), sessionsDir = join(root, "native");
-  const threads = new ThreadService({ databasePath, sessionsDir, capacity, workersOnly: true, ...runtime });
+  const threads = new ThreadService({ databasePath, sessionsDir, capacity, workersOnly: true, environment: () => ({ PI_KENAN_MEMORY_FOLDER: join(root, "own-memory"), PI_STACK_HOST_CONFIG: join(root, "host.json") }), ...runtime });
   const started = await threads.start();
   if (!started.ok) throw new Error(started.error.message);
   const consultationOwner = { threads, runtime };
@@ -35,8 +35,11 @@ test("root judgments use the already-started shared owner and never create per-r
   const f = await fixture();
   try {
     let called = 0;
-    const executor = createRootExecutor(f.config, { prompt: "PRIVATE_ROOT_POLICY", consultationOwner: f.consultationOwner,
+    const executor = createRootExecutor(f.config, { prompt: "PRIVATE_ROOT_POLICY", consultationOwner: f.consultationOwner, env: { PI_KENAN_MEMORY_FOLDER: "/wrong/process-folder", PI_STACK_HOST_CONFIG: "/wrong/process-flag" },
       factory: async spec => {
+        expect(spec.env.PI_KENAN_MEMORY_FOLDER).toBe(join(f.root, "own-memory"));
+        expect(spec.env.PI_STACK_HOST_CONFIG).toBe(join(f.root, "host.json"));
+        expect(spec.env.PI_KENAN_MEMORY_TOKEN).toBe(f.admission.memoryToken);
         const db = new Database(f.databasePath, { readonly: true });
         expect(db.query("SELECT state,entered_native FROM thread_capacity").get()).toEqual({ state: "held", entered_native: 1 });
         db.close();

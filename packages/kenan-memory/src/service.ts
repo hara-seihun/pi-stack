@@ -21,6 +21,7 @@ export interface MemoryServiceOptions {
   store: MemoryStore;
   auth: MemoryAuth;
   authorize: MemoryAuthorizer;
+  forget?: (request: { caller: MemoryPrincipal; ids: string[]; mode: import("./contract.js").ForgetMode }) => Promise<MemoryResult<MemoryValue>>;
   data?: (request: { caller: MemoryPrincipal; request: MemoryDataRequest }) => Promise<MemoryResult<MemoryDataProjection>>;
   enabled: () => boolean;
   peerUid?: (request: IncomingMessage) => number | undefined;
@@ -230,14 +231,18 @@ export function memoryService(options: MemoryServiceOptions) {
       const permit = (record: MemoryAuthorizationRecord) => options.authorize({ caller, route: request.url!, input, record }).ok;
       const mutationRecords = operation.operation === "write" ? [operation.item] : operation.operation === "log-disclosure" ? [operation.disclosure] : operation.operation === "forget" ? store.authorizationItems(operation.ids) : [];
       if (operation.operation === "forget" && mutationRecords.length !== operation.ids.length || mutationRecords.some(record => !permit(record))) return denied("The memory mutation is outside the granted records");
-      const result: MemoryResult = { ok: true, value: dispatch(store, person, role, operation, permit) };
+      if (operation.operation === "forget" && options.forget) {
+        const result = await options.forget({ caller, ids: operation.ids, mode: operation.mode });
+        return send(result.ok ? 200 : result.error === "unauthenticated" ? 403 : 503, result);
+      }
+      const result: MemoryResult = { ok: true, value: dispatch(store, person, role, operation, permit, role === "root" && caller.kind === "person" ? authorization.value.principal : person) };
       send(200, result);
     } catch { send(500, { ok: false, error: "unavailable", message: "Memory service could not complete the operation" }); }
   });
 }
-function dispatch(store: MemoryStore, person: string, role: MemoryRole, request: MemoryRequest, permit: (record: MemoryItem | Disclosure) => boolean): MemoryValue {
+function dispatch(store: MemoryStore, person: string, role: MemoryRole, request: MemoryRequest, permit: (record: MemoryItem | Disclosure) => boolean, recordedBy: string): MemoryValue {
   switch (request.operation) {
-    case "write": return store.write(person, request.item);
+    case "write": return store.write(recordedBy, request.item);
     case "search": return store.search(person, request.context, request.query, request.about, request.limit, role, permit);
     case "read": return store.read(person, request.context, request.ids, role, permit);
     case "forget": return store.forget(request.ids, request.mode);

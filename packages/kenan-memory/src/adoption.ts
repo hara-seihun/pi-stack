@@ -1,14 +1,17 @@
 import { Database } from "bun:sqlite";
 import { createDecipheriv, createHash, randomUUID } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { authorize, type PermissionPolicy, type Principal, type Resource } from "pi-orchestrator/permissions";
+import { forgottenIds, projectionNode, memoryUseFenced } from "./forget-projection.js";
+import { authorityHead, renderAuthority, type AuthorityHead } from "./authority.js";
 import { MEMORY_FOLDER_AGENTS, MEMORY_FOLDER_README } from "./markdown.js";
 
 export type AdoptionSource = { resource: Resource; path: string; selection: { kind: "person"; person: string } | { kind: "whole-store" }; format: "memory" | "calendar" };
-export type AdoptionOptions = { source: AdoptionSource; destination: { resource: Resource; path: string }; principal: Principal; policy: PermissionPolicy; now: number };
+export type AuthorityReceipt = { source: string; subject: string; revision: number; sha256: string };
+export type AdoptionOptions = { source: AdoptionSource; destination: { resource: Resource; path: string }; principal: Principal; policy: PermissionPolicy; now: number; expectedAuthority?: AuthorityReceipt };
 export type AdoptionError = { code: "invalid-options" | "denied" | "source-unavailable" | "invalid-record" | "destination-conflict" | "write-failed"; message: string };
-export type AdoptionResult = { ok: true; value: { fingerprint: string; records: number; created: number; receipt: string } } | { ok: false; error: AdoptionError };
+export type AdoptionResult = { ok: true; value: { fingerprint: string; records: number; created: number; receipt: string; currentHead: AuthorityReceipt | null } } | { ok: false; error: AdoptionError };
 type RecordData = { lane: string; id: string; value: unknown; current: boolean | null };
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const fail = (code: AdoptionError["code"], message: string): AdoptionResult => ({ ok: false, error: { code, message } });
@@ -53,6 +56,7 @@ function records(db: Database, source: AdoptionSource): RecordData[] {
       for (const row of db.query(`SELECT * FROM ${table}`).all() as { id: string; body: string; stopped?: number }[]) {
         const body = JSON.parse(row.body);
         if (selection.kind === "person" && !ownRecord(body, selection.person)) continue;
+        if (selection.kind === "person" && table === "memories" && tables.has("root_runs") && body.setting?.threadId && db.query("SELECT id FROM root_runs WHERE id=?").get(body.setting.threadId)) continue;
         output.push({ lane: table, id: row.id, value: row, current: row.stopped === undefined ? null : row.stopped === 0 });
       }
     }
@@ -89,12 +93,40 @@ export function adoptMarkdown(options: AdoptionOptions): AdoptionResult {
   let data: RecordData[];
   try { data = db.transaction(() => records(db, source))(); } catch { return fail("invalid-record", "Source records or decryption custody are invalid; nothing is discarded"); } finally { db.close(); }
   const serialized = JSON.stringify({ source: { id: source.resource.id, format: source.format, selection: source.selection }, records: data });
-  const fingerprint = hash(serialized);
+  let fingerprint = hash(serialized);
   let created = 0;
   try {
     mkdirSync(destination.path, { recursive: true, mode: 0o700 });
     const folder = realpathSync(destination.path);
     if (folder !== destination.path) return fail("invalid-options", "Destination must be canonical and not a symlink");
+    if (memoryUseFenced(folder)) return fail("destination-conflict", "Pending forget projection fences adoption until custody recovery");
+    const invalid = new Set(forgottenIds(folder));
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const record of data) {
+        const node = projectionNode(record.value);
+        if (node?.derived && node.dependencies.some(id => invalid.has(id)) && !invalid.has(node.id)) { invalid.add(node.id); changed = true; }
+      }
+    }
+    data = data.filter(record => { const node = projectionNode(record.value); return !node || !invalid.has(node.id); });
+    if (invalid.size) fingerprint = hash(JSON.stringify({ source: { id: source.resource.id, format: source.format, selection: source.selection }, exclusions: [...invalid].sort(), records: data }));
+    const heads = source.selection.kind === "person" ? data.filter(record => record.lane === "life-policy" && record.current === true) : [];
+    if (heads.length > 1) return fail("invalid-record", "A subject has conflicting current authority heads");
+    const current = heads[0]?.value as { subject: string; revision: number; value: Record<string, unknown> } | undefined;
+    const head: AuthorityHead | undefined = current ? { format: "markdown-authority-v1", subject: current.subject, revision: current.revision, source: source.resource.id, policy: current.value } : undefined;
+    const authorityPath = join(folder, "authority.md");
+    if (!head && source.selection.kind === "person" && existsSync(authorityPath)) return fail("destination-conflict", "Source has no current authority; an existing owning head cannot be blessed");
+    let replaceAuthority: string | undefined;
+    const currentHead: AuthorityReceipt | null = head ? { source: head.source, subject: head.subject, revision: head.revision, sha256: hash(renderAuthority(head)) } : null;
+    if (head && existsSync(authorityPath)) {
+      const before = readFileSync(authorityPath, "utf8"), existing = authorityHead(before);
+      if (!existing || JSON.stringify(existing) !== JSON.stringify(head)) {
+        const expected = options.expectedAuthority;
+        if (!existing || !expected || existing.source !== head.source || existing.subject !== head.subject || expected.source !== existing.source || expected.subject !== existing.subject || expected.revision !== existing.revision || expected.sha256 !== hash(before) || before !== renderAuthority(existing) || existing.revision >= head.revision) return fail("destination-conflict", "Existing authority note conflicts with the selected head or expected adopted provenance");
+        replaceAuthority = before;
+      }
+    } else if (options.expectedAuthority) return fail("destination-conflict", "Expected adopted authority is absent");
     const recordFolder = join(folder, "records");
     mkdirSync(recordFolder, { recursive: true, mode: 0o700 });
     if (realpathSync(recordFolder) !== recordFolder) return fail("invalid-options", "Record directory must stay in the memory folder");
@@ -109,8 +141,16 @@ export function adoptMarkdown(options: AdoptionOptions): AdoptionResult {
       const link = `- [${record.lane} ${hash(record.id).slice(0, 12)}](records/${filename}) — current at adoption: ${JSON.stringify(record.current)}`;
       links.push(link);
       const note = record.lane === "life-policy" ? "authority" : record.lane === "life-steering" ? "steering" : record.lane.startsWith("calendar-") ? "calendar" : "work";
-      notes.get(note)!.push(link);
+      if (source.selection.kind === "person" && note !== "authority" && record.current !== false) notes.get(note)!.push(link);
     }
+    if (head && replaceAuthority !== undefined) {
+      const temporary = `${authorityPath}.${randomUUID()}.tmp`, fd = openSync(temporary, "wx", 0o600);
+      try { writeFileSync(fd, renderAuthority(head)); fsyncSync(fd); } finally { closeSync(fd); }
+      try {
+        if (readFileSync(authorityPath, "utf8") !== replaceAuthority) return fail("destination-conflict", "Authority changed before adopted-head compare-and-swap");
+        renameSync(temporary, authorityPath);
+      } finally { if (existsSync(temporary)) unlinkSync(temporary); }
+    } else if (head && install(authorityPath, renderAuthority(head)) === "conflict") return fail("destination-conflict", "Current authority note changed during adoption");
     for (const [name, entries] of notes) {
       if (!entries.length) continue;
       const target = join(folder, `${name}.md`);
@@ -130,6 +170,6 @@ export function adoptMarkdown(options: AdoptionOptions): AdoptionResult {
     if (install(join(folder, receipt), manifest) === "conflict") return fail("destination-conflict", "Adoption receipt differs");
     const fd = openSync(folder, "r");
     try { fsyncSync(fd); } finally { closeSync(fd); }
-    return { ok: true, value: { fingerprint, records: data.length, created, receipt } };
+    return { ok: true, value: { fingerprint, records: data.length, created, receipt, currentHead } };
   } catch { return fail("write-failed", "Adoption could not finish; source is untouched and retry reuses existing exact records"); }
 }

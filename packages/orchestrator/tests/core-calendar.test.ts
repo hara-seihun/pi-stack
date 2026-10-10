@@ -25,6 +25,13 @@ test("adopted calendar data checks every command grant, never implies ownership/
   const grants: Grant[] = [{ id: "calendar-read", principal: "alice", resource: { kind: "exact", id: configured.id }, actions: ["read"], effect: "allow", validFrom: 0, validUntil: null, issuedBy: "fixture", source: "fixture" }];
   const policy: PermissionPolicy = { revision: 1, consents: [], grants };
   const options = { config, policy, scopes: [scope], owner: () => ({ ok: true as const, value: { runtime: { path: (path: string) => { if (![databasePath, adoptionReceiptPath, memoryFolder, journalDirectory].includes(path)) throw new Error("unregistered path"); return path; } } } }) };
+  const locked = createCoreCalendar({ ...options, scopes: [{ ...scope, availability: { kind: "unavailable", reason: "locked" } }], owner: () => { throw new Error("Locked dataset must not access its namespace"); } });
+  expect(locked.ok).toBe(true);
+  if (locked.ok) {
+    expect(await locked.value.execute({ kind: "person", id: "alice", person: "alice" }, "locked-read", { operation: "records" })).toMatchObject({ ok: false, error: "unavailable" });
+    expect(await locked.value.execute({ kind: "service", id: "root" }, "locked-root-read", { operation: "records" })).toMatchObject({ ok: false, error: "unauthenticated" });
+    await locked.value.close();
+  }
   const built = createCoreCalendar(options); expect(built.ok).toBe(true); if (!built.ok) { rmSync(dir, { recursive: true, force: true }); return; }
   try {
     const alice = { kind: "person" as const, id: "alice", person: "alice" };

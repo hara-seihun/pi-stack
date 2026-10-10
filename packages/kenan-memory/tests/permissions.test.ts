@@ -15,6 +15,17 @@ test("authenticated journal credentials never bypass the unified grant decision"
   } finally { await new Promise<void>(resolve => server.close(() => resolve())); store.close(); }
 });
 
+test("actual subject metadata includes legitimate own/recipient actions without opening another person's private facts", () => {
+  const store = new MemoryStore(":memory:");
+  try {
+    const bob = store.write("bob", { text: "Bob private", about: ["bob"], obviouslyPrivate: true, source: { saidBy: "bob" }, setting: { person: "bob", threadId: "private" } });
+    expect(store.authorizationDomain("alice")).not.toContain("bob");
+    store.write("alice", { text: "Delivered shared machine logistics", about: ["alice", "bob"], obviouslyPrivate: false, source: { actedFor: "alice", action: "message.send", externalId: "receipt" }, setting: { person: "alice", threadId: "action" } });
+    expect(store.authorizationDomain("alice")).toContain("bob");
+    expect(store.read("alice", { threadId: "own", turnId: "turn" }, [bob.id], "person").value).toEqual([]);
+  } finally { store.close(); }
+});
+
 test("a private consultation grant is filtered by actual records, not root role", async () => {
   const store = new MemoryStore(":memory:");
   const alice = store.write("alice", { text: "Alice fact", about: ["alice"], source: { saidBy: "alice" }, setting: { person: "alice", threadId: "source" }, obviouslyPrivate: true });

@@ -1,5 +1,6 @@
-import { readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
+import { authorityState } from "./authority.js";
 
 export type MarkdownResult<T> = { ok: true; value: T } | { ok: false; error: { code: "unset" | "invalid-folder" | "unavailable"; message: string } };
 export type MemoryFolder = { path: string; readme: string; instructions: string };
@@ -22,10 +23,21 @@ export function memoryFolder(path: string | undefined): MarkdownResult<MemoryFol
   }
 }
 
-export function memoryFolderPrompt(path: string | undefined): MarkdownResult<string> {
+export function memoryFolderPrompt(path: string | undefined, now = Date.now()): MarkdownResult<string> {
   const folder = memoryFolder(path);
   if (!folder.ok) return folder;
-  return { ok: true, value: `# Markdown memory\n\nAuthenticated memory folder: ${JSON.stringify(folder.value.path)}\n\n${folder.value.instructions}\n\n${folder.value.readme}` };
+  if (existsSync(join(folder.value.path, "FORGET-PENDING.md"))) return { ok: false, error: { code: "unavailable", message: "A durable forget projection is pending; active memory and authority use are fenced until its owner completes it" } };
+  const authorityPath = join(folder.value.path, "authority.md");
+  let current: string | null = null;
+  try {
+    if (existsSync(authorityPath)) {
+      if (realpathSync(authorityPath) !== authorityPath || statSync(authorityPath).size > 65536) return { ok: false, error: { code: "invalid-folder", message: "Authority head path/size is invalid" } };
+      current = readFileSync(authorityPath, "utf8");
+    }
+  } catch { return { ok: false, error: { code: "unavailable", message: "Current authority head cannot be refreshed" } }; }
+  const authority = authorityState(current, now);
+  const guidance = authority.state === "active" ? `Current standing authority (${JSON.stringify(authority.head.subject)}, revision ${authority.head.revision}):\n${JSON.stringify(authority.head.policy, null, 2)}` : `${authority.message}. Expanded standing delegation grants none.`;
+  return { ok: true, value: `# Markdown memory\n\nAuthenticated memory folder: ${JSON.stringify(folder.value.path)}\n\n${folder.value.instructions}\n\n${folder.value.readme}\n\n${guidance}` };
 }
 
 export const MEMORY_FOLDER_README = `# Memory\n\nThis folder is the working memory. Keep facts, decisions, work state, calendar data, delegation and steering in Markdown here, with links from this index. Source records adopted from databases live in records/; their exact versions, provenance, exclusions, consent and disclosure evidence remain intact.\n\n- [Authority](authority.md): stated delegation, spending, disclosure, exclusions, consent and validity dates. If missing, expanded standing authority is unset.\n- [Work](work.md): current work, exact next actions, dependencies and explicit stops.\n- [Calendar](calendar.md): event and subscription data, times and timezones, not a separate UI.\n- [Steering](steering.md): policy source, rationale, evidence, action, visibility, outcome and receipts.\n- [Adopted records](records/README.md): original versions and source identities.\n\nUse the existing action authority for outbound effects and their uncertainty fences. Markdown never substitutes for provider acceptance. The independent disclosure/consent journal remains accountable custody.\n`;

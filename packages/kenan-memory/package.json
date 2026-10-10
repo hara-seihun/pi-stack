@@ -9,6 +9,8 @@
     "./service": { "types": "./dist/service.d.ts", "bun": "./src/service.ts", "default": "./dist/service.js" },
     "./store": { "types": "./dist/store.d.ts", "bun": "./src/store.ts", "default": "./dist/store.js" },
     "./markdown": { "types": "./dist/markdown.d.ts", "bun": "./src/markdown.ts", "default": "./dist/markdown.js" },
+    "./forget-projection": { "types": "./dist/forget-projection.d.ts", "bun": "./src/forget-projection.ts", "default": "./dist/forget-projection.js" },
+    "./authority": { "types": "./dist/authority.d.ts", "bun": "./src/authority.ts", "default": "./dist/authority.js" },
     "./calendar-data": { "types": "./dist/calendar-data.d.ts", "bun": "./src/calendar-data.ts", "default": "./dist/calendar-data.js" },
     "./calendar-format": { "types": "./dist/calendar-format.d.ts", "bun": "./src/calendar-format.ts", "default": "./dist/calendar-format.js" },
     "./calendar-contract": { "types": "./dist/calendar-contract.d.ts", "bun": "./src/calendar-contract.ts", "default": "./dist/calendar-contract.js" },

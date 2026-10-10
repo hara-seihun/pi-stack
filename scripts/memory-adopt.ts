@@ -14,7 +14,7 @@ export function runAdoptionPlan(path: string) {
 }
 if (import.meta.main) {
   const args = process.argv.slice(2);
-  if (args.length === 1 && args[0] === "--help") console.log("Usage: bun scripts/memory-adopt.ts --plan /absolute/root-owned/plan.json\nOne non-destructive read-only source snapshot into a granted Markdown folder. Host plan declares authenticated principal, source/destination resources, selection and permission policy. Prints only receipt metadata. Does not modify grants, source data or uncertain effects.");
+  if (args.length === 1 && args[0] === "--help") console.log("Usage: bun scripts/memory-adopt.ts --plan /absolute/root-owned/plan.json\nOne non-destructive read-only source snapshot into a granted Markdown folder. Host plan declares authenticated principal, source/destination resources, per-subject selection and permission policy. Prints only fingerprint/current-head receipt metadata. Final adoption follows original-writer drain; expectedAuthority may CAS only its own prior adopted head. See docs/memory-adoption.md. Does not modify grants, source data or uncertain effects.");
   else if (args.length !== 2 || args[0] !== "--plan") { console.error("Use --help for the explicit adoption plan contract"); process.exitCode = 64; }
   else {
     const result = runAdoptionPlan(args[1]!);

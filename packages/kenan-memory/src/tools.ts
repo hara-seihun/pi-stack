@@ -4,6 +4,7 @@ import { Type } from "typebox";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { memoryClient } from "./client.js";
 import { rootRequestResponse } from "./root-transport.js";
+import { memoryUseFenced } from "./forget-projection.js";
 import { memoryFolderPrompt } from "./markdown.js";
 import { ACTION_TOOL_NAMES, registerActionTools } from "./action-tools.js";
 import { oneKenanEnabled } from "./config.js";
@@ -73,6 +74,7 @@ function registerMemoryTools(options: MemoryToolOptions, pi: ExtensionAPI) {
     let pending: Promise<MemoryResult<unknown>> | undefined;
     const ensureSession = async (): Promise<MemoryResult<unknown>> => {
       if (!oneKenanEnabled(options.env)) return { ok: false, error: "disabled", message: "One Kenan is disabled on this host" };
+      if (memoryUseFenced(options.env.PI_KENAN_MEMORY_FOLDER)) return { ok: false, error: "unavailable", message: "Forget projection is pending; memory and derived authority remain fenced" };
       if (options.env.PI_KENAN_MEMORY_ROLE !== undefined && !isMemoryRole(options.env.PI_KENAN_MEMORY_ROLE)) return { ok: false, error: "unauthenticated", message: "Unknown memory role" };
       if (options.env.PI_KENAN_MEMORY_TOKEN && options.env.PI_KENAN_MEMORY_PERSON && (root || options.env.PI_KENAN_MEMORY_ROLE === "person")) return { ok: true, value: undefined };
       if (root) return { ok: false, error: "unauthenticated", message: "Root memory requires an admitted root capability" };

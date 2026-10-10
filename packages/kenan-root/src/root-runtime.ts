@@ -46,7 +46,7 @@ export function readRootConfig(path = process.env.PI_KENAN_ROOT_CONFIG ?? "/etc/
 export function createRootExecutor(config: RootConfig, options: { factory?: RootSessionFactory; consultationOwner?: ConsultationOwner; consultationOwnerFor?: ConsultationOwnerResolver; env?: NodeJS.ProcessEnv; prompt?: string; report?: InfrastructureReporter; consent?: (admission: RootAdmission, request: string, input: ConsentInput) => ReturnType<ConsentRequest>; notify?: (admission: RootAdmission, toolCallId: string, input: NotificationInput) => ReturnType<NotificationRequest> } = {}): RootExecutor {
   const hostPrompt = options.prompt ?? readFileSync(config.promptFile, "utf8");
   const factory = options.factory ?? createFixedSession;
-  const baseEnv = { ...process.env, ...options.env };
+  const baseEnv = { ...options.env };
   return async (admission, request, onExecution) => {
     if (!options.consultationOwner && !options.consultationOwnerFor) return { ok: false, error: "unavailable", message: "Private consultations require the shared core owner" };
     if (options.consultationOwner && options.consultationOwnerFor) return { ok: false, error: "unavailable", message: "Private consultation ownership is ambiguous" };

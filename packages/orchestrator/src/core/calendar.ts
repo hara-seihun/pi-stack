@@ -29,7 +29,21 @@ export function createCoreCalendar(options: { config: CoreCalendarConfig; policy
   const policy = validatePermissionPolicy(options.policy); if (!policy.ok) return invalid(policy.error.message);
   const config = parsed.value, scope = options.scopes.find(scope => scope.id === config.custodyScopeId);
   if (!scope || scope.resource.privacy === "public" || scope.resource.owner !== config.person) return invalid("Calendar custody requires its registered owner's private scope");
-  const adopted = options.owner(scope.id); if (!adopted.ok) return adopted;
+  const unavailable = (): CoreResult<CoreCalendarData> => ({ ok: true, value: {
+    id: config.id,
+    async execute(principal, _requestId, input) {
+      const command = parseCalendarCommand(input);
+      if (!command.ok) return { ok: false, error: "invalid-request", message: command.error.message };
+      const action = calendarCommandAction(command.value);
+      for (const actual of action === "read" ? [action] : ["read" as const, action]) {
+        if (!authorize(options.policy, { principal, resource: config.resource, action: actual, now: Date.now() }).ok) return { ok: false, error: "unauthenticated", message: "Structured memory dataset is unavailable to this principal/action" };
+      }
+      return { ok: false, error: "unavailable", message: "Dataset owner custody is locked or not adopted; unlock and reload the core configuration" };
+    },
+    async close() {},
+  } });
+  if (scope.availability.kind === "unavailable") return unavailable();
+  const adopted = options.owner(scope.id); if (!adopted.ok) return unavailable();
   let pinned: CustodyResources | undefined, lock: ScopeOwnership | undefined, db: Database | undefined;
   try {
     pinned = new CustodyResources(scope.custody);

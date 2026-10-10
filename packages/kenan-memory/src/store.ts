@@ -24,6 +24,7 @@ export class MemoryStore {
       CREATE TABLE IF NOT EXISTS disclosures(id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, person TEXT NOT NULL, thread TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'person');
       CREATE TABLE IF NOT EXISTS root_runs(id TEXT PRIMARY KEY, body TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS forgotten_sources(id TEXT PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('delete','stop-using')));
       CREATE TABLE IF NOT EXISTS consent_resumes(id TEXT PRIMARY KEY, input TEXT NOT NULL, admission TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS root_continuations(original TEXT PRIMARY KEY, resumed TEXT NOT NULL);
       CREATE VIRTUAL TABLE IF NOT EXISTS memory_search USING fts5(id UNINDEXED, text, tokenize='porter unicode61');
@@ -94,10 +95,19 @@ export class MemoryStore {
     const items = ids.flatMap(id => { const row = query.get(id, ...(role === "person" ? [person, person, person] : [])) as { body: string } | null; return row ? [JSON.parse(row.body)] : []; });
     return this.report(person, context, permit ? items.filter(permit) : items);
   }
+  authorizationDomain(person: string | null): string[] {
+    const rows = this.db.query(`SELECT DISTINCT subject.value AS subject FROM memories,json_each(json_extract(memories.body,'$.about')) AS subject WHERE memories.stopped=0 ${person === null ? "" : `AND ${this.ownClause()}`}`).all(...(person === null ? [] : [person, person, person])) as { subject: string }[];
+    if (person === null) {
+      rows.push(...this.db.query("SELECT DISTINCT subject.value AS subject FROM disclosures,json_each(json_extract(disclosures.body,'$.about')) AS subject").all() as { subject: string }[]);
+      if (this.db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='life_heads'").get()) rows.push(...this.db.query("SELECT DISTINCT subject FROM life_heads").all() as { subject: string }[]);
+    }
+    return [...new Set(rows.map(row => row.subject).filter(subject => typeof subject === "string" && !!subject))];
+  }
   authorizationItems(ids: string[]): MemoryItem[] {
     const query = this.db.query("SELECT body FROM memories WHERE id=?");
     return ids.flatMap(id => { const row = query.get(id) as { body: string } | null; return row ? [JSON.parse(row.body) as MemoryItem] : []; });
   }
+  forgottenSources(): string[] { return (this.db.query("SELECT id FROM forgotten_sources").all() as { id: string }[]).map(row => row.id); }
   forget(ids: string[], mode: ForgetMode): { forgotten: string[]; mode: ForgetMode } {
     stateValue(forgetModes, mode);
     const result = this.db.transaction(() => {
@@ -105,8 +115,9 @@ export class MemoryStore {
       for (const id of ids) {
         const row = this.db.query("SELECT body FROM memories WHERE id=?").get(id) as { body: string } | null;
         if (!row) continue;
+        this.db.query("INSERT INTO forgotten_sources VALUES(?,?) ON CONFLICT(id) DO UPDATE SET mode=excluded.mode").run(id, mode);
         if (mode === "delete") this.db.query("DELETE FROM memories WHERE id=?").run(id);
-        else if (mode === "stop-using") this.db.query("UPDATE memories SET stopped=1,body=? WHERE id=?").run(JSON.stringify({ ...JSON.parse(row.body), stoppedAt: new Date().toISOString() }), id);
+        else if (mode === "stop-using") this.db.query("UPDATE memories SET stopped=1,body=? WHERE id=? AND stopped=0").run(JSON.stringify({ ...JSON.parse(row.body), stoppedAt: new Date().toISOString() }), id);
         forgotten.push(id);
       }
       return { forgotten, mode };
@@ -138,11 +149,11 @@ export class MemoryStore {
     return { person: row.person, threadId: row.thread, role: row.role };
   }
   canForget(person: string, ids: string[]): boolean {
-    const query = this.db.query("SELECT id FROM memories WHERE id=? AND json_extract(body,'$.recordedBy')=? AND NOT EXISTS(SELECT 1 FROM json_each(json_extract(memories.body,'$.about')) WHERE value<>?)");
+    const query = this.db.query("SELECT id FROM memories WHERE id=? AND json_extract(body,'$.recordedBy')=? AND NOT EXISTS(SELECT 1 FROM json_each(json_extract(memories.body,'$.about')) WHERE value<>?) AND NOT EXISTS(SELECT 1 FROM root_runs WHERE root_runs.id=json_extract(memories.body,'$.setting.threadId'))");
     return ids.every(id => !!query.get(id, person, person));
   }
   private ownClause(): string {
-    return `((json_extract(memories.body,'$.recordedBy')=? AND NOT EXISTS(SELECT 1 FROM json_each(json_extract(memories.body,'$.about')) WHERE value<>?)) OR (json_extract(memories.body,'$.source.action') IS NOT NULL AND json_extract(memories.body,'$.obviouslyPrivate')=0 AND EXISTS(SELECT 1 FROM json_each(json_extract(memories.body,'$.about')) WHERE value=?)))`;
+    return `((json_extract(memories.body,'$.recordedBy')=? AND NOT EXISTS(SELECT 1 FROM json_each(json_extract(memories.body,'$.about')) WHERE value<>?) AND NOT EXISTS(SELECT 1 FROM root_runs WHERE root_runs.id=json_extract(memories.body,'$.setting.threadId'))) OR (json_extract(memories.body,'$.source.action') IS NOT NULL AND json_extract(memories.body,'$.obviouslyPrivate')=0 AND EXISTS(SELECT 1 FROM json_each(json_extract(memories.body,'$.about')) WHERE value=?)))`;
   }
   admitRoot(person: string, threadId: string, recipients: string[], subjects: string[], roomId?: string, rootSessionId = randomUUID()): RootAdmission {
     return this.db.transaction(() => {

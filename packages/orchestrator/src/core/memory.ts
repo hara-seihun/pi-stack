@@ -10,6 +10,8 @@ import { openSqlite } from "../sqlite.js";
 import { CustodyResources } from "./custody-resources.js";
 import type { CoreScope } from "./contracts.js";
 import { readTimezoneProjection } from "../person-timezone.js";
+import { createMemoryMarkdown, parseMarkdownOwners, type MarkdownOwner } from "./memory-markdown.js";
+import { sharedCustodyFlag } from "./feature-stop.js";
 import { roomAudienceResolver } from "./room-audience.js";
 import { createCoreCalendar, parseCoreCalendarConfig, type CoreCalendarConfig, type CoreCalendarData } from "./calendar.js";
 
@@ -33,6 +35,8 @@ export type CoreMemoryConfig = { kind: "disabled" } | {
   resources: Resource[];
   routes: CoreMemoryRoute[];
   datasets: CoreCalendarConfig[];
+  markdownOwners: MarkdownOwner[];
+  projectionMaintenancePrincipalId: string | null;
 };
 export type CoreMemoryAdapter = { request(request: IncomingMessage, response: ServerResponse): void; close(): Promise<void> };
 const invalid = (message: string): CoreResult<never> => ({ ok: false, error: { code: "invalid-config", message } });
@@ -54,6 +58,9 @@ export function parseCoreMemoryConfig(value: unknown, principals: readonly Princ
   if (value.kind !== "configured" || !id(value.id) || !id(value.custodyScopeId) || !Number.isSafeInteger(value.uid) || Number(value.uid) < 0 || !absolute(value.databasePath) || !absolute(value.adoptionReceiptPath) || !absolute(value.authFile) || !Array.isArray(value.identities) || !Array.isArray(value.resources) || !Array.isArray(value.routes) || !Array.isArray(value.datasets)) return invalid("Memory requires existing database/auth paths and explicit identities, resources and routes");
   if (!object(value.roomAudience) || !(value.roomAudience.kind === "none" || value.roomAudience.kind === "registry" && absolute(value.roomAudience.databasePath) && id(value.roomAudience.custodian))) return invalid("Memory room audience requires explicit none or an existing registry and custodian");
   if (!object(value.timezones) || !["none", "auth-files"].includes(String(value.timezones.kind))) return invalid("Memory timezones require explicit none or existing authenticated supervisor files");
+  const markdownOwners = parseMarkdownOwners(value.markdownOwners);
+  if (!markdownOwners.ok) return markdownOwners;
+  if (!(value.projectionMaintenancePrincipalId === null || id(value.projectionMaintenancePrincipalId) && principals.some(principal => principal.id === value.projectionMaintenancePrincipalId && principal.kind === "service")) || markdownOwners.value.length > 0 && value.projectionMaintenancePrincipalId === null) return invalid("Markdown projection requires an explicitly registered housekeeping service principal");
   const identities: CoreMemoryIdentity[] = [];
   for (const item of value.identities) {
     if (!object(item) || !id(item.principalId)) return invalid("Memory identity requires a registered principal");
@@ -96,7 +103,7 @@ export function parseCoreMemoryConfig(value: unknown, principals: readonly Princ
     if (datasets.some(dataset => dataset.id === parsed.value.id || dataset.databasePath === parsed.value.databasePath) || parsed.value.databasePath === value.databasePath) return invalid("Memory datasets require distinct identifiers and existing custody databases");
     datasets.push(parsed.value);
   }
-  return { ok: true, value: { kind: "configured", id: value.id, uid: Number(value.uid), custodyScopeId: value.custodyScopeId, databasePath: value.databasePath, adoptionReceiptPath: value.adoptionReceiptPath, authFile: value.authFile, roomAudience: value.roomAudience as Extract<CoreMemoryConfig, { kind: "configured" }>["roomAudience"], timezones: value.timezones as Extract<CoreMemoryConfig, { kind: "configured" }>["timezones"], identities, resources, routes: mapped, datasets } };
+  return { ok: true, value: { kind: "configured", id: value.id, uid: Number(value.uid), custodyScopeId: value.custodyScopeId, databasePath: value.databasePath, adoptionReceiptPath: value.adoptionReceiptPath, authFile: value.authFile, roomAudience: value.roomAudience as Extract<CoreMemoryConfig, { kind: "configured" }>["roomAudience"], timezones: value.timezones as Extract<CoreMemoryConfig, { kind: "configured" }>["timezones"], identities, resources, routes: mapped, datasets, markdownOwners: markdownOwners.value, projectionMaintenancePrincipalId: value.projectionMaintenancePrincipalId as string | null } };
 }
 
 export async function createCoreMemory(options: {
@@ -122,9 +129,10 @@ export async function createCoreMemory(options: {
   let ownership: ScopeOwnership | undefined;
   let resources: CustodyResources | undefined;
   const datasets: CoreCalendarData[] = [];
+  let markdown: Extract<ReturnType<typeof createMemoryMarkdown>, { ok: true }>["value"] | undefined;
   try {
     resources = new CustodyResources(scope.custody);
-    const allowed = new Set([config.databasePath, config.authFile, config.adoptionReceiptPath, ...(config.roomAudience.kind === "registry" ? [config.roomAudience.databasePath] : [])]);
+    const allowed = new Set([config.databasePath, config.authFile, config.adoptionReceiptPath, ...(scope.environment.PI_STACK_HOST_CONFIG ? [scope.environment.PI_STACK_HOST_CONFIG] : []), ...(config.roomAudience.kind === "registry" ? [config.roomAudience.databasePath] : [])]);
     const path = (logical: string) => {
       if (!allowed.has(logical)) throw new Error("Unregistered memory custody resource");
       const actual = adopted.value.runtime.path(logical);
@@ -178,7 +186,20 @@ export async function createCoreMemory(options: {
       }
       datasets.push(dataset.value);
     }
-    const server = memoryService({ store, auth, enabled: options.enabled, roomAudience, timezone, releaseCommit: options.releaseCommit,
+    const projected = createMemoryMarkdown({ owners: config.markdownOwners, maintenance: config.projectionMaintenancePrincipalId === null ? null : options.principals.find(principal => principal.id === config.projectionMaintenancePrincipalId)!, scopes: options.scopes, owner: options.owner, policy: options.policy, store, signatureKey: auth.rootToken });
+    if (!projected.ok) {
+      await Promise.all(datasets.map(dataset => dataset.close()));
+      store.close(); ownership.close(); resources.close();
+      return projected;
+    }
+    markdown = projected.value;
+    const enabled = () => options.enabled() && sharedCustodyFlag(scope, path).state === "enabled";
+    const server = memoryService({ store, auth, enabled, roomAudience, timezone, releaseCommit: options.releaseCommit,
+      forget: async ({ caller, ids, mode }) => {
+        const identity = config.identities.find(identity => matches(identity, caller));
+        const principal = options.principals.find(principal => principal.id === identity?.principalId);
+        return principal ? markdown!.forget(principal, ids, mode) : { ok: false, error: "unauthenticated", message: "Forget requires its uniquely mapped principal" };
+      },
       data: async ({ caller, request }) => {
         const identities = config.identities.filter(identity => matches(identity, caller));
         const principal = identities.length === 1 ? options.principals.find(principal => principal.id === identities[0]!.principalId) : undefined;
@@ -195,10 +216,18 @@ export async function createCoreMemory(options: {
         const operation = route === "/v1/memory" && object(input) && typeof input.operation === "string" ? input.operation : null;
         const mapping = config.routes.find(mapping => mapping.principalId === principal.id && mapping.route === route && mapping.operation === operation);
         if (!mapping) return { ok: false, error: { code: "denied", message: "Memory action has no explicit resource mapping" } };
-        const resource = config.resources.find(resource => resource.id === mapping.resourceId)!;
+        const declared = config.resources.find(resource => resource.id === mapping.resourceId)!;
+        const ownerPerson = options.principals.find(principal => principal.kind === "person" && principal.person === declared.owner);
+        const metadataOwner = principal.kind === "person" ? principal.person : declared.owner === scope.resource.owner ? null : ownerPerson?.kind === "person" ? ownerPerson.person : undefined;
+        const domain = declared.kind === "memory" && metadataOwner !== undefined ? store!.authorizationDomain(metadataOwner) : [];
+        const item = object(input) && input.operation === "write" && object(input.item) ? input.item : undefined;
+        const ownAction = record && item && object(item.source) && object(item.setting) && typeof item.source.actedFor === "string" && (declared.owner === item.source.actedFor || declared.owner === scope.resource.owner) && item.source.actedFor === item.setting.person && (principal.kind === "person" ? item.source.actedFor === principal.person : caller.kind === "publisher") && typeof item.source.action === "string" && !!item.source.action && typeof item.source.externalId === "string" && !!item.source.externalId && item.obviouslyPrivate === false && record.about.includes(item.source.actedFor);
+        const admittedCapture = operation === "write" && record && caller.kind === "person" && caller.role === "root" && caller.threadId !== undefined && store!.rootAdmission(caller.threadId) !== undefined && declared.kind === "memory" && declared.owner === scope.resource.owner;
+        const newDomain = ownAction || admittedCapture ? [...record!.about] : [];
+        const resource = { ...declared, subjects: [...new Set([...declared.subjects, ...domain, ...newDomain])] };
         const dataset = operation === "data" && object(input) ? config.datasets.find(dataset => dataset.id === input.dataset) : undefined;
         const actual = record ?? (dataset ? { about: dataset.resource.subjects, obviouslyPrivate: true } : undefined);
-        if (operation === "data" && !dataset || actual && (!Array.isArray(actual.about) || actual.about.length === 0 || actual.about.some(subject => !resource.subjects.includes(subject)) || resource.privacy === "public" && actual.obviouslyPrivate !== false)) return { ok: false, error: { code: "denied", message: "The actual memory records are outside this resource's granted subject/privacy scope" } };
+        if (operation !== "forget" && actual && markdown!.fenced(actual.about) || operation === "data" && !dataset || actual && (!Array.isArray(actual.about) || actual.about.length === 0 || actual.about.some(subject => !resource.subjects.includes(subject)) || resource.privacy === "public" && actual.obviouslyPrivate !== false)) return { ok: false, error: { code: "denied", message: "The actual memory records are outside this resource's granted subject/privacy scope" } };
         return authorize(options.policy, { principal, resource, action: mapping.action, now: Date.now() });
       },
     });
@@ -224,6 +253,7 @@ export async function createCoreMemory(options: {
         closePromise = (async () => {
           if (active > 0) await new Promise<void>(resolve => { finish = resolve; });
           await Promise.all(datasets.map(dataset => dataset.close()));
+          markdown!.close();
           store!.close();
           ownership!.close();
           resources!.close();
@@ -233,6 +263,7 @@ export async function createCoreMemory(options: {
     } };
   } catch {
     await Promise.all(datasets.map(dataset => dataset.close()));
+    markdown?.close();
     store?.close();
     ownership?.close();
     resources?.close();

@@ -76,6 +76,12 @@ function rootIntegration(options: RootIntegrationOptions) {
         releaseState.consentActive = true;
         reconciliation = (async () => {
           try {
+            if (!options.enabled()) {
+              await handle.dispatchSettled();
+              await options.drainConsultations();
+              await handle.settled();
+              return { errors: 0 };
+            }
             const [result, requests] = await Promise.all([consent.drain(() => !releaseState.dispatchPaused && !options.shutdownSignal.aborted), handle.drain()]);
             return { errors: result.errors + requests.errors };
           } finally { releaseState.consentActive = false; reconciliation = undefined; }

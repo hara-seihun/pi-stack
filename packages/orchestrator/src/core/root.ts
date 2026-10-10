@@ -4,6 +4,7 @@ import type { ThreadService } from "../threads/service.js";
 import type { CoreResult } from "./config.js";
 import type { CoreScope } from "./contracts.js";
 import type { CoreRuntime } from "./custody.js";
+import { sharedCustodyFlag } from "./feature-stop.js";
 import { CustodyResources } from "./custody-resources.js";
 import { acquireDatabaseOwnership, type ScopeOwnership } from "./ownership.js";
 
@@ -82,7 +83,7 @@ export async function createCoreRootIntegration(config: CoreRootConfig, scopes: 
   try {
     resources = new CustodyResources(scope.custody);
     const paths = new Set([config.configPath, config.privateDir, config.requests.databasePath, config.requests.adoptionReceiptPath, config.consent.databasePath, config.consent.adoptionReceiptPath,
-      ...Object.values(config.credentials)]);
+      ...Object.values(config.credentials), ...(scope.environment.PI_STACK_HOST_CONFIG ? [scope.environment.PI_STACK_HOST_CONFIG] : [])]);
     const path = (logical: string) => {
       if (!paths.has(logical)) throw new Error("Unregistered private integration resource");
       const current = statSync(logical, { bigint: true });
@@ -108,7 +109,7 @@ export async function createCoreRootIntegration(config: CoreRootConfig, scopes: 
       config: readRootConfig(path(config.configPath)), privateDir: path(config.privateDir),
       memoryRootToken: credential(config.credentials.memoryRootTokenFile), adminCapability: credential(config.credentials.adminCapabilityFile),
       consentCapability: credential(config.credentials.consentCapabilityFile), memoryUrl: config.memoryUrl, routerUrl: config.routerUrl,
-      requestStorePath: config.requests.databasePath, consentStorePath: config.consent.databasePath, enabled: () => !lifecycle.shutdownSignal.aborted,
+      requestStorePath: config.requests.databasePath, consentStorePath: config.consent.databasePath, enabled: () => !lifecycle.shutdownSignal.aborted && sharedCustodyFlag(scope, path).state === "enabled",
       releaseCommit: lifecycle.releaseCommit, shutdownSignal: lifecycle.shutdownSignal });
     if (!integration.ok) { for (const lock of locks) lock.close(); resources.close(); return { ok: false, error: { code: "unavailable", message: integration.error.message } }; }
     const plugin = integration.value, pinned = resources;
@@ -122,7 +123,13 @@ export async function createCoreRootIntegration(config: CoreRootConfig, scopes: 
             if (token) headers.set("authorization", `Bearer ${token}`);
           }
           const transcript = /^\/v1\/admin\/root-sessions\/([0-9a-f-]{36})\/transcript$/.exec(url.pathname);
-          const requiredScopes = transcript ? [config.consultationOwners.find(entry => entry.rootSessionId === transcript[1])?.scopeId ?? scope.id]
+          let transcriptScope: string | undefined;
+          if (transcript) {
+            const recorded = config.consultationOwners.find(entry => entry.rootSessionId === transcript[1]);
+            transcriptScope = recorded?.scopeId ?? (owners.get(scope.id)!.threads.get(transcript[1]!) ? scope.id : undefined);
+            if (!transcriptScope) return Response.json({ error: "Private consultation access denied" }, { status: 404 });
+          }
+          const requiredScopes = transcriptScope ? [transcriptScope]
             : url.pathname === "/v1/admin/root-sessions" ? consultationScopes : [scope.id];
           for (const scopeId of requiredScopes) {
             const authorization = lifecycle.authorizeAdmin(new Request(request, { headers }), scopeId, request.method === "GET" ? ["read"] : ["control"]);
