@@ -28,13 +28,14 @@ test("unsupported durable consent or notification states cannot report delivery 
   try {
     // Exercise the reconciliation boundary with corrupted persisted discriminators.
     const reconcile = manager as unknown as {
-      advance(row: unknown): Promise<{ ok: boolean }>;
+      advance(row: unknown, canDispatch: () => boolean): Promise<{ ok: boolean }>;
       advanceNotification(row: unknown): Promise<{ ok: boolean }>;
     };
-    expect((await reconcile.advance({ state: "unknown" })).ok).toBe(false);
+    expect((await reconcile.advance({ state: "unknown" }, () => true)).ok).toBe(false);
+    expect((await reconcile.advance({ state: "unknown" }, () => false)).ok).toBe(false);
     expect((await reconcile.advanceNotification({ state: "unknown" })).ok).toBe(false);
     expect((await reconcile.advanceNotification({ state: "failed" })).ok).toBe(false);
-    expect((await reconcile.advance({ state: "delivered" })).ok).toBe(true);
+    expect((await reconcile.advance({ state: "delivered" }, () => true)).ok).toBe(true);
     expect((await reconcile.advanceNotification({ state: "delivered" })).ok).toBe(true);
     expect(effects).toBe(0);
   } finally { manager.close(); rmSync(directory, { recursive: true, force: true }); }

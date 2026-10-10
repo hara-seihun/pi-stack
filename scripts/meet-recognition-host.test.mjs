@@ -13,11 +13,12 @@ function fixture(t) {
   mkdirSync(join(dir, 'bin'));
   const put = (name, content) => writeFileSync(join(repo, 'deploy', name), `#!/usr/bin/env bash\nset -euo pipefail\n${content}\n`, { mode: 0o755 });
   copyFileSync(new URL('../deploy/host', import.meta.url), join(repo, 'deploy/host'));
-  for (const name of ['prepared-components.mjs', 'host-plan.mjs', 'source-scopes.mjs']) copyFileSync(new URL(`../deploy/${name}`, import.meta.url), join(repo, 'deploy', name));
+  for (const name of ['prepared-components.mjs', 'host-plan.mjs', 'source-scopes.mjs', 'remote-rollback-compatible.mjs']) copyFileSync(new URL(`../deploy/${name}`, import.meta.url), join(repo, 'deploy', name));
   put('lib', `pi_stack_enter_deployment() { :; }
 pi_stack_check_person_configs() { :; }
 pi_stack_fleet_user() { echo fixture; }
 pi_stack_users() { echo fixture; }
+pi_stack_persons_dir() { printf '%s\\n' "$PI_REMOTE_PERSONS_DIR"; }
 pi_stack_daemon_units() { :; }
 pi_stack_component_releases_root() { printf '%s\\n' "$PI_STACK_RELEASES_ROOT"; }
 pi_stack_select_release() {
@@ -33,6 +34,7 @@ for name in runtime orchestrator remote tools; do
   mkdir -p "$release"
   printf '%s\\n' "$commit" > "$release/.pi-stack-commit"
 done
+printf '%s\\n' '{"version":1,"schema":"fixture-v1"}' > "$PI_STACK_RELEASES_ROOT/remote/$commit/data-contract.json"
 mkdir -p "$PI_STACK_RELEASES_ROOT/runtime/$commit/node_modules/.bin"
 cp "$PI_STACK_RUNTIME_DEST/node_modules/.bin/pi-model-selection-doctor" "$PI_STACK_RELEASES_ROOT/runtime/$commit/node_modules/.bin/"
 node "$(dirname "$0")/prepared-components.mjs" "$PI_STACK_RELEASES_ROOT" "$commit" record
@@ -90,6 +92,10 @@ case $1 in
   is-active|is-enabled) exit "\${PRIOR_STATE:-0}";;
   list-units) exit 0;;
   show)
+    if [ "$3" = -p ] && [ "$4" = ActiveState ] && [ "$5" = -p ]; then
+      printf 'ActiveState=%s\\nLoadState=loaded\\nInvocationID=%s\\n' "\${OWNER_STATE:-active}" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      exit 0
+    fi
     case $4 in
       LoadState) echo "\${OLD_WRITE_LOADED:-not-found}";;
       ActiveState) echo "\${OLD_WRITE_ACTIVE:-active}";;
@@ -102,6 +108,9 @@ exit 0
   writeFileSync(join(dir, 'bin/curl'), '#!/bin/sh\necho \'{"people":[]}\'\n', { mode: 0o755 });
   const env = { ...process.env, PATH: `${dir}/bin:${process.env.PATH}`, PI_STACK_RELEASES_ROOT: join(dir, 'releases'), PREPARED: join(dir, 'prepared'), TRACE: join(dir, 'trace'), WARM_STARTED: join(dir, 'warming'), VOICE_ACTIVATED: join(dir, 'voice-activated'), RECOGNITION_SELECTED: join(dir, 'recognition-selected'), ACCOUNTS_DONE: join(dir, 'accounts'), OLD_RECOGNITION: join(dir, 'old'), NEW_RECOGNITION: join(dir, 'new'), PI_STACK_MEET_RECOGNITION_DEST: join(dir, 'meet-recognition'), PI_STACK_SERVICES: '1', PI_STACK_DEPLOY_NO_SUDO: '1', PI_STACK_ALLOW_LIVE_MEETING_RESTART: '1' };
   for (const name of ['RUNTIME', 'ORCHESTRATOR', 'REMOTE', 'TOOLS', 'SKILLS']) env[`PI_STACK_${name}_DEST`] = join(dir, name.toLowerCase());
+  env.PI_REMOTE_PERSONS_DIR = join(dir, 'persons');
+  mkdirSync(env.PI_REMOTE_PERSONS_DIR);
+  mkdirSync(join(dir, '.pi-stack-releases'));
   mkdirSync(env.OLD_RECOGNITION); mkdirSync(env.NEW_RECOGNITION);
   symlinkSync(env.OLD_RECOGNITION, env.PI_STACK_MEET_RECOGNITION_DEST);
   const oldRuntime = join(dir, 'old-runtime');
@@ -111,6 +120,14 @@ exit 0
   writeFileSync(join(doctor, 'pi-model-selection-doctor'), 'process.exit(0);');
   writeFileSync(join(dir, 'host.json'), '{"version":1}');
   for (const args of [['init', '-q'], ['add', '.'], ['-c', 'user.name=test', '-c', 'user.email=test@example.test', 'commit', '-qm', 'fixture']]) assert.equal(spawnSync('git', ['-C', repo, ...args]).status, 0);
+  const previous = spawnSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+  const oldRemote = join(dir, 'old-remote'); mkdirSync(oldRemote);
+  env.OLD_REMOTE = oldRemote;
+  writeFileSync(join(oldRemote, '.pi-stack-commit'), previous + '\n');
+  writeFileSync(join(oldRemote, 'data-contract.json'), '{"version":1,"schema":"fixture-v1"}');
+  symlinkSync(oldRemote, env.PI_STACK_REMOTE_DEST);
+  writeFileSync(join(repo, 'release-note'), 'candidate');
+  for (const args of [['add', '.'], ['-c', 'user.name=test', '-c', 'user.email=test@example.test', 'commit', '-qm', 'candidate']]) assert.equal(spawnSync('git', ['-C', repo, ...args]).status, 0);
   env.PI_STACK_RECOGNITION_TRANSITION_FILE = join(dir, 'speech-transition.json');
   return { env, run: extra => spawnSync('bash', [join(repo, 'deploy/host'), join(dir, 'host.json')], { env: { ...env, ...extra }, encoding: 'utf8', timeout: 4000 }) };
 }
@@ -154,6 +171,7 @@ for (const failure of [{}, { RECOGNITION_EXIT: '1' }, { SMOKE_EXIT: '1' }, { RUN
   const failed = Object.keys(failure).length > 0;
   assert.equal(result.status, failure.RUNTIME_FAILURE === 'TERM' ? 143 : failure.RUNTIME_FAILURE === 'exit' ? 23 : failed ? 1 : 0, result.stderr);
   assert.equal(realpathSync(f.env.PI_STACK_MEET_RECOGNITION_DEST), failed ? f.env.OLD_RECOGNITION : f.env.NEW_RECOGNITION);
+  if (failed) assert.equal(realpathSync(f.env.PI_STACK_REMOTE_DEST), f.env.OLD_REMOTE, 'schema-compatible old Remote remains recoverable');
   assert.equal(existsSync(f.env.RECOGNITION_SELECTED), !failure.RUNTIME_FAILURE);
   assert.equal(existsSync(f.env.WARM_STARTED), !failure.RUNTIME_FAILURE);
   assert.equal(existsSync(f.env.VOICE_ACTIVATED), !failure.RUNTIME_FAILURE);
@@ -199,8 +217,33 @@ test('later host smoke failure restores old same-port unit after accepted recogn
 
 test('outer host success closes durable speech transition only after all release phases pass', t => {
   const f = fixture(t);
-  assert.equal(f.run({ OLD_WRITE_LOADED: 'loaded' }).status, 0);
+  const result = f.run({ OLD_WRITE_LOADED: 'loaded' });
+  assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(readFileSync(f.env.PI_STACK_RECOGNITION_TRANSITION_FILE, 'utf8')).phase, 'accepted');
+  const plan = JSON.parse(readFileSync(join(f.env.PI_STACK_RUNTIME_DEST, '..', '.pi-stack-release-plan.json'), 'utf8'));
+  assert.equal(plan.state, 'accepted');
+  for (const owner of ['router', 'voice', 'phone']) {
+    const proof = plan.owners[owner].acceptance;
+    assert.equal(proof.sourceKey, plan.owners[owner].candidateKey);
+    assert.equal(proof.hostKey, plan.hostKey);
+    assert.equal(proof.proof.runningCommit, plan.candidate);
+    assert.equal(proof.proof.units.length, 1);
+    assert.equal(proof.proof.units[0].state, 'active');
+    assert.equal(proof.proof.units[0].invocationId, 'a'.repeat(32));
+  }
+});
+
+test('unknown owner activation state refuses host acceptance and retains recognition rollback', t => {
+  const f = fixture(t);
+  const result = f.run({ OWNER_STATE: 'unknown' });
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /no positive activation proof/);
+  assert.equal(realpathSync(f.env.PI_STACK_MEET_RECOGNITION_DEST), f.env.OLD_RECOGNITION);
+  assert.equal(realpathSync(f.env.PI_STACK_REMOTE_DEST), f.env.OLD_REMOTE);
+  const plan = JSON.parse(readFileSync(join(f.env.PI_STACK_RUNTIME_DEST, '..', '.pi-stack-release-plan.json'), 'utf8'));
+  assert.equal(plan.state, 'prepared');
+  assert.equal(plan.owners.router.acceptance, undefined);
+  assert.equal(JSON.parse(readFileSync(f.env.PI_STACK_RECOGNITION_TRANSITION_FILE, 'utf8')).phase, 'rolled_back');
 });
 
 test('unresolved interrupted transition refuses another host selection', t => {

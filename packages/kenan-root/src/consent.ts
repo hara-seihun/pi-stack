@@ -161,6 +161,8 @@ export class RootConsentManager {
     return { pending: rows.length + notifications.length - delivered, delivered, errors };
   }
   private async advance(row: PendingConsent, canDispatch: () => boolean): Promise<ConsentResult<void>> {
+    if (!["queued", "waiting", "answered", "decided", "delivered"].includes(row.state))
+      return { ok: false, message: "Invalid stored consent state; no reply was delivered" };
     if (!canDispatch()) return { ok: true, value: undefined };
     if (row.state === "queued") return this.dispatch(row);
     if (row.state === "waiting") {
