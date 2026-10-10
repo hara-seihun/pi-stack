@@ -90,14 +90,22 @@ export interface RetainedCompletionOwner {
   controller?: ProviderController;
 }
 interface CompletionAlias { state: "adopting" | "ready"; ownerId: string; requestId: string }
+export type BrokerRequestAuthorization = { ok: true } | { ok: false; status: 403 | 503; message: string };
+export type BrokerRequestAuthority = (principal: string, request: IncomingMessage) => Promise<BrokerRequestAuthorization>;
 export interface EmbeddedBrokerOptions {
   store: Store;
+  authorizeRequest?: BrokerRequestAuthority;
+  /** Core publishes complete original owner partitions with their exact footprints. */
+  grantPublication?: { kind: "borrowed" };
   controller?: ProviderController;
   completionOwners?: readonly RetainedCompletionOwner[];
 }
 export function createModelBroker(config: ModelBrokerConfig, availability: ModelAvailabilityStore, transport: BrokerTransport = fetch, embedded?: EmbeddedBrokerOptions) {
   const store = embedded?.store ?? Store.open(config.ledgerPath);
-  if (store.path !== config.ledgerPath) throw new Error("Broker store differs from its configured ledger custody");
+  if (store.path !== config.ledgerPath) {
+    const actual = statSync(store.path, { bigint: true }), configured = statSync(config.ledgerPath, { bigint: true });
+    if (actual.dev !== configured.dev || actual.ino !== configured.ino) throw new Error("Broker store differs from its configured ledger custody");
+  }
   if (embedded?.controller && embedded.controller.store !== store) throw new Error("Broker and provider controller must share one Store");
   // Grants are desired state the broker owns for every declared ledger consumer.
   // Reloading the grant file republishes them for retained and new completion custody.
@@ -118,6 +126,7 @@ export function createModelBroker(config: ModelBrokerConfig, availability: Model
     return used >= weeklyUsd ? allowanceRefusal(weeklyUsd) : null;
   };
   const publish = () => {
+    if (embedded?.grantPublication?.kind === "borrowed") return;
     for (const owner of completionOwners.values()) owner.store.publishBrokerGrants([...grants].map(([principal, grant]) => ({ principal, ...grant })), config.grantOwner);
   };
   const mappedOwner = (principal: string, requestId: string) => {
@@ -138,6 +147,7 @@ export function createModelBroker(config: ModelBrokerConfig, availability: Model
   const servers: Server[] = [];
   let draining = false;
   let closed: Promise<void> | undefined;
+  let listening: Promise<number[]> | undefined;
   const dispatches = (principal: string): DispatchReceipt[] => JSON.parse(store.control(dispatchKey(principal)) ?? "[]");
   const saveDispatch = (receipt: DispatchReceipt) => {
     receipt.updatedAt = Date.now();
@@ -416,11 +426,19 @@ export function createModelBroker(config: ModelBrokerConfig, availability: Model
     }
   };
   publish();
-  const trackedRequest = (principal: string, req: IncomingMessage, res: ServerResponse): Promise<void> => {
+  const trackedRequest = (principal: string, req: IncomingMessage, res: ServerResponse, listenerAuthority?: BrokerRequestAuthority): Promise<void> => {
     if (draining) { json(res, 503, "Broker custody is draining; reconcile accepted IDs with its successor"); return Promise.resolve(); }
     const listener = config.listeners.find(candidate => candidate.principal === principal);
     if (!listener) { json(res, 403, "Principal has no model grant"); return Promise.resolve(); }
-    const work = request(listener, req, res).catch(error => {
+    const work = (async () => {
+      for (const authority of [listenerAuthority, embedded?.authorizeRequest]) {
+        if (!authority) continue;
+        const authorized = await authority(principal, req);
+        if (!authorized.ok) { json(res, authorized.status, authorized.message); return; }
+      }
+      if (draining) { json(res, 503, "Broker custody is draining"); return; }
+      await request(listener, req, res);
+    })().catch(error => {
       console.error("Model broker request failed:", error instanceof Error ? error.message : String(error));
       json(res, 500, "Broker request failed");
     });
@@ -460,25 +478,37 @@ export function createModelBroker(config: ModelBrokerConfig, availability: Model
       for (const listener of listeners) {
         if (!grants.has(listener.principal)) continue;
         grants.set(listener.principal, { accounts: listener.accounts, models: listener.models, weeklyUsd: listener.weeklyUsd });
+        const configured = config.listeners.find(value => value.principal === listener.principal)!;
+        configured.maxInFlight = listener.maxInFlight;
       }
       publish();
     },
-    async listen() {
-      try {
+    listen(principals?: readonly string[], listenerAuthority?: BrokerRequestAuthority): Promise<number[]> {
+      if (draining) return Promise.reject(new Error("Broker custody is draining"));
+      if (listening) return listening;
+      if (principals && (new Set(principals).size !== principals.length || principals.some(principal => !config.listeners.some(listener => listener.principal === principal)))) return Promise.reject(new Error("Unknown or duplicate retained listener principal"));
+      listening = (async () => { try {
         publish();
-        for (const listener of config.listeners) {
-          const server = createServer((req, res) => { void trackedRequest(listener.principal, req, res); });
+        for (const listener of config.listeners.filter(listener => principals === undefined || principals.includes(listener.principal))) {
+          const server = createServer((req, res) => { void trackedRequest(listener.principal, req, res, listenerAuthority); });
           attachMeetRecognitionBroker(server, shutdown.signal, () => {
             const count = inflight.get(listener.principal) ?? 0;
             if (count >= listener.maxInFlight) return false;
             inflight.set(listener.principal, count + 1);
             return true;
-          }, () => inflight.set(listener.principal, Math.max(0, (inflight.get(listener.principal) ?? 1) - 1)));
+          }, () => inflight.set(listener.principal, Math.max(0, (inflight.get(listener.principal) ?? 1) - 1)), async req => {
+            if (draining) return false;
+            for (const authority of [listenerAuthority, embedded?.authorizeRequest]) {
+              if (authority && !(await authority(listener.principal, req)).ok) return false;
+            }
+            return !draining;
+          });
           servers.push(server);
           await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(listener.port, "127.0.0.1", resolve); });
         }
         return servers.map(server => (server.address() as { port: number }).port);
-      } catch (error) { await this.close(); throw error; }
+      } catch (error) { await this.close(); throw error; } })();
+      return listening;
     },
     close(): Promise<void> {
       if (!closed) closed = (async () => {

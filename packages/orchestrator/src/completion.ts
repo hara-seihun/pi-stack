@@ -157,6 +157,12 @@ export class CompletionService {
     });
   }
 
+  /** An authenticated original owner route retains the stored access identity,
+   * including records whose public broker ID cannot be recovered. */
+  submitOwner(requestId: string, input: unknown): CompletionOutcome<CompletionRecord> {
+    return this.store.transaction(() => this.submit(requestId, input, this.stored(requestId)?.access));
+  }
+
   adoptAccess(requestId: string, access: CompletionAccess): CompletionOutcome<CompletionRecord> {
     return this.store.transaction(() => {
       const value = this.stored(requestId);

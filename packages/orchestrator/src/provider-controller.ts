@@ -6,6 +6,7 @@ import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-code
 import { providerOAuth } from "./auth/shared-oauth.js";
 import { codexTierExclusions } from "./auth/codex-capabilities.js";
 import { ORCHESTRATOR_CATALOG } from "./catalog.js";
+import { prioritizeReservedCompletions } from "./account-reservation.js";
 import { CompletionService, completionModel } from "./completion.js";
 import { CodexMeterSampler } from "./meters-codex.js";
 import { AnthropicMeterSampler } from "./meters-anthropic.js";
@@ -62,7 +63,7 @@ export class ProviderController {
       const failures = observed.filter(sample => !["recorded", "stale-reading", "reset-credits-unreadable", "reset-pending"].includes(sample.outcome));
       this.store.setControl(`meter-error:${account.id}`, failures.length ? JSON.stringify(failures) : "");
     }
-    for (const run of this.store.admissionQueue()) {
+    for (const run of prioritizeReservedCompletions(this.store, this.store.admissionQueue())) {
       if (this.detached) return;
       if (!this.completions.byRun(run.id)) continue;
       const requestId = this.store.control(`completion-run:${run.id}`)!;

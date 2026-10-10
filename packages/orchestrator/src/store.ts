@@ -6,6 +6,7 @@ import { dirname, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import type { Account, BudgetClass, FailureKind, LeaseKind, ResetCreditReading, Run, RunContext, RunSource, RunState, UsageEntry, UsageTotal } from "./domain.js";
 
+import { accountReservation } from "./account-reservation.js";
 import { openSqlite } from "./sqlite.js";
 
 export const SCHEMA_VERSION = 3;
@@ -205,6 +206,7 @@ export class Store {
       id:r.id, provider:r.provider, label:maybe(r.label), enabled:!!r.enabled,
       cooldownUntil:maybe(r.cooldown_until), concurrency:r.concurrency,
       use:this.control(`account-use:${r.id}`)==="voice"?"voice":"shared",
+      reservation:accountReservation(this,r.id),
     }));
   }
   account(id: string): Account | undefined { return this.accounts().find((a) => a.id === id); }

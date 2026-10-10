@@ -1,4 +1,5 @@
 import { completionFeedbackRefusal } from "./completion-feedback.js";
+import { reservationMatchesRun } from "./account-reservation.js";
 import { completionModel } from "./completion.js";
 import { admissionThinking, modelDrainsMeter, type ModelCandidate } from "./catalog.js";
 import { allowsAccountUse, type BudgetClass, type OrchestratorConfig } from "./domain.js";
@@ -25,6 +26,7 @@ export function accountCapacity(store:Store,accountId:string,_budget:BudgetClass
   if(!allowsAccountUse(account,"fleet"))return stop(account.enabled?"reserved for voice":"disabled");
   const credential = credentialRefusal(cfg, accountId);
   if(credential)return stop(credential);
+  if(account.reservation&&!reservationMatchesRun(store,account.reservation,runId))return stop(`reserved capacity: ${account.reservation.reason}`);
   if(account.cooldownUntil&&account.cooldownUntil>now)return stop("account cooling down");
   if(meters.some((m)=>m.used_percent>=100))return stop("provider quota exhausted");
   return{state:"available",spent,reason:"provider capacity available"};
@@ -79,7 +81,7 @@ export function assignCompletion(store:Store,runId:string,_profile:string,cfg:Pi
   const candidates=run?.provider&&run.model?[{provider:run.provider,model:run.model,thinking:run.thinking}]
     :selected?[{...selected,thinking:completion.input.thinkingLevel??admissionThinking(selected)}]:[];
   if(!candidates.length)return{refusals:[{accountId:"*",reason:"completion has no valid explicit Pi model"}]};
-  const refusals:Refusal[]=[],choices:(Assignment&{spent:number})[]=[];
+  const refusals:Refusal[]=[],choices:(Assignment&{spent:number;reserved:boolean})[]=[];
   for(const candidate of candidates){
     // A brokered completion is a shared-model request: the household policy refuses a disabled
     // model even when the principal's grant includes it, as the broker does for live requests.
@@ -93,14 +95,15 @@ export function assignCompletion(store:Store,runId:string,_profile:string,cfg:Pi
         :!allowsAccountUse(account,"fleet")?"account unavailable"
         :credential?credential
         :unsupported?modelUnsupportedReason(unsupported)
+        :account.reservation&&!reservationMatchesRun(store,account.reservation,runId)?"reserved for another completion queue"
         :account.cooldownUntil&&account.cooldownUntil>now?"account cooling down"
         :!meters.length||meters.some(meter=>now-meter.observed_at>cfg.meterMaxAgeMs||meter.observed_at>now+60_000)?"missing or stale provider quota"
         :meters.some(meter=>meter.used_percent>=100)?"provider quota exhausted":completionFeedbackRefusal(store,account.id,now);
       if(reason){refusals.push({accountId:account.id,reason});continue;}
-      choices.push({...candidate,accountId:account.id,spent:Math.max(...meters.map(meter=>meter.used_percent))});
+      choices.push({...candidate,accountId:account.id,spent:Math.max(...meters.map(meter=>meter.used_percent)),reserved:!!account.reservation});
     }
     if(choices.length)break;
   }
-  choices.sort((a,b)=>a.spent-b.spent||a.accountId.localeCompare(b.accountId));
+  choices.sort((a,b)=>Number(b.reserved)-Number(a.reserved)||a.spent-b.spent||a.accountId.localeCompare(b.accountId));
   return{assignment:choices[0],refusals};
 }

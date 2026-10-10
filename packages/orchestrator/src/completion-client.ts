@@ -21,9 +21,11 @@ export class CompletionClient {
   private readonly timeoutMs: number;
   constructor(options: CompletionClientOptions = {}) {
     const coreUrl = process.env.PI_CORE_URL;
-    this.baseUrl = (options.baseUrl ?? (coreUrl ? `${coreUrl.replace(/\/$/, "")}/v1/model-broker` : modelBrokerUrl()))?.replace(/\/$/, "");
-    this.tokenFile = options.tokenFile ?? process.env.PI_CORE_TOKEN_FILE;
-    this.requiresToken = options.baseUrl === undefined && coreUrl !== undefined;
+    const boundUrl = process.env.PI_MODEL_BROKER_URL === undefined ? undefined : modelBrokerUrl();
+    const usesCore = options.baseUrl === undefined && boundUrl === undefined && coreUrl !== undefined;
+    this.baseUrl = (options.baseUrl ?? boundUrl ?? (usesCore ? `${coreUrl!.replace(/\/$/, "")}/v1/model-broker` : modelBrokerUrl()))?.replace(/\/$/, "");
+    this.tokenFile = options.tokenFile ?? (usesCore ? process.env.PI_CORE_TOKEN_FILE : undefined);
+    this.requiresToken = usesCore;
     this.fetch = options.fetch ?? globalThis.fetch;
     this.timeoutMs = options.timeoutMs ?? 15_000;
   }

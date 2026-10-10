@@ -1,3 +1,4 @@
+import type { AccountReservation } from "./account-reservation.js";
 export type BudgetClass = "background" | "force" | "live";
 export type RunSource = "direct" | "lane";
 export type RunExecution = "user" | "root-repair";
@@ -15,10 +16,11 @@ export interface Account {
   readonly cooldownUntil?: number;
   readonly concurrency: number;
   readonly use?: "shared" | "voice";
+  readonly reservation?: AccountReservation;
 }
 
 export function allowsAccountUse(account: Account, kind: LeaseKind): boolean {
-  return account.enabled && (account.use !== "voice" || kind === "voice") ;
+  return account.enabled && (account.use !== "voice" || kind === "voice") && (!account.reservation || kind === "fleet");
 }
 
 export interface Run {
