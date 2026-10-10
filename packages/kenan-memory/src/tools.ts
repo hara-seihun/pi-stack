@@ -74,7 +74,7 @@ function registerMemoryTools(options: MemoryToolOptions, pi: ExtensionAPI) {
     const failure = (result: MemoryResult<unknown>) => ({ content: [{ type: "text" as const, text: JSON.stringify(result) }], details: { memoryResult: result }, isError: true });
     if (!root) {
       pi.registerTool(defineTool({ name: "ask_kenan", label: "Ask Kenan",
-        description: "Ask privileged Kenan about cross-person memory or resources with {request}. A pending receipt returns a requestId; the chosen reply or safe terminal status arrives automatically in this thread, so continue other work. Optional recovery with {requestId} alone retrieves that same request without a new model session or repeating actions. Only his chosen reply or public request status returns. Your authenticated session fixes who asks and the full room audience; you cannot set his prompt, model, tools or context. Never resubmit an uncertain request.",
+        description: "Ask privileged Kenan about cross-person memory or resources with {request}. A pending receipt returns a requestId; the chosen reply or safe terminal status arrives automatically in this thread, so continue other work. Optional recovery with {requestId} alone retrieves that same request without a new model session or repeating actions. Only his chosen reply or public request status returns. Your authenticated session fixes who asks and the full room audience; you cannot set his prompt, model, tools or context. Never resubmit an uncertain request; only an explicit not-accepted receipt with safeToResubmit:true permits a fresh submission.",
         parameters: Type.Object({ request: Type.Optional(Type.String({ minLength: 1, maxLength: 100_000 })), requestId: Type.Optional(Type.String({ pattern: KENAN_REQUEST_ID_PATTERN })) }),
         execute: async (id, input, signal): Promise<{ content: { type: "text"; text: string }[]; details: Record<string, unknown> | undefined; isError?: boolean }> => {
           if ((input.request === undefined) === (input.requestId === undefined) || input.requestId !== undefined && !new RegExp(KENAN_REQUEST_ID_PATTERN).test(input.requestId))
@@ -107,7 +107,13 @@ function registerMemoryTools(options: MemoryToolOptions, pi: ExtensionAPI) {
               return uncertain(`Kenan's privileged request is unavailable (HTTP ${response.status}); no action outcome is implied`);
             }
             const result = response.body as any;
-            if (result?.requestId === requestId && typeof result.status === "string" && Object.hasOwn(rootReceiptStates, result.status) && !("reply" in result)) {
+            if (result?.requestId === requestId && result.state === "not-accepted" && result.safeToResubmit === true && !("reply" in result) && !("status" in result)) {
+              const receipt = { requestId, state: "not-accepted" as const, safeToResubmit: true as const,
+                message: "Root did not accept this request, and its old ID is fenced against delayed execution. You may submit the original request again as a new request." };
+              report({ component: "root-client", stage: "request", outcome: "ok", status: response.status, durationMs: Math.round(performance.now() - started) });
+              return { content: [{ type: "text" as const, text: JSON.stringify(receipt) }], details: { rootRequest: receipt } };
+            }
+            if (result?.requestId === requestId && typeof result.status === "string" && Object.hasOwn(rootReceiptStates, result.status) && !("reply" in result) && !("state" in result) && !("safeToResubmit" in result)) {
               const receiptState = stateValue(rootReceiptStates, result.status as KenanRequestStatus);
               const queued = result.status === "pending" && result.reason === "global-agent-capacity";
               const receipt = { requestId, status: result.status, message: queued ? "Queued for the shared global 100-agent capacity; no new native session has started. The chosen reply will arrive automatically." : receiptState.message, ...(queued ? { reason: "global-agent-capacity" } : {}) };
@@ -115,7 +121,7 @@ function registerMemoryTools(options: MemoryToolOptions, pi: ExtensionAPI) {
               return { content: [{ type: "text" as const, text: JSON.stringify(receipt) }], details: { rootRequest: receipt }, isError: receiptState.isError };
             }
             const reply = result?.reply;
-            if (!result || typeof result !== "object" || Array.isArray(result) || "status" in result || typeof reply !== "string") {
+            if (!result || typeof result !== "object" || Array.isArray(result) || "status" in result || "state" in result || "safeToResubmit" in result || typeof reply !== "string") {
               report({ component: "root-client", stage: "request", outcome: "failed", reason: "invalid-response", status: response.status, durationMs: Math.round(performance.now() - started) });
               return uncertain("Kenan's privileged context returned an invalid response");
             }
