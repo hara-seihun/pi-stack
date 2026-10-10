@@ -110,7 +110,7 @@ def key_handle(generation):
     metadata = os.fstat(descriptor)
     mode = stat.S_IMODE(metadata.st_mode)
     protected = (metadata.st_uid == 0 and metadata.st_gid == 0 and mode in (0o400, 0o440)
-                 or metadata.st_uid == generation['uid'] and metadata.st_gid == generation['gid'] and mode == 0o400) if source is not None else metadata.st_uid == expected_uid and mode & 0o077 == 0
+                 or metadata.st_uid == generation['uid'] and mode == 0o400) if source is not None else metadata.st_uid == expected_uid and mode & 0o077 == 0
     if not stat.S_ISREG(metadata.st_mode) or not protected:
         os.close(descriptor)
         raise ValueError('existing protected credential custodian required')

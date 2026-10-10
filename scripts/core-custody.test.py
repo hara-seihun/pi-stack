@@ -4,6 +4,8 @@ from importlib.machinery import SourceFileLoader
 from pathlib import Path
 import sys
 import unittest
+import stat
+from types import SimpleNamespace
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'deploy'))
 keeper = SourceFileLoader('core_keeper', str(Path(__file__).resolve().parents[1] / 'deploy/core-custody')).load_module()
@@ -33,6 +35,17 @@ class ResourceAdditions(unittest.TestCase):
         for candidate in candidates:
             with self.assertRaises(ValueError):
                 keeper.additions(self.original, candidate)
+
+    def test_owner_only_systemd_credential_may_have_root_group(self):
+        namespace = {'kind': 'pinned', 'path': '/run/pi-stack/namespaces/source', 'mountNamespaceInode': '42'}
+        generation = {'user': 'second', 'uid': 1002, 'gid': 1005, 'sourceNamespace': namespace,
+                      'keySource': {'kind': 'systemd-credential', 'path': '/run/credentials/pi-remote@second.service/key', 'namespace': namespace}}
+        with patch.object(keeper, 'resource_handle', return_value=(17, 0, 0)), patch.object(keeper.os, 'fstat', return_value=SimpleNamespace(st_uid=1002, st_gid=0, st_mode=stat.S_IFREG | 0o400)):
+            self.assertEqual(keeper.key_handle(generation), 17)
+        for uid, mode in [(1003, 0o400), (1002, 0o440), (1002, 0o404)]:
+            with patch.object(keeper, 'resource_handle', return_value=(17, 0, 0)), patch.object(keeper.os, 'fstat', return_value=SimpleNamespace(st_uid=uid, st_gid=0, st_mode=stat.S_IFREG | mode)), patch.object(keeper.os, 'close'):
+                with self.assertRaises(ValueError):
+                    keeper.key_handle(generation)
 
     def test_remote_unit_identity_is_its_actual_user_not_root(self):
         class Result:
