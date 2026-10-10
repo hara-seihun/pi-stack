@@ -130,6 +130,7 @@ for (const mainState of ["base", "pushed", "moved", "same-boot", "unrecorded-boo
   if (mainState === "same-boot") request.workerBootId = currentBootId;
   if (mainState === "unrecorded-boot") delete request.workerBootId;
   writeFileSync(receipt, JSON.stringify(request));
+  writeFileSync(join(root, 'owner-code.json'), JSON.stringify({ version: 1, sourceSha: request.integrationSha }));
   writeFileSync(join(root, "main"), mainState === "pushed" ? request.integrationSha : mainState === "moved" ? "d".repeat(40) : request.baseSha);
   writeFileSync(join(root, "bin/git"), `#!/bin/sh
 printf '%s\\n' "$*" >> "$TRACE/git"

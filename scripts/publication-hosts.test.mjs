@@ -204,6 +204,7 @@ function fixture(t, waitingHost, mode) {
   const baseline = git("rev-parse", "HEAD");
   git("commit", "--allow-empty", "-qm", "requested integration");
   const revision = git("rev-parse", "HEAD");
+  writeFileSync(join(root, 'owner-code.json'), JSON.stringify({ version: 1, sourceSha: revision }));
   git("commit", "--allow-empty", "-qm", "newer ready host delivery");
   const newer = git("rev-parse", "HEAD");
   const origin = join(root, "origin.git");
