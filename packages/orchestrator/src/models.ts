@@ -2,6 +2,9 @@ import type { Api, Model, Provider } from "@earendil-works/pi-ai";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import customModelConfig from "./models.json" with { type: "json" };
 
+/** Provider families served only through the household's shared accounts (pool or model broker). */
+export const POOLED_PROVIDERS: ReadonlySet<string> = new Set(["openai-codex", "anthropic"]);
+
 export function isSupportedModel(model: { id: string }): boolean {
   return !/(^|[-_./:])terra($|[-_./:])/i.test(model.id);
 }

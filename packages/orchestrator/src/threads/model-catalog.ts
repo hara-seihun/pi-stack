@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { getAgentDir, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { getSupportedThinkingLevels, type Model, type Api } from "@earendil-works/pi-ai";
-import { isSupportedModel, nativeModels, nativeProviders } from "../models.js";
+import { isSupportedModel, nativeModels, nativeProviders, POOLED_PROVIDERS } from "../models.js";
 import { ORCHESTRATOR_CATALOG } from "../catalog.js";
 
 export type ThreadModelMetadata = Pick<Model<Api>, "id" | "provider" | "name" | "reasoning" | "thinkingLevelMap" | "input" | "contextWindow" | "maxTokens" | "cost"> & {
@@ -45,7 +45,7 @@ export async function loadThreadModelCatalog(agentDir = getAgentDir()): Promise<
   const configuredModels = Object.entries(config.providers ?? {}).flatMap(([provider, config]) =>
     (config.models ?? []).flatMap((entry) => {
       const model = runtime.getModel(provider, entry.id);
-      if (!model || !isSupportedModel(model) || !available.has(`${provider}/${entry.id}`)) return [];
+      if (!model || !isSupportedModel(model) || !(POOLED_PROVIDERS.has(provider) || available.has(`${provider}/${entry.id}`))) return [];
       const icon = configuredModelIcon(provider, entry);
       if (!icon) throw new Error(`Cannot load thread models: ${provider}/${entry.id} in ${modelsPath} has no icon. Every model needs one; give the entry an "icon" (an emoji such as "🌳", or a client asset name) before it can be offered.`);
       return [{ ...threadModelMetadata(model), icon }];

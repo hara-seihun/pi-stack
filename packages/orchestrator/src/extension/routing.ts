@@ -15,7 +15,7 @@ import { chooseInteractiveAccount, interactiveQuotaExhausted, interactiveRetryAv
 import { installImageGeneration } from "./image-generation.js";
 import { installProviderOperations } from "./provider-operation.js";
 import { interruptedTurnPrompt } from "../host/continuations.js";
-import { withCustomModels } from "../models.js";
+import { POOLED_PROVIDERS, withCustomModels } from "../models.js";
 import { BROKER_ROUTES, modelBrokerUrl } from "../model-broker-contract.js";
 import { installBrokerRouting } from "./broker-routing.js";
 import { codexTierExclusions, requireCodexTier } from "../auth/codex-capabilities.js";
@@ -26,14 +26,13 @@ import { accountModelExcluded, accountModelUnsupported, noEntitledAccountError, 
 type ThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
 
 /** Families whose credentials live in shared custody rather than with a person. */
-const POOLED_FAMILIES=new Set(["openai-codex","anthropic"]);
 export const EXPLICIT_THREAD_MODEL_ENV="PI_THREAD_EXPLICIT_MODEL";
 export const POOLED_ACCOUNT_WAIT = "Pooled account round finished; awaiting account recovery";
 
 export function pooledRetryAvailability(model:string,env:NodeJS.ProcessEnv=process.env):{available:boolean;retryAt:number}{
   const slash=model.indexOf("/"),family=baseProvider(model.slice(0,slash)),modelId=model.slice(slash+1);
   const provider=builtinProviders().find(provider=>provider.id===family&&provider.auth.oauth);
-  if(!provider||!POOLED_FAMILIES.has(family))return {available:true,retryAt:Date.now()};
+  if(!provider||!POOLED_PROVIDERS.has(family))return {available:true,retryAt:Date.now()};
   const store=Store.open(defaultLedgerPath(env));
   try{
     const auth=providerOAuth(provider,env.PI_ORCHESTRATOR_AUTH??defaultSharedAuthPath(defaultLedgerPath(env)));
@@ -99,7 +98,7 @@ export default function routing(pi:ExtensionAPI):void{
   // Pooled families answer only through their numbered aliases. Registering the
   // family id with pool-only auth keeps the model catalog intact while removing
   // the ambient API-key and per-person credential routes upstream provides.
-  for(const family of families.values())if(family.auth.oauth&&POOLED_FAMILIES.has(family.id))pi.registerProvider(pooledOnlyProvider(family));
+  for(const family of families.values())if(family.auth.oauth&&POOLED_PROVIDERS.has(family.id))pi.registerProvider(pooledOnlyProvider(family));
   const shared=new Map<string,SharedOAuthAuth>();
   const requestTokens=new Map<string,string>();
   pi.on("session_shutdown",()=>requestTokens.clear());
@@ -218,7 +217,7 @@ export default function routing(pi:ExtensionAPI):void{
   };
   const bindCurrent=async(ctx:ExtensionContext)=>{
     requireSpeed(ctx);
-    if(!ctx.model||!POOLED_FAMILIES.has(familyOf(ctx.model.provider)))return;
+    if(!ctx.model||!POOLED_PROVIDERS.has(familyOf(ctx.model.provider)))return;
     const explicit=ctx.model?.provider&&/-\d+$/.test(ctx.model.provider)?store.account(ctx.model.provider):undefined;
     const retain=explicit&&allowsAccountUse(explicit,"interactive")
       &&(!explicit.cooldownUntil||explicit.cooldownUntil<=Date.now())&&shared.get(explicit.provider)?.has(explicit.id)
@@ -250,7 +249,7 @@ export default function routing(pi:ExtensionAPI):void{
           thinking=pi.getThinkingLevel();
         }
         if(!(saved&&account&&allowsAccountUse(account,"interactive")&&!accountModelExcluded(store,account.id,selected.modelId)&&await select(ctx,saved,thinking))){
-          if(!POOLED_FAMILIES.has(family))await bindCurrent(ctx);
+          if(!POOLED_PROVIDERS.has(family))await bindCurrent(ctx);
           else if(!await bind(ctx,undefined,{family,modelId:selected.modelId,thinking}))throw new Error(`Saved model ${family}/${selected.modelId} has no eligible pooled account`);
         }
       }
