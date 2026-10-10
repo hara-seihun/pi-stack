@@ -10,7 +10,7 @@ const db = new Database(join(meetData(), "supervisor.sqlite3"), { create: true, 
 db.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
 const connected = await MeetGateway.connect(db, {
   sessionExists: id => id === "thread",
-  threadActivity: () => [{ id: "thread", name: input.mode, state: "idle", held: false, activity: "idle", tools: [], output: "", events: [] }],
+  threadActivity: () => [{ id: "thread", name: input.mode, lifecycle: { kind: "idle" }, state: "idle", held: false, activity: "idle", tools: [], output: "", events: [] }],
 });
 if (!connected.ok) { console.error(connected.error); process.exit(1); }
 const gateway = connected.value;
