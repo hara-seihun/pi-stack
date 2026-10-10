@@ -13,7 +13,7 @@ import { indexedThreadHistory } from "../src/threads/history.mjs";
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
 
-async function fixture(native?: { watermarked: boolean }, unavailable = false) {
+async function fixture(native?: { watermarked: boolean; baselineTag?: boolean; noSuffix?: boolean }, unavailable = false) {
   const root = mkdtempSync(join(tmpdir(), "core-image-adoption-"));
   const databasePath = join(root, "supervisor.sqlite3"), artifactRoot = join(root, "images"), adoptionReceiptPath = join(root, "adopt.json");
   mkdirSync(artifactRoot);
@@ -37,12 +37,12 @@ async function fixture(native?: { watermarked: boolean }, unavailable = false) {
   const nativeText = `<pi-remote-image id="after-watermark" path="${source}" />`;
   if (native) {
     writeFileSync(nativePath, JSON.stringify({ type: "session", version: 3, id: "session", timestamp: new Date().toISOString(), cwd: root }) + "\n"
-      + JSON.stringify({ type: "message", id: "first", parentId: null, message: { role: "assistant", content: [{ type: "text", text: "Before custody transfer" }], timestamp: Date.now() } }) + "\n");
+      + JSON.stringify({ type: "message", id: "first", parentId: null, message: { role: "assistant", content: [{ type: "text", text: native.baselineTag ? `<pi-remote-image id="before-watermark" path="${source}" />` : "Before custody transfer" }], timestamp: Date.now() } }) + "\n");
     const history = indexedThreadHistory(nativePath);
     if (!history.ok) throw new Error(history.error.message);
     const last = history.value.entries.at(-1)!;
     watermark = { threadId: "thread", path: nativePath, revision: history.value.source.revision, lastOffset: last.offset, lastDigest: last.digest };
-    appendFileSync(nativePath, JSON.stringify({ type: "message", id: "after", parentId: "first", message: { role: "assistant", content: [{ type: "text", text: nativeText }], timestamp: Date.now() } }) + "\n");
+    if (!native.noSuffix) appendFileSync(nativePath, JSON.stringify({ type: "message", id: "after", parentId: "first", message: { role: "assistant", content: [{ type: "text", text: nativeText }], timestamp: Date.now() } }) + "\n");
   }
   writeFileSync(adoptionReceiptPath, JSON.stringify({ version: 1, state: "detached", scopeId: "person:images", databasePath,
     tableNames: ["inline_images", "inline_image_versions", "inline_image_messages", "core_image_acceptance", "core_image_sources", "core_image_ingress_errors", "core_image_threads"],
@@ -120,6 +120,18 @@ test("post-watermark native images recover with Remote offline and live messages
   expect((await f.request("accept", { threadId: "thread", messageKey: "remote-replay", text: f.nativeText }))!.status).toBe(200);
   const images = (await (await f.request("sync", { have: {} }))!.json()).value.snapshots.thread.images;
   expect(images.filter((image: any) => image.id === "after-watermark")).toHaveLength(1);
+});
+
+test("live-owner watermark never silently blesses unacknowledged pre-baseline tags", async () => {
+  for (const noSuffix of [true, false]) {
+    const f = await fixture({ watermarked: true, baselineTag: true, noSuffix });
+    expect((await f.service.start()).ok).toBe(true);
+    f.allow();
+    const result = await (await f.request("sync", { have: {} }))!.json();
+    expect(result.value.snapshots.thread.images.map((image: any) => image.id)).not.toContain("before-watermark");
+    expect(result.value.errors[0]).toContain("historical image messages");
+    if (!noSuffix) expect(result.value.snapshots.thread.images.map((image: any) => image.id)).toContain("after-watermark");
+  }
 });
 
 test("a historical gap without a trustworthy watermark is explicit and never generates old tags", async () => {

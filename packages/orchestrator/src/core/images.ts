@@ -207,18 +207,17 @@ export class CoreImages {
   private recoverNative(registry: Registry, thread: Thread): CoreResult<void> {
     const previous = registry.db.query("SELECT source_path,revision,last_offset,last_digest FROM core_image_sources WHERE thread_id=?").get(thread.id) as { source_path: string; revision: string; last_offset: number; last_digest: string } | null;
     const recovered = withIndexedThreadHistory(registry.scope.runtime.path(thread.sessionFile), undefined, undefined, history => {
-      if (previous?.source_path === thread.sessionFile && previous.revision === history.source.revision) return { ok: true as const, value: undefined };
       const boundary = previous && previous.source_path === thread.sessionFile ? history.entries.find(entry => entry.offset === previous.last_offset && entry.digest === previous.last_digest) : undefined;
       const trusted = Boolean(previous && previous.source_path === thread.sessionFile && (boundary || previous.last_offset === -1 && previous.last_digest === ""));
       const after = boundary ? boundary.offset : -1;
       let uncertain = 0;
       for (const descriptor of history.messages) {
-        if (descriptor.role !== "assistant" || descriptor.offset <= after) continue;
+        if (descriptor.role !== "assistant") continue;
         const read = history.read(descriptor);
         if (!read.ok) return { ok: false as const, error: { code: "unavailable" as const, message: read.error.message } };
         const text = assistantText(read.value.message?.content);
         if (!text.includes("<pi-remote-image")) continue;
-        if (!trusted) {
+        if (!trusted || descriptor.offset <= after) {
           const hash = messageHash(text);
           const receipt = registry.db.query("SELECT 1 FROM inline_image_messages WHERE session_id=? AND message_key=?").get(thread.id, hash);
           if (!receipt) uncertain++;
