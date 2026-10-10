@@ -97,6 +97,16 @@ test("confirmed failure and cancellation are distinct, and failure preserves the
   expect(renderToStaticMarkup(createElement(StatusPill, { status: failure }))).toContain('class="status-error-detail">Runner could not cancel</span>');
 });
 
+test("human attention requires an explicit owner grant without erasing lifecycle evidence", () => {
+  for (const humanAttention of [true, false, undefined]) {
+    const unread = threadStatus(observation({ kind: "idle" }, { idleUnread: true, humanAttention }));
+    const failed = threadStatus(observation({ kind: "failed", reason: "Runner exited", control: "none" }, { humanAttention }));
+    expect(unread).toMatchObject({ key: "idle", busy: false, attention: humanAttention === true });
+    expect(failed).toMatchObject({ key: "error", busy: false, title: "Runner exited", attention: humanAttention === true });
+    expect(attentionRank(unread)).toBe(humanAttention === true ? 2 : 21);
+  }
+});
+
 test("lack of updates is visible in dense rows, not hidden in a desktop tooltip", () => {
   const status = threadStatus(observation({ kind: "working", phase: "waiting_on_tool", since: Date.now() - 70000 }, { lastActivityAt: Date.now() - 60000 }));
   const markup = renderToStaticMarkup(createElement(StatusQuiet, { status }));
