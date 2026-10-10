@@ -2354,7 +2354,7 @@ export class ThreadService implements ThreadApi {
     const thread = this.get(id)!;
     if (thread.metadata?.cancellationSettled) return;
     const executionId = `cancel:${id}:${thread.revision}`;
-    const assignments = this.sql(`SELECT w.id,w.sender_id FROM thread_work w WHERE w.thread_id=? AND w.sender_id IS NOT NULL AND w.sender_id!=? AND w.source='explicit'
+    const assignments = thread.metadata?.manager === true ? [] : this.sql(`SELECT w.id,w.sender_id FROM thread_work w WHERE w.thread_id=? AND w.sender_id IS NOT NULL AND w.sender_id!=? AND w.source='explicit'
       AND NOT EXISTS(SELECT 1 FROM thread_assignment_reply r WHERE r.work_id=w.id)`).all(id, id) as Array<{ id: string; sender_id: string }>;
     const recipients = [...new Set([...assignments.map(work => work.sender_id), ...((thread.metadata?.peerDependents as string[] | undefined) ?? [])])];
     const now = Date.now();
@@ -3170,7 +3170,7 @@ export class ThreadService implements ThreadApi {
       outcome = "failed";
       error = "Native turn ended without a final result or a durable dependency wait";
     }
-    const assignments = assignmentPending ? [] : this.sql(`SELECT w.id,w.sender_id FROM thread_work w WHERE w.thread_id=? AND w.sender_id IS NOT NULL AND w.sender_id!=? AND w.source='explicit'
+    const assignments = assignmentPending || thread.metadata?.manager === true ? [] : this.sql(`SELECT w.id,w.sender_id FROM thread_work w WHERE w.thread_id=? AND w.sender_id IS NOT NULL AND w.sender_id!=? AND w.source='explicit'
       AND (w.status='done' OR w.execution_id=? OR ?) AND NOT EXISTS(SELECT 1 FROM thread_assignment_reply r WHERE r.work_id=w.id)`).all(id, id, execution.id, outcome === "cancelled" ? 1 : 0) as Array<{ id: string; sender_id: string }>;
     const recipients = assignmentPending ? [] : [...new Set([...assignments.map(work => work.sender_id), ...((thread.metadata?.peerDependents as string[] | undefined) ?? [])])];
     this.capacityLedger?.retain(id, execution.id, execution.work_id, "work");
