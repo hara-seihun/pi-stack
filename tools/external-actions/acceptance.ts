@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 const args = process.argv.slice(2);
 const option = (name: string) => { const index = args.indexOf(name); return index < 0 ? undefined : args[index + 1]; };
 const source = option("--source-root");
+const syntheticOnly = args.includes("--synthetic-only");
 const installed = option("--root") ?? "/srv/pi";
 const modulePath = source ? resolve(source, "packages/kenan-memory/src/actions.ts") : resolve(installed, "runtime/node_modules/kenan-memory/src/actions.ts");
 const remote = source ? resolve(source, "apps/remote/server") : resolve(installed, "pi-remote/server");
@@ -48,6 +49,20 @@ try {
   proofs.push("crash-after-effect-before-receipt-and-evidence-reconciliation");
   const bob = make("canonical", "synthetic-bob"); assert.equal(bob.inspect(first.id).error, "not-found"); get(bob.submit(intent()));
   proofs.push("synthetic-owner-isolation");
+  const owned = make("worker-purpose");
+  const worker = { kind: "thread", threadId: "synthetic-worker", managing: false };
+  const request = (operation: string, input: unknown) => new Request("http://127.0.0.1/v1/external-actions", { method: "POST", body: JSON.stringify({ operation, input }) });
+  const ownSubmission = await (await externalActionsEndpoint(request("submit", intent({ threadId: "forged" })), owned, worker)).json();
+  const ownAction = get(ownSubmission).action;
+  assert.equal(ownAction.submittingThreadId, worker.threadId);
+  const ownTicket = get(owned.claim(ownAction.id, worker.threadId)); get(owned.dispatch(ownTicket));
+  const ownDelivered = get(owned.finish(ownTicket, "succeeded", null, accepted));
+  const resolution = { id: ownAction.id, expectedRevision: ownDelivered.revision, decision: "resolve-purpose", evidence: observation, actor: "forged" };
+  assert.equal((await externalActionsEndpoint(request("reconcile", resolution), owned, { ...worker, threadId: "other-worker" })).status, 403);
+  assert.equal((await externalActionsEndpoint(request("reconcile", resolution), owned, worker)).status, 200);
+  assert.equal(get(owned.inspect(ownAction.id)).resolved, true);
+  assert.equal(get(owned.submit(intent({ intentKey: "next-conversation-step" }))).disposition, "created");
+  proofs.push("authenticated-worker-resolves-own-delivered-purpose-not-another-workers");
   const held = make("held"); get(held.holdRecipient("+12025550123", "Synthetic hold", "operator"));
   const blocked = get(held.submit(intent())).action; assert.equal(blocked.state, "held"); assert.equal(held.claim(blocked.id, "worker").error, "fenced");
   proofs.push("held-recipient");
@@ -74,14 +89,14 @@ try {
   const commit = source ? Bun.spawnSync(["git", "-C", source, "rev-parse", "HEAD"]).stdout.toString().trim() : readFileSync(join(installed, "pi-remote/.pi-stack-commit"), "utf8").trim();
   const runtimeCommit = source ? commit : readFileSync(join(installed, "runtime/.pi-stack-commit"), "utf8").trim();
   assert.equal(runtimeCommit, commit, "Remote and runtime must select the same installed action implementation");
-  if (!source) {
+  if (!source && !syntheticOnly) {
     const { ActionClient } = await import(pathToFileURL(clientPath).href);
     const actual = new ActionClient(process.env.PI_REMOTE_SERVER_URL ?? `http://127.0.0.1:${process.env.PI_REMOTE_ROUTER_PORT ?? "8788"}`, undefined, process.env.PI_REMOTE_SERVER_URL ? process.env.PI_THREAD_TOKEN : undefined);
     const noRecord = actual.inspect(`synthetic-not-found:${crypto.randomUUID()}`);
     assert.equal(noRecord.ok, false); assert.equal(noRecord.error, "not-found", JSON.stringify(noRecord));
     proofs.push("real-owner-router-canonical-readonly-probe-no-state-mutation");
   }
-  const receipt = { ok: true, scope: source ? "source-synthetic" : "installed-synthetic-and-readonly-route", commit, runtimeCommit, modulePath, sourceHash: createHash("sha256").update(readFileSync(modulePath)).digest("hex"), realRecipientsContacted: 0, tests: proofs, at: new Date().toISOString() };
+  const receipt = { ok: true, scope: source ? "source-synthetic" : syntheticOnly ? "installed-synthetic" : "installed-synthetic-and-readonly-route", commit, runtimeCommit, modulePath, sourceHash: createHash("sha256").update(readFileSync(modulePath)).digest("hex"), realRecipientsContacted: 0, tests: proofs, at: new Date().toISOString() };
   const output = option("--output"); if (output) writeFileSync(output, JSON.stringify(receipt, null, 2) + "\n", { mode: 0o600 });
   console.log(JSON.stringify(receipt));
 } finally {

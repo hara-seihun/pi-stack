@@ -11,8 +11,10 @@ printf '%s' '{"id":"ACTION_ID"}' | pi-actions inspect
 
 ```sh
 bun /srv/pi/tools/external-actions/acceptance.ts --root /srv/pi --output /absolute/private/proof.json
+# Installed code only, for hosts without a granted canonical-owner route:
+bun /srv/pi/tools/external-actions/acceptance.ts --root /srv/pi --synthetic-only --output /absolute/private/installed-proof.json
 # Source-only fixture, no live supervisor request:
 bun tools/external-actions/acceptance.ts --source-root "$PWD" --output /absolute/private/source-proof.json
 ```
 
-Proof scope is explicit: the synthetic provider counter proves at-most-once dispatch and uncertainty fencing, not external provider delivery. The real route query proves owner-bound serving without reading private action records. Publication's independent host proof owns release/Android/client readiness. No temporary fixture database is retained.
+Proof scope is explicit: `--synthetic-only` reports `installed-synthetic`, not live route readiness; it never masks a failed route probe. The synthetic provider counter proves at-most-once dispatch, uncertainty fencing and authenticated worker purpose resolution, not external provider delivery. The real route query proves owner-bound serving without reading private action records. Publication's independent host proof owns release/Android/client readiness. No temporary fixture database is retained.
