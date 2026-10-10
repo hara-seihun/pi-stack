@@ -13,19 +13,16 @@ function fixture(t) {
   mkdirSync(join(dir, 'bin'));
   const put = (name, content) => writeFileSync(join(repo, 'deploy', name), `#!/usr/bin/env bash\nset -euo pipefail\n${content}\n`, { mode: 0o755 });
   copyFileSync(new URL('../deploy/host', import.meta.url), join(repo, 'deploy/host'));
-  for (const name of ['prepared-components.mjs', 'host-plan.mjs', 'source-scopes.mjs', 'remote-rollback-compatible.mjs']) copyFileSync(new URL(`../deploy/${name}`, import.meta.url), join(repo, 'deploy', name));
-  put('lib', `pi_stack_enter_deployment() { :; }
+  for (const name of ['prepared-components.mjs', 'host-plan.mjs', 'source-scopes.mjs', 'remote-rollback-compatible.mjs', 'release-checkout']) copyFileSync(new URL(`../deploy/${name}`, import.meta.url), join(repo, 'deploy', name));
+  copyFileSync(new URL('../deploy/lib', import.meta.url), join(repo, 'deploy/release-selection-lib'));
+  put('lib', `source "$(dirname "\${BASH_SOURCE[0]}")/release-selection-lib"
+pi_stack_enter_deployment() { :; }
 pi_stack_check_person_configs() { :; }
 pi_stack_fleet_user() { echo fixture; }
 pi_stack_users() { echo fixture; }
 pi_stack_persons_dir() { printf '%s\\n' "$PI_REMOTE_PERSONS_DIR"; }
 pi_stack_daemon_units() { :; }
 pi_stack_component_releases_root() { printf '%s\\n' "$PI_STACK_RELEASES_ROOT"; }
-pi_stack_select_release() {
-  [[ $(cat "$1/.pi-stack-commit") == "$3" ]] || return 66
-  ln -s "$1" "$2.next"
-  mv -Tf "$2.next" "$2"
-}
 pi_stack_as_root() { "$@"; }
 pi_stack_run_as() { shift; "$@"; }`);
   put('prepare', `commit=$(git -C "$(dirname "$0")/.." rev-parse HEAD)
@@ -231,6 +228,21 @@ test('outer host success closes durable speech transition only after all release
     assert.equal(proof.proof.units[0].state, 'active');
     assert.equal(proof.proof.units[0].invocationId, 'a'.repeat(32));
   }
+});
+
+test('first populated Remote transition retains an immutable rollback target rather than self-linking', t => {
+  const f = fixture(t);
+  rmSync(f.env.PI_STACK_REMOTE_DEST);
+  mkdirSync(f.env.PI_STACK_REMOTE_DEST);
+  for (const name of ['.pi-stack-commit', 'data-contract.json']) copyFileSync(join(f.env.OLD_REMOTE, name), join(f.env.PI_STACK_REMOTE_DEST, name));
+  const previous = readFileSync(join(f.env.OLD_REMOTE, '.pi-stack-commit'), 'utf8').trim();
+  const result = f.run({ SMOKE_EXIT: '1' });
+  assert.equal(result.status, 1, result.stderr);
+  const retained = join(f.env.PI_STACK_RELEASES_ROOT, 'remote', previous);
+  assert.equal(realpathSync(f.env.PI_STACK_REMOTE_DEST), retained);
+  assert.notEqual(retained, f.env.PI_STACK_REMOTE_DEST);
+  assert.equal(readFileSync(join(retained, '.pi-stack-commit'), 'utf8').trim(), previous);
+  assert.equal(realpathSync(f.env.PI_STACK_MEET_RECOGNITION_DEST), f.env.OLD_RECOGNITION);
 });
 
 test('unknown owner activation state refuses host acceptance and retains recognition rollback', t => {

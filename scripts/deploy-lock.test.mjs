@@ -327,7 +327,9 @@ case $name in
   runtime)
     mkdir -p "$release/node_modules/.bin"
     cp "$root/packages/runtime/model-doctor.mjs" "$release/node_modules/.bin/pi-model-selection-doctor";;
-  orchestrator) cp "$root/packages/runtime/agent-capacity.mjs" "$release/dist/agent-capacity.js";;
+  orchestrator)
+    cp "$root/packages/runtime/agent-capacity.mjs" "$release/dist/agent-capacity.js"
+    cp "$root/packages/runtime/daemon-config.mjs" "$release/dist/config.js";;
   remote)
     mkdir -p "$release/server/voice" "$release/server/phone"
     touch "$release/server/voice/service.ts" "$release/server/phone/service.ts"
@@ -373,6 +375,12 @@ export async function configuredAgentCapacityStatus() {
     initialized: process.env.CAPACITY_UNINITIALIZED !== '1', active: 0, queued: 0 } };
 }
 `);
+    writeFileSync(join(repository, 'packages/runtime/daemon-config.mjs'), `
+export function orchestratorUrl(env) {
+  if (!env.PI_STACK_HOST_FILE || !env.PI_REMOTE_PERSONS_DIR) throw new Error('Daemon proof must use its actual process environment');
+  return 'http://127.0.0.1:2460';
+}
+`);
     assert.equal(spawnSync("git",["init","-q",repository]).status,0);assert.equal(spawnSync("git",["-C",repository,"add","deploy","apps","packages"]).status,0);assert.equal(spawnSync("git",["-C",repository,"-c","user.name=test","-c","user.email=test@example.test","commit","-qm","fixture"]).status,0);
     const user=process.env.USER??spawnSync("id",["-un"],{encoding:"utf8"}).stdout.trim();
     const hostFile=join(directory,"host.json");writeFileSync(hostFile,JSON.stringify({version:1,fleetUser:user}));
@@ -410,8 +418,18 @@ case $1 in
     printf '%s\\n' 'pi-model-broker.service loaded active running' 'pi-stack-model-broker@alice.service loaded active running' 'pi-remote@alice.service loaded active running' 'pi-orchestrator@alice.service loaded active running' 'pi-orchestrator@running-person.service loaded active running';;
   show)
     [ "\${DISCOVERY_EXIT:-0}" = 0 ] || exit "$DISCOVERY_EXIT"
+    if [ "$3" = -p ] && [ "$4" = ActiveState ] && [ "$5" = -p ]; then
+      state=active
+      case $2 in pi-orchestrator@*) if [ "\${DAEMON_ACTIVE_STATE:-active}" = inactive ] && [ ! -f "$DAEMON_STARTED" ]; then state=inactive; fi;; esac
+      printf 'ActiveState=%s\\nLoadState=loaded\\nInvocationID=%s\\n' "$state" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      exit 0
+    fi
+    if [ "$4" = MainPID ]; then awk '/^PPid:/{print $2}' "/proc/$PPID/status"; exit 0; fi
     case $2 in pi-stack-phone.service|pi-stack-voice.service) echo loaded; exit 0;; esac
-    if [ "$4" = ActiveState ]; then echo "\${DAEMON_ACTIVE_STATE:-active}"; exit 0; fi
+    if [ "$4" = ActiveState ]; then
+      if [ "\${DAEMON_ACTIVE_STATE:-active}" = inactive ] && [ ! -f "$DAEMON_STARTED" ]; then echo inactive; else echo active; fi
+      exit 0
+    fi
     case $4 in
       pi-orchestrator@alice.service) echo "\${ALICE_UNIT_STATE:-enabled}";;
       pi-orchestrator@guest-person.service) echo "\${GUEST_UNIT_STATE:-${enableGuest ? "enabled-runtime" : "disabled"}}";;
@@ -432,7 +450,8 @@ case $1 in
         exit 91
       fi
       exit "\${DAEMON_RESTART_EXIT:-0}";; esac;;
-  is-active|reset-failed|stop|start) exit 0;;
+  start) touch "$DAEMON_STARTED"; exit 0;;
+  is-active|reset-failed|stop) exit 0;;
   *) exit 64;;
 esac
 exit 0
@@ -451,6 +470,10 @@ for arg; do
     http://127.0.0.1:8788/v1/router-health)
       printf '{"people":[{"user":"alice","unlocked":true},{"user":"guest-person","unlocked":false}]}\\n'
       exit 0;;
+    http://127.0.0.1:2460/v1/health)
+      printf '%s\\n' "$arg" >> "$DAEMON_HEALTH_TRACE"
+      printf '{"releaseCommit":"%s"}\\n' "$(cat "$PI_STACK_ORCHESTRATOR_DEST/.pi-stack-commit")"
+      exit 0;;
     http://127.0.0.1:18798/v1/health)
       printf '%s\\n' "$arg" >> "$HEALTH_TRACE"
       printf '{"releaseCommit":"%s"}\\n' "$(cat "$SUPERVISOR_COMMIT" 2>/dev/null)"
@@ -467,6 +490,8 @@ exit 64
     const preparedReceipt = () => join(directory, ".pi-stack-releases/.prepared", `${spawnSync("git", ["-C", repository, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim()}.json`);
     const resetPreparation = () => rmSync(preparedReceipt());
     env.DAEMON_ACTIVATED = join(directory, "daemon.activated");
+    env.DAEMON_STARTED = join(directory, 'daemon.started');
+    env.DAEMON_HEALTH_TRACE = join(directory, 'daemon-health.trace');
     env.PERSON_READ_TRACE = personReadTrace;
     env.PI_STACK_ALLOW_LIVE_MEETING_RESTART = "0";
     env.MEETING_ROOMS = '{"rooms":[]}';
@@ -529,7 +554,15 @@ exit 64
     assert.equal(readFileSync(env.PHONE_TRACE,"utf8"),"--check\n--activate\n");
     assert.equal(readFileSync(activationTrace,"utf8"),"pi-remote@alice.service\n");
     assert.deepEqual(readFileSync(settingsTrace,"utf8").trim().split("\n").sort(),[user,"alice","guest-person"].sort(),"settings reconcile every account, concurrently");
-    assert.equal(readFileSync(env.HEALTH_TRACE, "utf8"), "http://127.0.0.1:18798/v1/health\n".repeat(2));
+    assert.equal(readFileSync(env.HEALTH_TRACE, "utf8"), "http://127.0.0.1:18798/v1/health\n".repeat(3));
+    assert.equal(readFileSync(env.DAEMON_HEALTH_TRACE, 'utf8'), 'http://127.0.0.1:2460/v1/health\n'.repeat(expectedDaemons.length));
+    const acceptedPlan = JSON.parse(readFileSync(join(directory, '.pi-stack-release-plan.json'), 'utf8'));
+    assert.equal(acceptedPlan.state, 'accepted');
+    assert.deepEqual(acceptedPlan.owners.daemons.acceptance.proof.units.map(item => item.unit).sort(), expectedDaemons);
+    for (const owner of ['remote', 'router', 'voice', 'phone', 'daemons', 'brokers']) {
+      assert.equal(acceptedPlan.owners[owner].acceptance.sourceKey, acceptedPlan.owners[owner].candidateKey);
+      for (const unit of acceptedPlan.owners[owner].acceptance.proof.units) assert.equal(unit.invocationId, 'a'.repeat(32));
+    }
     rmSync(systemctlTrace,{force:true});
     const uninitialized = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...env, CAPACITY_UNINITIALIZED: "1" }, cwd: directory });
     assert.equal(uninitialized.status, 75, uninitialized.stderr);
@@ -577,7 +610,7 @@ exit 64
     const acceptedRepeat = spawnSync(join(deploy, 'host'), [hostFile], { encoding: 'utf8', env });
     assert.equal(acceptedRepeat.status, 0, acceptedRepeat.stderr);
     assert.deepEqual(restartedDaemons(readFileSync(systemctlTrace, 'utf8')), [], 'accepted unchanged source does not restart daemons');
-    assert.match(again, /restart pi-remote-router/, 'unfinished recovery plan still reconciles its router');
+    assert.doesNotMatch(again, /restart pi-remote-router/, 'accepted router is not replayed while failed daemons recover');
     assert.doesNotMatch(readFileSync(systemctlTrace, 'utf8'), /restart pi-remote-router/, 'accepted unchanged source leaves the router running');
     rmSync(systemctlTrace, { force: true });
     const inactiveRepeat = spawnSync(join(deploy, 'host'), [hostFile], { encoding: 'utf8', env: { ...env, DAEMON_ACTIVE_STATE: 'inactive' } });
@@ -626,6 +659,7 @@ exit 64
     const before=readlinkSync(destinations.PI_STACK_REMOTE_DEST);
     writeFileSync(join(repository,"packages/runtime/release-fixture.mjs"),"broken\n");assert.equal(spawnSync("git",["-C",repository,"add","packages/runtime/release-fixture.mjs"]).status,0);assert.equal(spawnSync("git",["-C",repository,"-c","user.name=test","-c","user.email=test@example.test","commit","-qm","broken"]).status,0);
     for (const failure of [{ SMOKE_EXIT: "1" }, { DAEMON_RESTART_EXIT: "1" }, { BROWSER_SMOKE_EXIT: "1" }, { MODEL_SMOKE_EXIT: "1" }]) {
+      rmSync(join(directory, '.pi-stack-release-plan.json'), { force: true });
       rmSync(join(directory, '.pi-stack-doctors'), { recursive: true, force: true });
       rmSync(activationTrace,{force:true});rmSync(env.VOICE_TRACE,{force:true});rmSync(env.PHONE_TRACE,{force:true});
       const broken=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:{...env,...failure}});assert.notEqual(broken.status,0);
@@ -639,6 +673,7 @@ exit 64
     rmSync(join(before, "server/phone/service.ts"));
     rmSync(systemctlTrace);
     rmSync(env.PHONE_TRACE);
+    rmSync(join(directory, '.pi-stack-release-plan.json'), { force: true });
     const prePhoneRollback = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...env, SMOKE_EXIT: "1" } });
     assert.equal(prePhoneRollback.status, 1, prePhoneRollback.stderr);
     assert.equal(readlinkSync(destinations.PI_STACK_REMOTE_DEST), before);
@@ -649,6 +684,7 @@ exit 64
     // not reactivate an older supervisor against migrated data.
     const contractPath = join(before, "data-contract.json");
     for (const previousContract of [null, { version: 1, schema: "incompatible-fixture-schema" }]) {
+      rmSync(join(directory, '.pi-stack-release-plan.json'), { force: true });
       if (previousContract === null) rmSync(contractPath);
       else writeFileSync(contractPath, JSON.stringify(previousContract));
       rmSync(destinations.PI_STACK_REMOTE_DEST);

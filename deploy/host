@@ -194,8 +194,35 @@ if [[ -z ${PI_STACK_HOST_PHASE:-} ]]; then
     "$root/deploy/native-history-boundary" "$PI_STACK_HOST_FILE" "$root" "$candidate"
   fi
   remote=${PI_STACK_REMOTE_DEST:-/srv/pi/pi-remote}
-  export PI_STACK_PREVIOUS_REMOTE=$(cat "$remote/.pi-stack-commit" 2>/dev/null || true)
-  export PI_STACK_PREVIOUS_REMOTE_RELEASE=$(readlink -f "$remote" || true)
+  export PI_STACK_PREVIOUS_REMOTE=''
+  export PI_STACK_PREVIOUS_REMOTE_RELEASE=''
+  if [[ -e $remote || -L $remote ]]; then
+    PI_STACK_PREVIOUS_REMOTE=$(cat "$remote/.pi-stack-commit") || { echo 'Serving Remote has no readable source marker' >&2; exit 66; }
+    [[ $PI_STACK_PREVIOUS_REMOTE =~ ^[a-f0-9]{40}$ ]] || { echo 'Serving Remote has an invalid source marker' >&2; exit 66; }
+    if [[ -L $remote ]]; then
+      PI_STACK_PREVIOUS_REMOTE_RELEASE=$(readlink -e "$remote") || { echo 'Serving Remote selection is dangling or recursive' >&2; exit 66; }
+    else
+      # Preserve the first populated-directory transition before selection replaces it.
+      PI_STACK_PREVIOUS_REMOTE_RELEASE="$PI_STACK_RELEASES_ROOT/remote/$PI_STACK_PREVIOUS_REMOTE"
+      pi_stack_as_root node --input-type=module - "$root" "$remote" "$PI_STACK_PREVIOUS_REMOTE_RELEASE" <<'JS'
+import { existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
+const [root, current, retained] = process.argv.slice(2);
+const { digest } = await import(pathToFileURL(`${root}/deploy/prepared-components.mjs`));
+if (existsSync(retained)) {
+  if (digest(current) !== digest(retained)) throw new Error('Existing Remote generation differs from the serving populated directory');
+} else {
+  mkdirSync(dirname(retained), { recursive: true });
+  const stage = `${retained}.transition.${process.pid}`;
+  try { execFileSync('cp', ['-a', '--reflink=auto', current, stage]); renameSync(stage, retained); }
+  finally { rmSync(stage, { recursive: true, force: true }); }
+}
+JS
+    fi
+    [[ $PI_STACK_PREVIOUS_REMOTE_RELEASE != $(realpath -sm "$remote") ]] || { echo 'Serving Remote rollback target aliases its stable selection' >&2; exit 66; }
+  fi
   export PI_REMOTE_PERSONS_DIR=$(pi_stack_persons_dir)
   export PI_STACK_HOST_PLAN=${PI_STACK_HOST_PLAN:-$(dirname "${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}")/.pi-stack-release-plan.json}
   pi_stack_as_root node "$root/deploy/host-plan.mjs" create "$root" "$(git -C "$root" rev-parse HEAD)" "$PI_STACK_PREVIOUS_REMOTE" "$PI_STACK_HOST_PLAN" "$PI_STACK_HOST_FILE"
@@ -464,7 +491,9 @@ JS
 activate_daemons() {
   local failed=0 broker_units
   local -a brokers=()
-  if owner_changed daemons; then
+  local daemon_change=0
+  owner_changed daemons && daemon_change=1
+  if (( daemon_change )) && { [[ -z ${PI_STACK_HOST_PLAN:-} ]] || jq -e '.owners.daemons.changed' "$PI_STACK_HOST_PLAN" >/dev/null; }; then
     if (( ${#daemons[@]} )); then pi_stack_as_root systemctl restart "${daemons[@]}" || failed=1; fi
   else
     local unit state
@@ -563,7 +592,7 @@ fi
 smoke_failed=0
 if [[ ${PI_STACK_FORCE_ROLLBACK:-0} == 1 ]] || (( activation_failed )) || ! "$root/deploy/smoke"; then smoke_failed=1; fi
 if (( smoke_failed )); then
-    if [[ -n $previous_remote_release && $previous_remote != "$expected" && -d $previous_remote_release ]] &&
+    if [[ -n $previous_remote_release && $previous_remote_release != $(realpath -sm "$remote") && $previous_remote != "$expected" && -d $previous_remote_release ]] &&
        node "$root/deploy/remote-rollback-compatible.mjs" "$(readlink -f "$remote")" "$previous_remote_release"; then
       echo "activation, smoke or runtime doctor failed; returning Pi Remote to schema-compatible $previous_remote" >&2
       candidate="$(dirname "$remote")/.pi-stack-releases/.rollback.$$"
