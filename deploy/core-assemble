@@ -112,6 +112,12 @@ def assemble(directory, inputs_path, output_path):
     config['principals'] = read(fragments / 'principals.json')
     config['credentials'] = read(fragments / 'credentials.json')
     config['policy'] = read(fragments / 'policy.json')
+    image_authority = fragments / 'images-duties-authority-e4b3609f'
+    image_grants = read(image_authority / 'image-authority.grants.json')
+    if image_grants.get('newAuthorityGranted') is not False or not isinstance(image_grants.get('grants'), list) or not isinstance(image_grants.get('consents'), list):
+        raise ValueError('image authority must explicitly project original grants without new authority')
+    config['policy'] = merge_policy(config['policy'], {'revision': config['policy']['revision'], 'grants': image_grants['grants'], 'consents': image_grants['consents']})
+    declared_auxiliary = {row['id']: row for row in read(image_authority / 'per-scope.fragment.json')['scopes']}
     config.update(read(fragments / 'gateway.fragment.json'))
     config['callbacks'] = read(fragments / 'callbacks.fragment.json')
     config['broker'] = read(fragments / 'provider.fragment.json')
@@ -142,7 +148,16 @@ def assemble(directory, inputs_path, output_path):
         if binding is None:
             raise ValueError('every adopted and unavailable scope needs an explicit host binding')
         for key in ('custody', 'storage', 'environment', 'resources'):
-            scope[key] = binding[key]
+            scope[key] = copy.deepcopy(binding[key])
+        declaration = declared_auxiliary.get(scope['id'])
+        if declaration is None:
+            raise ValueError('every scope requires its original auxiliary resource declaration')
+        resources = {row['path']: row for row in scope['resources']}
+        for row in declaration['resourceDeclarationsToMerge']:
+            if row['path'] in resources and resources[row['path']] != row:
+                raise ValueError('auxiliary resource conflicts with the registered path kind')
+            resources[row['path']] = row
+        scope['resources'] = list(resources.values())
         scope['callbackGateway'] = callbacks.get(scope['id'], {'kind': 'none'})
         aux = aux_scopes.get(scope['id'])
         if aux is None:
