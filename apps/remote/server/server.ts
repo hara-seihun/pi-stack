@@ -362,7 +362,7 @@ const watchList = new WatchList({
   databasePath: join(DATA, "threads.sqlite3"), threads,
   intervalMs: watchInterval(process.env.PI_REMOTE_WATCH_INTERVAL_MS),
   settings: unwrap(watchSettings(process.env.PI_REMOTE_WATCH_MODEL)),
-  recoveryEvidence: id => threads.watchRecoveryEvidence(id),
+  checkOutcome: id => threads.watchCheckOutcome(id),
   enabled: process.env.PI_REMOTE_WATCH_ENABLED !== "0",
   destinations: WATCH_DESTINATIONS,
   defaultDestination: DEFAULT_WATCH_DESTINATION,

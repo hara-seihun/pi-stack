@@ -34,8 +34,10 @@ regardless of unread results or attention notices. Startup also reconciles alrea
 completed background tasks. Transcripts, results, assignment receipts and notification
 history remain accessible; opening a notification restores and promotes the original
 thread. Foreground Chats keep their unread behavior. Pending input/questions, typed
-waits, wake schedules, outstanding result subscriptions and persistent watch threads remain
-open because their work is not complete. Startup-failed agents also remain visible,
+waits, wake schedules and outstanding result subscriptions remain open because their work
+is not complete. Watch list checks are disposable background workers and archive the same
+way, including one that ended without a final result: the watch list records that as a
+failed check on its items. Startup-failed agents also remain visible,
 including after their bounded retry budget settles an assignment as failed: losing
 native startup is not proof that external resources have been released. Automatic
 archive sweeps preserve that owner across restarts. Successful startup clears the

@@ -32,6 +32,7 @@ import { isThreadModeName, threadMode } from "./modes.js";
 import type { ThreadCapability } from "./caller.js";
 import { isThreadState, resolveDelivery, validateInspectOptions, validateThreadAwait, validateWaitDependency, CONTEXT_WINDOW_MAX_BYTES, THREAD_AWAIT_TIMEOUT_MS, type ThreadContextRecords, type ThreadContextWindow } from "./contracts.js";
 import { parseRunnerWaitDependency } from "./wait-contract.js";
+import { threadHasOutstandingWork } from "./work-state.js";
 import { BACKGROUND_ATTENTION_POLICY } from "./attention-policy.js";
 import { createExecutionActivity, executionActivitySnapshot, executionWaitActivity, observeExecutionActivity, restoreExecutionActivity, settleExecutionActivity, type ExecutionActivity, type ExecutionPhase } from "./execution-activity.js";
 import { deriveThreadLifecycle } from "./lifecycle.js";
@@ -1028,11 +1029,11 @@ export class ThreadService implements ThreadApi {
     const thread = this.get(id);
     const settledWork = this.sql(`SELECT 1 FROM thread_execution WHERE thread_id=? AND ended_at IS NOT NULL
       UNION ALL SELECT 1 FROM thread_work WHERE thread_id=? AND status='done' LIMIT 1`).get(id, id);
-    if (!thread || !settledWork || thread.metadata?.foreground === true || thread.metadata?.watchList
+    if (!thread || !settledWork || thread.metadata?.foreground === true
       || thread.metadata?.archived || this.hasAutoArchiveWork(thread)) return;
     const latest = this.get(id);
     if (!latest || this.suspended || this.closed || latest.metadata?.foreground === true
-      || latest.metadata?.watchList || latest.metadata?.archived || this.hasAutoArchiveWork(latest)) return;
+      || latest.metadata?.archived || this.hasAutoArchiveWork(latest)) return;
     this.sql("UPDATE thread SET held=0,metadata=json_set(metadata,'$.archived',json('true'),'$.archivedAt',?) WHERE id=?").run(new Date().toISOString(), id);
     this.changed(id);
   }
@@ -1040,7 +1041,6 @@ export class ThreadService implements ThreadApi {
     const rows = this.sql(`SELECT t.id FROM thread t WHERE t.state='idle'
       AND json_extract(t.metadata,'$.archived') IS NOT 1
       AND json_extract(t.metadata,'$.foreground') IS NOT 1
-      AND json_extract(t.metadata,'$.watchList') IS NOT 1
       AND (EXISTS(SELECT 1 FROM thread_execution e WHERE e.thread_id=t.id AND e.ended_at IS NOT NULL)
         OR EXISTS(SELECT 1 FROM thread_work w WHERE w.thread_id=t.id AND w.status='done'))`)
       .all() as Array<{ id: string }>;
@@ -2009,7 +2009,8 @@ export class ThreadService implements ThreadApi {
   }
   private hasAutoArchiveWork(thread: Thread): boolean {
     const runtime = this.runtimes.get(thread.id);
-    return !!(thread.metadata?.manager === true || thread.metadata?.startupFailure || thread.metadata?.incompleteResult || thread.metadata?.agentWait || thread.dependencies?.length || thread.wakeSchedule || thread.state !== "idle" || thread.pendingMessages > 0
+    // A watch check's incomplete result is recorded as a failed check on its items, so the check itself is disposable.
+    return !!(thread.metadata?.manager === true || thread.metadata?.startupFailure || thread.metadata?.incompleteResult && thread.metadata?.watchList !== true || thread.metadata?.agentWait || thread.dependencies?.length || thread.wakeSchedule || thread.state !== "idle" || thread.pendingMessages > 0
       || this.sql("SELECT 1 FROM thread_question WHERE thread_id=? AND accepted_at IS NULL LIMIT 1").get(thread.id)
       || this.execution(thread.id) || (!runtime && thread.metadata?.runnerReference) || runtime?.busy || runtime?.commandRunning
       || this.opening.has(thread.id) || this.operations.has(thread.id) || this.halts.has(thread.id) || this.waitRegistering.has(thread.id));
@@ -2881,19 +2882,26 @@ export class ThreadService implements ThreadApi {
       } else throw error;
     }
   }
-  watchRecoveryEvidence(id: string): Result<import("./watch-list.js").WatchRecoveryEvidence> {
+  /**
+   * How a watch check ended, for recording on its items. A check is open only while it still has work of its own
+   * (a turn, queued input, a dependency wait or wake); pending questions do not keep it open. A held or archived check
+   * without a settlement did not finish.
+   */
+  watchCheckOutcome(id: string): Result<import("./watch-list.js").WatchCheckOutcome> {
     if (this.closed || this.suspended) return bad("unavailable", "Thread controller is suspended");
     try {
       const thread = this.get(id);
-      if (!thread) return good("uncertain");
-      if (thread.state === "running" || thread.pendingMessages || thread.metadata?.archived || thread.metadata?.watchStopped || this.execution(id) || this.runtimes.has(id) || this.opening.has(id)) return good("ineligible");
-      const failure = thread.metadata?.startupFailure as Json | undefined;
-      const settlement = this.sql("SELECT work_id,outcome FROM thread_execution WHERE thread_id=? AND ended_at IS NOT NULL ORDER BY ended_at DESC,settlement_seq DESC,id DESC LIMIT 1").get(id) as Json | undefined;
-      if (settlement?.outcome === "complete") return good("checked");
-      if (settlement?.outcome === "cancelled") return good("ineligible");
-      if (thread.metadata?.watchList !== true || !failure?.nativeNotReady || settlement?.outcome !== "failed" || settlement.work_id !== failure.workId || thread.metadata?.runnerReference) return good("uncertain");
-      const work = this.sql("SELECT inserted_at,landed_at FROM thread_work WHERE id=? AND thread_id=?").get(settlement.work_id, id) as Json | undefined;
-      return good(work && work.inserted_at === null && work.landed_at === null ? "unlanded" : "uncertain");
+      if (!thread) return good({ status: "missing" });
+      const ended = !!thread.held || !!thread.metadata?.archived;
+      if (!ended && (threadHasOutstandingWork(thread) || this.execution(id) || this.opening.has(id))) return good({ status: "open" });
+      const settlement = this.latestSettlement(id);
+      if (settlement?.outcome === "complete") return good({ status: "complete", at: settlement.time });
+      if (settlement?.outcome === "failed") return good({ status: "failed", at: settlement.time, error: settlement.error ?? "Check failed without a recorded error" });
+      if (settlement?.outcome === "cancelled") return good({ status: "failed", at: settlement.time, error: "Check was cancelled before it finished" });
+      const startup = (thread.metadata?.startupFailure as Json | undefined)?.error;
+      if (thread.held) return good({ status: "failed", at: thread.updatedAt, error: typeof startup === "string" ? `Check failed to start: ${startup}` : "Check was stopped before it finished" });
+      if (thread.metadata?.archived) return good({ status: "failed", at: thread.updatedAt, error: "Check was archived before it finished" });
+      return good({ status: "failed", at: thread.updatedAt, error: "Check went idle without a settled turn" });
     } catch (error) { return bad("unavailable", errorText(error)); }
   }
   private async rejectStartup(id: string, error: string): Promise<void> {
