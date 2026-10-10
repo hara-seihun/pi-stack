@@ -30,6 +30,7 @@ export function checkPolicy(name) {
     'user usage': ['tools/user-usage'],
     'Claude reset collector': ['tools/claude-reset'],
     runtime: ['packages/runtime', 'scripts'],
+    'runtime dependency closure': deployment,
     'One Kenan deployment': deployment,
     'prompt availability': ['deploy/prompt-availability', 'scripts/prompt-availability.test.py'],
     'Meet recognition protocol': ['apps/meet-recognition'],
