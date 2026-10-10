@@ -6,7 +6,7 @@ import { shortThreadName, ThreadDirectoryContext } from "./thread-chips";
 
 /** Old cached heads and new server projections share the same human presentation. */
 export function presentAgentMessage(entry: ContextEntry): ContextEntry {
-  if (entry.kind !== "user") return entry;
+  if (entry.kind !== "user" || entry.inputOrigin === "human") return entry;
   const envelope = entry.agentSender || entry.text === undefined ? null : agentMessagePresentation(entry.text);
   const sender = entry.agentSender ?? envelope?.sender;
   if (!sender) return entry;

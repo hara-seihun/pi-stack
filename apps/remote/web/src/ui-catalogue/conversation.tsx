@@ -89,19 +89,25 @@ const toolEntries: ContextEntry[] = [
   entry("notice", "The requested operation failed. Your draft is retained.", "notice"),
 ];
 function Frame({ children }: { children: ReactNode }) { return <div style={{ padding: 16, minWidth: 0 }}>{children}</div>; }
-function ScreenFixture({ mode }: { mode: "empty" | "history" | "working" | "held" | "offline" | "syncing" | "expanded" | "slash" | "errors" | "reply" | "long-header" | "receipts" }) {
+function ScreenFixture({ mode }: { mode: "empty" | "history" | "working" | "held" | "offline" | "syncing" | "expanded" | "slash" | "errors" | "reply" | "long-header" | "receipts" | "messenger" }) {
   const [prompt, setPrompt] = useState(mode === "working" ? `Follow up: ${unicode}` : mode === "slash" ? "/" : "");
   const [reply, setReply] = useState<ReplyTarget | null>(mode === "reply" ? { identity: { id: "pi/catalogue-session/original", timestamp: epoch, sender: { id: "person", name: "A very long original sender name" } }, text: prose } : null);
   const drawing = useChatDrawing("ai:catalogue-session", async () => ({ ok: true }));
   const busy = mode === "working";
   const current = session({
     ...(busy || mode === "receipts" ? { observation: { kind: "running", phase: "thinking" } as const } : {}),
-    ...(mode === "receipts" ? { manager: true, contextSelection: { mode: "all" as const, files: ["AGENTS.md", "machine/README.md", "notes.md"] }, queuedMessages: [queueMessage("input-0", "steer", "queued")] } : {}),
+    ...(mode === "receipts" || mode === "messenger" ? { manager: true, contextSelection: { mode: "all" as const, files: ["AGENTS.md", "machine/README.md", "notes.md"] }, queuedMessages: [queueMessage("input-0", "steer", "queued")] } : {}),
     ...(mode === "held" ? { observation: { kind: "held" } as const, queuedMessages: [queueMessage("held", "queue", "queued")] } : {}),
     ...(mode === "long-header" ? { name: `${unicode} ${longToken}`, model: `provider/${longToken}`, contextUsage: { tokens: 180000, contextWindow: 200000, percent: 90 } } : {}),
   });
-  return <div style={{ height: "100dvh" }}><ConversationScreen session={current} mono={mode === "receipts" ? { hintSeen: true, onClassic: noop, onHintSeen: noop, saving: false } : undefined} ancestors={mode === "long-header" ? [session({ id: "parent", agentName: unicode })] : []}
-    entries={mode === "receipts" ? [entry("assistant", "Ready for your next instruction.", "reply-before"), ...receiptEntries, entry("assistant", "The previous turn finished. I am still available.", "reply-after")] : mode === "empty" ? [] : mode === "expanded" ? [...messages.slice(0, 1), ...toolEntries, ...messages.slice(1)] : messages}
+  return <div style={{ height: "100dvh" }}><ConversationScreen session={current} mono={mode === "receipts" || mode === "messenger" ? { hintSeen: true, onClassic: noop, onHintSeen: noop, saving: false } : undefined} ancestors={mode === "long-header" ? [session({ id: "parent", agentName: unicode })] : []}
+    entries={mode === "messenger" ? [
+      entry("user", "Can you show me the details?", "human-first"),
+      { ...entry("user", "And keep the picture in the chat.", "human-next"), messageTimestamp: epoch + 15_000 },
+      { ...entry("user", "Machine settlement must not become a person bubble", "machine"), inputOrigin: "machine" },
+      { ...entry("assistant", `${markdown}\n\n![Image inside the bubble](/kenan.png)`, "rich-answer"), messageTimestamp: epoch + 30_000 },
+      { ...entry("assistant", "The second bubble joins the same group.", "joined-answer"), messageTimestamp: epoch + 45_000 },
+    ] : mode === "receipts" ? [entry("assistant", "Ready for your next instruction.", "reply-before"), ...receiptEntries, entry("assistant", "The previous turn finished. I am still available.", "reply-after")] : mode === "empty" ? [] : mode === "expanded" ? [...messages.slice(0, 1), ...toolEntries, ...messages.slice(1)] : messages}
     liveText={busy ? "Streaming **response** with an unfinished list:\n- first item\n- " : ""} liveThinking={busy ? "Inspecting the available states…" : ""} thinkingActive={busy}
     autoCollapse={mode !== "expanded"} images={null} offline={mode === "offline" ? "Connection lost" : ""} syncing={mode === "syncing"} pending={false}
     home="/home/catalogue" prompt={prompt} attachments={[]} slashCommands={[{ name: "kelana", description: prose, source: "skill" }, { name: "software-engineering", description: "Valid states and explicit errors", source: "skill" }]}
@@ -210,7 +216,7 @@ function ui(id: string, component: string, contract: string, render: () => React
 }
 export const conversationCases: UiCase[] = [
   ...(["root", "empty", "many", "loading", "failure"] as const).map(mode => ui(`picker-${mode}`, "ChatPicker", "Root and archived empty/many/loading/failure; model/context and agent navigation via real controls", () => <PickerFixture mode={mode} />)),
-  ...(["empty", "history", "working", "held", "offline", "syncing", "expanded", "slash", "errors", "reply", "long-header", "receipts"] as const).map(mode => ui(`screen-${mode}`, "ConversationScreen", `Valid session and ${mode} conversation composition`, () => <ScreenFixture mode={mode} />, "composition")),
+  ...(["empty", "history", "working", "held", "offline", "syncing", "expanded", "slash", "errors", "reply", "long-header", "receipts", "messenger"] as const).map(mode => ui(`screen-${mode}`, "ConversationScreen", `Valid session and ${mode} conversation composition`, () => <ScreenFixture mode={mode} />, "composition")),
   ...(["empty", "long", "uploading", "many", "readonly", "stop", "resume", "hidden"] as const).map(mode => ui(`composer-${mode}`, "Composer", `${mode} prompt, attachment and action state`, () => <ComposerFixture mode={mode} />, mode === "long" || mode === "many" ? "content-boundary" : "finite-variant")),
   ui("status-matrix", "StatusPill / StatusIcon", "All Activity variants plus held, cancellation, error, unread, archived, offline and 1/2/many tools; every fixture validates", () => <StatusMatrix />),
   ...(["empty", "variants", "held", "pending", "long"] as const).map(mode => ui(`queue-${mode}`, "QueueSheet", "All deliveries and queued/dispatched acknowledgement variants; held and pending action availability", () => <QueueFixture mode={mode} />)),

@@ -48,6 +48,7 @@ export const agentAvatar = () => appPath(AGENT_AVATAR);
 export type ChatMessageProps = {
   kind: string;
   label: string;
+  appearance?: "bubble";
   /** Shown instead of the label when the sender needs more than a name, such as an agent-to-agent route. */
   heading?: ReactNode;
   /** Picture shown before the label: the sender's, or Kenan's head. */
@@ -68,9 +69,10 @@ export type ChatMessageProps = {
   onEditImage?(image: HTMLImageElement): void;
 } & ({ contentFormat: "literal"; renderMarkdown?: never } | { contentFormat: "markdown"; renderMarkdown(text: string): ReactNode });
 
-function MessageFrame({ kind, label, heading, avatar, text, resolveCopyText, timestamp, menu = [], identity, onReply, onReact, children }: {
+function MessageFrame({ kind, label, appearance, heading, avatar, text, resolveCopyText, timestamp, menu = [], identity, onReply, onReact, children }: {
   kind: string;
   label: string;
+  appearance?: "bubble";
   heading?: ReactNode;
   avatar?: string;
   text: string;
@@ -85,6 +87,7 @@ function MessageFrame({ kind, label, heading, avatar, text, resolveCopyText, tim
   const time = timestamp === undefined ? undefined : new Date(timestamp);
   const reader = useSpeech().catalog !== null;
   const [copyError, setCopyError] = useState<string | null>(null);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const copy = async () => {
     try {
       const copied = await copyText(resolveCopyText ? await resolveCopyText() : text);
@@ -102,16 +105,18 @@ function MessageFrame({ kind, label, heading, avatar, text, resolveCopyText, tim
       catch (cause) { setCopyError(cause instanceof Error ? cause.message : "The full message could not be loaded."); }
     } }] : []),
     ...(onReact ? [{ label: "React", onSelect: onReact }] : []),
+    ...(appearance === "bubble" && time ? [{ label: "Message time", onSelect: () => setDetailsOpen(value => !value) }] : []),
     ...menu,
   ]);
-  return <article className={`message ${kind}`} data-message-id={identity?.id} tabIndex={identity ? 0 : undefined} {...handlers}>
-    <header className="message-header">
+  return <article className={`message ${kind}${appearance === "bubble" ? " chat-bubble" : ""}`} aria-label={appearance === "bubble" ? `Message from ${label}` : undefined} data-message-id={identity?.id} tabIndex={identity ? 0 : undefined} {...handlers}>
+    {appearance !== "bubble" && <header className="message-header">
       {avatar && <CachedImage className="message-avatar" src={avatar} alt="" loading="lazy" decoding="async" />}
       {heading ?? <span className="message-label">{label.toUpperCase()}</span>}
       {time && <time className="message-time" dateTime={time.toISOString()}>{time.toLocaleString()}</time>}
-    </header>
+    </header>}
     {openMenu}
     {children}
+    {detailsOpen && time && <time className="chat-message-detail-time" dateTime={time.toISOString()}>{time.toLocaleString()}</time>}
     {copyError && <p className="message-status failed" role="status">{copyError}</p>}
   </article>;
 }
@@ -136,9 +141,9 @@ function MessageBody({ attachments = [], delivery, onEditImage, children }: {
 }
 
 export function ChatMessage(props: ChatMessageProps) {
-  const { kind, label, heading, avatar, text, resolveCopyText, timestamp, responseMetrics, menu, attachments, delivery, onEditImage, identity, reactions, reply, onReply } = props;
+  const { kind, label, appearance, heading, avatar, text, resolveCopyText, timestamp, responseMetrics, menu, attachments, delivery, onEditImage, identity, reactions, reply, onReply } = props;
   const [reactionsOpen, setReactionsOpen] = useState(false);
-  return <MessageFrame kind={kind} label={label} heading={heading} avatar={avatar} text={text} resolveCopyText={resolveCopyText} timestamp={timestamp} menu={menu} identity={identity} onReply={onReply} onReact={identity ? () => setReactionsOpen(true) : undefined}>
+  return <MessageFrame kind={kind} label={label} appearance={appearance} heading={heading} avatar={avatar} text={text} resolveCopyText={resolveCopyText} timestamp={timestamp} menu={menu} identity={identity} onReply={onReply} onReact={identity ? () => setReactionsOpen(true) : undefined}>
     <MessageBody attachments={attachments} delivery={delivery} onEditImage={onEditImage}>
       {reply && <ReplyQuote reply={reply} />}
       {props.contentFormat === "markdown" ? props.renderMarkdown(text) : text && <div className="message-text">{text}</div>}

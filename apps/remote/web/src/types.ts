@@ -9,6 +9,7 @@ export interface ContextEntry {
   agentSender?: { threadId: string; name?: string };
   /** Quiet native records remain available in classic, but never appear in mono. */
   monoVisibility?: "hidden" | "visible";
+  inputOrigin?: "human" | "machine";
   key: string;
   signature: string;
   kind: import("../../server/protocol").TranscriptItemKind;
