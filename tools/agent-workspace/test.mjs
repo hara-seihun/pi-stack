@@ -94,6 +94,131 @@ process.exit(result.status ?? 1);
   return { ...f.env, PATH: `${bin}:${process.env.PATH}` };
 }
 
+test("refreshed published custody releases stale-ref writers and groups without accepting imported unpublished tips", () => {
+  const f = fixture();
+  try {
+    const create = (name, group) => JSON.parse(run(["create", "--root", f.workspaces, "--name", name,
+      "--repo", f.source, "--min-free-gib", "0", "--lease-seconds", "0", "--json",
+      ...(group ? ["--group", group] : [])], f.env));
+    const author = create("author", "delivered-group");
+    git(author.path, "config", "user.name", "Test");
+    git(author.path, "config", "user.email", "test@example.invalid");
+    git(author.path, "commit", "--allow-empty", "-m", "published later by another owner");
+    const published = git(author.path, "rev-parse", "HEAD");
+    git(author.path, "push", f.remote, "HEAD:refs/heads/delivered");
+    assert.equal(git(author.path, "for-each-ref", "--format=%(refname)", "refs/remotes"), "");
+    const peer = create("peer", "delivered-group");
+    const unique = create("unique");
+    git(unique.path, "config", "user.name", "Test");
+    git(unique.path, "config", "user.email", "test@example.invalid");
+    git(unique.path, "commit", "--allow-empty", "-m", "not published");
+    const uniqueHead = git(unique.path, "rev-parse", "HEAD");
+    const mirror = path.join(path.dirname(f.env.PI_WORKSPACE_STATE), "mirrors",
+      `${createHash("sha256").update(f.remote).digest("hex").slice(0, 24)}.git`);
+    mkdirSync(mirror, { recursive: true });
+    git(mirror, "init", "--bare");
+    git(mirror, "fetch", unique.path, `HEAD:refs/pi-workspace/objects/${uniqueHead}`);
+    const before = JSON.parse(run(["reconcile", "--root", f.workspaces, "--json"], f.env));
+    assert.equal(before.find(x => x.record.id === author.id).inspection.classification, "repair-required");
+    assert.throws(() => run(["reconcile", "--refresh-custody", "--json"], f.env), /requires --execute/);
+    const bin = path.join(f.root, "bin");
+    mkdirSync(bin);
+    const counter = path.join(f.root, "fetches");
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    writeFileSync(path.join(bin, "git"), `#!${process.execPath}
+const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+if (args.includes('+refs/heads/*:refs/pi-workspace/published/*')) fs.appendFileSync(${JSON.stringify(counter)}, 'fetch\\n');
+const result = spawnSync(${JSON.stringify(realGit)}, args, {stdio:'inherit'});
+process.exit(result.status ?? 1);
+`);
+    chmodSync(path.join(bin, "git"), 0o755);
+    const results = JSON.parse(run(["reconcile", "--root", f.workspaces, "--execute", "--refresh-custody", "--json"],
+      { ...f.env, PATH: `${bin}:${process.env.PATH}` }));
+    assert.equal(readFileSync(counter, "utf8"), "fetch\n");
+    for (const record of [author, peer]) {
+      assert.equal(results.find(x => x.record.id === record.id).action, "released-group");
+      assert.equal(existsSync(record.path), false);
+    }
+    assert.match(results.find(x => x.record.id === author.id).inspection.reason, /refreshed published custody/);
+    assert.equal(git(mirror, "rev-parse", "refs/pi-workspace/published/delivered"), published);
+    assert.equal(results.find(x => x.record.id === unique.id).inspection.classification, "repair-required");
+    assert.equal(git(unique.path, "rev-parse", "HEAD"), uniqueHead);
+    assert.equal(git(unique.path, "for-each-ref", "--format=%(refname)", "refs/remotes"), "");
+  } finally { f.close(); }
+});
+
+test("refreshed published custody preserves leases, queued threads, dirty source and ignored evidence", () => {
+  const f = fixture();
+  try {
+    const create = (name, lease) => JSON.parse(run(["create", "--root", f.workspaces, "--name", name,
+      "--repo", f.source, "--min-free-gib", "0", "--lease-seconds", String(lease), "--json"], f.env));
+    const leased = create("leased", 3600);
+    const pending = create("pending", 0);
+    const dirty = create("dirty", 0);
+    const evidence = create("evidence", 0);
+    for (const record of [leased, pending, dirty, evidence]) {
+      git(record.path, "config", "user.name", "Test");
+      git(record.path, "config", "user.email", "test@example.invalid");
+      git(record.path, "commit", "--allow-empty", "-m", record.owner);
+      git(record.path, "push", f.remote, `HEAD:refs/heads/${record.owner}`);
+    }
+    writeFileSync(path.join(dirty.path, "file.txt"), "unfinished\n");
+    mkdirSync(path.join(evidence.path, "ignored-output"));
+    writeFileSync(path.join(evidence.path, "ignored-output", "evidence.txt"), "irreplaceable\n");
+    const threadPath = path.join(f.root, "threads.sqlite3");
+    const database = new DatabaseSync(threadPath);
+    database.exec("CREATE TABLE thread(id TEXT, cwd TEXT, state TEXT); CREATE TABLE thread_work(thread_id TEXT, status TEXT); CREATE TABLE thread_execution(thread_id TEXT, ended_at INTEGER)");
+    database.prepare("INSERT INTO thread VALUES(?, ?, 'idle')").run("queued-owner", pending.path);
+    database.exec("INSERT INTO thread_work VALUES('queued-owner', 'pending')");
+    database.close();
+    const results = JSON.parse(run(["reconcile", "--root", f.workspaces, "--execute", "--refresh-custody", "--json"],
+      { ...f.env, PI_THREAD_DATABASE: threadPath }));
+    for (const record of [leased, pending, dirty, evidence]) assert.equal(existsSync(record.path), true);
+    assert.equal(results.find(x => x.record.id === leased.id).inspection.classification, "active");
+    assert.equal(results.find(x => x.record.id === pending.id).inspection.classification, "referenced");
+    assert.equal(results.find(x => x.record.id === dirty.id).inspection.classification, "repair-required");
+    assert.equal(results.find(x => x.record.id === evidence.id).inspection.classification, "repair-required");
+    assert.equal(readFileSync(path.join(evidence.path, "ignored-output", "evidence.txt"), "utf8"), "irreplaceable\n");
+  } finally { f.close(); }
+});
+
+test("refreshed published custody fails closed within its inspection deadline", () => {
+  const f = fixture();
+  try {
+    const created = JSON.parse(run(["create", "--root", f.workspaces, "--name", "stalled",
+      "--repo", f.source, "--min-free-gib", "0", "--lease-seconds", "0", "--json"], f.env));
+    git(created.path, "config", "user.name", "Test");
+    git(created.path, "config", "user.email", "test@example.invalid");
+    git(created.path, "commit", "--allow-empty", "-m", "published work");
+    git(created.path, "push", f.remote, "HEAD:refs/heads/delivered");
+    const head = git(created.path, "rev-parse", "HEAD");
+    const bin = path.join(f.root, "bin");
+    mkdirSync(bin);
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    writeFileSync(path.join(bin, "git"), `#!${process.execPath}
+const { spawnSync } = require('node:child_process');
+const args = process.argv.slice(2);
+if (args.includes('+refs/heads/*:refs/pi-workspace/published/*')) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10000);
+}
+const result = spawnSync(${JSON.stringify(realGit)}, args, {stdio:'inherit'});
+process.exit(result.status ?? 1);
+`);
+    chmodSync(path.join(bin, "git"), 0o755);
+    const start = Date.now();
+    const [result] = JSON.parse(run(["reconcile", "--id", created.id, "--execute", "--refresh-custody",
+      "--budget-ms", "1000", "--json"], { ...f.env, PATH: `${bin}:${process.env.PATH}` }));
+    assert.equal(result.inspection.classification, "blocked");
+    assert.equal(result.action, "none");
+    assert.match(result.inspection.reason, /budget|timed out/);
+    assert.equal(Date.now() - start < 4000, true);
+    assert.equal(git(created.path, "rev-parse", "HEAD"), head);
+    assert.equal(existsSync(created.path), true);
+  } finally { f.close(); }
+});
+
 for (const stage of ["clone", "checkout"]) test(`creation resumes after interruption following ${stage}`, () => {
   const f = fixture();
   try {
