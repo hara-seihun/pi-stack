@@ -33,6 +33,7 @@ const shipping = {
   'Claude reset collector': ['tools/claude-reset'],
   'runtime dependency closure': ['deploy/runtime', 'packages/runtime', 'packages/orchestrator', 'packages/kenan-memory', 'packages/kenan-root'],
   'One Kenan deployment': ['deploy', 'config', 'scripts/one-kenan-deploy.test.py'],
+  'One Kenan activation': ['deploy/one-kenan-activate', 'deploy/host-plan.mjs', 'deploy/source-scopes.mjs'],
   'prompt availability': ['deploy/prompt-availability', 'scripts/prompt-availability.test.py'],
   'Meet recognition protocol': ['apps/meet-recognition'],
   'action journal publication': ['deploy'],

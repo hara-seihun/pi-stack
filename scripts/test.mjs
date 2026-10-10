@@ -39,6 +39,7 @@ const jobs = [
   ...testFiles(root, 'packages/runtime', /\.test\.mjs$/).map(file => [`runtime test: ${file}`, 'node', ['--test', file], { checkInputs: [file] }]),
   ['runtime dependency closure', 'node', ['--test', 'scripts/deploy-runtime-closure.test.mjs'], { dependsOn: ['orchestrator memory build'], timeoutMs: 55_000 }],
   ["One Kenan deployment", "python3", ["-B", "scripts/one-kenan-deploy.test.py"]],
+  ['One Kenan activation', 'python3', ['-B', 'scripts/one-kenan-activate.test.py']],
   ["prompt availability", "python3", ["-B", "scripts/prompt-availability.test.py"]],
   ["Meet recognition protocol", "python3", ["-B", "-m", "unittest", "discover", "-s", "apps/meet-recognition", "-p", "test_protocol.py"]],
   ["action journal publication", "bun", ["test", "deploy/action-journal.test.ts"]],

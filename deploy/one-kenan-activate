@@ -133,7 +133,13 @@ def release_matches(host, role, running):
     value = json.loads(plan.read_text())
     if value.get('candidate') != host.expected:
         return False
-    proof = host.command('node', str(source / 'deploy/host-plan.mjs'), 'verify-owner', str(source), str(plan), role, str(running))
+    try:
+        proof = host.command('node', str(source / 'deploy/host-plan.mjs'), 'verify-owner', str(source), str(plan), role, str(running))
+    except subprocess.CalledProcessError as error:
+        outcome = json.loads(error.output)
+        if error.returncode == 66 and outcome.get('ok') is False and outcome.get('error', {}).get('code') == 'host-owner-source-stale':
+            return False
+        raise
     return json.loads(proof).get('ok') is True
 
 
