@@ -1,8 +1,8 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { indexedThreadHistory, visibleThreadHistory, MAX_HISTORY_RECORD_BYTES, MAX_HISTORY_INDEX_BYTES, MAX_HISTORY_INDEXES, type IndexedThreadHistory, type IndexedThreadHistoryOptions } from "../src/threads/history.mjs";
+import { indexedThreadHistory, withIndexedThreadHistory, visibleThreadHistory, MAX_HISTORY_RECORD_BYTES, MAX_HISTORY_INDEX_BYTES, MAX_HISTORY_INDEXES, type IndexedThreadHistory, type IndexedThreadHistoryOptions } from "../src/threads/history.mjs";
 import { formatThreadMessage } from "../src/threads/message-format.js";
 
 const directories: string[] = [];
@@ -28,6 +28,51 @@ function wakeText(source: "explicit" | "notification" = "notification", id = "th
     source, text: "Scheduled wake check: WAKE_BODY_NOT_INDEXED", delivery: "steer", createdAt: 1, state: "queued" },
   "Scheduled wake check: WAKE_BODY_NOT_INDEXED");
 }
+
+it("restarts the entire window after append between indexing and reads without mixing revisions", () => {
+  const first = message("a", null, "user", "A"), second = message("b", "a", "assistant", "B");
+  const path = source([first]);
+  let attempts = 0;
+  let escaped: IndexedThreadHistory | undefined;
+  const result = withIndexedThreadHistory(path, undefined, undefined, history => {
+    attempts++;
+    escaped = history;
+    if (attempts === 1) appendFileSync(path, JSON.stringify(second) + "\n");
+    expect(history.read({ ...history.entries[0]! })).toMatchObject({ ok: false, error: { code: "invalid-descriptor" } });
+    return { source: history.source, records: history.entries.map(descriptor => history.read(descriptor)) };
+  });
+  expect(attempts).toBe(2);
+  expect(result).toEqual({ ok: true, value: { source: index(path).source, records: [{ ok: true, value: first }, { ok: true, value: second }] } });
+  expect(escaped!.read(escaped!.entries[0]!)).toMatchObject({ ok: false, error: { code: "invalid-descriptor" } });
+});
+
+it("rejects replacement and rewritten records instead of retrying them as an append", () => {
+  for (const replace of [false, true]) {
+    const path = source([message("a", null, "user", "A")]);
+    let attempts = 0;
+    const result = withIndexedThreadHistory(path, undefined, undefined, history => {
+      attempts++;
+      const target = replace ? path + ".replacement" : path;
+      writeFileSync(target, JSON.stringify(message("a", null, "user", "Changed")) + "\n");
+      if (replace) renameSync(target, path);
+      if (!replace) expect(history.read(history.entries[0]!)).toMatchObject({ ok: false, error: { code: "stale-source" } });
+      return history.read(history.entries[0]!);
+    });
+    expect(result).toMatchObject({ ok: false, error: { code: "stale-source", message: "Session was rewritten or replaced during window reading" } });
+    expect(attempts).toBe(1);
+  }
+});
+
+it("bounds sustained window mutation and returns an explicit conflict source", () => {
+  const path = source([message("a", null, "user", "A")]);
+  let attempts = 0;
+  const result = withIndexedThreadHistory(path, undefined, undefined, history => {
+    appendFileSync(path, JSON.stringify(message(`next-${++attempts}`, history.source.leafId, "user", "New")) + "\n");
+    return history.read(history.entries[0]!);
+  });
+  expect(attempts).toBe(3);
+  expect(result).toMatchObject({ ok: false, error: { code: "stale-source" } });
+});
 
 it("counts signed narration as text while retaining exact source and branch paging identity", () => {
   const field = (number: number, bytes: Buffer): Buffer => Buffer.concat([Buffer.from([number * 8 + 2, bytes.length]), bytes]);

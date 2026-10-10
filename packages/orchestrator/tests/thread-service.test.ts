@@ -2878,6 +2878,24 @@ describe("thread inspection", () => {
     expect(known.completedToolCallIds).toEqual(["call"]);
     expect(known.records.map(record => record.entryId)).toEqual(["m0"]);
   });
+  it("reprojects a native window when its writer appends a paired result during reading", async () => {
+    const { service, directory } = fixture();
+    const thread = value(await service.spawn({ requestId: "window-append-race", cwd: directory }));
+    const call = { type: "message", id: "call", parentId: null, message: { role: "assistant", content: [{ type: "toolCall", id: "tool", name: "Bash", arguments: {} }] } };
+    const result = { type: "message", id: "result", parentId: "call", message: { role: "toolResult", toolCallId: "tool", content: "finished" } };
+    writeFileSync(thread.sessionFile, JSON.stringify(call) + "\n");
+    const initial = value(await service.inspect(thread.id, { contextWindow: { limit: 1 } })).contextWindow!;
+    const identify = (service as any).nativeMessageIdentity.bind(service);
+    vi.spyOn(service as any, "nativeMessageIdentity").mockImplementationOnce((...args) => {
+      appendFileSync(thread.sessionFile, JSON.stringify(result) + "\n");
+      return identify(...args);
+    });
+    const window = value(await service.inspect(thread.id, { contextWindow: { limit: 1, generation: initial.source.generation, toolCallIds: ["tool"] } })).contextWindow!;
+    expect(window.source.generation).toBe(initial.source.generation);
+    expect(window.source.revision).not.toBe(initial.source.revision);
+    expect(window.records).toMatchObject([{ entryId: "call", results: [result.message] }]);
+    expect(window.completedToolCallIds).toEqual(["tool"]);
+  });
   it("reads paired results only for tool-call items intersecting the requested window", async () => {
     const { service, directory } = fixture();
     const thread = value(await service.spawn({ requestId: "many-tools", cwd: directory }));
