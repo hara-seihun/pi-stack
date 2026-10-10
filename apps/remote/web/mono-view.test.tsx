@@ -36,7 +36,7 @@ test("manager wire validation rejects unknown views, malformed hints and mono wi
   expect(() => validateTranscriptHead({ kind: "user", monoVisibility: "unknown" })).toThrow();
 });
 
-test("quiet native turns stay in history but render no mono entries, including wake input", () => {
+test("mono retains collapsible work and agent traffic but suppresses explicitly quiet native records", () => {
   const heads: TranscriptItemHead[] = [
     { kind: "user", seq: 1, id: "human", size: 5, text: "Hello" },
     { kind: "user", seq: 2, id: "wake", size: 5, text: "Manager wake", monoVisibility: "hidden" },
@@ -48,7 +48,7 @@ test("quiet native turns stay in history but render no mono entries, including w
     { kind: "thinking", seq: 8, id: "ordinary-thinking", size: 5, preview: "Internal thoughts" },
     { kind: "notice", seq: 9, id: "internal-notice", size: 5, text: "Internal phase" },
   ];
-  expect(monoTranscript(heads).map(head => head.id)).toEqual(["human", "answer"]);
+  expect(monoTranscript(heads).map(head => head.id)).toEqual(["human", "answer", "peer", "delegation", "ordinary-thinking", "internal-notice"]);
   expect(monoTranscript(heads.slice(1, 4))).toEqual([]);
   expect(heads).toHaveLength(9);
   expect(heads[1]!.kind).toBe("user");

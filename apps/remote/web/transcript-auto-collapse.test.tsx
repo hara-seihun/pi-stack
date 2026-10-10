@@ -8,7 +8,7 @@ import type { ContextEntry } from "./src/types";
 
 globalThis.location ??= new URL("https://router.test/") as unknown as Location;
 
-const entry = (key: string, kind: string, fields: Partial<ContextEntry> = {}): ContextEntry => ({
+const entry = (key: string, kind: ContextEntry["kind"], fields: Partial<ContextEntry> = {}): ContextEntry => ({
   key, kind, signature: key, text: key, ...fields,
 });
 const thought = entry("first thought detail", "thinking", { label: "First thought" });
@@ -80,7 +80,9 @@ test("mono keeps assistant text plain after tools and before an unsettled wait, 
       const html = render({ mono: true, autoCollapse, entries: [user, ...work, final, ...tail], thinkingActive: true, liveThinking: "Live private reasoning" });
       expect(html.match(/class="message assistant/g)).toHaveLength(1);
       expect(html).toContain('<div data-transcript-seq="20"><article');
-      expect(html).not.toContain("work-card");
+      expect(html.match(/class="work-card(?: running)?"/g)).toHaveLength(1);
+      expect(html).toContain('class="work-card-header" aria-expanded="false"');
+      expect(html).not.toContain("work-latest");
       expect(html).not.toContain("conversation-step");
       expect(html).not.toContain("step-arguments");
       expect(html).not.toContain("step-thinking-body");
@@ -93,6 +95,15 @@ test("mono keeps assistant text plain after tools and before an unsettled wait, 
   expect(classic).toContain('<div data-transcript-seq="20"><article');
   expect(classic).toContain("work-card");
   expect(JSON.stringify(entries)).toBe(before);
+});
+
+test("mono never projects hidden wake inputs or their assistant replies as visible narration", () => {
+  const html = render({ mono: true, entries: [user, entry("wake input", "user", { monoVisibility: "hidden" }), entry("quiet answer", "assistant", { monoVisibility: "hidden" }), entry("quiet tool", "toolCall", { monoVisibility: "hidden", toolCall: { name: "read", arguments: {} } }), answer] });
+  expect(html.match(/class="message user/g)).toHaveLength(1);
+  expect(html.match(/class="message assistant/g)).toHaveLength(1);
+  expect(html).not.toContain("wake input");
+  expect(html).not.toContain("quiet answer");
+  expect(html).not.toContain("work-card");
 });
 
 test("autoCollapse false renders every intervening entry individually expanded and in transcript order", () => {

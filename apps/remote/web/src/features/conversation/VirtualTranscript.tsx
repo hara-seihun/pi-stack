@@ -1,5 +1,6 @@
-import { useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useContext, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { REVEAL_VIRTUAL_MESSAGE } from "../../virtual-message-navigation";
+import { ScrollPositionBoundary, ScrollPositionContext } from "../../scroll-boundary";
 
 export const TRANSCRIPT_DOM_BUDGET = 60;
 export function transcriptRange(offsets: readonly number[], top: number, height: number) {
@@ -16,9 +17,10 @@ export function transcriptRange(offsets: readonly number[], top: number, height:
   return { start, end: Math.min(count, start + TRANSCRIPT_DOM_BUDGET, Math.max(end + 3, start + 1)) };
 }
 
-/** Coordinates come from rectangles, not scrollTop: conversation scrollers use reverse flex. */
+/** Rectangle coordinates also account for content before the virtual list. */
 export function VirtualTranscript<T>({ items, itemKey, render, reverseDom = false, messageIds }: { items: readonly T[]; itemKey(item: T): string; render(item: T, index: number): ReactNode; reverseDom?: boolean; messageIds?(item: T): readonly string[] }) {
   const root = useRef<HTMLDivElement>(null);
+  const scrollOwner = useContext(ScrollPositionContext);
   const sizes = useRef(new Map<string, number>());
   const [measurement, measured] = useState(0);
   const [viewport, setViewport] = useState<{ top: number; height: number } | null>(null);
@@ -85,9 +87,9 @@ export function VirtualTranscript<T>({ items, itemKey, render, reverseDom = fals
     return () => observer.disconnect();
   }, [identity, range.start, range.end]);
   const rows = items.slice(range.start, range.end).map((item, index) => <div key={itemKey(item)} data-virtual-key={itemKey(item)} style={{ display: "flow-root", flex: "none" }}>{render(item, range.start + index)}</div>);
-  const top = <div key="top" aria-hidden="true" style={{ height: offsets[range.start], flex: "none" }} />;
-  const bottom = <div key="bottom" aria-hidden="true" style={{ height: offsets.at(-1)! - offsets[range.end], flex: "none" }} />;
-  return <div ref={root} className="virtual-transcript" style={reverseDom ? { display: "flex", flexDirection: "column-reverse" } : undefined}>
+  const top = <div key="top" aria-hidden="true" style={{ height: offsets[range.start], flex: "none", overflowAnchor: "none" }} />;
+  const bottom = <div key="bottom" aria-hidden="true" style={{ height: offsets.at(-1)! - offsets[range.end], flex: "none", overflowAnchor: "none" }} />;
+  return <ScrollPositionBoundary owner={scrollOwner}><div ref={root} className="virtual-transcript" style={reverseDom ? { display: "flex", flexDirection: "column-reverse" } : undefined}>
     {reverseDom ? [bottom, ...rows.reverse(), top] : [top, ...rows, bottom]}
-  </div>;
+  </div></ScrollPositionBoundary>;
 }

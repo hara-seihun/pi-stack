@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { InlineImage } from "../../../../server/inline-image-contract";
 import { agentAvatar, AttachmentImage, ChatMessage, CopyButton } from "../../chat-message";
@@ -8,13 +8,12 @@ import { resourceUrl } from "../../resource-url";
 import { formatResponseMetrics } from "../../response-metrics";
 import type { ContextEntry } from "../../types";
 import { assertNever } from "../../../../shared/explicit-state";
-import { monoMessage } from "../../app/mono";
 import { AgentDisclosure, AgentRoute, copyOutgoingMessage, outgoingAgentMessage, presentAgentMessage, spawnedThread } from "./agent-message";
 import { AGENT_NAME } from "../../../../server/agent-identity";
 import { useItemBody } from "./item-bodies";
 import { completeMessageEntry, loadMessageEntry } from "./message-body";
 import { ThreadChips, threadIdsOf } from "./thread-chips";
-import { appendLiveThinking, buildStableTranscript, type TranscriptItem } from "./transcript-model";
+import { appendLiveThinking, buildStableTranscript, visibleKind, type TranscriptItem } from "./transcript-model";
 import { VirtualTranscript } from "./VirtualTranscript";
 import { useVisualClock } from "../status/visual-clock";
 import { useVisibleHeads } from "./visible-heads";
@@ -22,7 +21,7 @@ import type { VisibleTranscriptRange } from "./transcript-store";
 import { duration, toolSummary } from "./tool-summary";
 import "./transcript.css";
 
-type RenderedTranscriptItem = TranscriptItem | { kind: "step"; entry: ContextEntry };
+type RenderedTranscriptItem = TranscriptItem | { kind: "step" | "outgoing" | "incoming"; entry: ContextEntry };
 const transcriptMessageIds = (item: RenderedTranscriptItem): readonly string[] => item.kind !== "work" && item.entry.identity ? [item.entry.identity.id] : [];
 
 export interface TranscriptProps {
@@ -109,7 +108,7 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, autoCollapse
   const [open, setOpen] = useState(!autoCollapse);
   useEffect(() => setOpen(!autoCollapse), [autoCollapse]);
   const incoming = presentAgentMessage(entry).agentSender;
-  const body = useItemBody(entry.itemId, expanded || !!incoming && open, entry.size);
+  const body = useItemBody(entry.itemId, expanded || !!incoming && open || mono && entry.kind === "user" && !incoming && entry.textTruncated === true, entry.size);
   const loaded = body.body ? completeMessageEntry(entry, body.body) : null;
   const presented = presentAgentMessage(loaded?.ok ? loaded.value : entry);
   const text = presented.text || "";
@@ -354,28 +353,54 @@ function workHeading(item: Extract<TranscriptItem, { kind: "work" }>, running: b
   return `Work · ${parts.join(" · ")}`;
 }
 
-const WorkCard = memo(function WorkCard({ item, newest, sessionId, home, onThinkingOpen }: {
+function WorkEntry({ entry, sessionId, home, mono, autoCollapse, onThinkingOpen, onEdit, onReply }: {
+  entry: ContextEntry;
+  sessionId: string;
+  home: string;
+  mono: boolean;
+  autoCollapse: boolean;
+  onThinkingOpen?(open: boolean): void;
+  onEdit(entry: ContextEntry): void;
+  onReply(target: ReplyTarget): void;
+}) {
+  if (outgoingAgentMessage(entry)) return <OutgoingEntry entry={entry} sessionId={sessionId} autoCollapse={autoCollapse} />;
+  if (entry.kind === "user" && presentAgentMessage(entry).agentSender) return <MessageEntry entry={entry} sessionId={sessionId} mono={mono} autoCollapse={autoCollapse} onEdit={onEdit} onReply={onReply} />;
+  return <Step entry={entry} sessionId={sessionId} home={home} forceExpanded={!autoCollapse} onThinkingOpen={onThinkingOpen} />;
+}
+
+const WorkCard = memo(function WorkCard({ item, newest, sessionId, home, mono, expanded, onExpanded, onThinkingOpen, onEdit, onReply }: {
   item: Extract<TranscriptItem, { kind: "work" }>;
   newest: boolean;
   sessionId: string;
   home: string;
+  mono: boolean;
+  expanded: boolean;
+  onExpanded(key: string, expanded: boolean): void;
   onThinkingOpen?(open: boolean): void;
+  onEdit(entry: ContextEntry): void;
+  onReply(target: ReplyTarget): void;
 }) {
-  const [expanded, setExpanded] = useState(false);
   const running = newest && item.running;
   const { ref, elapsed } = useElapsed<HTMLElement>(item.summary.startedAt, running);
   return <section ref={ref} className={`work-card${running ? " running" : ""}${item.summary.hasErrors ? " has-errors" : ""}`}>
-    <button type="button" className="work-card-header" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
+    <button type="button" className="work-card-header" aria-expanded={expanded} onClick={() => onExpanded(`${sessionId}:${item.key}`, !expanded)}>
       <span className="work-chevron" aria-hidden="true">›</span>
       <span>{workHeading(item, running, elapsed, expanded)}</span>
     </button>
     {expanded
-      ? <div className="work-steps"><VirtualTranscript items={item.entries} itemKey={entry => entry.key} render={entry => <Step entry={entry} sessionId={sessionId} home={home} onThinkingOpen={onThinkingOpen} />} />{item.live && <Step entry={item.live} sessionId={sessionId} home={home} onThinkingOpen={onThinkingOpen} />}</div>
-      : <div className="work-latest"><Step entry={item.latest} sessionId={sessionId} home={home} forceExpanded={running && !item.latest.live} onThinkingOpen={onThinkingOpen} /></div>}
+      ? <div className="work-steps"><VirtualTranscript items={item.entries} messageIds={entry => entry.identity ? [entry.identity.id] : []} itemKey={entry => entry.key} render={entry => <WorkEntry entry={entry} sessionId={sessionId} home={home} mono={mono} autoCollapse={false} onThinkingOpen={onThinkingOpen} onEdit={onEdit} onReply={onReply} />} />{item.live && <Step entry={item.live} sessionId={sessionId} home={home} onThinkingOpen={onThinkingOpen} />}</div>
+      : !mono && <div className="work-latest">{outgoingAgentMessage(item.latest) || item.latest.kind === "user"
+        ? <WorkEntry entry={item.latest} sessionId={sessionId} home={home} mono={mono} autoCollapse onThinkingOpen={onThinkingOpen} onEdit={onEdit} onReply={onReply} />
+        : <Step entry={item.latest} sessionId={sessionId} home={home} forceExpanded={running && !item.latest.live} onThinkingOpen={onThinkingOpen} />}</div>}
   </section>;
 }, (before, after) => before.newest === after.newest
   && before.sessionId === after.sessionId
   && before.home === after.home
+  && before.mono === after.mono
+  && before.expanded === after.expanded
+  && before.onExpanded === after.onExpanded
+  && before.onEdit === after.onEdit
+  && before.onReply === after.onReply
   && before.onThinkingOpen === after.onThinkingOpen
   && before.item.running === after.item.running
   && before.item.latest.signature === after.item.latest.signature
@@ -383,9 +408,30 @@ const WorkCard = memo(function WorkCard({ item, newest, sessionId, home, onThink
   && before.item.entries.every((entry, index) => entry.signature === after.item.entries[index]?.signature));
 
 export function Transcript({ entries, liveThinking, thinkingActive, autoCollapse = true, mono = false, sessionId, home, images, earlierAvailable, loadingEarlier, earlierError, onShowEarlier, newerAvailable, onShowNewer, onVisibleRange, onThinkingOpen, onEdit, onReply }: TranscriptProps) {
-  const stable = useMemo(() => buildStableTranscript(mono ? entries.filter(monoMessage) : entries), [entries, mono]);
-  const grouped = useMemo(() => mono ? stable : appendLiveThinking(stable, liveThinking, thinkingActive), [stable, liveThinking, thinkingActive, mono]);
-  const items = useMemo(() => autoCollapse ? grouped : grouped.flatMap<RenderedTranscriptItem>(item => item.kind === "work" ? [...item.entries, ...(item.live ? [item.live] : [])].map(entry => ({ kind: "step" as const, entry })) : [item]), [grouped, autoCollapse]);
+  const [expandedWork, setExpandedWork] = useState<ReadonlySet<string>>(() => new Set());
+  const onExpanded = useCallback((key: string, expanded: boolean) => {
+    setExpandedWork(previous => {
+      const next = new Set(previous);
+      if (expanded) next.add(key); else next.delete(key);
+      return next;
+    });
+  }, []);
+  const retainedEntries = useMemo(() => mono ? entries.filter(entry => entry.monoVisibility !== "hidden") : entries, [entries, mono]);
+  const stable = useMemo(() => buildStableTranscript(retainedEntries, mono), [retainedEntries, mono]);
+  const grouped = useMemo(() => appendLiveThinking(stable, liveThinking, thinkingActive, mono), [stable, liveThinking, thinkingActive, mono]);
+  const items = useMemo<RenderedTranscriptItem[]>(() => {
+    if (mono || autoCollapse) return grouped;
+    const expanded: RenderedTranscriptItem[] = retainedEntries.map(entry => {
+      const kind = visibleKind(entry);
+      return { kind: kind ?? (outgoingAgentMessage(entry) ? "outgoing" : entry.kind === "user" && presentAgentMessage(entry).agentSender ? "incoming" : "step"), entry };
+    });
+    const liveWork = grouped.findLast(item => item.kind === "work" && (item.live || item.entries.some(entry => entry.live)));
+    if (liveWork?.kind === "work") {
+      const live = liveWork.live ?? liveWork.entries.find(entry => entry.live);
+      if (live) expanded.push({ kind: "step", entry: live });
+    }
+    return expanded;
+  }, [grouped, retainedEntries, autoCollapse, mono]);
   const ref = useVisibleHeads(items, onVisibleRange);
   const visible = items;
   const newestWork = items.findLastIndex(item => item.kind === "work");
@@ -396,7 +442,7 @@ export function Transcript({ entries, liveThinking, thinkingActive, autoCollapse
       </button>}
       {earlierError && <p className="context-earlier-error" role="status">{earlierError}</p>}
       <VirtualTranscript items={visible} messageIds={transcriptMessageIds} itemKey={item => `${sessionId}:${item.kind === "work" ? item.key : item.entry.key}`} render={(item, index) => item.kind === "work"
-        ? <WorkCard item={item} newest={index === newestWork} sessionId={sessionId} home={home} onThinkingOpen={onThinkingOpen} />
+        ? <WorkCard item={item} newest={index === newestWork} sessionId={sessionId} home={home} mono={mono} expanded={expandedWork.has(`${sessionId}:${item.key}`)} onExpanded={onExpanded} onThinkingOpen={onThinkingOpen} onEdit={onEdit} onReply={onReply} />
         : item.kind === "step"
           ? <Step entry={item.entry} sessionId={sessionId} home={home} forceExpanded onThinkingOpen={onThinkingOpen} />
           : item.kind === "outgoing"
