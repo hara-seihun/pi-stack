@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""Capture original technical environment/path metadata into protected scoped bindings."""
+import copy
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+from core_namespace import absolute, publish, trusted
+
+SAFE_NAMES = {'HOME', 'USER', 'LOGNAME', 'PATH', 'SHELL', 'LANG', 'LC_ALL', 'TMPDIR', 'XDG_RUNTIME_DIR', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME'}
+RETIRED = ('PI_REMOTE_SPEECH', 'PI_LOCAL_MODEL', 'PI_CONDENSE', 'PI_AGENT_FACTORY')
+
+
+def environment(pid):
+    selected = {}
+    for entry in Path(f'/proc/{pid}/environ').read_bytes().split(b'\0'):
+        if b'=' not in entry:
+            continue
+        name, value = entry.split(b'=', 1)
+        name, value = name.decode(), value.decode()
+        credential_literal = any(word in name for word in ('TOKEN', 'PASSWORD', 'SECRET', 'CAPABILITY', 'CREDENTIAL')) and not name.endswith(('_FILE', '_PATH', '_DIR'))
+        if credential_literal or value.startswith('/proc/self/fd/') or any(name.startswith(prefix) for prefix in RETIRED):
+            continue
+        if name in SAFE_NAMES or name.startswith('PI_') and (value.startswith('/') or name.endswith('_URL') and re.fullmatch(r'http://(?:127\.0\.0\.1|localhost|\[::1\]):\d+(?:/[^\s]*)?', value)):
+            selected[name] = value
+    return selected
+
+
+METADATA = r'''
+import json,os,sqlite3,sys
+result=[]
+for item in json.load(sys.stdin):
+ out={'id':item['id'],'cwd':[],'managerIds':[],'tables':[]}
+ try:
+  db=sqlite3.connect('file:'+item['databasePath']+'?mode=ro',uri=True,timeout=1)
+  tables=[row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")];out['tables']=tables
+  if 'thread' in tables:
+   cols={row[1] for row in db.execute('PRAGMA table_info(thread)')}
+   if 'cwd' in cols:out['cwd']=[row[0] for row in db.execute('SELECT DISTINCT cwd FROM thread WHERE cwd IS NOT NULL')]
+   if 'metadata' in cols:out['managerIds']=[row[0] for row in db.execute("SELECT id FROM thread WHERE json_extract(metadata,'$.manager')=1")]
+  db.close()
+ except (OSError,sqlite3.Error) as e:out['error']=type(e).__name__
+ result.append(out)
+print(json.dumps(result))
+'''
+
+
+def collect(directory, runtime_path, output_path):
+    original = trusted(directory / 'manifest.json')
+    base = trusted(directory / 'activation/core-config.projection.json')['config']
+    adoption = trusted(directory / 'host-plans/scope-adoption.plan.json')
+    runtime = trusted(runtime_path)
+    initial = {item['id']: item for item in original['scopes']}
+    plans = {item['scopeId']: item for item in adoption['scopes']}
+    owners = {item['unit']: item for item in adoption['owners']}
+    envs = {unit: environment(item['namespace']['pid']) for unit, item in owners.items()}
+    grouped = {}
+    for scope in base['scopes']:
+        plan = plans[scope['id']]
+        if 'source' in plan:
+            grouped.setdefault((plan['ownerUnit'], plan['uid'], plan['gid']), []).append({'id': scope['id'], 'databasePath': plan['databasePath']})
+    observed = {}
+    for (unit, uid, gid), scopes in grouped.items():
+        # The finite stdin program reads schema/cwd/manager identity, never messages or titles.
+        descriptor = os.open(__import__('core_namespace').namespace_path(owners[unit]['pinned']), os.O_RDONLY)
+        try:
+            response = subprocess.run(['nsenter', f'--mount=/proc/self/fd/{descriptor}', '--', 'setpriv', '--reuid='+str(uid), '--regid='+str(gid), '--clear-groups', 'python3', '-c', METADATA], input=json.dumps(scopes), text=True, capture_output=True, pass_fds=(descriptor,), check=True, timeout=15)
+            observed.update({item['id']: item for item in json.loads(response.stdout)})
+        finally:
+            os.close(descriptor)
+    result, pending, absent = [], [], []
+    for original_scope in base['scopes']:
+        scope = copy.deepcopy(original_scope)
+        plan = plans[scope['id']]
+        recorded = initial.get(scope['id'])
+        references = {} if recorded is None else recorded.get('environmentReferences', {})
+        if 'source' not in plan:
+            # Locked/inactive resource descriptors are inert and retain their declared paths.
+            scope['environment'] = dict(references)
+            scope['resources'] = [{'path': str(Path(scope['storage']['databasePath']).parent), 'kind': 'directory'}, {'path': scope['storage']['sessionsDir'], 'kind': 'directory'}]
+            scope['custody']['namespace'] = {'kind': 'host'}
+            scope['custody']['retainedRunnerNamespace'] = {'kind': 'host'}
+        else:
+            scope['storage'].update({key: plan[key] for key in ('databasePath', 'sessionsDir', 'capabilityKeyPath', 'adoptionReceiptPath')})
+            source = plan['source']
+            root = plan['ownerUnit'] == 'pi-kenan-root.service'
+            data = source if source['kind'] == 'host' else runtime['namespace']
+            scope['custody']['namespace'] = data
+            scope['custody']['retainedRunnerNamespace'] = data if root else source
+            scope['environment'] = {**envs[plan['ownerUnit']], **references}
+            if root:
+                credentials = trusted(directory / 'activation/final-schema/root.fragment.json')['credentials']
+                scope['environment'].update({'PI_KENAN_MEMORY_ROOT_TOKEN_FILE': credentials['memoryRootTokenFile'], 'PI_KENAN_ROOT_ADMIN_CAPABILITY_FILE': credentials['adminCapabilityFile'], 'PI_KENAN_ROOT_CONSENT_TOKEN_FILE': credentials['consentCapabilityFile']})
+            paths = {str(Path(plan['databasePath']).parent): 'directory', plan['sessionsDir']: 'directory', str(Path(plan['capabilityKeyPath']).parent): 'directory'}
+            for value in scope['environment'].values():
+                if value.startswith('/') and ':' not in value:
+                    paths.setdefault(value, 'unknown')
+            meta = observed[scope['id']]
+            for cwd in meta['cwd']:
+                if isinstance(cwd, str) and cwd.startswith('/'):
+                    paths[cwd] = 'directory'
+            # Batched path observations below use one process per unique data view.
+            scope['resources'] = [{'path': path, 'kind': kind} for path, kind in paths.items()]
+            scope['capturedManagerIds'] = meta['managerIds']
+            if 'error' in meta:
+                pending.append({'code': 'SCOPE_METADATA_UNAVAILABLE', 'scopeId': scope['id']})
+        result.append({key: scope[key] for key in ('id', 'storage', 'custody', 'environment', 'resources')} | {'capturedManagerIds': scope.get('capturedManagerIds', [])})
+    views = {}
+    for scope in result:
+        if plans[scope['id']].get('source'):
+            view = json.dumps(scope['custody']['namespace'], sort_keys=True)
+            views.setdefault(view, set()).update(item['path'] for item in scope['resources'])
+    path_info = {}
+    program = "import json,os,sys;from pathlib import Path;out={}\nfor p in json.load(sys.stdin):\n try:\n  s=os.stat(p);out[p]={'kind':'directory' if Path(p).is_dir() else 'file','dev':str(s.st_dev),'ino':str(s.st_ino)}\n except OSError as e:out[p]={'error':e.errno}\nprint(json.dumps(out))"
+    from core_namespace import namespace_path
+    for view, paths in views.items():
+        descriptor = os.open(namespace_path(json.loads(view)), os.O_RDONLY)
+        try:
+            response = subprocess.run(['nsenter', f'--mount=/proc/self/fd/{descriptor}', '--', 'python3', '-c', program], input=json.dumps(sorted(paths)), text=True, capture_output=True, pass_fds=(descriptor,), check=True, timeout=10)
+            path_info[view] = json.loads(response.stdout)
+        finally:
+            os.close(descriptor)
+    for scope in result:
+        if not plans[scope['id']].get('source'):
+            continue
+        view = json.dumps(scope['custody']['namespace'], sort_keys=True)
+        registered = []
+        for entry in scope['resources']:
+            info = path_info[view][entry['path']]
+            if 'error' in info:
+                evidence = {'code': 'REGISTERED_PATH_ABSENT', 'scopeId': scope['id'], 'path': entry['path'], 'errno': info['error']}
+                required = {str(Path(scope['storage']['databasePath']).parent), scope['storage']['sessionsDir'], str(Path(scope['storage']['capabilityKeyPath']).parent)}
+                (pending if entry['path'] in required else absent).append(evidence)
+                continue
+            registered.append({'path': entry['path'], 'kind': info['kind']})
+        scope['resources'] = registered
+    value = {'version': 1, 'scopes': result, 'metadata': {'privateContentRead': False, 'pending': pending, 'absentOptionalPaths': absent, 'sourceSchemas': observed}}
+    publish(output_path, value)
+    return {'scopeCount': len(result), 'pendingCount': len(pending), 'writtenPath': str(output_path)}
+
+
+if __name__ == '__main__':
+    try:
+        if os.geteuid() != 0 or len(sys.argv) != 4:
+            raise ValueError('usage: root core-bindings MIGRATION_DIRECTORY RUNTIME_JSON OUTPUT_JSON')
+        print(json.dumps({'ok': True, 'value': collect(*(absolute(path) for path in sys.argv[1:]))}))
+    except (OSError, KeyError, ValueError, TypeError, subprocess.SubprocessError) as error:
+        print(json.dumps({'ok': False, 'error': {'code': 'core-bindings-unavailable', 'message': str(error)}}))
+        sys.exit(75)
