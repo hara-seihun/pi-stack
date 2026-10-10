@@ -17,7 +17,7 @@ Environment=PI_CODING_AGENT_DIR=/home/%i/.pi/agent
 ExecStart=/usr/local/bin/node /srv/pi/pi-orchestrator/dist/cli.js daemon
 Restart=always
 RestartSec=5
-TimeoutStopSec=10
+TimeoutStopSec=90
 UMask=0007
 MemoryHigh=4G
 MemoryMax=6G
