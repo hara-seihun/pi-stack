@@ -1,6 +1,10 @@
 #!/usr/bin/python3
 import http.client
 import http.server
+import json
+import subprocess
+import tempfile
+import os
 import pathlib
 import runpy
 import socket
@@ -18,6 +22,7 @@ class Host:
     expected = 'new'
 
     def __init__(self, *, protocol=2, busy=False, selected=False, fail=None, migration=False):
+        self.config = {'runtimeRoot': '/fixture/not-installed/runtime'}
         self.protocol, self.busy, self.fail = protocol, busy, fail
         self.commits = {role: 'new' if selected else 'old' for role in ['root', 'memory', 'rooms']}
         self.calls = []
@@ -103,7 +108,23 @@ class HTTPProbes(unittest.TestCase):
             with self.assertRaises(Deferred): self.host.ready('rooms')
             command.assert_not_called()
         with patch.object(self.host, 'command', return_value='active'):
-            with self.assertRaisesRegex(RuntimeError, 'running release'): prove(self.host)
+            with self.assertRaisesRegex(RuntimeError, 'running source'): prove(self.host)
+
+
+class SourceMatches(unittest.TestCase):
+    def test_changed_owner_is_a_replacement_not_a_failed_source_proof(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan = pathlib.Path(directory)/'plan.json'
+            plan.write_text(json.dumps({'candidate': 'new'}))
+            host = module['Host']({}, 'new')
+            for code in ['host-owner-source-stale', 'host-plan-source-mismatch', 'host-plan-source-unavailable']:
+                error = subprocess.CalledProcessError(66, ['node'], output=json.dumps({'ok': False, 'error': {'code': code}}))
+                with patch.dict(os.environ, {'PI_STACK_HOST_PLAN': str(plan)}), patch.object(host, 'command', side_effect=error):
+                    if code == 'host-owner-source-stale':
+                        self.assertFalse(module['release_matches'](host, 'memory', 'old'))
+                    else:
+                        with self.assertRaises(subprocess.CalledProcessError):
+                            module['release_matches'](host, 'memory', 'old')
 
 
 class Activation(unittest.TestCase):
@@ -126,7 +147,7 @@ class Activation(unittest.TestCase):
         self.assertIn(('ready', 'rooms', '123'), host.calls)
         self.assertFalse(host.paused)
         self.assertFalse(any('custody' in ' '.join(call) for call in host.calls))
-        with self.assertRaisesRegex(RuntimeError, 'running release'): prove(Host())
+        with self.assertRaisesRegex(RuntimeError, 'running source'): prove(Host())
 
     def test_prepared_protocol_one_idle_owner_is_replaced_before_memory_or_rooms(self):
         host = Host(protocol=1)

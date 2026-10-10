@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { checkExecutor, checkKey, checkPolicy } from './check-cache.mjs';
+import { checkExecutor, checkKey, checkPolicy, toolchain } from './check-cache.mjs';
 import { checkJobs } from './test.mjs';
 import { runJobs } from './run-jobs.mjs';
 
@@ -21,7 +21,7 @@ function fixture() {
 const job = ['mail send boundary', 'python3', ['-B', 'tools/mail-send/test_send.py']];
 
 test('every shipping check declares inputs or an output-producing stage', () => {
-  for (const [name] of checkJobs) assert.ok(['run', 'memo'].includes(checkPolicy(name).kind), name);
+  for (const job of checkJobs) assert.ok(['run', 'memo'].includes(checkPolicy(job[0], job).kind), job[0]);
   assert.throws(() => checkPolicy('new unregistered check'), /No declared/);
 });
 
@@ -84,7 +84,7 @@ test('failed or mutated stages cannot manufacture pass receipts; corrupt receipt
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('output stages always run; cached prerequisites still obey the graph', async () => {
+test('revision reconciliation always runs; cached prerequisites still obey the graph', async () => {
   const root = fixture();
   const exit = process.exitCode;
   try {
@@ -97,4 +97,21 @@ test('output stages always run; cached prerequisites still obey the graph', asyn
     await runJobs(jobs, { execute, write: () => {} });
     assert.deepEqual(calls, ['Remote build', 'mail send boundary', 'Remote build']);
   } finally { process.exitCode = exit; rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Vitest result caches are outputs, not installed dependency mutation', () => {
+  const root = fixture();
+  try {
+    mkdirSync(join(root, 'node_modules/example'), { recursive: true });
+    writeFileSync(join(root, 'node_modules/example/index.js'), 'export const value = 1');
+    mkdirSync(join(root, 'packages/orchestrator'), { recursive: true });
+    writeFileSync(join(root, 'packages/orchestrator/package.json'), JSON.stringify({ name: 'pi-orchestrator' }));
+    const before = toolchain(root);
+    const cache = join(root, 'packages/orchestrator/node_modules/.vite/vitest/fixture');
+    mkdirSync(cache, { recursive: true });
+    writeFileSync(join(cache, 'results.json'), JSON.stringify({ passed: true }));
+    assert.deepEqual(toolchain(root), before);
+    writeFileSync(join(root, 'node_modules/example/index.js'), 'export const value = 2');
+    assert.notDeepEqual(toolchain(root), before);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

@@ -383,8 +383,8 @@ it("projects durable person-input recency without agent sends, notifications or 
     sessionFile: join(directory, "recency.jsonl"), settings: { model: "sol", thinkingLevel: "high", speed: "standard" },
     createdAt: 1, updatedAt: 2 }));
   expect(thread.lastUserMessageAt).toBeUndefined();
-  value(service.importMessage({ id: "person-old", threadId: thread.id, text: "first", createdAt: 10, state: "done" }));
-  value(service.importMessage({ id: "person-new", threadId: thread.id, text: "next", createdAt: 20, state: "done" }));
+  value(service.importMessage({ id: "person-old", threadId: thread.id, humanActivity: true, text: "first", createdAt: 10, state: "done" }));
+  value(service.importMessage({ id: "person-new", threadId: thread.id, humanActivity: true, text: "next", createdAt: 20, state: "done" }));
   value(service.importMessage({ id: "agent", threadId: thread.id, senderId: "child", text: "agent send", createdAt: 30, state: "done" }));
   value(service.importMessage({ id: "notice", threadId: thread.id, source: "notification", text: "notice", createdAt: 40, state: "done" }));
   value(service.importMessage({ id: "person-new", threadId: thread.id, text: "next", createdAt: 50, state: "done" }));
@@ -2877,6 +2877,24 @@ describe("thread inspection", () => {
     expect(known.knownToolCallIds).toEqual(["call"]);
     expect(known.completedToolCallIds).toEqual(["call"]);
     expect(known.records.map(record => record.entryId)).toEqual(["m0"]);
+  });
+  it("reprojects a native window when its writer appends a paired result during reading", async () => {
+    const { service, directory } = fixture();
+    const thread = value(await service.spawn({ requestId: "window-append-race", cwd: directory }));
+    const call = { type: "message", id: "call", parentId: null, message: { role: "assistant", content: [{ type: "toolCall", id: "tool", name: "Bash", arguments: {} }] } };
+    const result = { type: "message", id: "result", parentId: "call", message: { role: "toolResult", toolCallId: "tool", content: "finished" } };
+    writeFileSync(thread.sessionFile, JSON.stringify(call) + "\n");
+    const initial = value(await service.inspect(thread.id, { contextWindow: { limit: 1 } })).contextWindow!;
+    const identify = (service as any).nativeMessageIdentity.bind(service);
+    vi.spyOn(service as any, "nativeMessageIdentity").mockImplementationOnce((...args) => {
+      appendFileSync(thread.sessionFile, JSON.stringify(result) + "\n");
+      return identify(...args);
+    });
+    const window = value(await service.inspect(thread.id, { contextWindow: { limit: 1, generation: initial.source.generation, toolCallIds: ["tool"] } })).contextWindow!;
+    expect(window.source.generation).toBe(initial.source.generation);
+    expect(window.source.revision).not.toBe(initial.source.revision);
+    expect(window.records).toMatchObject([{ entryId: "call", results: [result.message] }]);
+    expect(window.completedToolCallIds).toEqual(["tool"]);
   });
   it("reads paired results only for tool-call items intersecting the requested window", async () => {
     const { service, directory } = fixture();

@@ -37,7 +37,7 @@ export function rootService(options: RootServiceOptions): ((request: Request) =>
   let active = 0;
   const rpc = async <T>(path: string, body: unknown): Promise<MemoryResult<T>> => {
     const started = performance.now();
-    const stage = path === "/v1/root/admit" ? "admit" : (path === "/v1/root/authorize-request" || path === "/v1/root/resume-request") ? "authorize" : path === "/v1/root/log-request-status" ? "request-status" : "finalize";
+    const stage = path === "/v1/root/admit" ? "admit" : (path === "/v1/root/authorize-request" || path === "/v1/root/authenticate-caller" || path === "/v1/root/resume-request") ? "authorize" : path === "/v1/root/log-request-status" ? "request-status" : "finalize";
     try {
       const response = await transport(new URL(path, options.memoryUrl), { method: "POST", headers: { "content-type": "application/json", [MEMORY_TOKEN_HEADER]: options.memoryRootToken }, body: JSON.stringify(body), signal: AbortSignal.timeout(10_000) });
       const result = await response.json();
@@ -169,6 +169,7 @@ export function rootService(options: RootServiceOptions): ((request: Request) =>
     throw new Error("Invalid root request status");
   };
   const authorize = (callerToken: string, record: RootRequest) => rpc("/v1/root/authorize-request", { callerToken, rootSessionId: record.admission.rootSessionId });
+  const notAccepted = (requestId: string) => Response.json({ requestId, state: "not-accepted", safeToResubmit: true }, { headers: { "cache-control": "no-store" } });
   const handle = async (request: Request): Promise<Response> => {
     if (!options.enabled()) return Response.json({ error: "Root Kenan is disabled" }, { status: 503 });
     const path = new URL(request.url).pathname;
@@ -206,9 +207,15 @@ export function rootService(options: RootServiceOptions): ((request: Request) =>
     if (!callerToken) return Response.json({ error: "An authenticated thread is required" }, { status: 403 });
     if (lookup) {
       if (!new RegExp(KENAN_REQUEST_ID_PATTERN).test(lookup[1]!)) return new Response("Not found", { status: 404 });
-      while (accepting.has(lookup[1]!)) await accepting.get(lookup[1]!);
-      let record = requests.get(lookup[1]!);
-      if (!record) return new Response("Not found", { status: 404 });
+      const id = lookup[1]!;
+      const authenticated = await rpc("/v1/root/authenticate-caller", { callerToken });
+      if (!authenticated.ok) return new Response("Not found", { status: authenticated.error === "unauthenticated" ? 404 : 503 });
+      while (accepting.has(id)) await accepting.get(id);
+      let record = requests.get(id);
+      if (!record) {
+        requests.fenceNotAccepted(id);
+        return notAccepted(id);
+      }
       const authorized = await authorize(callerToken, record);
       if (!authorized.ok) return new Response("Not found", { status: authorized.error === "unauthenticated" ? 404 : 503 });
       if (record.state === "finalizing" && !releaseState.dispatchPaused) await finalize(record);
@@ -226,6 +233,11 @@ export function rootService(options: RootServiceOptions): ((request: Request) =>
     const id = suppliedId ?? randomUUID();
     while (accepting.has(id)) await accepting.get(id);
     const prior = requests.get(id);
+    if (!prior && requests.notAccepted(id)) {
+      const authenticated = await rpc("/v1/root/authenticate-caller", { callerToken });
+      if (!authenticated.ok) return new Response("Not found", { status: authenticated.error === "unauthenticated" ? 404 : 503 });
+      return notAccepted(id);
+    }
     if (prior) {
       const authorized = await authorize(callerToken, prior);
       if (!authorized.ok) return new Response("Not found", { status: authorized.error === "unauthenticated" ? 404 : 503 });

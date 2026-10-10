@@ -1,143 +1,198 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, renameSync, writeFileSync } from 'node:fs';
-import { join, resolve, relative } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { runJob } from './run-jobs.mjs';
+import { inputGraph, planCheck, sourceFiles } from './check-plan.mjs';
+export { checkPolicy } from './check-plan.mjs';
 
-const foundation = ['package.json', 'package-lock.json', 'vendor', 'skills', 'scripts/test-node.mjs'];
-const packages = ['packages'];
-const application = [...packages, 'apps', 'config', 'deploy', 'scripts'];
-const deployment = [...application, 'tools'];
-
-export function checkPolicy(name) {
-  if (['orchestrator memory build', 'orchestrator types', 'orchestrator shared RPC', 'Kenan build', 'Remote build'].includes(name)) return { kind: 'run' };
-  if (name.startsWith('agent workspace ')) return { kind: 'memo', inputs: ['tools/agent-workspace'] };
-  if (name.startsWith('orchestrator ')) return { kind: 'memo', inputs: [...packages, 'config', 'apps/remote/shared'] };
-  if (['config', 'transport', 'roots', 'core', 'gate', 'bundle', 'source', 'progress', 'proof', 'telephone'].some(suite => name === `publication ${suite}`)) return { kind: 'memo', inputs: deployment };
-  const policies = {
-    'job lifecycle': deployment,
-    'explicit state dispatch': deployment,
-    manifests: deployment,
-    'account deployment': deployment,
-    'deploy lock': deployment,
-    'deploy host guest disabled': deployment,
-    'deploy host guest enabled': deployment,
-    publication: deployment,
-    'Android publication': deployment,
-    'remote deployment': deployment,
-    tools: deployment,
-    'user usage': ['tools/user-usage'],
-    'Claude reset collector': ['tools/claude-reset'],
-    runtime: ['packages/runtime', 'scripts'],
-    'runtime dependency closure': deployment,
-    'One Kenan deployment': deployment,
-    'prompt availability': ['deploy/prompt-availability', 'scripts/prompt-availability.test.py'],
-    'Meet recognition protocol': ['apps/meet-recognition'],
-    'action journal publication': deployment,
-    'mail send boundary': ['tools/mail-send'],
-    'Kenan memory': [...packages, 'config'],
-    'life import': [...packages, 'scripts/life-import.ts', 'scripts/life-import.test.ts'],
-    'Root Kenan': [...packages, 'config', 'scripts'],
-    remote: [...packages, 'apps', 'config', 'deploy/android-update', 'deploy/android-native-artifact.mjs', 'deploy/remote-resources.mjs', 'tools/read-condensed-session', 'scripts/migrate-native-history.mjs', 'scripts/build-workspace.mjs'],
-    mcp: ['tools/mcp'],
-    'mcp-script': ['tools/mcp-script', 'tools/mcp'],
-    'session readers': ['tools/read-condensed-session'],
-  };
-  if (!Object.hasOwn(policies, name)) throw new Error(`No declared check inputs for ${name}`);
-  return { kind: 'memo', inputs: policies[name] };
-}
-
+const contract = 'check-pass-v2';
+const digest = value => createHash('sha256').update(value).digest('hex');
 function git(root, args) {
   const result = spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', timeout: 10_000 });
-  if (result.status !== 0) throw new Error(`Check source inspection failed: ${result.error?.message ?? result.stderr}`);
+  if (result.status !== 0) throw new Error(`check-source-inspection: ${result.error?.message ?? result.stderr}`);
   return result.stdout.trimEnd();
 }
+function atomicJson(path, value) {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  writeFileSync(temporary, JSON.stringify(value) + '\n', { mode: 0o600 });
+  renameSync(temporary, path);
+}
 
-export function toolchain() {
-  const versions = {};
-  for (const [command, args] of [['bun', ['--version']], ['python3', ['--version']], ['git', ['--version']], ['npm', ['--version']]]) {
+export function fingerprintTree(root, { indexPath, skip = () => false } = {}) {
+  const index = indexPath && existsSync(indexPath) ? JSON.parse(readFileSync(indexPath, 'utf8')) : { contract: 'content-index-v1', files: {} };
+  if (index.contract !== 'content-index-v1') throw new Error('invalid-content-index');
+  const next = { contract: 'content-index-v1', files: {} }, visited = new Set(), hash = createHash('sha256');
+  function visit(path, name) {
+    if (skip(name, path)) return;
+    const stat = lstatSync(path, { bigint: true });
+    const identity = [stat.dev, stat.ino, stat.mode, stat.size, stat.mtimeNs, stat.ctimeNs].join(':');
+    hash.update(name).update('\0').update(String(stat.mode)).update('\0');
+    if (stat.isSymbolicLink()) {
+      const target = readlinkSync(path);
+      hash.update(target).update('\0');
+      const actual = realpathSync(path);
+      if (!skip(name, actual) && !visited.has(actual)) { visited.add(actual); visit(actual, `${name}@target`); }
+    } else if (stat.isDirectory()) {
+      for (const entry of readdirSync(path).sort()) visit(join(path, entry), name ? `${name}/${entry}` : entry);
+    } else if (stat.isFile()) {
+      const previous = index.files[path];
+      const content = previous?.identity === identity ? previous.content : digest(readFileSync(path));
+      next.files[path] = { identity, content };
+      hash.update(content).update('\0');
+    } else throw new Error(`unsupported-check-input: ${path}`);
+  }
+  if (!existsSync(root)) return { state: 'absent' };
+  visit(root, '');
+  if (indexPath) atomicJson(indexPath, next);
+  return { state: 'present', digest: hash.digest('hex'), files: Object.keys(next.files).length };
+}
+
+export function toolchain(root, directory) {
+  const tools = {};
+  for (const [command, args] of [[process.execPath, ['--version']], ['bun', ['--version']], ['python3', ['--version']], ['git', ['--version']], ['npm', ['--version']]]) {
     const result = spawnSync(command, args, { encoding: 'utf8', timeout: 5_000 });
-    if (result.status !== 0) throw new Error(`Cannot identify check tool ${command}`);
-    versions[command] = result.stdout.trim();
+    const located = command.startsWith('/') ? command : spawnSync('which', [command], { encoding: 'utf8', timeout: 1000 }).stdout?.trim();
+    if (result.status !== 0 || !located) throw new Error(`unidentified-check-tool: ${command}`);
+    tools[command === process.execPath ? 'node' : command] = { version: result.stdout.trim(), executable: digest(readFileSync(realpathSync(located))) };
   }
-  return { node: process.version, platform: process.platform, arch: process.arch, ...versions };
+  const source = resolve(root);
+  const skip = (name, path) => name.split('/').some(part => ['.cache', '.vite'].includes(part)) || name.startsWith('.pi-stack-') ||
+    ['apps', 'packages', 'tools'].some(area => path.startsWith(`${source}/${area}/`) && !path.split('/').includes('node_modules'));
+  const dependencyAreas = ['node_modules', ...sourceFiles(root, ['apps', 'packages', 'tools'])
+    .filter(file => /^(?:apps|packages|tools)\/[^/]+\/package\.json$/.test(file))
+    .map(file => join(dirname(file), 'node_modules')).filter(path => existsSync(join(root, path)))];
+  const dependencies = dependencyAreas.map(area => ({ area, ...fingerprintTree(join(root, area), {
+    indexPath: directory ? join(directory, `toolchain-${digest(area).slice(0, 16)}-content-index.json`) : undefined, skip,
+  }) })).filter(dependency => dependency.area === 'node_modules' || dependency.files > 0);
+  if (dependencies[0].state !== 'present') throw new Error('check-toolchain-unset: node_modules');
+  return { platform: process.platform, arch: process.arch, tools, dependencies };
 }
 
-export function checkKey(root, job, versions) {
-  const [name, command, args, options = {}] = job;
-  const policy = checkPolicy(name);
-  if (policy.kind === 'run') return null;
-  const inputs = [...new Set([...foundation, ...policy.inputs])];
-  const files = git(root, ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', ...inputs]).split('\0').filter(Boolean).sort();
-  const hash = createHash('sha256');
+const contentCache = new Map();
+function fileContent(root, file) {
+  const path = join(root, file);
+  if (!existsSync(path)) return { path: file, state: 'absent' };
+  const stat = lstatSync(path, { bigint: true });
+  const identity = [stat.dev, stat.ino, stat.mode, stat.size, stat.mtimeNs, stat.ctimeNs].join(':');
+  const previous = contentCache.get(path);
+  if (previous?.identity === identity && !stat.isSymbolicLink()) return previous.value;
+  const value = { path: file, state: 'present', mode: Number(stat.mode),
+    digest: stat.isSymbolicLink() ? digest(JSON.stringify(fingerprintTree(path))) : digest(readFileSync(path)) };
+  contentCache.set(path, { identity, value });
+  return value;
+}
+function outputs(root, paths) {
+  return paths.map(path => ({ path, ...fingerprintTree(join(root, path)) }));
+}
+function usableOutputs(value) {
+  return value.every(output => output.state === 'present' && output.files > 0);
+}
+
+export function checkKey(root, job, versions, { graph = inputGraph(root), plan = planCheck(root, job, graph) } = {}) {
+  if (plan.kind === 'run') return null;
+  const [, command, args, options = {}] = job;
   const normalize = value => typeof value === 'string' ? value.replaceAll(root, '$SOURCE') : value;
-  hash.update(JSON.stringify({ contract: 'check-pass-v1', name, command: normalize(command), args: args.map(normalize),
-    cwd: options.cwd ? relative(root, options.cwd) : '.',
-    env: options.checkEnvironment ?? options.env ?? {}, versions }));
-  for (const file of files) {
-    const path = join(root, file);
-    const stat = lstatSync(path);
-    hash.update(file).update('\0').update(String(stat.mode)).update('\0')
-      .update(stat.isSymbolicLink() ? readlinkSync(path) : readFileSync(path)).update('\0');
-  }
-  return hash.digest('hex');
+  const effective = { ...process.env, ...options.env };
+  const names = plan.fullEnvironment ? Object.keys(effective) : [...plan.environment, 'NODE_OPTIONS', 'TZ', 'LANG', 'LC_ALL', 'PATH'];
+  const environment = Object.fromEntries([...new Set(names)].sort().map(name => [name, normalize(effective[name] ?? null)]));
+  const generated = plan.inputs.filter(path => path.split('/').some(part => part === 'dist')).map(path => ({ path, ...fingerprintTree(join(root, path)) }));
+  return digest(JSON.stringify({ contract, name: job[0], command: normalize(command), args: args.map(normalize),
+    cwd: options.cwd ? relative(root, options.cwd) : '.', environment, declaredEnvironment: options.checkEnvironment ?? options.env ?? {}, versions,
+    coverage: plan.coverage, inputs: plan.inputs, sourceIdentity: plan.sourceIdentity ? git(root, ['rev-parse', 'HEAD']) : undefined,
+    files: plan.files.map(file => fileContent(root, file)), generated,
+    environmentArtifacts: ['PI_THREAD_TEST_RELEASE'].filter(name => plan.environment.includes(name) && effective[name]).map(name => ({ name, input: fingerprintTree(effective[name]) })) }));
 }
 
-function store(directory, key, receipt) {
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const target = join(directory, `${key}.json`), temporary = `${target}.${randomUUID()}.tmp`;
-  writeFileSync(temporary, JSON.stringify(receipt) + '\n', { mode: 0o600 });
-  renameSync(temporary, target);
-}
-
-export function checkExecutor({ root, directory, versions = toolchain(), execute = runJob }) {
+export function checkExecutor({ root, directory, versions, execute = runJob }) {
+  if (!directory?.startsWith('/')) throw new Error('check-cache-directory-unset-or-relative');
+  if (versions === undefined && (resolve(directory) === resolve(root) || resolve(directory).startsWith(`${resolve(root)}/`))) throw new Error('check-cache-must-live-outside-source');
   const source = git(root, ['rev-parse', 'HEAD']);
-  return async (job, write = text => process.stdout.write(text)) => {
-    const key = checkKey(root, job, versions);
+  const identified = versions ?? toolchain(root, directory);
+  const pending = new Map();
+  let graph = inputGraph(root);
+  const plans = new Map();
+  const signature = files => digest(JSON.stringify(files.map(file => fileContent(root, file))));
+  let state = signature(graph.files);
+  const initialState = state;
+  function refresh() {
+    const files = sourceFiles(root, ['.']);
+    const current = signature(files);
+    if (current !== state) {
+      graph = inputGraph(root);
+      state = current;
+      plans.clear();
+    }
+  }
+  const executor = async (job, write = text => process.stdout.write(text)) => {
+    const started = performance.now();
+    refresh();
+    const plan = plans.get(job[0]) ?? planCheck(root, job, graph);
+    plans.set(job[0], plan);
+    const key = checkKey(root, job, identified, { graph, plan });
     if (key === null) return execute(job, write);
     const path = join(directory, `${key}.json`);
-    if (existsSync(path)) {
+    if (plan.memoizable && existsSync(path)) {
       const receipt = JSON.parse(readFileSync(path, 'utf8'));
-      if (receipt.contract !== 'check-pass-v1' || receipt.key !== key || receipt.name !== job[0] || receipt.outcome !== 'passed') throw new Error(`Invalid check receipt ${path}`);
-      write(`\n===== ${job[0]}: reused (${key.slice(0, 12)}) =====\n`);
-      return { name: job[0], outcome: 'passed', code: 0, signal: null, elapsedMs: 0, reused: path };
+      if (receipt.contract !== contract || receipt.key !== key || receipt.name !== job[0] || receipt.outcome !== 'passed' || !Array.isArray(receipt.outputs)) throw new Error(`Invalid check receipt ${path}`);
+      const actual = outputs(root, plan.outputs ?? []);
+      if (usableOutputs(actual) && JSON.stringify(actual) === JSON.stringify(receipt.outputs)) {
+        write(`\n===== ${job[0]}: reused (${key.slice(0, 12)}; ${plan.coverage}) =====\n`);
+        return { name: job[0], outcome: 'passed', code: 0, signal: null, elapsedMs: performance.now() - started, reused: path, key, coverage: plan.coverage };
+      }
     }
+    if (plan.coverage === 'full-source-proof') write(`\n===== ${job[0]}: full source proof (${plan.reasons.join('; ')}) =====\n`);
     const result = await execute(job, write);
-    if (result.outcome === 'passed' && checkKey(root, job, versions) === key) {
-      store(directory, key, { contract: 'check-pass-v1', key, name: job[0], source, outcome: 'passed', at: new Date().toISOString(), elapsedMs: result.elapsedMs });
+    if (result.outcome === 'passed') {
+      refresh();
+      const after = planCheck(root, job, graph);
+      const produced = outputs(root, plan.outputs ?? []);
+      if (checkKey(root, job, identified, { graph, plan: after }) !== key) return { ...result, outcome: 'failed', code: 1, error: 'check-inputs-mutated-during-execution', key, coverage: plan.coverage };
+      if (!usableOutputs(produced)) return { ...result, outcome: 'failed', code: 1, error: 'check-output-unset', key, coverage: plan.coverage };
+      const receipt = { contract, key, name: job[0], source, outcome: 'passed', coverage: plan.coverage, at: new Date().toISOString(), elapsedMs: result.elapsedMs, outputs: produced };
+      if (plan.memoizable) {
+        if (versions !== undefined) atomicJson(path, receipt);
+        else pending.set(key, { path, receipt, job, plan });
+      }
     }
-    return result;
+    return { ...result, key, coverage: plan.coverage };
   };
+  executor.finalize = () => {
+    refresh();
+    if (state !== initialState) { pending.clear(); return { state: 'changed-source', error: 'check-source-mutated-during-plan' }; }
+    if (versions === undefined && JSON.stringify(toolchain(root, directory)) !== JSON.stringify(identified)) { pending.clear(); return { state: 'changed-toolchain', error: 'check-toolchain-mutated-during-plan' }; }
+    const stored = [];
+    for (const [key, item] of pending) {
+      if (checkKey(root, item.job, identified, { graph, plan: item.plan }) !== key || JSON.stringify(outputs(root, item.plan.outputs ?? [])) !== JSON.stringify(item.receipt.outputs)) {
+        pending.clear(); return { state: 'changed-product', error: `check-products-mutated-after-stage: ${item.job[0]}` };
+      }
+      atomicJson(item.path, item.receipt);
+      stored.push(item.receipt.name);
+    }
+    pending.clear();
+    return { state: 'validated', source, stored };
+  };
+  executor.inspect = job => {
+    const plan = planCheck(root, job, graph);
+    const key = checkKey(root, job, identified, { graph, plan });
+    if (key === null) return { ...plan, key, receipt: null, state: 'always-run' };
+    if (!plan.memoizable) return { ...plan, key, receipt: null, state: 'requires-cold-proof' };
+    const path = join(directory, `${key}.json`);
+    if (!existsSync(path)) return { ...plan, key, receipt: null, state: 'needs-execution' };
+    const receipt = JSON.parse(readFileSync(path, 'utf8'));
+    if (receipt.contract !== contract || receipt.key !== key || receipt.name !== job[0] || receipt.outcome !== 'passed' || !Array.isArray(receipt.outputs)) throw new Error(`Invalid check receipt ${path}`);
+    const actual = outputs(root, plan.outputs ?? []);
+    return { ...plan, key, receipt: path, state: usableOutputs(actual) && JSON.stringify(actual) === JSON.stringify(receipt.outputs) ? 'reusable' : 'needs-output-repair' };
+  };
+  return executor;
 }
 
-export async function seedChecks(root, requestPath, directory) {
-  const request = JSON.parse(readFileSync(requestPath, 'utf8'));
-  if (!request.integrationSha || !['passed', 'failed'].includes(request.checks?.status) || !request.checks.command.startsWith('npm run check && ')) throw new Error('Request has no completed check command');
-  if (git(root, ['rev-parse', 'HEAD']) !== request.integrationSha || git(root, ['status', '--porcelain', '--untracked-files=no'])) throw new Error('Seed source differs from the actual checked source');
-  if (request.workerBootId !== readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim()) throw new Error('Seed toolchain custody belongs to another boot');
-  for (const command of [process.execPath, 'bun', 'python3', 'git', 'npm']) {
-    const located = command.startsWith('/') ? command : spawnSync('which', [command], { encoding: 'utf8', timeout: 1000 }).stdout?.trim();
-    if (!located || lstatSync(located).mtimeMs > Date.parse(request.startedAt)) throw new Error(`Seed executable changed after checks: ${command}`);
-  }
-  const { checkJobs } = await import(pathToFileURL(join(root, 'scripts/test.mjs')).href);
-  const log = readFileSync(request.checks.log, 'utf8');
-  const versions = toolchain();
-  const seeded = [];
-  for (const job of checkJobs) {
-    const key = checkKey(root, job, versions);
-    if (key === null) continue;
-    const marker = `===== ${job[0]}: passed (`;
-    if (!log.includes(marker)) continue;
-    if (log.includes(`===== ${job[0]}: failed (`) || log.includes(`===== ${job[0]}: blocked (`)) continue;
-    store(directory, key, { contract: 'check-pass-v1', key, name: job[0], source: request.integrationSha, outcome: 'passed', at: new Date().toISOString(), evidence: { request: resolve(requestPath), log: request.checks.log } });
-    seeded.push(job[0]);
-  }
-  return seeded;
+export async function seedChecks() {
+  throw new Error('check-receipt-seeding-refused: historical logs do not establish v2 input/toolchain/output custody; execute the cold plan');
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const [action, root, request, directory] = process.argv.slice(2);
-  if (action !== 'seed' || !root || !request || !directory) throw new Error('usage: check-cache.mjs seed CHECKED_ROOT REQUEST_JSON CACHE_DIRECTORY');
-  console.log(JSON.stringify(await seedChecks(resolve(root), request, directory)));
+  throw new Error('check-receipt-seeding-refused: use scripts/test.mjs with PI_STACK_CHECK_CACHE_DIR');
 }

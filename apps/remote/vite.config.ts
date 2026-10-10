@@ -7,7 +7,24 @@ import { devAllowedHosts } from "./dev-hosts";
 export default defineConfig({
   root: resolve(import.meta.dirname, "web"),
   base: "./",
-  plugins: [react()],
+  plugins: [react(), {
+    name: 'pi-release-revision',
+    transformIndexHtml() {
+      return [{ tag: 'script', attrs: { src: './release-revision.js' }, injectTo: 'head-prepend' }];
+    },
+    generateBundle() {
+      const revision = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: import.meta.dirname, encoding: 'utf8' }).trim();
+      this.emitFile({ type: 'asset', fileName: 'release-revision.js', source: `globalThis.__PI_STACK_RELEASE_REVISION__=${JSON.stringify(revision)};\n` });
+    },
+    configureServer(server) {
+      server.middlewares.use('/release-revision.js', (_request, response) => {
+        const revision = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: import.meta.dirname, encoding: 'utf8' }).trim();
+        response.setHeader('Content-Type', 'application/javascript');
+        response.setHeader('Cache-Control', 'no-store');
+        response.end(`globalThis.__PI_STACK_RELEASE_REVISION__=${JSON.stringify(revision)};\n`);
+      });
+    },
+  }],
   server: {
     host: "127.0.0.1",
     port: 5175,
@@ -15,7 +32,7 @@ export default defineConfig({
     allowedHosts: devAllowedHosts(process.env.PI_REMOTE_DEV_ALLOWED_HOSTS),
     proxy: { "/v1": { target: "http://127.0.0.1:8788", changeOrigin: true } },
   },
-  define: { __PI_REMOTE_REVISION__: JSON.stringify(execFileSync("git", ["rev-parse", "HEAD"], { cwd: import.meta.dirname, encoding: "utf8" }).trim()) },
+  define: { __PI_REMOTE_REVISION__: 'globalThis.__PI_STACK_RELEASE_REVISION__' },
   build: {
     outDir: resolve(import.meta.dirname, "web/dist"),
     emptyOutDir: true,

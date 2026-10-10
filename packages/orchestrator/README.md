@@ -16,6 +16,10 @@ The daemon reconciles provider meters, weighted lanes and optional readiness pro
 
 Agents use ordinary peer messages and explicit quota admission. Foreground/background placement and launch provenance confer no execution-budget exemption. There is no external fleet coordinator, waiting run, receipt endpoint or worker restart lifecycle. The daemon detaches from shared runners on shutdown; ThreadService recovers durable execution when it reconnects. Cutover imports existing fleet records before starting the service and must refuse active source custody rather than replay it.
 
+## Native transcript windows
+
+[`src/threads/history.mjs`](src/threads/history.mjs) owns coherent bounded-window reads. `withIndexedThreadHistory` projects a window synchronously through one open source handle, checks descriptor ownership and each record's SHA-256, then checks the exact handle and path revision before accepting the whole projection. Append races discard the projection and retry from a fresh index, at most three attempts. Rewrites or replacements and sustained mutation return `stale-source` (a thread API conflict). Standalone indexed readers still reject any revision change; scoped window readers expire when their projection returns. Tests in `native-history-index.test.ts` and `thread-service.test.ts` cover append races, paired-result reprojection, replacement rejection and the retry bound.
+
 ## Startup history census
 
 [`src/native-history-startup.ts`](src/native-history-startup.ts) observes at most256 runner controls concurrently, with a3-second status deadline and one retry only on timeout. The daemon journal receives a version1 `fleet-native-census` JSON receipt: each runner is `native`, `legacy` or `unverified`, with its socket, generation, attempts and total latency; unverified observations retain a typed error. Missing/refused, unanswered and invalid controls do not veto the daemon's startup or become proven native generations.

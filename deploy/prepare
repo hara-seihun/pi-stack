@@ -22,7 +22,15 @@ if pi_stack_as_root test -f "$PI_STACK_RELEASES_ROOT/.prepared/$commit.json"; th
 fi
 started=$SECONDS
 "$root/deploy/retain" || echo 'Pi stack release retention failed; existing assets retained' >&2
-pi_stack_prepare_builds "$root" &
+cache=$(pi_stack_as_root node "$root/deploy/component-cache.mjs" "$root" "$PI_STACK_RELEASES_ROOT" "$commit" reuse)
+printf '%s\n' "$cache"
+(
+  if jq -e '.value.components | all(. == "present" or . == "reused")' <<<"$cache" >/dev/null; then
+    echo 'all component inputs unchanged; reusing prepared build artifacts'
+  else
+    pi_stack_prepare_builds "$root"
+  fi
+) &
 builds_pid=$!
 "$root/deploy/meet-recognition" &
 recognition_pid=$!
@@ -42,14 +50,23 @@ fi
 export PI_STACK_PREPARE_ONLY=1 PI_STACK_SKIP_TOOL_LINKS=1
 export PI_STACK_RUNTIME_DEST="$PI_STACK_RELEASES_ROOT/runtime/$commit"
 export PI_STACK_ORCHESTRATOR_DEST="$prepared/orchestrator" PI_STACK_REMOTE_DEST="$prepared/remote" PI_STACK_TOOLS_DEST="$prepared/tools"
-"$root/deploy/orchestrator"
-"$root/deploy/remote" &
+prepare_component() {
+  local name=$1 destination=$2
+  if [[ $(jq -r --arg name "$name" '.value.components[$name]' <<<"$cache") == reused ]]; then
+    pi_stack_select_release "$PI_STACK_RELEASES_ROOT/$name/$commit" "$destination" "$commit"
+  else
+    "$root/deploy/$name"
+  fi
+}
+prepare_component orchestrator "$PI_STACK_ORCHESTRATOR_DEST"
+prepare_component remote "$PI_STACK_REMOTE_DEST" &
 remote_pid=$!
-"$root/deploy/tools" &
+prepare_component tools "$PI_STACK_TOOLS_DEST" &
 tools_pid=$!
 failed=0
 wait "$remote_pid" || failed=1
 wait "$tools_pid" || failed=1
 (( failed == 0 )) || exit 1
 pi_stack_as_root node "$root/deploy/prepared-components.mjs" "$PI_STACK_RELEASES_ROOT" "$commit" record
+pi_stack_as_root node "$root/deploy/component-cache.mjs" "$root" "$PI_STACK_RELEASES_ROOT" "$commit" record
 printf 'prepared Pi stack %s in %ss without changing selected owners\n' "$commit" "$((SECONDS - started))"

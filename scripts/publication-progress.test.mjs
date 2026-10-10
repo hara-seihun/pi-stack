@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { policy, repairPrompt, runnable, stallReason, observeQueueProgress, queueStallReason } from "../deploy/publication-control.mjs";
 import { publicationConfig } from "./publication-fixture.mjs";
+import { repairSourceRef } from "../deploy/publication-continuation.mjs";
 
 const configRoot = mkdtempSync(join(tmpdir(), "publication-config-"));
 process.env.PI_STACK_PUBLICATION_CONFIG = publicationConfig(configRoot);
@@ -65,7 +66,12 @@ fi
   executable(join(bin, "agent-workspace"), `#!/bin/sh
 printf '%s\\n' "$*" >> "$AGENT_WORKSPACE_LOG"
 if [ "$1" = "create" ]; then
-  printf '{"path":"%s"}\\n' "$STUB_WORKSPACE"
+  owner=''
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = '--owner' ]; then owner="$2"; break; fi
+    shift
+  done
+  printf '{"id":"fixture-owned-workspace","path":"%s","owner":"%s"}\\n' "$STUB_WORKSPACE" "$owner"
 fi
 `);
   executable(join(bin, "pi"), `#!/bin/sh
@@ -74,7 +80,7 @@ printf '%s\\n' "$PI_STUB_OUTCOME" > "$PI_STUB_RESULT"
 `);
   executable(join(bin, "publication-submit"), `#!/bin/sh
 printf '%s\\n' "$*" >> "$PUBLICATION_SUBMIT_LOG"
-printf '{"requestId":"PUB-fedcba9876543210fedcba98","sourceSha":"%s","status":"queued","receipt":"/fixture/successor.json"}\\n' "$2"
+exec ${JSON.stringify(process.execPath)} ${JSON.stringify(publication)} "$@"
 `);
   return bin;
 }
@@ -106,6 +112,9 @@ function repairFixture(t, status = "launching") {
   mkdirSync(requests, { recursive: true });
   mkdirSync(repairDirectory, { recursive: true });
   const { sourceSha, repairedSha } = initializeRepository(workspace);
+  const remote = join(root, "pi-stack.git");
+  assert.equal(run("git", ["clone", "--bare", "--quiet", workspace, remote]).status, 0);
+  assert.equal(run("git", ["remote", "add", "origin", "https://github.com/hara-seihun/pi-stack.git"], { cwd: workspace }).status, 0);
   assert.equal(run("git", ["clone", "--quiet", workspace, join(root, "repository")]).status, 0);
   assert.equal(run("git", ["-C", join(root, "repository"), "update-ref", `refs/pi-stack-publication/${requestId}/source`, sourceSha]).status, 0);
   const publicationLog = join(root, "publication.log");
@@ -115,6 +124,8 @@ function repairFixture(t, status = "launching") {
     at: "2026-04-15T12:00:00.000Z",
     step: "checks",
     message: "integration checks exited 17",
+    reason: "integration checks exited 17",
+    attempt: 1,
     log: publicationLog,
     command: "npm run check",
     progress: {
@@ -169,9 +180,12 @@ function repairFixture(t, status = "launching") {
     PI_STUB_LOG: join(root, "pi.log"),
     PI_STUB_RESULT: repair.result,
     PUBLICATION_SUBMIT_LOG: join(root, "publication-submit.log"),
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: `url.${remote}.insteadOf`,
+    GIT_CONFIG_VALUE_0: "https://github.com/hara-seihun/pi-stack.git",
   };
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  return { root, bin, workspace, request, requestPath, repair, repairPath, repairedSha, environment };
+  return { root, bin, workspace, remote, request, requestPath, repair, repairPath, repairedSha, environment };
 }
 
 test("installed publication services resolve NixOS privilege wrappers before package binaries", t => {
@@ -191,7 +205,9 @@ test("installed publication services resolve NixOS privilege wrappers before pac
   });
   assert.equal(result.status, 0, result.stderr);
   const services = readdirSync(units).filter(name => name.endsWith(".service"));
-  assert.equal(services.length, 4);
+  assert.equal(services.length, 5);
+  assert.equal(readdirSync(units).length, 8);
+  assert.ok(services.includes("pi-stack-publication-host@.service"));
   const wrapperBin = join(root, "run/wrappers/bin");
   const packageBin = join(root, "run/current-system/sw/bin");
   mkdirSync(wrapperBin, { recursive: true });
@@ -425,7 +441,6 @@ for (const status of ["source-fixed", "infrastructure-fixed"]) {
 test("repair submission, enqueue and retry reject cancellation at their own entry points", t => {
   const f = repairFixture(t, "ready-to-retry");
   writeFileSync(join(f.root, "requests", `${requestId}.cancel`), "cancelled\n");
-  assert.equal(run("git", ["remote", "add", "origin", "https://github.com/hara-seihun/pi-stack.git"], { cwd: f.workspace }).status, 0);
   const before = readFileSync(f.requestPath, "utf8");
   const successor = "PUB-fedcba9876543210fedcba98";
   const operations = [
@@ -456,36 +471,33 @@ test("repair-result completes an interrupted repair once without launching anoth
   const result = runPublication(f.root, f.bin, "repair-result", f.environment);
   assert.equal(result.status, 0, result.stderr);
   const repair = JSON.parse(readFileSync(f.repairPath, "utf8"));
-  assert.equal(repair.status, "submitted");
+  assert.equal(repair.status, "retry-submitted");
   assert.equal(repair.resultRecovery[0].summary, summary);
   assert.equal(repair.summary, undefined);
   assert.equal(repair.outcome.sourceSha, f.repairedSha);
   assert.match(repair.outcome.evidenceSha256, /^[a-f0-9]{64}$/);
   assert.equal(existsSync(f.environment.PI_STUB_LOG), false);
-  assert.equal(runPublication(f.root, f.bin, "repair-result", f.environment).status, 0);
+  const repeated = runPublication(f.root, f.bin, "repair-result", f.environment);
+  assert.equal(repeated.status, 0, repeated.stderr);
   assert.equal(readFileSync(f.environment.PUBLICATION_SUBMIT_LOG, "utf8").trim().split("\n").length, 1);
-  assert.deepEqual(JSON.parse(readFileSync(f.requestPath, "utf8")), f.request);
+  const continued = JSON.parse(readFileSync(f.requestPath, "utf8"));
+  assert.equal(continued.status, "queued");
+  assert.equal(continued.sourceSha, f.request.sourceSha);
+  assert.equal(continued.continuedRepair.sourceSha, f.repairedSha);
+  assert.deepEqual(continued.failures, f.request.failures);
 });
 
-test("assigned repair transfers real source custody despite an offline requester and the automatic depth limit", t => {
+test("assigned repair continues the original request despite an offline requester and many prior repairs", t => {
   const f = repairFixture(t, "blocked");
   const reporter = { url: "http://127.0.0.1:18791", sessionId: "144b647b-dd8e-53e0-a9b7-5f398b7e49e5" };
-  const request = { ...f.request, reporter, repairDepth: policy.maxRepairDepth };
+  const request = { ...f.request, reporter, repairDepth: 100 };
   const curlLog = join(f.root, "curl.log");
   executable(join(f.bin, "curl"), `#!/bin/sh
 printf '%s\\n' "$*" >> ${JSON.stringify(curlLog)}
 exit 7
 `);
   writeJson(f.requestPath, request);
-  const remote = join(f.root, "hara-seihun", "pi-stack.git");
-  mkdirSync(join(f.root, "hara-seihun"));
-  assert.equal(run("git", ["clone", "--bare", "--quiet", f.workspace, remote]).status, 0);
-  assert.equal(run("git", ["update-ref", "refs/heads/main", f.request.sourceSha], { cwd: remote }).status, 0);
-  assert.equal(run("git", ["remote", "add", "origin", "https://github.com/hara-seihun/pi-stack.git"], { cwd: f.workspace }).status, 0);
-  executable(join(f.bin, "publication-submit"), `#!/bin/sh
-printf '%s\\n' "$*" >> "$PUBLICATION_SUBMIT_LOG"
-exec ${JSON.stringify(process.execPath)} ${JSON.stringify(publication)} "$@"
-`);
+  assert.equal(run("git", ["update-ref", "refs/heads/main", f.request.sourceSha], { cwd: f.remote }).status, 0);
   executable(join(f.bin, "systemctl"), `#!/bin/sh
 printf '%s\\n' "$*" >> "$SYSTEMCTL_LOG"
 case "$*" in
@@ -500,32 +512,31 @@ esac
     ...f.environment,
     PI_STACK_PUBLICATION_REPORT_URL: "",
     PI_STACK_PUBLICATION_REPORT_SESSION: "",
-    GIT_CONFIG_COUNT: "1",
-    GIT_CONFIG_KEY_0: `url.${remote}.insteadOf`,
-    GIT_CONFIG_VALUE_0: "https://github.com/hara-seihun/pi-stack.git",
   };
   const result = runPublication(f.root, f.bin, "repair-result", environment);
   assert.equal(result.status, 0, result.stderr);
   const repair = JSON.parse(readFileSync(f.repairPath, "utf8"));
-  assert.equal(repair.status, "submitted");
-  const successor = JSON.parse(readFileSync(repair.successor.receipt, "utf8"));
-  assert.equal(successor.sourceSha, f.repairedSha);
-  assert.equal(successor.repairOf, requestId);
-  assert.equal(successor.repairDepth, policy.maxRepairDepth + 1);
-  assert.deepEqual(successor.reporter, reporter);
+  assert.equal(repair.status, "retry-submitted");
+  assert.equal(repair.successor, undefined);
+  const continued = JSON.parse(readFileSync(f.requestPath, "utf8"));
+  assert.equal(continued.requestId, requestId);
+  assert.equal(continued.status, "queued");
+  assert.equal(continued.step, "queued-after-source-repair");
+  assert.equal(continued.sourceSha, request.sourceSha);
+  assert.equal(continued.repairSources[0].sourceSha, f.repairedSha);
+  assert.equal(continued.repairSources[0].repairId, repair.id);
+  assert.deepEqual(continued.reporter, reporter);
+  assert.deepEqual(continued.failures, request.failures);
+  assert.equal(continued.integrationSha, undefined);
+  assert.equal(continued.integrationHistory[0].integrationSha, request.integrationSha);
   assert.equal(existsSync(curlLog), false, "notification transport cannot gate source custody");
-  assert.equal(run("git", ["rev-parse", successor.sourceRef], { cwd: remote }).stdout.trim(), f.repairedSha);
-  assert.equal(runPublication(f.root, f.bin, "repair-result", environment).status, 0);
-  assert.equal(readFileSync(environment.PUBLICATION_SUBMIT_LOG, "utf8").trim().split("\n").length, 2);
-  assert.deepEqual(JSON.parse(readFileSync(f.requestPath, "utf8")), request);
-
-  writeJson(repair.successor.receipt, { ...successor, status: "failed", failure: request.failure });
-  writeJson(join(f.root, "repair-policy.json"), { activatedAt: "2026-01-01T00:00:00.000Z", policy });
-  const watchdog = runPublication(f.root, f.bin, "watchdog", environment);
-  assert.equal(watchdog.status, 0, watchdog.stderr);
-  const successorRepair = JSON.parse(readFileSync(join(f.root, "repairs", successor.requestId, "receipt.json"), "utf8"));
-  assert.equal(successorRepair.status, "blocked");
-  assert.equal(successorRepair.launchAttempts, 0);
+  assert.equal(existsSync(environment.AGENT_WORKSPACE_LOG), false, 'accepting external source never releases a workspace this repair did not create');
+  assert.ok(existsSync(f.workspace));
+  assert.equal(run("git", ["rev-parse", repairSourceRef(requestId, f.repairedSha)], { cwd: f.remote }).stdout.trim(), f.repairedSha);
+  const repeated = runPublication(f.root, f.bin, "repair-result", environment);
+  assert.equal(repeated.status, 0, repeated.stderr);
+  assert.equal(readFileSync(environment.PUBLICATION_SUBMIT_LOG, "utf8").trim().split("\n").length, 1);
+  assert.equal(readdirSync(join(f.root, "requests")).filter(name => name.endsWith(".json")).length, 1);
   assert.equal(existsSync(environment.PI_STUB_LOG), false);
 });
 
@@ -546,7 +557,7 @@ test("repair-run launches the registered local Pi process once and accepts each 
   const cases = [
     { status: "blocked", summary: "upstream credentials are required", expected: "blocked" },
     { status: "infrastructure-fixed", summary: "repaired the host package index", expected: "ready-to-retry", evidence: true },
-    { status: "source-fixed", summary: "corrected dependency selection", expected: "submitted", evidence: true, source: true },
+    { status: "source-fixed", summary: "corrected dependency selection", expected: "retry-submitted", evidence: true, source: true },
   ];
   for (const scenario of cases) {
     await t.test(scenario.status, child => {
@@ -587,8 +598,8 @@ test("repair-run launches the registered local Pi process once and accepts each 
       assert.match(prompt, /ERR fixture dependency unavailable/);
       assert.match(prompt, /"command":"npm","args":\["run","check"\]/);
       if (scenario.source) {
-        assert.match(readFileSync(environment.PUBLICATION_SUBMIT_LOG, "utf8"), new RegExp(`submit ${fixture.repairedSha} --repair-of ${requestId}`));
-        assert.match(workspaceCalls, new RegExp(`release --path ${fixture.workspace.replaceAll("/", "\\/")}`));
+        assert.match(readFileSync(environment.PUBLICATION_SUBMIT_LOG, "utf8"), new RegExp(`continue-source ${requestId} ${fixture.repairedSha} ${repairSourceRef(requestId, fixture.repairedSha)} ${repair.id}`));
+        assert.match(workspaceCalls, /release --id fixture-owned-workspace/);
       }
 
       result = runPublication(fixture.root, fixture.bin, "repair-run", environment);
@@ -691,15 +702,39 @@ for (const kind of ["queued", "live-meeting"]) test(`unserviced ${kind} work get
 });
 
 
-test("later failure acquires exact attempt-bound receipt; retains old evidence and deduplicates retry", t => {
+for (const sameSource of [true, false]) {
+  test(`repeated defect ${sameSource ? "blocks unchanged source" : "permits changed source beyond a repair depth"}`, t => {
+    const f = repairFixture(t, "retry-submitted");
+    const failure = { ...f.request.failure, attempt: 2, at: "2026-04-15T12:05:00.000Z" };
+    writeJson(f.requestPath, {
+      ...f.request,
+      integrationSha: sameSource ? f.request.integrationSha : "c".repeat(40),
+      repairDepth: 100,
+      attempt: 2,
+      failure,
+      failures: [f.request.failure, failure],
+    });
+    const result = runPublication(f.root, f.bin, "repair", f.environment);
+    assert.equal(result.status, 0, result.stderr);
+    const repair = JSON.parse(readFileSync(f.repairPath, "utf8"));
+    assert.equal(repair.status, sameSource ? "blocked" : "pending");
+    assert.equal(repair.launchAttempts, 0);
+    assert.deepEqual(repair.failure, failure);
+    assert.equal(repair.priorRepairs[0].id, f.repair.id);
+    assert.equal(existsSync(f.environment.PI_STUB_LOG), false);
+    if (sameSource) assert.match(repair.summary, /same defect persisted/);
+  });
+}
+
+test("pending repair accepts supplied proof; later failure retains attempt-bound custody and deduplicates retry", t => {
   const f = repairFixture(t, "retry-submitted");
-  const latest = { ...f.request.failure, attempt: 2, at: "2026-04-15T12:05:00.000Z" };
+  const latest = { ...f.request.failure, step: "host-delivery", command: "deploy host", attempt: 2, at: "2026-04-15T12:05:00.000Z" };
   writeJson(f.requestPath, { ...f.request, attempt: 2, failure: latest, failures: [f.request.failure, latest], repairedRetry: { repairId: f.repair.id } });
   const env = { ...f.environment, SYSTEMCTL_ACTIVE_STATE: "inactive" };
   let r = runPublication(f.root, f.bin, "repair", env); assert.equal(r.status, 0, r.stderr);
   const current = JSON.parse(readFileSync(f.repairPath));
   assert.equal(current.failure.at, latest.at); assert.match(current.id, /attempt-2$/);
-  assert.equal(current.status, "blocked");
+  assert.equal(current.status, "pending");
   assert.equal(JSON.parse(readFileSync(join(f.root, "repairs", requestId, "retained", "attempt-1", "receipt.json"))).status, "retry-submitted");
   const evidence = join(f.root, "proof-2.json"); writeJson(evidence, { passed: true });
   writeJson(current.result, { status: "infrastructure-fixed", summary: "phase custody repaired", evidence });

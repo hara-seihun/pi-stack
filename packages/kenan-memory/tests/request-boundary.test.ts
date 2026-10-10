@@ -20,6 +20,20 @@ async function fixture() {
     close: async () => { await new Promise<void>(resolve => server.close(() => resolve())); store.close(); } };
 }
 
+test("absence recovery authenticates a person capability without admitting root work", async () => {
+  const f = await fixture();
+  try {
+    const caller = f.store.session("alice", "original-thread");
+    const check = (callerToken: string, token?: string) => f.post("/v1/root/authenticate-caller", { callerToken }, token);
+    expect((await check(caller.token)).body).toEqual({ ok: true, value: { authenticated: true } });
+    expect((await check("missing")).status).toBe(403);
+    expect((await check(caller.token, caller.token)).status).toBe(403);
+    expect((await check("fixture-service")).status).toBe(403);
+    expect((await f.post("/v1/root/authenticate-caller", { callerToken: caller.token, person: "bob" })).status).toBe(400);
+    expect(f.store.db.query("SELECT count(*) AS count FROM root_runs").get()).toEqual({ count: 0 });
+  } finally { await f.close(); }
+});
+
 test("request authorization binds verified person/thread, accepts renewed capabilities, and never creates a root model admission", async () => {
   const f = await fixture();
   try {

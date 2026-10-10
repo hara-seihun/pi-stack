@@ -118,6 +118,7 @@ import { ClientStream, PING_INTERVAL_MS, readSubscription } from "./stream";
 import { ReconcilePublisher } from "../shared/reconcile";
 import { parsePresentationEvent } from "./pi-event-presentation";
 import { SourceTranscripts, type SourceResult } from "./source-transcripts";
+import { refreshTranscriptProjection } from "./transcript-refresh";
 import { MachineActions } from "./machine-actions";
 import { createMessagingService } from "./messaging";
 import { PiReactions, nativeMessageExists, reactToMessage } from "./reactions";
@@ -393,6 +394,15 @@ manager = MANAGER_DESTINATION ? new Manager(db, threads, () => {
     workspaceId: MANAGER_DESTINATION.workspaceId, profileId: MANAGER_DESTINATION.id, contextFiles: selected.value,
   } } } : { ok: false, error: { code: "invalid_request", message: selected.error } };
 }, unwrap(managerSettings(process.env.PI_REMOTE_MANAGER_MODEL)), () => { signalSync(); void refreshThreadNotifications(); void pushNotifications(); }) : null;
+if (manager) {
+  const workObserver = managerRelayClient();
+  threads.setManagerWatchdog(async () => {
+    const managerThreadId = manager!.snapshot().managerThreadId;
+    if (managerThreadId === null) return { ok: true, value: { managerThreadId, activeWork: false, lastHumanMessageAt: null } };
+    const summary = await workObserver.managerWorkSummary();
+    return summary.ok ? { ok: true, value: { ...summary.value, managerThreadId } } : summary;
+  }, message => { observeError(db, "manager-watchdog", message); });
+}
 const peerThreads = new Map<string, Thread>();
 let peerArchivedTotal = 0;
 const peerChildren = new Map<string, boolean>();
@@ -1166,31 +1176,42 @@ function sessionSubscribers(sessionId: string): ClientStream[] {
   return [...streams.values()].filter(stream => stream.subscription.session === sessionId);
 }
 
-async function refreshTranscript(sessionId: string): Promise<void> {
-  await Promise.all(sessionSubscribers(sessionId).map(stream => sendTranscript(stream)));
+async function refreshTranscript(sessionId: string): Promise<SourceResult<void>> {
+  const results = await Promise.all(sessionSubscribers(sessionId).map(stream => sendTranscript(stream)));
+  for (const result of results) if (!result.ok) return result;
+  return { ok: true, value: undefined };
 }
 
 function signalTranscript(sessionId: string): void {
   if (shuttingDown || transcriptTimers.has(sessionId) || !sessionSubscribers(sessionId).length) return;
   transcriptTimers.set(sessionId, setTimeout(() => {
     transcriptTimers.delete(sessionId);
-    void refreshTranscript(sessionId).catch(cause => {
-      for (const stream of sessionSubscribers(sessionId)) stream.send({ type: "error", message: `Could not read transcript: ${cause instanceof Error ? cause.message : String(cause)}` });
-    });
+    const failed = (message: string) => {
+      for (const stream of sessionSubscribers(sessionId)) stream.send({ type: "error", message: `Could not read transcript: ${message}` });
+    };
+    void refreshTranscriptProjection(() => refreshTranscript(sessionId), () => signalTranscript(sessionId), error => {
+      failed(`${error.code}: ${error.message}`);
+    }).catch(cause => failed(cause instanceof Error ? cause.message : String(cause)));
   }, TRANSCRIPT_COALESCE_MS));
 }
 
-async function sendTranscript(stream: ClientStream): Promise<void> {
+async function sendTranscript(stream: ClientStream): Promise<SourceResult<void>> {
   const sessionId = stream.subscription.session;
-  if (!sessionId) return;
+  if (!sessionId) return { ok: true, value: undefined };
   const revision = stream.revision;
   const loaded = await transcripts.page(sessionId, undefined, 60);
-  let page = sourceValue(loaded);
+  if (!loaded.ok) return loaded;
+  let page = loaded.value;
   const from = stream.subscription.transcriptFrom;
   const limit = from == null ? 60 : Math.min(600, Math.max(60, page.total - from));
-  if (limit > 60) page = sourceValue(await transcripts.page(sessionId, undefined, limit));
+  if (limit > 60) {
+    const expanded = await transcripts.page(sessionId, undefined, limit);
+    if (!expanded.ok) return expanded;
+    page = expanded.value;
+  }
   if (!stream.closed && stream.revision === revision && stream.subscription.session === sessionId)
     stream.publish({ type: "transcript", ...page });
+  return { ok: true, value: undefined };
 }
 
 /** Apply a subscription change and push whatever it now entitles the client to. */
@@ -1214,7 +1235,7 @@ async function applySubscription(stream: ClientStream, patch: Partial<StreamSubs
     pending.push(stream.synchronizeSelection(
       () => sessionRow.get(sessionId) ? refreshThreadInspection(sessionId, fresh) : Promise.resolve(),
       async () => {
-        await sendTranscript(stream);
+        sourceValue(await sendTranscript(stream));
         sendLive(stream);
         projectState();
         sendState(stream);
@@ -1531,12 +1552,12 @@ async function threadCommands(row: any) {
   const commands = await rpc(row.id, "get_commands");
   return { commands: commands.commands ?? [] };
 }
-async function runCommand(row: any, requestId: string, name: string, args: string) {
+async function runCommand(row: any, requestId: string, name: string, args: string, humanActivity: boolean) {
   const previous = requestResult(requestId);
   if (previous) return { response: JSON.parse(previous.response), status: previous.status };
   const response = name === "compact"
     ? await rpc(row.id, "compact", { id: requestId, customInstructions: args || undefined })
-    : await enqueuePrompt(row.id, requestId, `/${name}${args ? ` ${args}` : ""}`, resolveDelivery({}));
+    : await enqueuePrompt(row.id, requestId, `/${name}${args ? ` ${args}` : ""}`, resolveDelivery({}), [], humanActivity);
   saveRequest(requestId, row.id, "command", 202, response);
   return { response, status: 202 };
 }
@@ -1639,8 +1660,8 @@ function notificationThread(id: string): { parentId: string | null; role?: "agen
   return ROOMS_ENABLED && db.query("SELECT value FROM metadata WHERE key=?").get(`room-link:${id}`) ? { parentId: null } : null;
 }
 
-async function enqueuePrompt(sessionId: string, requestId: string, text: string, delivery: "queue" | "steer" | "hardSteer", images: ImageContent[] = []) {
-  const sent = await directory.send({ threadId: sessionId, requestId, text, delivery, images });
+async function enqueuePrompt(sessionId: string, requestId: string, text: string, delivery: "queue" | "steer" | "hardSteer", images: ImageContent[] = [], humanActivity = false) {
+  const sent = await directory.send({ threadId: sessionId, requestId, text, delivery, images, humanActivity });
   const message = unwrap(sent);
   return { accepted: true, workId: message.id, delivery: message.delivery, session: publicSession(sessionRow.get(sessionId)) };
 }
@@ -1721,11 +1742,11 @@ phoneOverlay = new PhoneOverlay({
   create: async (message, device) => {
     const destination = meetingDestination();
     const id = crypto.randomUUID();
-    await insertThread(id, `Phone · ${device.name}`, destination, destination.defaultModel, null, message);
+    await insertThread(id, `Phone · ${device.name}`, destination, destination.defaultModel, null, message, undefined, undefined, [], { kind: "person", via: "upstream" });
     signalSync();
     return id;
   },
-  prompt: async (threadId, requestId, text) => { await enqueuePrompt(threadId, requestId, text, "steer"); },
+  prompt: async (threadId, requestId, text) => { await enqueuePrompt(threadId, requestId, text, "steer", [], true); },
   send: (deviceId, command, args) => phones.send(deviceId, command, args),
   online: deviceId => phones.online(deviceId),
   load: () => (db.query("SELECT key,value FROM metadata WHERE key LIKE 'phone-overlay:%'").all() as Array<{ key: string; value: string }>)
@@ -1804,7 +1825,7 @@ const server = Bun.serve<SocketData>({
           ensureThreadView(db, id);
         },
         update: async (id, members) => { unwrap(threads.update(id, { metadata: { room: { id, members } } })); },
-        send: async (id, requestId, text) => { await enqueuePrompt(id, requestId, text, "queue"); },
+        send: async (id, requestId, text) => { await enqueuePrompt(id, requestId, text, "queue", [], humanCaller()); },
         history: async (id, options) => {
           const inspect = async (before: number | undefined, limit: number, revision?: string) => {
             const result = await directory.inspect(id, { contextRecords: { includeEntries: true,
@@ -1835,7 +1856,7 @@ const server = Bun.serve<SocketData>({
           const previous = db.query("SELECT value FROM metadata WHERE key=?").get(key) as { value: string } | null;
           if (previous && JSON.parse(previous.value).user !== sender.user) throw new Error("Another room member already answered this question");
           db.query("INSERT OR IGNORE INTO metadata(key,value) VALUES(?,?)").run(key, JSON.stringify(sender));
-          const answered = await directory.answer({ threadId: id, questionId, selectedSuggestionIds: body?.selectedSuggestionIds, text: body?.text, dismissed: body?.dismissed });
+          const answered = await directory.answer({ threadId: id, questionId, humanActivity: humanCaller(), selectedSuggestionIds: body?.selectedSuggestionIds, text: body?.text, dismissed: body?.dismissed });
           if (!answered.ok && !previous) db.query("DELETE FROM metadata WHERE key=?").run(key);
           unwrap(answered);
         },
@@ -2414,7 +2435,7 @@ const server = Bun.serve<SocketData>({
       if (!sessionRow.get(answerRequest.sessionId)) return error("Session not found", 404);
       try {
         const body = await readBody(req);
-        const result = await directory.answer({ threadId: answerRequest.sessionId, questionId: answerRequest.questionId,
+        const result = await directory.answer({ threadId: answerRequest.sessionId, questionId: answerRequest.questionId, humanActivity: humanCaller(),
           selectedSuggestionIds: body?.selectedSuggestionIds, text: body?.text, dismissed: body?.dismissed });
         if (!result.ok) return threadError(result.error);
         await questionFeed.settle(answerRequest.sessionId);
@@ -2483,7 +2504,7 @@ const server = Bun.serve<SocketData>({
         },
         send: async (threadId, requestId, prepared) => {
           if (req.signal.aborted) return { ok: false, error: { code: "unavailable", message: "The caller disconnected before admission; check the saved request explicitly." } };
-          return directory.send({ threadId, requestId, ...prepared });
+          return directory.send({ threadId, requestId, ...prepared, humanActivity: humanCaller() });
         },
       });
       if (result.body.outcome === "accepted" && body && typeof body === "object" && "requestId" in body && typeof body.requestId === "string") trackFeature("chat", humanCaller() ? "human" : "agent", body.requestId);
@@ -2562,7 +2583,7 @@ const server = Bun.serve<SocketData>({
         if (!/^[0-9a-f-]{36}$/i.test(requestId)) return error("Valid requestId required");
         const name = String(body.name ?? "");
         const args = String(body.args ?? "").trim();
-        const result = await runCommand(row, requestId, name, args);
+        const result = await runCommand(row, requestId, name, args, humanCaller());
         return json(result.response, result.status);
       } catch (e: any) { return error(e.message ?? "Slash command failed", 400); }
     }

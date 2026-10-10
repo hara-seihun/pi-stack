@@ -61,7 +61,7 @@ export function memoryService(options: { store: MemoryStore; auth: MemoryAuth; e
     try {
       if (!options.enabled()) return send(503, { ok: false, error: "disabled", message: "One Kenan is disabled on this host" });
       if (request.method === "GET" && request.url === "/v1/health") return send(200, { ok: true, service: "kenan-memory", releaseCommit: options.releaseCommit ?? null });
-      if (request.method !== "POST" || !["/v1/memory", "/v1/life", "/v1/sessions", "/v1/root/admit", "/v1/root/finalize-reply", "/v1/root/resume-consent", "/v1/root/log-consent", "/v1/root/authorize-request", "/v1/root/resume-request", "/v1/root/log-notification", "/v1/root/log-request-status"].includes(request.url ?? ""))
+      if (request.method !== "POST" || !["/v1/memory", "/v1/life", "/v1/sessions", "/v1/root/admit", "/v1/root/finalize-reply", "/v1/root/resume-consent", "/v1/root/log-consent", "/v1/root/authorize-request", "/v1/root/authenticate-caller", "/v1/root/resume-request", "/v1/root/log-notification", "/v1/root/log-request-status"].includes(request.url ?? ""))
         return send(404, { ok: false, error: "invalid-request", message: "Unknown memory route" });
       const caller = principal(request);
       if (!caller) return denied("Memory access requires a verified local identity");
@@ -72,6 +72,13 @@ export function memoryService(options: { store: MemoryStore; auth: MemoryAuth; e
       if (request.url?.startsWith("/v1/root/")) {
         if (caller.kind !== "root-service") return denied("This operation belongs to the root Kenan service");
         if (!object(input)) return invalid("Root operation must be an object");
+        if (request.url === "/v1/root/authenticate-caller") {
+          if (!fields(input, ["callerToken"]) || typeof input.callerToken !== "string") return invalid("Invalid caller authentication");
+          const session = store.resolveSession(input.callerToken);
+          if (!session || session.role !== "person") return denied("An authenticated person session is required");
+          if (session.person === "pi-rooms" && !await options.roomAudience?.(session.person, session.threadId)) return denied("Room audience is unavailable");
+          return send(200, { ok: true, value: { authenticated: true } });
+        }
         if (request.url === "/v1/root/authorize-request") {
           if (!fields(input, ["callerToken", "rootSessionId"]) || typeof input.callerToken !== "string" || typeof input.rootSessionId !== "string") return invalid("Invalid request authorization");
           const session = store.resolveSession(input.callerToken);

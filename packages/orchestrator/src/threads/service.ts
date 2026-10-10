@@ -5,7 +5,7 @@ import { RunnerStartupError, isPooledStartupWait } from "./runner-startup.js";
 import { parseRuntimeEvent, requireAssistantStopReason, assertNever } from "./runtime-events.js";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
-import { indexedThreadHistory, timestampMs, type IndexedThreadHistory, type MessageRecordDescriptor, type RecordDescriptor, type ThreadHistoryError } from "pi-orchestrator/history";
+import { indexedThreadHistory, withIndexedThreadHistory, timestampMs, type IndexedThreadHistory, type MessageRecordDescriptor, type RecordDescriptor, type ThreadHistoryError } from "pi-orchestrator/history";
 import { contentText } from "@earendil-works/pi-ai";
 import { dirname, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -36,6 +36,7 @@ import { threadHasOutstandingWork } from "./work-state.js";
 import { BACKGROUND_ATTENTION_POLICY } from "./attention-policy.js";
 import { createExecutionActivity, executionActivitySnapshot, executionWaitActivity, observeExecutionActivity, restoreExecutionActivity, settleExecutionActivity, type ExecutionActivity, type ExecutionPhase } from "./execution-activity.js";
 import { deriveThreadLifecycle } from "./lifecycle.js";
+import { MANAGER_INACTIVITY_MS, MANAGER_WATCHDOG_PREFIX, hasManagedWork, type ManagerWorkSummary, type ManagerWatchObservation } from "./manager-watchdog.js";
 import type { AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, QuestionEvents, QuestionState, ThreadQuestion, AttachPiSession, AwaitThreads, Delivery, OpenPiSession, PiCommand, PiEvent, PiSession, Result, SendThread, SpawnThread, Thread, ThreadApi, ThreadAwaitResult, ThreadControl, ThreadError, ThreadHistory, ThreadInspection, InspectOptions, ThreadList, ThreadMessage, ThreadPage, ThreadRead, ThreadSettings, ThreadSettlement, ThreadSettlements, WorkOutcome } from "./contracts.js";
 
 import type { PendingQuestions, PendingQuestionsQuery, ManagerQuestionsRequest, ManagerQuestionsResponse, HeldThreadQuestion, ManagerQuestionCustodyRequest, ManagerQuestionCustodyReceipt } from "./contracts.js";
@@ -96,6 +97,8 @@ export interface ImportThread {
   createdAt?: number; updatedAt?: number; metadata?: Record<string, unknown>;
 }
 export interface ImportMessage {
+  /** Only known authenticated input provenance; absent historical provenance stays unknown. */
+  humanActivity?: boolean;
   id: string; threadId: string; requestId?: string; senderId?: string | null; text: string; images?: unknown[];
   delivery?: Delivery; source?: "explicit" | "notification"; replyTo?: string; createdAt?: number;
   state?: "queued" | "dispatched" | "done"; insertedAt?: number; outcome?: WorkOutcome;
@@ -177,6 +180,12 @@ export class ThreadService implements ThreadApi {
   private closed = false;
   private suspended = false;
   private directory?: ThreadApi & { owners?: readonly { id: string; api: ThreadApi }[] };
+  private managerWatchdog?: { observe: () => Promise<Result<ManagerWatchObservation>>; onError: (message: string | null) => void };
+  private managerWatchdogRunning = false;
+  private managerWatchdogApproved: string | null = null;
+  setManagerWatchdog(observe: () => Promise<Result<ManagerWatchObservation>>, onError: (message: string | null) => void): void {
+    this.managerWatchdog = { observe, onError };
+  }
   private watchList?: import("./watch-list.js").WatchApi;
   setWatchList(watchList: import("./watch-list.js").WatchApi): void { this.watchList = watchList; }
   async watch(input: import("./watch-list.js").WatchRequest): Promise<Result<import("./watch-list.js").WatchResponse>> {
@@ -229,13 +238,26 @@ export class ThreadService implements ThreadApi {
         landed_at INTEGER, outcome TEXT, final_message TEXT, error TEXT);
       CREATE INDEX IF NOT EXISTS thread_work_queue ON thread_work(thread_id,status,front DESC,ordinal);
       CREATE INDEX IF NOT EXISTS thread_work_unfinished ON thread_work(thread_id) WHERE status!='done';
-      CREATE INDEX IF NOT EXISTS thread_work_user_recency ON thread_work(thread_id,created_at DESC) WHERE sender_id IS NULL AND source='explicit';
+      CREATE TABLE IF NOT EXISTS thread_human_activity (
+        work_id TEXT PRIMARY KEY REFERENCES thread_work(id), thread_id TEXT NOT NULL REFERENCES thread(id), created_at INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS thread_human_recency ON thread_human_activity(thread_id,created_at DESC);
+      CREATE INDEX IF NOT EXISTS thread_human_latest ON thread_human_activity(created_at DESC);
       CREATE TABLE IF NOT EXISTS thread_execution (
         id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES thread(id), work_id TEXT NOT NULL,
         settings TEXT NOT NULL, created_at INTEGER NOT NULL, ended_at INTEGER, settlement_seq INTEGER UNIQUE, outcome TEXT, final_message TEXT, error TEXT);
       CREATE TABLE IF NOT EXISTS thread_request (id TEXT PRIMARY KEY, hash TEXT NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL, response TEXT);
       CREATE TABLE IF NOT EXISTS thread_assignment_reply (work_id TEXT PRIMARY KEY REFERENCES thread_work(id), execution_id TEXT NOT NULL REFERENCES thread_execution(id));
       CREATE TABLE IF NOT EXISTS thread_wake (thread_id TEXT PRIMARY KEY REFERENCES thread(id), generation TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS manager_watchdog (
+        thread_id TEXT PRIMARY KEY REFERENCES thread(id), last_human_at INTEGER,
+        next_due_at INTEGER, sequence INTEGER NOT NULL CHECK(sequence>=0), paused_at INTEGER);
+      UPDATE thread_work SET status='done',outcome='cancelled' WHERE status='queued' AND id IN (
+        SELECT json_extract(data,'$.lastMessageId') FROM thread_wake WHERE thread_id IN (SELECT id FROM thread WHERE json_extract(metadata,'$.manager')=1)
+        AND json_extract(data,'$.cadenceMs')=14400000
+        AND json_extract(data,'$.reason')='Managing Kenan heartbeat: consider the person''s current needs and held questions; speak only when there is something useful to say.');
+      DELETE FROM thread_wake WHERE thread_id IN (SELECT id FROM thread WHERE json_extract(metadata,'$.manager')=1)
+        AND json_extract(data,'$.cadenceMs')=14400000
+        AND json_extract(data,'$.reason')='Managing Kenan heartbeat: consider the person''s current needs and held questions; speak only when there is something useful to say.';
       CREATE TABLE IF NOT EXISTS thread_context_generation (
         thread_id TEXT PRIMARY KEY REFERENCES thread(id), generation TEXT NOT NULL,
         key_count INTEGER NOT NULL CHECK(key_count>=1), key_hash TEXT NOT NULL);
@@ -280,6 +302,9 @@ export class ThreadService implements ThreadApi {
         this.sql("UPDATE thread SET metadata=? WHERE id=?").run(JSON.stringify(metadata), row.id);
       }
     });
+    this.db.exec(`UPDATE thread_work SET source='notification' WHERE sender_id IS NULL AND source='explicit'
+      AND id IN (SELECT r.id FROM thread_request r JOIN thread t ON t.id=r.target WHERE r.kind='spawn'
+        AND (json_extract(t.metadata,'$.watchList')=1 OR json_extract(t.metadata,'$.createdBy.kind') IN ('runtime','process','thread')));`);
     const executionColumns = this.sql("PRAGMA table_info(thread_execution)").all() as { name: string }[];
     if (!executionColumns.some(column => column.name === "retry_settings")) this.db.exec("ALTER TABLE thread_execution ADD COLUMN retry_settings TEXT");
     if (!executionColumns.some(column => column.name === "assignment_pending")) this.db.exec("ALTER TABLE thread_execution ADD COLUMN assignment_pending INTEGER NOT NULL DEFAULT 0");
@@ -307,7 +332,7 @@ export class ThreadService implements ThreadApi {
       catch (error) { this.db.exec(depth ? `ROLLBACK TO SAVEPOINT ${savepoint}; RELEASE SAVEPOINT ${savepoint}` : "ROLLBACK"); throw error; }
     } finally { this.transactionDepth--; }
   }
-  private static readonly THREAD_COLUMNS = "t.*,(SELECT MAX(created_at) FROM thread_work w WHERE w.thread_id=t.id AND w.sender_id IS NULL AND w.source='explicit') last_user_message_at,(SELECT data FROM thread_wake s WHERE s.thread_id=t.id) wake_data,(SELECT count(*) FROM thread_work w INDEXED BY thread_work_unfinished WHERE w.thread_id=t.id AND w.status!='done') pending_count,(SELECT created_at FROM thread_execution e WHERE e.thread_id=t.id AND e.ended_at IS NULL) active_execution_at,(SELECT min(created_at) FROM thread_work w WHERE w.thread_id=t.id AND w.status='queued') queued_at";
+  private static readonly THREAD_COLUMNS = "t.*,(SELECT MAX(created_at) FROM thread_human_activity w WHERE w.thread_id=t.id) last_user_message_at,(SELECT data FROM thread_wake s WHERE s.thread_id=t.id) wake_data,(SELECT count(*) FROM thread_work w INDEXED BY thread_work_unfinished WHERE w.thread_id=t.id AND w.status!='done') pending_count,(SELECT created_at FROM thread_execution e WHERE e.thread_id=t.id AND e.ended_at IS NULL) active_execution_at,(SELECT min(created_at) FROM thread_work w WHERE w.thread_id=t.id AND w.status='queued') queued_at";
   private row(id: string): Json | undefined { return this.sql(`SELECT ${ThreadService.THREAD_COLUMNS} FROM thread t WHERE id=?`).get(id) as Json | undefined; }
   private project(row: Json): Thread {
     const pending = row.pending_count ?? (this.sql("SELECT count(*) n FROM thread_work INDEXED BY thread_work_unfinished WHERE thread_id=? AND status!='done'").get(row.id) as { n: number }).n;
@@ -353,6 +378,18 @@ export class ThreadService implements ThreadApi {
       if (row.execution === "root-repair") repairOwner ??= row.id;
     }
     return { total: rows.length, lanes, repairOwner };
+  }
+  async managerWorkSummary(): Promise<Result<ManagerWorkSummary>> {
+    if (this.closed || this.suspended) return bad("unavailable", "Thread controller is suspended");
+    const human = this.sql("SELECT MAX(created_at) time FROM thread_human_activity").get() as { time: number | null };
+    const activeWork = this.snapshot({ archived: false }).some(thread => {
+      if (!hasManagedWork(thread)) return false;
+      if (thread.metadata?.manager !== true) return true;
+      const work = this.sql(`SELECT id FROM thread_work WHERE thread_id=? AND status!='done'
+        UNION SELECT work_id id FROM thread_execution WHERE thread_id=? AND ended_at IS NULL`).all(thread.id, thread.id) as { id: string }[];
+      return !work.length || work.some(item => !item.id.startsWith(MANAGER_WATCHDOG_PREFIX));
+    });
+    return good({ activeWork, lastHumanMessageAt: human.time });
   }
   /** Counts each live lane owner once; a hold releases its queue only after cancellation is confirmed. */
   laneCustody(): Map<string, number> {
@@ -731,14 +768,17 @@ export class ThreadService implements ThreadApi {
     return window;
   }
   private nativeContextWindow(thread: Thread, request: NonNullable<InspectOptions["contextWindow"]>): Result<ThreadContextWindow> {
-    const indexed = indexedThreadHistory(thread.sessionFile, request.leafId, { managerWakeVisibility: thread.metadata?.manager === true });
-    if (!indexed.ok) {
-      if (indexed.error.code !== "missing" || thread.metadata?.nativeHistoryRequired === true || request.leafId !== undefined) return historyFailure(indexed.error);
+    const projected = withIndexedThreadHistory(thread.sessionFile, request.leafId, { managerWakeVisibility: thread.metadata?.manager === true },
+      history => this.projectNativeContextWindow(thread, request, history));
+    if (!projected.ok) {
+      if (projected.error.code !== "missing" || thread.metadata?.nativeHistoryRequired === true || request.leafId !== undefined) return historyFailure(projected.error);
       const source = this.unstartedContextSource(thread);
       if (request.generation !== undefined && request.generation !== source.generation) return bad("conflict", "Context source generation changed; reopen the transcript window");
       return good({ source, total: 0, records: [], knownToolCallIds: [], completedToolCallIds: [] });
     }
-    const history = indexed.value;
+    return projected.value;
+  }
+  private projectNativeContextWindow(thread: Thread, request: NonNullable<InspectOptions["contextWindow"]>, history: IndexedThreadHistory): Result<ThreadContextWindow> {
     const metadata = this.nativeContextMetadata(thread, history);
     const window = this.nativeWindowMetadata(thread, history, metadata);
     const { total, calls, results } = window;
@@ -975,6 +1015,7 @@ export class ThreadService implements ThreadApi {
     void this.routeQuestionCustody();
     this.releaseExpiredQuestions();
     this.deliverScheduledWakes();
+    void this.reconcileManagerWatchdog();
     if (this.capacityLedger) {
       const pending = this.sql("SELECT DISTINCT thread_id FROM thread_capacity WHERE state='releasing'").all() as { thread_id: string }[];
       for (const row of pending) void this.serial(row.thread_id, async () => {
@@ -998,6 +1039,82 @@ export class ThreadService implements ThreadApi {
     for (const [id, runtime] of this.runtimes) if (!runtime.busy && !runtime.executionId && !this.operations.has(id) && !this.halts.has(id) && !this.opening.has(id)) void this.serial(id, () => this.park(id, runtime)).catch(error => {
       if (!this.suspended && !this.closed) { this.sql("UPDATE thread SET metadata=json_set(metadata,'$.cleanupError',?) WHERE id=?").run(errorText(error), id); this.changed(id); }
     });
+  }
+
+  private async reconcileManagerWatchdog(): Promise<void> {
+    const owner = this.managerWatchdog;
+    if (!owner || this.managerWatchdogRunning) return;
+    this.managerWatchdogRunning = true;
+    try {
+      const observed = await owner.observe();
+      if (this.closed || this.suspended || !this.started) return;
+      if (!observed.ok) { this.managerWatchdogApproved = null; owner.onError(observed.error.message); return; }
+      const input = observed.value;
+      if (input.managerThreadId === null) { owner.onError(null); return; }
+      await this.serial(input.managerThreadId, async () => {
+      if (this.closed || this.suspended || !this.started) return;
+      const manager = this.get(input.managerThreadId!);
+      if (!manager || manager.metadata?.manager !== true) { owner.onError("Manager watchdog has no canonical manager identity"); return; }
+      const now = Date.now();
+      const localHuman = this.sql("SELECT MAX(created_at) time FROM thread_human_activity").get() as { time: number | null };
+      const times = [input.lastHumanMessageAt, localHuman.time].filter((time): time is number => time !== null);
+      const humanAt = times.length ? Math.max(...times) : null;
+      let receipt: string | null = null;
+      this.transaction(() => {
+        this.sql("INSERT OR IGNORE INTO manager_watchdog(thread_id,last_human_at,next_due_at,sequence) VALUES(?,NULL,NULL,0)").run(manager.id);
+        const state = this.sql("SELECT * FROM manager_watchdog WHERE thread_id=?").get(manager.id) as { last_human_at: number | null; next_due_at: number | null; sequence: number; paused_at: number | null };
+        const newestHuman = humanAt === null ? state.last_human_at : state.last_human_at === null ? humanAt : Math.max(humanAt, state.last_human_at);
+        const pausedAt = state.paused_at !== null && newestHuman !== null && newestHuman > state.paused_at ? null : state.paused_at;
+        let due = state.next_due_at;
+        if (!input.activeWork || pausedAt !== null || manager.held || manager.lifecycle.kind === "archived") due = null;
+        else if (due === null || newestHuman !== state.last_human_at) due = (newestHuman ?? now) + MANAGER_INACTIVITY_MS;
+        this.sql("UPDATE manager_watchdog SET last_human_at=?,next_due_at=?,paused_at=? WHERE thread_id=?").run(newestHuman, due, pausedAt, manager.id);
+        if (due === null || newestHuman !== state.last_human_at) { this.managerWatchdogApproved = null; this.cancelQueuedManagerChecks(manager.id); }
+        else if (newestHuman === null || newestHuman + MANAGER_INACTIVITY_MS <= now) this.managerWatchdogApproved = `${MANAGER_WATCHDOG_PREFIX}${manager.id}:${state.sequence}`;
+        if (due === null || due > now || this.halts.has(manager.id)
+          || this.pending(manager.id).some(message => message.id.startsWith(MANAGER_WATCHDOG_PREFIX))) return;
+        receipt = `${MANAGER_WATCHDOG_PREFIX}${manager.id}:${state.sequence + 1}`;
+        this.managerWatchdogApproved = receipt;
+        this.insertMessage(receipt, { requestId: receipt, threadId: manager.id, senderId: manager.id, source: "notification", delivery: "queue",
+          text: `Five-minute inactivity check: the person has not sent a human message for five minutes and managed work remains active. Inspect the accessible orchestrator work and canonical dependency waits for stuck work, unblock what you can, and return quietly if nothing needs attention. Agent messages and tool events do not reset this schedule. The controller owns this conditional timer; do not create a thread_wake for it.\n\n${BACKGROUND_ATTENTION_POLICY}` }, manager.settings, true);
+        this.sql("UPDATE thread SET state='running' WHERE id=?").run(manager.id);
+        this.sql("UPDATE manager_watchdog SET next_due_at=?,sequence=? WHERE thread_id=?").run(now + MANAGER_INACTIVITY_MS, state.sequence + 1, manager.id);
+      });
+      owner.onError(null);
+      if (receipt !== null) { this.changed(manager.id); this.wake(manager.id); }
+      });
+    } catch (error) {
+      if (!this.closed && !this.suspended) owner.onError(errorText(error));
+    } finally { this.managerWatchdogRunning = false; }
+  }
+
+  private async validateManagerCheck(threadId: string, workId: string): Promise<boolean> {
+    const owner = this.managerWatchdog;
+    if (!owner) return false;
+    try {
+      const result = await owner.observe();
+      if (this.closed || this.suspended || !this.started) return false;
+      if (!result.ok) { this.managerWatchdogApproved = null; owner.onError(result.error.message); return false; }
+      const manager = this.get(threadId);
+      const localHuman = this.sql("SELECT MAX(created_at) time FROM thread_human_activity").get() as { time: number | null };
+      const times = [result.value.lastHumanMessageAt, localHuman.time].filter((time): time is number => time !== null);
+      const humanAt = times.length ? Math.max(...times) : null;
+      const state = this.sql("SELECT paused_at FROM manager_watchdog WHERE thread_id=?").get(threadId) as { paused_at: number | null } | undefined;
+      const valid = result.value.managerThreadId === threadId && result.value.activeWork && manager?.metadata?.manager === true && !manager.held
+        && (humanAt === null || humanAt + MANAGER_INACTIVITY_MS <= Date.now())
+        && !!state && (state.paused_at === null || humanAt !== null && humanAt > state.paused_at);
+      if (!valid) this.cancelQueuedManagerChecks(threadId);
+      else {
+        this.managerWatchdogApproved = workId;
+        this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.agentWait') WHERE id=?").run(threadId);
+      }
+      owner.onError(null);
+      return valid;
+    } catch (error) {
+      this.managerWatchdogApproved = null;
+      if (!this.closed && !this.suspended) owner.onError(errorText(error));
+      return false;
+    }
   }
 
   private async validateDependencies(id: string, ids: string[]): Promise<Result<void>> {
@@ -1216,7 +1333,20 @@ export class ThreadService implements ThreadApi {
     return receipt ? receipt.hash === digest(value) && receipt.kind === kind ? good(receipt.target) : bad("conflict", "requestId already belongs to different input") : good(null);
   }
   private recordRequest(id: string, value: unknown, kind: string, target: string): void { this.sql("INSERT INTO thread_request(id,hash,kind,target) VALUES(?,?,?,?)").run(id, digest(value), kind, target); }
+  private cancelQueuedManagerChecks(threadId?: string): void {
+    this.managerWatchdogApproved = null;
+    const ids = threadId ? [threadId] : (this.sql("SELECT thread_id FROM manager_watchdog").all() as { thread_id: string }[]).map(row => row.thread_id);
+    for (const id of ids) {
+      this.sql("UPDATE thread_work SET status='done',outcome='cancelled' WHERE thread_id=? AND status='queued' AND id LIKE 'thread-wake:manager-inactivity:%'").run(id);
+      this.sql("UPDATE thread SET state='idle',metadata=json_remove(metadata,'$.admissionWait') WHERE id=? AND NOT EXISTS(SELECT 1 FROM thread_execution e WHERE e.thread_id=thread.id AND e.ended_at IS NULL) AND NOT EXISTS(SELECT 1 FROM thread_work w WHERE w.thread_id=thread.id AND w.status!='done')").run(id);
+    }
+  }
   private insertMessage(id: string, input: SendThread, settings: ThreadSettings, front = false, senderName?: string, waitResult?: WaitResultEvidence): ThreadMessage {
+    const humanActivity = input.humanActivity === true && !input.senderId && (input.source ?? "explicit") === "explicit";
+    if (humanActivity) {
+      this.cancelQueuedManagerChecks();
+      this.sql("UPDATE manager_watchdog SET paused_at=NULL").run();
+    }
     const current = this.get(input.threadId);
     const wait = current?.metadata?.agentWait;
     const dependency = validateWaitDependency(wait);
@@ -1242,6 +1372,7 @@ export class ThreadService implements ThreadApi {
     }
     this.sql("INSERT INTO thread_work(id,thread_id,sender_id,text,images,delivery,source,reply_to,front,settings,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
       .run(id, input.threadId, input.senderId ?? null, input.text, JSON.stringify(input.images ?? []), resolveDelivery(input), input.source ?? "explicit", input.replyTo ?? null, front ? Date.now() : 0, JSON.stringify(settings), Date.now());
+    if (humanActivity) this.sql("INSERT INTO thread_human_activity(work_id,thread_id,created_at) SELECT id,thread_id,created_at FROM thread_work WHERE id=?").run(id);
     if (senderName) this.sql("UPDATE thread_work SET sender_name=? WHERE id=?").run(senderName, id);
     if (input.source === "notification" && this.get(input.threadId)?.metadata?.archived) this.sql("UPDATE thread_work SET status='done',outcome='cancelled' WHERE id=?").run(id);
     return this.message(this.sql("SELECT * FROM thread_work WHERE id=?").get(id) as Json);
@@ -1309,7 +1440,9 @@ export class ThreadService implements ThreadApi {
         const now = Date.now();
         this.sql("INSERT INTO thread(id,parent_id,title,cwd,session_file,settings,admission,state,created_at,updated_at,metadata) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
           .run(id, input.parentId ?? null, input.title ?? `Thread ${id.slice(0, 8)}`, cwd, join(this.options.sessionsDir, `${id}.jsonl`), JSON.stringify(settings.value), admission, input.message ? "running" : "idle", now, now, JSON.stringify(metadata));
-        if (input.message) this.insertMessage(input.requestId, { requestId: input.requestId, threadId: id, senderId: input.parentId, text: input.message, images: input.images, delivery: resolveDelivery({ senderId: input.parentId }) }, settings.value, false, parent?.agentName);
+        if (input.message) this.insertMessage(input.requestId, { requestId: input.requestId, threadId: id, senderId: input.parentId, humanActivity: input.createdBy?.kind === "person",
+          source: !input.parentId && (input.metadata?.watchList === true || input.createdBy && input.createdBy.kind !== "person") ? "notification" : "explicit",
+          text: input.message, images: input.images, delivery: resolveDelivery({ senderId: input.parentId }) }, settings.value, false, parent?.agentName);
         this.recordRequest(input.requestId, receipt, "spawn", id);
       });
       this.changed(id); this.wake(id); return good(this.get(id)!);
@@ -1800,7 +1933,7 @@ export class ThreadService implements ThreadApi {
           this.sql("UPDATE thread SET held=0,state='running',metadata=json_remove(metadata,'$.archiveInterruption','$.archived','$.archivedAt') WHERE id=?").run(recipient.id);
           const body = questionAnswerBody(question, value);
           this.insertMessage(`question-answer:${question.id}`, { requestId: `question-answer:${question.id}`, threadId: recipient.id,
-            ...(managerId ? { senderId: managerId } : {}), text: managerId ? `Manager decision (not human input):\n${body}` : body,
+            ...(managerId ? { senderId: managerId } : {}), humanActivity: !managerId && input.humanActivity === true, text: managerId ? `Manager decision (not human input):\n${body}` : body,
             delivery: "steer", source: managerId ? "notification" : "explicit", replyTo: question.id }, recipient.settings, recipient.held, managerId ? this.get(managerId)?.agentName : undefined);
           this.sql("UPDATE thread SET held=0,state='running',metadata=json_remove(metadata,'$.archiveInterruption','$.archived','$.archivedAt') WHERE id=?").run(recipient.id);
           resumed.add(recipient.id);
@@ -2081,6 +2214,7 @@ export class ThreadService implements ThreadApi {
     }
     if (input.action === "close" || input.action === "stop" || input.action === "cancel") {
       const id = input.threadId;
+      if (manager) this.sql("INSERT INTO manager_watchdog(thread_id,last_human_at,next_due_at,sequence,paused_at) VALUES(?,NULL,NULL,0,?) ON CONFLICT(thread_id) DO UPDATE SET next_due_at=NULL,paused_at=excluded.paused_at").run(id, Date.now());
       if (input.action !== "cancel" && this.get(id)?.metadata?.archived && !this.execution(id) && !this.pending(id).length && !this.runtimes.get(id)?.busy) return good(this.get(id)!);
       this.sql("UPDATE thread SET held=1,metadata=json_set(json_remove(metadata,'$.cancellationSettled'),'$.cancellationRequest',?) WHERE id=?").run(input.action === "cancel" || manager ? "cancel" : "close", id);
       this.changed(id);
@@ -2804,6 +2938,8 @@ export class ThreadService implements ThreadApi {
     const work = this.sql(`SELECT * FROM thread_work WHERE thread_id=? AND status='queued' ${execution ? "AND delivery IN ('steer','hardSteer')" : ""} ORDER BY front DESC,ordinal LIMIT 1`).get(id) as Json | undefined;
     if (!work) { if (!execution && !runtime?.busy) { this.state(id, "idle"); if (runtime) await this.park(id, runtime); } return; }
     if (!execution && runtime?.busy) return;
+    if (work.id.startsWith(MANAGER_WATCHDOG_PREFIX)
+      && (!await this.validateManagerCheck(id, work.id) || this.managerWatchdogApproved !== work.id || !this.queuedWork(work.id))) return;
     if (work.prepared === null) {
       if (!execution) this.phase(id, "preparing", "Preparing queued input and attachments");
       const prepared = this.options.prepareMessage ? await this.options.prepareMessage(thread, this.message(work)) : good({ text: work.text as string, images: JSON.parse(work.images) as unknown[] });
@@ -3076,7 +3212,7 @@ export class ThreadService implements ThreadApi {
       const settings = validateThreadSettings(input.settings === undefined ? thread.settings : input.settings);
       if (!settings.ok) return settings;
       this.transaction(() => {
-        this.insertMessage(input.id, { requestId: input.requestId ?? input.id, threadId: input.threadId, senderId: input.senderId ?? undefined, text: input.text, images: input.images, delivery: resolveDelivery({ senderId: input.senderId ?? undefined, delivery: input.delivery }), source: input.source, replyTo: input.replyTo }, settings.value);
+        this.insertMessage(input.id, { requestId: input.requestId ?? input.id, threadId: input.threadId, senderId: input.senderId ?? undefined, humanActivity: input.humanActivity, text: input.text, images: input.images, delivery: resolveDelivery({ senderId: input.senderId ?? undefined, delivery: input.delivery }), source: input.source, replyTo: input.replyTo }, settings.value);
         this.sql("INSERT INTO thread_request(id,hash,kind,target) VALUES(?,'import','import-message',?)").run(input.requestId ?? input.id, input.id);
         const done = input.state === "done";
         const executionId = input.executionId ?? `import:${input.id}`;
@@ -3085,6 +3221,7 @@ export class ThreadService implements ThreadApi {
           .run(executionId, input.threadId, input.id, JSON.stringify(settings.value), input.createdAt ?? Date.now(), input.createdAt ?? Date.now(), input.outcome ?? "complete", JSON.stringify(input.finalMessage ?? null));
         this.sql("UPDATE thread_work SET status=?,execution_id=?,created_at=?,inserted_at=?,outcome=?,final_message=? WHERE id=?")
           .run(input.state ?? "queued", done || input.state === "dispatched" ? executionId : null, input.createdAt ?? Date.now(), input.insertedAt ?? null, input.outcome ?? (done ? "complete" : null), input.finalMessage === undefined ? null : JSON.stringify(input.finalMessage), input.id);
+        this.sql("UPDATE thread_human_activity SET created_at=(SELECT created_at FROM thread_work WHERE id=?) WHERE work_id=?").run(input.id, input.id);
         if (!done && !this.row(input.threadId)?.held) this.sql("UPDATE thread SET state='running' WHERE id=?").run(input.threadId);
       });
       return good(this.message(this.sql("SELECT * FROM thread_work WHERE id=?").get(input.id) as Json));

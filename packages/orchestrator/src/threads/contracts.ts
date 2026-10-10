@@ -75,6 +75,8 @@ export interface AskThreadQuestions {
 }
 export interface QuestionsReceipt { accepted: true; questionIds: string[] }
 export interface AnswerThreadQuestion {
+  /** Stamped by authenticated human ingress. */
+  humanActivity?: boolean;
   threadId: string;
   questionId: string;
   selectedSuggestionIds: string[];
@@ -151,6 +153,8 @@ export interface SpawnThread {
   createdBy?: ThreadCreator;
 }
 export interface SendThread {
+  /** Stamped by authenticated human ingress; agents/processes cannot assert this. */
+  humanActivity?: boolean;
   requestId: string;
   threadId: string;
   senderId?: string;
@@ -413,6 +417,7 @@ export interface ThreadApi {
   watch(input: import("./watch-list.js").WatchRequest): Promise<Result<import("./watch-list.js").WatchResponse>>;
   managerThread(): Promise<Result<Thread | null>>;
   managerNotificationPolicy(): Promise<Result<ManagerNotificationPolicy>>;
+  managerWorkSummary(): Promise<Result<import("./manager-watchdog.js").ManagerWorkSummary>>;
   questionOrigin(threadId: string): Promise<Result<Pick<Thread, "id" | "title" | "agentName">>>;
   managerQuestionCustody(input: ManagerQuestionCustodyRequest): Promise<Result<ManagerQuestionCustodyReceipt>>;
   managerQuestions(input: ManagerQuestionsRequest): Promise<Result<ManagerQuestionsResponse>>;

@@ -9,7 +9,6 @@ export const policy = Object.freeze({
   // A meeting census that keeps failing for this long is a broken probe, not a long meeting.
   meetingProbeFailureLimitMs: 2 * 60 * 60_000,
   maxAttempts: 3,
-  maxRepairDepth: 2,
   maxLaunchAttempts: 3,
   repairMs: 1_200_000,
 });
@@ -63,7 +62,7 @@ export function queueStallReason(request, observation, now = Date.now()) {
 }
 
 export function progressBudgetExhausted(request, now = Date.now()) {
-  if (["live-meeting", "live-telephone", "native-source", "native-history", "hosts"].includes(request.waiting?.kind)) return false;
+  if (["live-meeting", "live-telephone", "native-source", "native-history", "executor-handoff", "hosts"].includes(request.waiting?.kind)) return false;
   return (request.attempt ?? 0) >= (request.attemptLimit ?? policy.maxAttempts)
     || !!request.blockedSince && now - Date.parse(request.blockedSince) > policy.blockedLimitMs;
 }
@@ -89,13 +88,13 @@ Workspace preparation: ${repair.workspaceError ?? "ready"}
 Compact log context:
 ${request.failure?.excerpt ?? "See the full log."}
 
-Please repair the owning code or host configuration, keeping existing source refs, receipts and host restoration plans. Run focused checks that take seconds. Full publication checks remain the worker's responsibility; skipping checks or resubmitting an unchanged defect is not a repair. Work in the registered checkout and commit source changes there. If workspace preparation failed, please repair that tooling or source-custody problem first and use agent-workspace to obtain a writer checkout. Return its absolute path in a workspace field when different from the path above. The wrapper will submit the corrected commit once and record its causal link. Do not publish or retry from this agent, and do not change publication request or repair receipts yourself.
+Please repair the owning code or host configuration, keeping existing source refs, receipts and host restoration plans. Run focused checks that take seconds. Full publication checks remain the worker's responsibility; skipping checks or resubmitting an unchanged defect is not a repair. Work in the registered checkout and commit source changes there. If workspace preparation failed, please repair that tooling or source-custody problem first and use agent-workspace to obtain a writer checkout. Return its absolute path in a workspace field when different from the path above. The wrapper retains the corrected immutable source and continues this same request, reusing unchanged proofs. Do not publish or retry from this agent, and do not change publication request or repair receipts yourself.
 
 Write ${repair.result} with one JSON result when you finish:
 - {"status":"source-fixed","sourceSha":"40-character commit","summary":"cause and repair","evidence":"absolute path to a focused check or diagnosis receipt"}
 - {"status":"infrastructure-fixed","summary":"cause and actual host repair","evidence":"absolute path to a focused proof receipt"} if the original source now deserves its one repaired retry.
 - {"status":"blocked","summary":"what remains and exactly what Hara needs to supply"} if this attempt cannot repair it.
 
-You have one ${policy.repairMs / 60_000}-minute turn, not a retry loop. Retain useful changes and report an honest blocker if the repair cannot finish. The publication command is ${command}. The wrapper retains terminal reporting and links any corrected submission back to this failed request.
+You have one ${policy.repairMs / 60_000}-minute turn, not a retry loop. Retain useful changes and report an honest blocker if the repair cannot finish. The publication command is ${command}. The wrapper retains terminal reporting, original source and failed attempts in this request.
 `;
 }

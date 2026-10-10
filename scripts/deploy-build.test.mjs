@@ -46,6 +46,7 @@ async function run() {
   if (name === 'remote') {
     fs.mkdirSync('apps/remote/server/phone/dist', { recursive: true });
     fs.writeFileSync('apps/remote/server/phone/dist/retell-sdk.js', 'sdk');
+    fs.writeFileSync(out + '/release-revision.js', 'globalThis.__PI_STACK_RELEASE_REVISION__="' + 'a'.repeat(40) + '";');
   }
 }
 run();
@@ -109,7 +110,7 @@ test("Root publication reuses prepared compilation but rejects changed inputs or
   assert.equal(f.calls().length, 8);
 });
 
-test('Kenan copies the checked shared build, while a new revision refreshes its embedded identity', t => {
+test('Kenan copies the checked shared build, while a new revision rebinds metadata without rebuilding JavaScript', t => {
   const f = fixture(t);
   const build = () => {
     const result = spawnSync(process.execPath, [join(f.repo, 'apps/kenan/build.mjs')], { cwd: f.repo, env: f.env, encoding: 'utf8', timeout: 3000 });
@@ -122,7 +123,9 @@ test('Kenan copies the checked shared build, while a new revision refreshes its 
   assert.equal(spawnSync('git', ['-C', f.repo, 'add', 'revision-marker']).status, 0);
   assert.equal(spawnSync('git', ['-C', f.repo, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'next revision']).status, 0);
   build();
-  assert.deepEqual(f.calls(), ['remote', 'remote']);
+  assert.deepEqual(f.calls(), ['remote']);
+  const revision = spawnSync('git', ['-C', f.repo, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+  assert.equal(readFileSync(join(f.repo, 'apps/kenan/dist/release-revision.js'), 'utf8'), `globalThis.__PI_STACK_RELEASE_REVISION__="${revision}";`);
 });
 
 test("build reuse requires unchanged source, dependencies and complete output", t => {

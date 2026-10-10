@@ -1,8 +1,17 @@
-import { createThreadClient } from "pi-orchestrator/api";
+import { createThreadClient, validateManagerWorkSummary } from "pi-orchestrator/api";
 
 export function managerRelayClient(baseUrl: string, environmentId?: string, transport: (input: string | URL | Request, init?: RequestInit) => Promise<Response> = fetch) {
-  const client = createThreadClient(baseUrl, (url, init) => transport(url, { ...init,
-    body: JSON.stringify({ input: JSON.parse(String(init?.body)), ...(environmentId ? { environmentId } : {}) }) }));
+  const bridge = (url: string | URL | Request, init?: RequestInit) => transport(url, { ...init,
+    body: JSON.stringify({ input: JSON.parse(String(init?.body)),
+      ...(environmentId && new URL(String(url)).pathname.split("/").at(-1) !== "managerWorkSummary" ? { environmentId } : {}) }) });
+  const client = createThreadClient(baseUrl, bridge);
+  const summaryClient = createThreadClient(baseUrl, bridge, { timeoutMs: 5_000 });
+  client.managerWorkSummary = async () => {
+    const result = await summaryClient.managerWorkSummary();
+    if (!result.ok) return result;
+    return validateManagerWorkSummary(result.value) ? { ok: true, value: result.value }
+      : { ok: false, error: { code: "unavailable", message: "Manager relay returned an invalid work summary" } };
+  };
   const readPolicy = client.managerNotificationPolicy;
   client.managerNotificationPolicy = async () => {
     const result = await readPolicy();

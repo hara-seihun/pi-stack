@@ -13,7 +13,7 @@ function fixture(t) {
   mkdirSync(join(dir, 'bin'));
   const put = (name, content) => writeFileSync(join(repo, 'deploy', name), `#!/usr/bin/env bash\nset -euo pipefail\n${content}\n`, { mode: 0o755 });
   copyFileSync(new URL('../deploy/host', import.meta.url), join(repo, 'deploy/host'));
-  copyFileSync(new URL('../deploy/prepared-components.mjs', import.meta.url), join(repo, 'deploy/prepared-components.mjs'));
+  for (const name of ['prepared-components.mjs', 'host-plan.mjs', 'source-scopes.mjs']) copyFileSync(new URL(`../deploy/${name}`, import.meta.url), join(repo, 'deploy', name));
   put('lib', `pi_stack_enter_deployment() { :; }
 pi_stack_check_person_configs() { :; }
 pi_stack_fleet_user() { echo fixture; }
@@ -127,6 +127,25 @@ test('preparation precedes native history wait without changing serving sources 
   }
   assert.doesNotMatch(readFileSync(f.env.TRACE, 'utf8'), /^(restart|start|stop|enable|disable) /m);
   assert.equal(JSON.parse(readFileSync(f.env.PI_STACK_RECOGNITION_TRANSITION_FILE, 'utf8')).phase, 'rolled_back');
+});
+
+test('missing recognition selection restores absence, never a pointer to its own stable name', t => {
+  const f = fixture(t);
+  rmSync(f.env.PI_STACK_MEET_RECOGNITION_DEST);
+  const result = f.run({ PRIOR_STATE: '1', RECOGNITION_EXIT: '1' });
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(existsSync(f.env.PI_STACK_MEET_RECOGNITION_DEST), false);
+  assert.equal(JSON.parse(readFileSync(f.env.PI_STACK_RECOGNITION_TRANSITION_FILE, 'utf8')).previousRecognition, '');
+});
+
+test('recursive recognition selection is an explicit error before publication', t => {
+  const f = fixture(t);
+  rmSync(f.env.PI_STACK_MEET_RECOGNITION_DEST);
+  symlinkSync(f.env.PI_STACK_MEET_RECOGNITION_DEST, f.env.PI_STACK_MEET_RECOGNITION_DEST);
+  const result = f.run();
+  assert.equal(result.status, 66, result.stderr);
+  assert.match(result.stderr, /dangling or recursive/);
+  assert.equal(existsSync(f.env.PREPARED), false);
 });
 
 for (const failure of [{}, { RECOGNITION_EXIT: '1' }, { SMOKE_EXIT: '1' }, { RUNTIME_FAILURE: 'exit' }, { RUNTIME_FAILURE: 'TERM' }]) test(`Recognition selection and concurrent activation restore on ${JSON.stringify(failure)}`, t => {

@@ -111,7 +111,7 @@ test("publication partitions deployment checks without dropping or repeating con
 
 test("publication fixture files run exactly once as separately bounded jobs", async () => {
   const suites = checkJobs.filter(([name]) => name.startsWith("publication "));
-  const expected = ["config", "transport", "roots", "", "gate", "bundle", "source", "progress", "proof", "hosts"]
+  const expected = ["config", "transport", "roots", "", "gate", "bundle", "source", "progress", "proof", "continuation", "timings", "preflight", "hosts", "host-lanes"]
     .map(suite => `scripts/publication${suite ? `-${suite}` : ""}.test.mjs`);
   assert.deepEqual(suites.flatMap(([, , args]) => args.filter(arg => arg.endsWith(".test.mjs"))), expected);
   assert.ok(suites.every(job => job[3].timeoutMs === 55_000));
@@ -160,29 +160,23 @@ test("workspace shards execute a selected contract exactly once across the tool 
   assert.equal((output.match(/✔ cache discovery walks each directory once/g) ?? []).length, 1, output);
 });
 
-test("publication shards Orchestrator under the shared budget without dropping the native proof", async () => {
-  const shards = checkJobs.filter(([name]) => /^orchestrator \d+\/6$/.test(name));
-  assert.equal(shards.length, 6);
-  assert.deepEqual(shards.map(([, , args]) => args.at(-1)), Array.from({ length: 6 }, (_, index) => `--shard=${index + 1}/6`));
-  for (const [, command, args, options] of shards) {
+test("publication gives each Orchestrator contract its own verdict and retains shared typed prerequisites", () => {
+  const suites = checkJobs.filter(([name]) => name.startsWith('orchestrator test: '));
+  assert.ok(suites.length > 100);
+  assert.equal(new Set(suites.map(job => job[2].at(-1))).size, suites.length);
+  for (const [, command, args, options] of suites) {
     assert.equal(command, process.execPath);
-    assert.equal(args[1], "run");
-    assert.ok(args.includes("--exclude=tests/routing-runtime.test.ts"));
-    assert.deepEqual(options.dependsOn, ["orchestrator shared RPC", "orchestrator tool schemas"]);
+    assert.equal(args[1], 'run');
+    assert.ok(!args.some(arg => arg.startsWith('--shard=')));
+    assert.deepEqual(options.dependsOn, ['orchestrator shared RPC', 'orchestrator tool schemas']);
+    assert.ok(options.checkInputs.includes(`packages/orchestrator/${args.at(-1)}`));
   }
-  const routing = checkJobs.find(([name]) => name === "orchestrator routing runtime");
-  assert.equal(routing[2].at(-1), "tests/routing-runtime.test.ts");
-  assert.deepEqual(routing[3].dependsOn, shards[0][3].dependsOn);
-  for (const prerequisite of ["orchestrator memory build", "orchestrator types", "orchestrator shared RPC"]) {
+  for (const file of ['tests/routing-runtime.test.ts', 'tests/thread-wake-native.test.ts']) {
+    assert.equal(suites.filter(job => job[2].at(-1) === file).length, 1);
+  }
+  for (const prerequisite of ['orchestrator memory build', 'orchestrator types', 'orchestrator shared RPC', 'orchestrator tool schemas']) {
     assert.equal(checkJobs.filter(([name]) => name === prerequisite).length, 1);
   }
-  let output = "";
-  const jobs = orchestratorTestChecks(shards.map(([name, , args]) => ({ name, args: [
-    "tests/thread-wake-native.test.ts", "--passWithNoTests", ...args.slice(3),
-  ] })));
-  const results = await runJobs(jobs, { concurrency: checkParallelism(), write(text) { output += text; } });
-  assert.deepEqual(results.map(result => result.code), jobs.map(() => 0), output);
-  assert.equal((output.match(/✓ tests\/thread-wake-native\.test\.ts/g) ?? []).length, 1, output);
 });
 
 test("check budgets reject invalid settings and permit an empty queue", async () => {
