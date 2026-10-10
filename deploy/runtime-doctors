@@ -5,15 +5,20 @@ source "$control/deploy/lib"
 case $phase in browser|model) ;; *) exit 64;; esac
 runtime=${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}
 cache=${PI_STACK_DOCTOR_CACHE_ROOT:-$(dirname "$runtime")/.pi-stack-doctors}/$user
-key=$(pi_stack_as_root node "$control/deploy/doctor-cache.mjs" key "$phase" "$runtime" "$(pi_stack_home "$user")" "$control")
+bindings=$(mktemp)
+trap 'pi_stack_as_root rm -f "$bindings"' EXIT
+runtime=$(pi_stack_as_root node "$control/deploy/doctor-cache.mjs" capture "$phase" "$runtime" "$(pi_stack_home "$user")" "$control" "$bindings")
+pi_stack_as_root chown "$user" "$bindings"
+pi_stack_as_root chmod 600 "$bindings"
+key=$(pi_stack_as_root node "$control/deploy/doctor-cache.mjs" key "$phase" "$runtime" "$(pi_stack_home "$user")" "$control" "$bindings")
 status=0
 pi_stack_as_root node "$control/deploy/doctor-cache.mjs" verify "$cache" "$key" "$phase" || status=$?
 if (( status == 0 )); then exit 0; fi
 (( status == 3 )) || exit "$status"
 case $phase in
-  browser) pi_stack_run_as "$user" node "$control/packages/runtime/browser-doctor.mjs" ;;
-  model) pi_stack_run_as "$user" node "$runtime/node_modules/.bin/pi-model-selection-doctor" ;;
+  browser) pi_stack_run_as "$user" env PI_STACK_RUNTIME_DEST="$runtime" PI_STACK_DOCTOR_BINDINGS="$bindings" node "$control/packages/runtime/browser-doctor.mjs" ;;
+  model) pi_stack_run_as "$user" env PI_STACK_RUNTIME_DEST="$runtime" node "$runtime/node_modules/.bin/pi-model-selection-doctor" ;;
 esac
-after=$(pi_stack_as_root node "$control/deploy/doctor-cache.mjs" key "$phase" "$runtime" "$(pi_stack_home "$user")" "$control")
+after=$(pi_stack_as_root node "$control/deploy/doctor-cache.mjs" key "$phase" "$runtime" "$(pi_stack_home "$user")" "$control" "$bindings")
 [[ $after == "$key" ]] || { echo 'runtime doctor inputs changed during proof; refusing to cache its result' >&2; exit 66; }
 pi_stack_as_root node "$control/deploy/doctor-cache.mjs" record "$cache" "$key" "$phase"

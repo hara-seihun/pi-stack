@@ -5,9 +5,26 @@ import { hostname, release, arch, platform } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { digest } from './prepared-components.mjs';
 
-export function doctorKey(phase, runtime, home, control) {
+export function captureDoctorBindings(phase, runtime, home, control) {
   if (!['browser', 'model'].includes(phase)) throw new Error('doctor phase is required');
-  const hash = createHash('sha256').update(JSON.stringify(['pi-doctor-cache-v1', phase, hostname(), release(), arch(), platform(), process.version, home]));
+  const path = join(home, '.pi/agent/settings.json');
+  const bytes = existsSync(path) ? readFileSync(path) : null;
+  const settings = bytes === null ? {} : JSON.parse(bytes);
+  if (settings.packages !== undefined && !Array.isArray(settings.packages)) throw new Error('doctor settings packages must be an array');
+  const packages = (settings.packages ?? []).map(entry => {
+    const source = typeof entry === 'string' ? entry : entry?.source;
+    if (typeof source !== 'string') throw new Error('doctor package source is required');
+    const target = /^(npm:|git:|https?:)/.test(source) ? source : realpathSync(source);
+    return typeof entry === 'string' ? target : { ...entry, source: target };
+  });
+  return { protocol: 'pi-doctor-bindings-v1', phase, runtime: realpathSync(runtime), home: resolve(home), control: realpathSync(control),
+    settingsSha256: bytes === null ? null : createHash('sha256').update(bytes).digest('hex'), packages };
+}
+export function doctorKey(phase, runtime, home, control, bindings = captureDoctorBindings(phase, runtime, home, control)) {
+  if (bindings.protocol !== 'pi-doctor-bindings-v1' || bindings.phase !== phase || bindings.home !== resolve(home) || bindings.control !== realpathSync(control) || !Array.isArray(bindings.packages)) throw new Error('invalid doctor input bindings');
+  runtime = bindings.runtime;
+  if (realpathSync(runtime) !== runtime) throw new Error('doctor runtime binding must remain immutable');
+  const hash = createHash('sha256').update(JSON.stringify(['pi-doctor-cache-v2', phase, hostname(), release(), arch(), platform(), process.version, home]));
   hash.update(readFileSync(new URL('./doctor-cache.mjs', import.meta.url)));
   hash.update(readFileSync(join(control, 'deploy/runtime-doctors')));
   const closure = realpathSync(join(runtime, 'node_modules'));
@@ -35,12 +52,12 @@ export function doctorKey(phase, runtime, home, control) {
     const path = join(home, '.pi/agent', name);
     hash.update(name).update(existsSync(path) ? readFileSync(path) : 'unset');
   }
-  const settingsPath = join(home, '.pi/agent/settings.json');
-  const packages = existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, 'utf8')).packages : [];
-  for (const entry of packages ?? []) {
-    if (typeof entry !== 'string' || /^(npm:|git:|https?:)/.test(entry)) continue;
-    const target = realpathSync(entry);
-    hash.update(entry).update(digest(target, cache));
+  for (const entry of bindings.packages) {
+    const target = typeof entry === 'string' ? entry : entry?.source;
+    if (typeof target !== 'string') throw new Error('doctor bound package source is required');
+    if (/^(npm:|git:|https?:)/.test(target)) continue;
+    if (realpathSync(target) !== target) throw new Error('doctor package binding must remain immutable');
+    hash.update(digest(target, cache));
   }
   for (const directory of [join(home, '.cache/ms-playwright'), join(home, '.cache/agent-browser'), process.env.PLAYWRIGHT_BROWSERS_PATH].filter(Boolean)) {
     hash.update(directory);
@@ -78,7 +95,11 @@ export function doctorReceipt(directory, key, action, phase) {
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try {
     const [action, ...args] = process.argv.slice(2);
-    if (action === 'key') console.log(doctorKey(...args));
+    if (action === 'capture') {
+      const bindings = captureDoctorBindings(...args.slice(0, 4));
+      writeFileSync(args[4], JSON.stringify(bindings) + '\n', { mode: 0o600 });
+      console.log(bindings.runtime);
+    } else if (action === 'key') console.log(doctorKey(...args.slice(0, 4), args[4] === undefined ? undefined : JSON.parse(readFileSync(args[4], 'utf8'))));
     else if (doctorReceipt(args[0], args[1], action, args[2])) console.log(`runtime doctor ${args[2]} proof reused: ${args[1]}`);
     else process.exitCode = 3;
   } catch (error) { console.error(`doctor-cache-invalid: ${error.message}`); process.exitCode = 66; }
