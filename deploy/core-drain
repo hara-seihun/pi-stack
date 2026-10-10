@@ -24,6 +24,13 @@ def detached_status(current, prior, kind, retirement):
         raise ValueError('original fleet retirement has not positively closed every controller edge')
 
 
+def journal_since(value):
+    timestamp = datetime.fromisoformat(value)
+    if timestamp.tzinfo is None:
+        raise ValueError('drain journal boundary requires an explicit timezone')
+    return '@' + format(timestamp.timestamp(), '.6f')
+
+
 def storage_identities(scopes):
     grouped = {}
     for scope in scopes:
@@ -55,7 +62,7 @@ def native_exit_custody(plan, invocation_id, after=False):
     if not isinstance(mode, dict) or mode.get('kind') not in ('direct-bun','supervised'):
         raise ValueError('explicit original native exit custody required')
     if mode['kind'] == 'direct-bun':
-        if not after and Path(os.readlink(f"/proc/{plan['pid']}/exe")).name != 'bun':
+        if not after and Path(os.readlink(f"/proc/{plan['pid']}/exe")).resolve() != Path('/usr/local/bin/bun').resolve():
             raise ValueError('direct native exit declaration differs from MainPID executable')
         return {'kind':'direct-bun'}
     module = runpy.run_path(str(Path(__file__).with_name('core-remote-witness')))
@@ -150,7 +157,7 @@ def drain(path):
         return {'protocol': 'pi-core-owner-drain-v1', 'state': 'pending', 'unit': plan['unit']}
     retirement = None
     if plan['kind'] == 'fleet':
-        journal = subprocess.run(['/usr/bin/journalctl', '--no-pager', '--output=json', f"_SYSTEMD_INVOCATION_ID={state['previous']['InvocationID']}", '--since', state['startedAt']], check=True, capture_output=True, text=True, timeout=3).stdout
+        journal = subprocess.run(['/usr/bin/journalctl', '--no-pager', '--output=json', f"_SYSTEMD_INVOCATION_ID={state['previous']['InvocationID']}", '--since', journal_since(state['startedAt'])], check=True, capture_output=True, text=True, timeout=3).stdout
         for line in journal.splitlines():
             row = json.loads(line)
             try:
