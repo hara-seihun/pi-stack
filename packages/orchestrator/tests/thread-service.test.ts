@@ -648,7 +648,6 @@ it("the thread's own agent names it with thread_title; a person's rename pins it
   value(await restored.start());
   expect(await restored.control({ threadId: thread.id, action: "title", title: "After restart" })).toMatchObject({ ok: false, error: { code: "conflict" } });
   expect(value(await restored.control({ threadId: thread.id, action: "rename", title: "Next chosen title" })).title).toBe("Next chosen title");
-  expect(restored.get(thread.id)?.metadata?.taskDescription).toBe("Publish the task-first Orchestrator on both hosts.");
 });
 
 it("a person accepting the agent's title through update pins it", async () => {
@@ -886,7 +885,7 @@ it.each([false, true])("retains runner-capacity custody beyond three refusals an
       await waitFor(() => (second.get("capacity-child")?.metadata?.startupFailure as { attempts: number })?.attempts === attempts);
       expect(second.get("capacity-child")).toMatchObject({ held: false });
       expect(second.latestSettlement("capacity-child")).toBeNull();
-      expect(second.get("capacity-child")?.metadata?.agentWait).toMatchObject({ reason: "Awaiting delegated release" });
+      expect(second.get("capacity-child")?.metadata?.agentWait).toMatchObject({ kind: "deployment" });
       expect(second.get("capacity-child")?.wakeSchedule).toEqual(schedule);
       expect(second.pending("capacity-child")).toMatchObject([{ id: "assignment", state: recovering ? "dispatched" : "queued" }]);
     }
@@ -2073,7 +2072,7 @@ describe("ThreadService", () => {
     expect((await tool(root.id).execute("call-root", { threadId: child.id, text: "Carry on" }, undefined, undefined, undefined as never)).details).toMatchObject({ ok: false });
     value(await service.control({ threadId: child.id, action: "reopen" }));
     const sent = await tool(root.id).execute("call-fresh", { threadId: child.id, text: "Fresh work" }, undefined, undefined, undefined as never);
-    expect(sent.details).toMatchObject({ ok: true, value: { threadId: child.id, senderId: root.id } });
+    expect(sent.details).toMatchObject({ ok: true, value: { id: expect.any(String), state: "queued" } });
     expect(service.get(child.id)).toMatchObject({ held: false, state: "running", pendingMessages: 1 });
     expect(service.get(child.id)?.metadata?.archiveInterruption).toBeUndefined();
 

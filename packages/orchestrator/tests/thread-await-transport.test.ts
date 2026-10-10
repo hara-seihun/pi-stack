@@ -29,7 +29,8 @@ function deferred<T>() {
 it("returns on the first owner timeout with cursors and actionable child statuses", async () => {
   const wait = vi.fn<ThreadApi["await"]>().mockImplementation(async input => response({ ...input, after: { ...input.after, child: 8, other: 4 } }));
   const list = vi.fn<ThreadApi["list"]>().mockImplementation(async input => ({ ok: true, value: { threads: [{
-    id: input!.id!, parentId: "parent", state: "running", held: false, pendingMessages: 1,
+    id: input!.id!, parentId: "parent", state: "running", held: false, pendingMessages: 1, lifecycle: input!.id === "child"
+      ? { kind: "waiting", target: "capacity", reason: "No account available", since: 1 } : { kind: "failed", reason: "Cancellation unconfirmed", control: "stop" },
     metadata: input!.id === "child" ? { admissionWait: { code: "quota_exhausted", reason: "No account available" } } : { executionError: "Cancellation unconfirmed" },
   } as unknown as Thread] } }));
   const tool = threadTools({ threadId: "parent", cwd: "/work", sessionFile: "/work/session.jsonl", args: [], env: {}, threads: { await: wait, list } as unknown as ThreadApi })
@@ -39,8 +40,8 @@ it("returns on the first owner timeout with cursors and actionable child statuse
   expect(wait).toHaveBeenCalledOnce();
   expect(wait).toHaveBeenCalledWith({ threadIds: ["child", "other"], parentId: "parent", after: { prior: 3 }, timeoutMs: 25_000 }, controller.signal);
   expect(outcome.details).toEqual({ ok: true, value: { settlement: null, timedOut: true, remainingThreadIds: ["child", "other"], after: { prior: 3, child: 8, other: 4 }, statuses: [
-    { threadId: "child", state: "running", held: false, pendingMessages: 1, admissionWait: { code: "quota_exhausted", reason: "No account available" } },
-    { threadId: "other", state: "running", held: false, pendingMessages: 1, executionError: "Cancellation unconfirmed" },
+    { threadId: "child", lifecycle: { kind: "waiting", target: "capacity", reason: "No account available", since: 1 }, pendingMessages: 1 },
+    { threadId: "other", lifecycle: { kind: "failed", reason: "Cancellation unconfirmed", control: "stop" }, pendingMessages: 1 },
   ] } });
   expect(list).toHaveBeenCalledTimes(2);
 });

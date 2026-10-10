@@ -146,7 +146,7 @@ it("wakes an idle existing thread once, persists observability and coalesces ove
   const f = fixture(undefined, { admit }); await spawn(f, "self"); unwrap(await schedule(f, "self"));
   unwrap(await f.service.start()); await until(() => admit.mock.calls.length > 0);
   const queued = f.service.pending("self"); expect(queued).toHaveLength(1); expect(queued[0]).toMatchObject({ source: "notification", threadId: "self" });
-  expect(f.service.get("self")?.wakeSchedule).toMatchObject({ nextDueAt: 160000, lastDeliveredAt: 100000, lastMessageId: queued[0]!.id });
+  expect(f.service.get("self")?.wakeSchedule).toMatchObject({ nextDueAt: 160000, lastMessageId: queued[0]!.id });
   now += 600000; f.service.reconcile(); f.service.reconcile(); await boundary();
   expect(f.service.pending("self")).toHaveLength(1); expect(f.sessions).toHaveLength(0);
   expect(f.service.get("self")?.metadata?.admissionWait).toBeDefined();
@@ -174,7 +174,7 @@ it.each([true, false])("dependency settlement resumes a durable waiter through t
   unwrap(await child.service.spawn({ requestId: "child", id: "child", parentId: "parent", cwd: child.root, message: "work" }));
   await until(() => child.sessions[0]?.commands.some(c => c.type === "prompt") === true);
   const wait = unwrap(await parent.service.agentWait({ requestId: "wait", threadId: "parent", action: "set", ...(legacy ? {} : { kind: "agents" as const }), threadIds: ["child"] }));
-  expect(wait).toMatchObject({ state: "waiting", waitingOnAgents: { threadIds: ["child"], reason: "Need child result" } });
+  expect(wait).toMatchObject({ state: "waiting", waitingOnAgents: { threadIds: ["child"] } });
   expect(parent.sessions).toHaveLength(0);
   child.sessions[0]!.settle(); await until(() => parent.sessions[0]?.commands.some(c => c.type === "prompt") === true);
   expect(parent.service.get("parent")?.waitingOnAgents).toBeUndefined();
@@ -300,12 +300,12 @@ it("reports the latest completed assignment and new input without terminating ei
   const tools = threadTools({ threadId: "self", cwd: f.root, sessionFile: "none", args: [], env: {}, threads: f.service });
   const wait = tools.find(t => t.name === "thread_wait")!;
   const execute = (id: string, input: unknown) => wait.execute(id, input as never, undefined, undefined, {} as never);
-  const arrived = await execute("arrived", { action: "set", kind: "agents", threadIds: ["child"], reason: "Result" });
-  expect(arrived).toMatchObject({ details: { ok: true, value: { waitRegistration: { status: "already_arrived", settlement: { workId: "second" } } } } });
+  const arrived = await execute("arrived", { action: "set", kind: "agents", threadIds: ["child"] });
+  expect(arrived).toMatchObject({ details: { ok: true, value: { status: "already_arrived", settlement: { threadId: "child" } } } });
   expect(arrived).not.toHaveProperty("terminate");
   unwrap(await f.service.send({ requestId: "human", threadId: "self", text: "Next instruction" }));
-  const resumed = await execute("resumed", { action: "set", kind: "job", jobId: "job", reason: "Result" });
-  expect(resumed).toMatchObject({ details: { ok: true, value: { waitRegistration: { status: "resumed", messageIds: ["human"] } } } });
+  const resumed = await execute("resumed", { action: "set", kind: "job", jobId: "job" });
+  expect(resumed).toMatchObject({ details: { ok: true, value: { status: "resumed", messageIds: ["human"] } } });
   expect(resumed).not.toHaveProperty("terminate");
 });
 
@@ -319,7 +319,7 @@ it("withdrawn unlanded input cannot swallow a wait during validation", async () 
   unwrap(await f.service.send({ requestId: "withdrawn", threadId: "self", text: "Never mind" }));
   unwrap(await f.service.control({ threadId: "self", action: "cancelMessage", messageId: "withdrawn" }));
   release();
-  expect(unwrap(await registering)).toMatchObject({ waitRegistration: { status: "registered" }, metadata: { agentWait: { reason: "Child result" } } });
+  expect(unwrap(await registering)).toMatchObject({ waitRegistration: { status: "registered" }, metadata: { agentWait: { kind: "agents", threadIds: ["child"] } } });
 });
 
 it("rejects a competing registration without overwriting accepted intent", async () => {
@@ -332,7 +332,7 @@ it("rejects a competing registration without overwriting accepted intent", async
   expect(await f.service.agentWait({ requestId: "clear", threadId: "self", action: "clear" })).toMatchObject({ ok: false, error: { code: "conflict" } });
   expect(await f.service.control({ action: "dependencies", threadId: "self", threadIds: [] })).toMatchObject({ ok: false, error: { code: "conflict" } });
   release();
-  expect(unwrap(await registering)).toMatchObject({ waitRegistration: { status: "registered" }, metadata: { agentWait: { reason: "Child result" } } });
+  expect(unwrap(await registering)).toMatchObject({ waitRegistration: { status: "registered" }, metadata: { agentWait: { kind: "agents", threadIds: ["child"] } } });
   expect(unwrap(await f.service.agentWait({ requestId: "clear", threadId: "self", action: "clear" }))).toMatchObject({ waitRegistration: { status: "cleared" }, dependencies: [] });
 });
 
