@@ -58,7 +58,7 @@ export function createCoreCustodyFactory(consultationScopeIds: string | readonly
       const readImage = createImageReader(pinned);
       return { ok: true, value: { ...runtime, path,
         readImage: async (logical, allowedRoots, signal) => {
-          try { path(logical); for (const root of allowedRoots) path(root); }
+          try { pinned.assert(); }
           catch (cause) { return { ok: false, error: { code: "unavailable", message: `Image resource custody: ${String(cause)}` } }; }
           return readImage(logical, allowedRoots, signal);
         },
