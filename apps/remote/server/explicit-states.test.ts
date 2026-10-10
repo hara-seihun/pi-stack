@@ -24,7 +24,7 @@ test("open-ended context preserves unsupported payloads as notices, never tool o
   expect(items[2]!.body).toContain("preserved message");
 });
 
-test("wait kinds retain their reason in one activity; missing or unknown kinds are reporting errors", () => {
+test("wait kinds project one awaiting activity; missing or unknown kinds are reporting errors", () => {
   for (const dependency of [
     { kind: "agents", threadIds: ["child"], after: {} },
     { kind: "job", jobId: "job" },
@@ -33,7 +33,8 @@ test("wait kinds retain their reason in one activity; missing or unknown kinds a
   ] as const) {
     const lifecycle = deriveThreadLifecycle({ archived: false, cancelling: false, execution: null, pending: null, delay: null, subscriptions: [], error: null, updatedAt: 10, dependency: { ...dependency, since: 10 } as LifecycleObservation["dependency"] });
     const projected = projectThreadActivity({ lifecycle });
-    expect(projected).toMatchObject({ activity: "awaiting", activitySince: 10, activityDetail: "Reason" });
+    expect(projected).toMatchObject({ activity: "awaiting", activitySince: 10 });
+    expect(projected.activityDetail).toBeUndefined();
   }
   for (const dependency of [{ threadIds: [], after: {} }, { kind: "other" },
     { kind: "agents", threadIds: [], after: {} }, { kind: "job", jobId: "" },

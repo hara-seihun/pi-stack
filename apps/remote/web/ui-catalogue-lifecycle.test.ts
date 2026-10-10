@@ -27,5 +27,5 @@ test("catalogue observations construct explicit canonical lifecycle without flat
     expect(threadStatus(row).key).toBe(key);
   }
   const wait = conversationSession(fixtures.at(-1)![0]);
-  expect(wait.lifecycle).toMatchObject({ kind: "waiting", target: "deployment", reason: "Publication receipt", since: 1000 });
+  expect(wait.lifecycle).toMatchObject({ kind: "waiting", target: "deployment", since: 1000 });
 });

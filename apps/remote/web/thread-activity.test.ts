@@ -8,7 +8,7 @@ import { validateStreamSnapshot } from "../shared/state-validation";
 import type { ThreadLifecycle } from "../../../packages/orchestrator/src/threads/lifecycle";
 
 const observation = (lifecycle: ThreadLifecycle, patch: Partial<Session> = {}) => ({
-  lifecycle, state: "idle" as const, held: false, activity: "idle" as Session["activity"], activeTools: [], idleUnread: false, archivedAt: null, ...patch,
+  lifecycle, state: "idle" as const, held: false, activity: "idle" as Session["activity"], activeTools: [], idleUnread: false, humanAttention: true, archivedAt: null, ...patch,
 });
 
 test("missing owner lifecycle is an instrumentation error, never inferred from old activity", () => {
@@ -38,11 +38,13 @@ test("canonical lifecycle controls presentation even when coarse state and activ
 
 test("durable waits name all dependency and scheduling targets without pretending to execute", () => {
   for (const target of ["agents", "job", "deployment", "message", "capacity", "retry", "dispatch"] as const) {
-    const status = threadStatus(observation({ kind: "waiting", target, reason: "Owner receipt", since: 1000 }, { lastActivityAt: 1000 }));
-    expect(status).toMatchObject({ key: "waiting", busy: false, title: "Owner receipt", since: 1000 });
+    const lifecycle = (target === "capacity" || target === "retry" ? { kind: "waiting", target, reason: "Owner receipt", since: 1000 } : { kind: "waiting", target, since: 1000 }) as ThreadLifecycle;
+    const status = threadStatus(observation(lifecycle, { lastActivityAt: 1000 }));
+    expect(status).toMatchObject({ key: "waiting", busy: false, since: 1000 });
+    expect(status.title).toBe(target === "capacity" || target === "retry" ? "Owner receipt" : undefined);
     expect(status.label).toContain("Waiting for");
     expect(activityTiming(status, 80000)).toEqual({ elapsed: "1m 19s" });
-    const mono = monoThreadStatus(observation({ kind: "waiting", target, reason: "Owner receipt", since: 1000 }));
+    const mono = monoThreadStatus(observation(lifecycle));
     expect(mono).toMatchObject({ key: "working", label: "Working" });
     expect(mono.title).toBeUndefined();
   }

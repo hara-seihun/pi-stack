@@ -13,7 +13,7 @@ globalThis.location ??= new URL("https://router.test/") as unknown as Location;
 const session = (id: string, patch: Partial<Session> = {}): Session => ({
   id, parentId: null, hasChildren: false, origin: "person", model: "model", name: id,
   cwd: "/", workspaceName: "", environment: "local", state: "idle", lifecycle: { kind: "idle" }, held: false, activity: "idle", activeTools: [],
-  provider: "openai", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", lastUserMessageAt: "2026-01-01T00:00:00Z", revision: 1, idleUnread: false,
+  provider: "openai", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", lastUserMessageAt: "2026-01-01T00:00:00Z", revision: 1, idleUnread: false, humanAttention: true,
   queuedMessages: [], archivedAt: null, ...patch,
 });
 const queued: Session["queuedMessages"][number] = { id: "q", text: "later", delivery: "queue", state: "queued", canSteer: false, canHardSteer: false, canCancel: true, createdAt: "" };
