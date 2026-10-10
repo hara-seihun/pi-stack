@@ -418,8 +418,18 @@ activate_remote() {
 activate_daemons() {
   local failed=0 broker_units
   local -a brokers=()
-  if owner_changed daemons && (( ${#daemons[@]} )); then
-    pi_stack_as_root systemctl restart "${daemons[@]}" || failed=1
+  if owner_changed daemons; then
+    if (( ${#daemons[@]} )); then pi_stack_as_root systemctl restart "${daemons[@]}" || failed=1; fi
+  else
+    local unit state
+    for unit in "${daemons[@]}"; do
+      state=$(pi_stack_as_root systemctl show "$unit" -p ActiveState --value) || { failed=1; continue; }
+      case $state in
+        active) ;;
+        inactive|failed) pi_stack_as_root systemctl start "$unit" || failed=1 ;;
+        *) echo "daemon $unit has unsettled or unknown lifecycle: $state" >&2; failed=1 ;;
+      esac
+    done
   fi
   if owner_changed brokers; then
     broker_units=$(pi_stack_as_root systemctl list-units --type=service --state=running --no-legend 'pi-model-broker.service' 'pi-stack-model-broker@*.service') || failed=1

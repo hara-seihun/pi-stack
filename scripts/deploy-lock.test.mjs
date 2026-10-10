@@ -411,6 +411,7 @@ case $1 in
   show)
     [ "\${DISCOVERY_EXIT:-0}" = 0 ] || exit "$DISCOVERY_EXIT"
     case $2 in pi-stack-phone.service|pi-stack-voice.service) echo loaded; exit 0;; esac
+    if [ "$4" = ActiveState ]; then echo "\${DAEMON_ACTIVE_STATE:-active}"; exit 0; fi
     case $4 in
       pi-orchestrator@alice.service) echo "\${ALICE_UNIT_STATE:-enabled}";;
       pi-orchestrator@guest-person.service) echo "\${GUEST_UNIT_STATE:-${enableGuest ? "enabled-runtime" : "disabled"}}";;
@@ -431,7 +432,7 @@ case $1 in
         exit 91
       fi
       exit "\${DAEMON_RESTART_EXIT:-0}";; esac;;
-  is-active|reset-failed|stop) exit 0;;
+  is-active|reset-failed|stop|start) exit 0;;
   *) exit 64;;
 esac
 exit 0
@@ -578,6 +579,12 @@ exit 64
     assert.deepEqual(restartedDaemons(readFileSync(systemctlTrace, 'utf8')), [], 'accepted unchanged source does not restart daemons');
     assert.match(again, /restart pi-remote-router/, 'unfinished recovery plan still reconciles its router');
     assert.doesNotMatch(readFileSync(systemctlTrace, 'utf8'), /restart pi-remote-router/, 'accepted unchanged source leaves the router running');
+    rmSync(systemctlTrace, { force: true });
+    const inactiveRepeat = spawnSync(join(deploy, 'host'), [hostFile], { encoding: 'utf8', env: { ...env, DAEMON_ACTIVE_STATE: 'inactive' } });
+    assert.equal(inactiveRepeat.status, 0, inactiveRepeat.stderr);
+    const inactiveTrace = readFileSync(systemctlTrace, 'utf8');
+    assert.deepEqual(restartedDaemons(inactiveTrace), [], 'cold enabled owners are started without restarting unchanged owners');
+    assert.match(inactiveTrace, /^start pi-orchestrator@/m);
 
     rmSync(systemctlTrace,{force:true});
     resetPreparation();

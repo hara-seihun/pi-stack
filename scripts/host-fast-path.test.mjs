@@ -61,6 +61,21 @@ test('transcript and browser changes leave Root/memory serving; in-process SDK c
   assert.equal(verifyOwner(f.root, sdkPlan.value, 'root', browser).error.code, 'host-owner-source-stale');
 });
 
+test('Memory source proof follows exported timezone imports transitively and rejects unknown dynamic imports', t => {
+  const f = fixture(t);
+  f.put('packages/kenan-memory/src/main.ts', 'import { timezone } from "pi-orchestrator/person-timezone";');
+  f.put('packages/orchestrator/package.json', JSON.stringify({ exports: { './person-timezone': { bun: './src/person-timezone.ts', default: './dist/person-timezone.js' } } }));
+  f.put('packages/orchestrator/src/person-timezone.ts', 'export { timezone } from "./timezone-helper.js";');
+  f.put('packages/orchestrator/src/timezone-helper.ts', 'export const timezone = "UTC";');
+  const previous = f.commit(); hostPlan(f.root, previous, '', f.plan, f.host); accept(f.plan);
+  f.put('packages/orchestrator/src/timezone-helper.ts', 'export const timezone = "Pacific/Auckland";'); const candidate = f.commit();
+  const next = hostPlan(f.root, candidate, previous, f.plan, f.host);
+  assert.equal(next.value.owners.memory.changed, true);
+  assert.equal(verifyOwner(f.root, next.value, 'memory', previous).error.code, 'host-owner-source-stale');
+  f.put('packages/orchestrator/src/timezone-helper.ts', 'await import(process.env.UNKNOWN_MODULE);'); const unknown = f.commit();
+  assert.equal(hostPlan(f.root, unknown, candidate, f.plan, f.host).error.code, 'host-plan-unavailable');
+});
+
 test('mutable host model changes invalidate the owner plan even without a source change', t => {
   const f = fixture(t); const source = f.commit(); const models = join(f.directory, 'models.json');
   writeFileSync(models, '{"providers":{}}'); writeFileSync(f.host, JSON.stringify({ version: 1, models }));
