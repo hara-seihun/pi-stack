@@ -1,0 +1,52 @@
+{
+  "schema": "pi-stack-public-app-adoption-observation-v1",
+  "scope": "read-only existing installation; no install/restart/deploy/sync/publication performed",
+  "identityManifestSha256": "77d503e79db5bfab3d6df35e4b11eb08b7af2a57d5cbf7e186611e9c31a1d718",
+  "targets": {
+    "gmktec": {
+      "observedAt": "2026-10-10T03:34:41.727847+00:00",
+      "installedBridgeAndUnitHashesMatch": true,
+      "configSha256": "7be380ebc9d2195831f58fb5cee012661307308cefa9fe67adc69eafb3d9db4b",
+      "application": {
+        "activeState": "active",
+        "unitFileState": "enabled"
+      },
+      "gatewaySocket": {
+        "activeState": "active",
+        "unitFileState": "enabled"
+      },
+      "health": {
+        "status": 200,
+        "body": {
+          "ok": true,
+          "plane": "public-only",
+          "privateRemote": false
+        }
+      }
+    },
+    "converge": {
+      "observedAt": "2026-10-10T03:31:57.154Z",
+      "installedBridgeAndUnitHashesMatch": true,
+      "configSha256": "500ac754cba5705342a65e247d2dda3c1779c29e0c30aea8da2e1a00cbd5031a",
+      "application": {
+        "activeState": "active",
+        "unitFileState": "enabled"
+      },
+      "gatewaySocket": {
+        "activeState": "active",
+        "unitFileState": "enabled"
+      },
+      "health": {
+        "status": 200,
+        "body": {
+          "ok": true,
+          "plane": "public-only",
+          "privateRemote": false
+        }
+      }
+    }
+  },
+  "browserPhoneProof": "not-run",
+  "normalPublicationDelivery": "not-performed",
+  "fullPrivateAppDecomposition": "unfinished"
+}
