@@ -149,13 +149,16 @@ def apply(addition, namespace):
             with os.fdopen(key_handle(generation), 'rb') as key:
                 child = subprocess.Popen(['/usr/bin/setpriv', f"--reuid={generation['uid']}", f"--regid={generation['gid']}", '--clear-groups', '--',
                     '/usr/bin/gocryptfs', '-fg', '-q', '-nosyslog', '-acl', '-allow_other', '-sharedstorage', '--', generation['cipherDir'], str(mountpoint)],
-                    stdin=key, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            children.append(child); mounted.append(mountpoint)
+                    stdin=key, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            children.append(child)
             deadline = time.monotonic() + 10
             while subprocess.run(['/usr/bin/mountpoint', '-q', '--', str(mountpoint)], timeout=1).returncode != 0:
-                if child.poll() is not None or time.monotonic() >= deadline:
-                    raise ValueError('target encrypted generation mount failed or timed out')
+                if child.poll() is not None:
+                    raise ValueError(f'target encrypted generation mount failed for {generation["user"]}: {child.stderr.read(4096).decode().strip()}')
+                if time.monotonic() >= deadline:
+                    raise ValueError('target encrypted generation mount timed out')
                 time.sleep(0.02)
+            mounted.append(mountpoint)
         return children, mounted
     except BaseException:
         for child in children:
