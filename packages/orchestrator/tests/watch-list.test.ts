@@ -147,6 +147,18 @@ it("records a check that ends without a final result as a failed check, disposes
   expect(items[0]!.lastCheck).toMatchObject({ status: "scheduled" });
   expect(items[0]!.lastCheck!.threadId).not.toBe(first.id);
 });
+it("rejects unknown check outcomes without recording completion or scheduling another worker, then reconciles a known outcome", async () => {
+  const { watch, owner, options, add } = fixture();
+  const { item } = await add(); value(await watch.tick(100));
+  const first = value(await owner.list()).threads[0]!;
+  const outcome = vi.spyOn(options, "checkOutcome").mockReturnValue({ ok: true, value: { status: "unexpected" } as never });
+  expect(await watch.tick(1e8)).toMatchObject({ ok: false, error: { code: "unavailable", message: expect.stringContaining("Unknown watch check outcome") } });
+  expect(value(await watch.watch({ action: "list", threadId: "agent" }))).toMatchObject({ items: [{ id: item.id, lastCheck: { threadId: first.id, status: "scheduled" } }] });
+  expect(value(await owner.list()).threads).toHaveLength(1);
+  outcome.mockReturnValue({ ok: true, value: { status: "missing" } });
+  value(await watch.tick(101));
+  expect(value(await watch.watch({ action: "list", threadId: "agent" }))).toMatchObject({ items: [{ id: item.id, lastCheck: { threadId: first.id, status: "failed", error: "Check thread no longer exists" } }] });
+});
 it("migrates items that name only their last worker and reconciles that worker's outcome", async () => {
   const { watch, owner, options, add } = fixture();
   const { item } = await add(); value(await watch.tick(100));
