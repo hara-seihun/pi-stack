@@ -261,7 +261,9 @@ JS
     # Supervisors own a 90-second start and 10-second stop budget. Activation
     # overlaps the doctors; the shared generation wait must include both plus
     # the front door's 20-second readiness budget.
-    phase activation 120 env PI_STACK_HOST_PHASE=activation "$0" "$@" || activation_status=$?
+    # The measured cold fleet restart can consume 100 seconds after Remote starts.
+    # Each independently bounded owner must fit within this outer cleanup budget.
+    phase activation 300 env PI_STACK_HOST_PHASE=activation "$0" "$@" || activation_status=$?
     if [[ -n ${doctor_pid:-} ]]; then wait "$doctor_pid" || doctor_failed=1; fi
     if (( doctor_failed )); then
       echo 'runtime doctor failed' >&2

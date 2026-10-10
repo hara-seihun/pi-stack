@@ -116,6 +116,11 @@ runtime_required_pattern() {
 
 check_release() {
   local release=$1 version browser_version
+  case ${PI_STACK_RELEASE_MODE:-qualified} in
+    immediate|minimal) return 0 ;;
+    qualified) ;;
+    *) echo 'Unknown runtime release mode' >&2; return 64 ;;
+  esac
   version=$("$release/node_modules/.bin/pi" --version)
   browser_version=$("$release/node_modules/.bin/agent-browser" --version)
   [[ $version == "$PI_VERSION" ]] || { echo "unexpected Pi version: $version" >&2; exit 1; }
