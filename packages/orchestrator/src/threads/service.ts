@@ -5,7 +5,7 @@ import { RunnerStartupError, isPooledStartupWait } from "./runner-startup.js";
 import { parseRuntimeEvent, requireAssistantStopReason, assertNever } from "./runtime-events.js";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
-import { indexedThreadHistory, timestampMs, type IndexedThreadHistory, type MessageRecordDescriptor, type RecordDescriptor, type ThreadHistoryError } from "pi-orchestrator/history";
+import { indexedThreadHistory, withIndexedThreadHistory, timestampMs, type IndexedThreadHistory, type MessageRecordDescriptor, type RecordDescriptor, type ThreadHistoryError } from "pi-orchestrator/history";
 import { contentText } from "@earendil-works/pi-ai";
 import { dirname, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -731,14 +731,17 @@ export class ThreadService implements ThreadApi {
     return window;
   }
   private nativeContextWindow(thread: Thread, request: NonNullable<InspectOptions["contextWindow"]>): Result<ThreadContextWindow> {
-    const indexed = indexedThreadHistory(thread.sessionFile, request.leafId, { managerWakeVisibility: thread.metadata?.manager === true });
-    if (!indexed.ok) {
-      if (indexed.error.code !== "missing" || thread.metadata?.nativeHistoryRequired === true || request.leafId !== undefined) return historyFailure(indexed.error);
+    const projected = withIndexedThreadHistory(thread.sessionFile, request.leafId, { managerWakeVisibility: thread.metadata?.manager === true },
+      history => this.projectNativeContextWindow(thread, request, history));
+    if (!projected.ok) {
+      if (projected.error.code !== "missing" || thread.metadata?.nativeHistoryRequired === true || request.leafId !== undefined) return historyFailure(projected.error);
       const source = this.unstartedContextSource(thread);
       if (request.generation !== undefined && request.generation !== source.generation) return bad("conflict", "Context source generation changed; reopen the transcript window");
       return good({ source, total: 0, records: [], knownToolCallIds: [], completedToolCallIds: [] });
     }
-    const history = indexed.value;
+    return projected.value;
+  }
+  private projectNativeContextWindow(thread: Thread, request: NonNullable<InspectOptions["contextWindow"]>, history: IndexedThreadHistory): Result<ThreadContextWindow> {
     const metadata = this.nativeContextMetadata(thread, history);
     const window = this.nativeWindowMetadata(thread, history, metadata);
     const { total, calls, results } = window;

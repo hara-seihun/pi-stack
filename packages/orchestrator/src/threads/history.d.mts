@@ -69,6 +69,8 @@ export type IndexedThreadHistoryOptions = Readonly<{
   managerWakeVisibility?: boolean;
 }>;
 export function indexedThreadHistory(path: string, leafId?: string, options?: IndexedThreadHistoryOptions): ThreadHistoryResult<IndexedThreadHistory>;
+/** Synchronous projection, with at most three fresh append snapshots; scoped readers expire on return. */
+export function withIndexedThreadHistory<T>(path: string, leafId: string | undefined, options: IndexedThreadHistoryOptions | undefined, project: (history: IndexedThreadHistory) => T): ThreadHistoryResult<T>;
 export function parseSession(text: string): SessionEntry[];
 export function activePath(entries: SessionEntry[], leafId?: string): SessionEntry[];
 export function timestampMs(value: unknown): number | undefined;
