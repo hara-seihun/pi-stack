@@ -108,6 +108,13 @@ def pin(plan):
     PIN_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
     if PIN_ROOT.stat().st_uid != 0 or PIN_ROOT.stat().st_mode & 0o022:
         raise ValueError('untrusted namespace pin directory')
+    propagation = subprocess.run(['/usr/bin/nsenter', '--mount=/proc/1/ns/mnt', '--', '/usr/bin/findmnt', '-n', '-M', str(PIN_ROOT), '-o', 'PROPAGATION'], capture_output=True, text=True, timeout=5)
+    if propagation.returncode not in (0, 1):
+        raise ValueError('namespace pin mount propagation could not be observed')
+    if propagation.returncode == 1 or propagation.stdout.strip() != 'private':
+        flags = [4096, 1 << 18] if propagation.returncode == 1 else [1 << 18]
+        prepare = "import ctypes,os,sys;c=ctypes.CDLL(None,use_errno=True);p=os.fsencode(sys.argv[1]);\nfor value in sys.argv[2:]:\n if c.mount(p,p,None,int(value),None)!=0:raise OSError(ctypes.get_errno(),'prepare private namespace pin mount')"
+        subprocess.run(['/usr/bin/nsenter', '--mount=/proc/1/ns/mnt', '--', '/usr/bin/python3', '-c', prepare, str(PIN_ROOT), *map(str, flags)], check=True, capture_output=True, timeout=5)
     result = []
     for item in plan['namespaces']:
         name = item['id']
@@ -117,6 +124,9 @@ def pin(plan):
         fd = os.open(source, os.O_RDONLY)
         try:
             inode = str(os.fstat(fd).st_ino)
+            if inode == str(Path('/proc/1/ns/mnt').stat().st_ino):
+                result.append({'kind': 'host'})
+                continue
             target = PIN_ROOT / name
             host_target = Path('/proc/1/root' + str(target))
             if host_target.exists() and str(host_target.stat().st_ino) == inode:
@@ -126,7 +136,11 @@ def pin(plan):
                 raise ValueError('pin identifier already belongs to another namespace')
             host_target.touch(mode=0o600, exist_ok=False)
             try:
-                subprocess.run(['/usr/bin/nsenter', '--mount=/proc/1/ns/mnt', '--', '/usr/bin/mount', '--bind', f'/proc/{os.getpid()}/fd/{fd}', str(target)], pass_fds=(fd,), check=True, capture_output=True, timeout=5)
+                bind = "import ctypes,os,sys;c=ctypes.CDLL(None,use_errno=True);source=('/proc/self/fd/'+sys.argv[1]).encode();target=os.fsencode(sys.argv[2]);r=c.mount(source,target,None,4096,None);\nif r!=0:raise OSError(ctypes.get_errno(),'persist exact namespace handle')"
+                subprocess.run(['/usr/bin/nsenter', '--mount=/proc/1/ns/mnt', '--', '/usr/bin/python3', '-c', bind, str(fd), str(target)], pass_fds=(fd,), check=True, capture_output=True, timeout=5)
+            except subprocess.CalledProcessError as error:
+                host_target.unlink()
+                raise ValueError(f'namespace persistence failed: {error.stderr.decode().strip()}') from error
             except subprocess.SubprocessError:
                 host_target.unlink()
                 raise
