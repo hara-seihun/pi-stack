@@ -33,8 +33,9 @@ export function entryFromHead(head: TranscriptItemHead, bodyLoaded = false): Con
     : "";
   const base = {
     key: `${head.kind}:${head.seq}`,
-    signature: `${head.id}${bodyLoaded ? ":body" : ""}${"textTruncated" in head && head.textTruncated ? ":preview" : ""}${metricsSignature}${head.kind === "user" || head.kind === "assistant" ? `${head.label ?? ""}:${JSON.stringify(head.agentSender ?? null)}:${head.identity?.id ?? ""}:${JSON.stringify(head.reactions ?? [])}:${JSON.stringify(head.reply ?? null)}` : ""}`,
+    signature: `${head.id}${head.monoVisibility === undefined ? "" : `:mono:${head.monoVisibility}`}${bodyLoaded ? ":body" : ""}${"textTruncated" in head && head.textTruncated ? ":preview" : ""}${metricsSignature}${head.kind === "user" || head.kind === "assistant" ? `${head.label ?? ""}:${JSON.stringify(head.agentSender ?? null)}:${head.identity?.id ?? ""}:${JSON.stringify(head.reactions ?? [])}:${JSON.stringify(head.reply ?? null)}` : ""}`,
     kind: head.kind,
+    monoVisibility: head.monoVisibility,
     label: entryLabel(head),
     itemId: head.id,
     seq: head.seq,

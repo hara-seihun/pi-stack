@@ -1,5 +1,6 @@
 import type { ContextEntry } from "../../types";
 import { assertNever } from "../../../../shared/explicit-state";
+import { monoMessage } from "../../app/mono";
 import { outgoingAgentMessage } from "./agent-message";
 
 export interface WorkSummary {
@@ -15,7 +16,6 @@ export interface WorkSummary {
 export type TranscriptItem =
   | { kind: "user"; entry: ContextEntry }
   | { kind: "assistant"; entry: ContextEntry }
-  /** A thread_send or thread_spawn call, shown as the message this agent sent. */
   | { kind: "outgoing"; entry: ContextEntry }
   | {
       kind: "work";
@@ -27,11 +27,15 @@ export type TranscriptItem =
       summary: WorkSummary;
     };
 
-function visibleKind(entry: ContextEntry): "user" | "assistant" | "outgoing" | undefined {
+export function emptyAssistantEntry(entry: ContextEntry): boolean {
+  return entry.kind === "assistant" && !entry.text?.trim();
+}
+
+export function visibleKind(entry: ContextEntry, mono = false): "user" | "assistant" | "outgoing" | undefined {
   switch (entry.kind) {
-    case "user": return "user";
-    case "assistant": return "assistant";
-    case "toolCall": return outgoingAgentMessage(entry) ? "outgoing" : undefined;
+    case "user": return !mono || entry.monoVisibility !== "hidden" && monoMessage(entry) ? "user" : undefined;
+    case "assistant": return mono && entry.monoVisibility === "hidden" ? undefined : "assistant";
+    case "toolCall": return !mono && outgoingAgentMessage(entry) ? "outgoing" : undefined;
     case "system": case "tool": case "thinking": case "notice": return undefined;
   }
   return assertNever(entry.kind, "Transcript visible kind");
@@ -101,11 +105,11 @@ function workItem(key: string, entries: ContextEntry[]): Extract<TranscriptItem,
  * `thinkingActive` puts the card there before any text exists: a collapsed
  * "Thinking…" step the person can open to subscribe.
  */
-export function buildTranscript(entries: ContextEntry[], liveThinking?: string, thinkingActive?: boolean): TranscriptItem[] {
-  return appendLiveThinking(buildStableTranscript(entries), liveThinking, thinkingActive);
+export function buildTranscript(entries: ContextEntry[], liveThinking?: string, thinkingActive?: boolean, mono = false): TranscriptItem[] {
+  return appendLiveThinking(buildStableTranscript(entries, mono), liveThinking, thinkingActive, mono);
 }
 
-export function appendLiveThinking(items: TranscriptItem[], liveThinking?: string, thinkingActive?: boolean): TranscriptItem[] {
+export function appendLiveThinking(items: TranscriptItem[], liveThinking?: string, thinkingActive?: boolean, mono = false): TranscriptItem[] {
   const text = liveThinking?.trim() ? liveThinking : "";
   if (!text && !thinkingActive) return items;
   const live = {
@@ -117,33 +121,57 @@ export function appendLiveThinking(items: TranscriptItem[], liveThinking?: strin
         streaming: true,
         live: true,
       } satisfies ContextEntry;
-  const last = items.at(-1);
-  const work = last?.kind === "work"
-    ? { ...last, live, running: true, latest: live, summary: { ...last.summary, thinkingBlocks: last.summary.thinkingBlocks + 1 } }
-    : workItem(last ? `work-after:${last.entry.key}` : "work-after:start", [live]);
-  return [...(last?.kind === "work" ? items.slice(0, -1) : items), work];
+  if (!mono) {
+    const last = items.at(-1);
+    const work = last?.kind === "work"
+      ? { ...last, live, running: true, latest: live, summary: { ...last.summary, thinkingBlocks: last.summary.thinkingBlocks + 1 } }
+      : workItem(last ? `work-after:${last.entry.key}` : "work-after:start", [live]);
+    return [...(last?.kind === "work" ? items.slice(0, -1) : items), work];
+  }
+  const humanIndex = items.findLastIndex(item => item.kind === "user");
+  const workIndex = items.findIndex((item, index) => index > humanIndex && item.kind === "work");
+  const existing = items[workIndex];
+  if (existing?.kind === "work") {
+    const work = { ...existing, live, running: true, latest: live, summary: { ...existing.summary, thinkingBlocks: existing.summary.thinkingBlocks + 1 } };
+    return items.map((item, index) => index === workIndex ? work : item);
+  }
+  const human = items[humanIndex];
+  const key = human?.kind === "user" ? `work-after:${human.entry.key}` : "work-after:start";
+  const work = { ...workItem(key, [live]), entries: [], live };
+  return [...items.slice(0, humanIndex + 1), work, ...items.slice(humanIndex + 1)];
 }
 
-export function buildStableTranscript(entries: ContextEntry[]): TranscriptItem[] {
+export function buildStableTranscript(entries: ContextEntry[], mono = false): TranscriptItem[] {
   const items: TranscriptItem[] = [];
   let work: ContextEntry[] = [];
+  let replies: Extract<TranscriptItem, { kind: "assistant" }>[] = [];
   let workKey = "work-after:start";
 
   const flush = () => {
-    if (work.length === 0) return;
-    items.push(workItem(workKey, work));
+    if (work.length > 0) items.push(workItem(workKey, work));
+    items.push(...replies);
     work = [];
+    replies = [];
   };
 
   for (const entry of entries) {
-    const kind = visibleKind(entry);
-    if (!kind) {
+    if (emptyAssistantEntry(entry)) continue;
+    const kind = visibleKind(entry, mono);
+    if (!mono) {
+      if (kind) {
+        flush();
+        items.push({ kind, entry });
+        workKey = `work-after:${entry.key}`;
+      } else work.push(entry);
+    } else if (kind === "user") {
+      flush();
+      items.push({ kind, entry });
+      workKey = `work-after:${entry.key}`;
+    } else if (kind === "assistant") {
+      replies.push({ kind, entry });
+    } else {
       work.push(entry);
-      continue;
     }
-    flush();
-    items.push({ kind, entry });
-    workKey = `work-after:${entry.key}`;
   }
   flush();
   return items;
