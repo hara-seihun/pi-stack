@@ -51,36 +51,28 @@ if (name === "ssh") {
     }
   }
 } else if (name === "git") {
-  const position = args.indexOf("fetch");
-  if (position !== -1) args[args.indexOf("origin", position)] = join(root, "origin.git");
+  const position = args.findIndex(value => value === "fetch" || value === "push");
+  const remote = args.indexOf("origin", position);
+  if (position !== -1 && remote !== -1) args[remote] = join(root, "origin.git");
   exec("/usr/bin/git", args);
 } else if (name === "bash") {
+  if (args[0] === "-c" && args[1].includes("npm run check")) {
+    event("post-source-checks");
+    process.exit(world().hosts[host].mode === "post-checks-failed" ? 42 : 0);
+  }
   if (args[0] !== "-s") throw new Error("Unexpected fixture bash invocation " + JSON.stringify(args));
   const script = readFileSync(0, "utf8");
   args = args.slice(1);
   if (args[0] === "--") args.shift();
-  if (script.includes('observations=\'{}\'') && script.includes('meeting_mode=$6')) {
-    assert.equal(args.length, 6);
-    const [requestId, integrationSha, hostId, repository, hostConfig, meetingMode] = args;
-    assert.equal(hostId, host);
-    assert.equal(repository, join(root, 'repository'));
-    assert.equal(hostConfig, join(root, 'host.json'));
-    const reservation = JSON.parse(readFileSync(process.env.PI_STACK_HOST_LOCK_PATH + '.publication', 'utf8'));
-    assert.deepEqual(reservation, { requestId, integrationSha }, 'batched observation cannot outlive its own reservation');
-    const state = world().hosts[host];
-    event('census');
-    const census = { host, selectedCommit: state.selected, checkoutCommit: state.selected, runtimes: [], fleet: { activeRuns: [] } };
-    const meetings = meetingMode === 'override' ? { state: 'override' } : { status: 0, stdout: state.mode === 'live-meeting' ? 'fixture-room:1\n' : '', stderr: '' };
-    if (meetingMode !== 'override') event('meeting-probe');
-    event('native-probe');
-    const native = ['native-probe-error', 'native-unmarked-busy'].includes(state.mode)
-      ? { status: state.mode === 'native-unmarked-busy' ? 75 : 66, stdout: '', stderr: 'fixture native source status unavailable\n' }
-      : { status: 0, stdout: '', stderr: '' };
-    json({ version: 1, host, requestId, integrationSha, observations: {
-      reservation: { status: 0, stdout: '', stderr: '' }, runtime: { status: 0, stdout: JSON.stringify(census), stderr: '' }, meetings, native,
-    } });
-  } else if (script.includes('git -C "$1" fetch --quiet --no-tags origin "$2"')) {
+  if (script.includes('git -C "$1" fetch --quiet --no-tags origin "$2"')) {
     exec('/bin/bash', ['-s', '--', ...args], { input: script });
+  } else if (script.includes('read -r commit < /srv/pi/pi-remote/.pi-stack-commit') || script.includes('read -r selected < /srv/pi/pi-remote/.pi-stack-commit')) {
+    event('selected-source');
+    process.stdout.write(world().hosts[host].selected);
+  } else if (script.includes("'{remoteCommit:$remote,orchestratorCommit:$orchestrator}'")) {
+    const state = world().hosts[host];
+    event('proof', { revision: state.selected });
+    json({ remoteCommit: state.selected, orchestratorCommit: state.orchestratorSelected ?? state.selected });
   } else if (script.includes('operation=$1') && script.includes('pi_stack_acquire_host_lock')) {
     event(args[0]);
     exec("/bin/bash", ["-s", "--", ...args], { input: script });
@@ -116,9 +108,12 @@ if (name === "ssh") {
     const state = world().hosts[host];
     json({ host, selectedCommit: state.selected, checkoutCommit: state.selected, runtimes: [], fleet: { activeRuns: [] } });
   } else if (script.includes('supervisors:$people') && script.includes('voiceCommit:')) {
-    event("proof", { revision: args[0] });
+    event("qualification", { revision: args[0] });
     if (world().hosts[host].selected !== args[0]) throw new Error("proof selected source mismatch");
     json({ host, integrationSha: args[0], remoteCommit: args[0], orchestratorCommit: args[0], voiceCommit: args[0] });
+  } else if (script.includes('"$control/deploy/runtime-doctors"')) {
+    event('post-doctors');
+    json({ status: 'passed' });
   } else if (script.includes('root=/var/lib/pi-remote/app-updates/current')) {
     event("matched-app-web-proof");
     const android = world().hosts[host].android;
@@ -137,7 +132,9 @@ if (name === "ssh") {
   }
 } else if (name === "bun") {
   const [tool, operation, path] = args;
-  if (operation === "bundle") {
+  if (operation === "plan") {
+    json({ kind: "native" });
+  } else if (operation === "bundle") {
     writeFileSync(path, "checked installer\n");
   } else if (operation === "install") {
     event("install-app-web");
@@ -148,6 +145,9 @@ if (name === "ssh") {
     const revision = JSON.parse(readFileSync(path, "utf8")).revision;
     json({ revision, web: { revision } });
   } else throw new Error("Unknown Android operation: " + operation);
+} else if (name === "npm") {
+  assert.deepEqual(args, ["run", "android:test", "--workspace=kenan"]);
+  event("post-android-tests");
 } else if (name === "rsync") {
   const source = args.at(-2);
   const destination = args.at(-1).split(":").slice(1).join(":");
@@ -166,6 +166,7 @@ if (name === "ssh") {
   assert.equal(request.android.release.revision, args[0], "checked app/web artifact is prepared before wrapper preparation");
   event("deploy", { revision: args[0], custody });
   if (mode === "failed") { process.stderr.write("fixture activation failed\n"); process.exit(42); }
+  if (mode === "live-meeting") { process.stderr.write("live meeting rooms on this host (fixture-room:1); deploying now would end them\n"); process.exit(75); }
   if (mode === "native-source") {
     process.stderr.write("native source prerequisite fixture requires " + "f".repeat(40) + " before Pi Stack " + args[0] + "; selected " + "e".repeat(40) + "\n");
     process.exit(75);
@@ -193,6 +194,7 @@ if (name === "ssh") {
     event("root-executor-replaced", { revision: args[0] });
     state.hosts[host].rootReplacementPending = false;
   }
+  if (mode === "mismatched-markers") state.hosts[host].orchestratorSelected = state.hosts[host].selected;
   state.hosts[host].selected = args[0];
   save(state);
 } else throw new Error("Unknown fixture command " + name);
@@ -218,6 +220,10 @@ function fixture(t, waitingHost, mode) {
   for (const name of readdirSync(candidateDeploy).filter(name => name.startsWith('publication') || ['action-journal.mjs', 'release-checkout', 'meeting-census', 'phone-census', 'native-prerequisites'].includes(name))) {
     copyFileSync(new URL(name, candidateDeploy), join(repository, 'deploy', name));
   }
+  mkdirSync(join(repository, "deploy/systemd"));
+  for (const name of readdirSync(new URL('systemd/', candidateDeploy)).filter(name => name.startsWith('pi-stack-publication'))) {
+    copyFileSync(new URL(`systemd/${name}`, candidateDeploy), join(repository, 'deploy/systemd', name));
+  }
   writeFileSync(join(repository, "deploy/android-update"), "fixture artifact capability\n");
   writeFileSync(join(repository, "deploy/native-history-boundary"), "# native-history-boundary-fixture\n");
   writeFileSync(join(repository, "deploy/native-history-bridge.mjs"), "export const MAINTENANCE_INTAKE = 'always-open-v1';\n");
@@ -226,6 +232,7 @@ function fixture(t, waitingHost, mode) {
   const baseline = git("rev-parse", "HEAD");
   git("commit", "--allow-empty", "-qm", "requested integration");
   const revision = git("rev-parse", "HEAD");
+  git("update-ref", `refs/heads/pi-stack-publications/${id}`, revision);
   writeFileSync(join(root, 'owner-code.json'), JSON.stringify({ version: 1, sourceSha: revision }));
   git("commit", "--allow-empty", "-qm", "newer ready host delivery");
   const newer = git("rev-parse", "HEAD");
@@ -240,7 +247,7 @@ function fixture(t, waitingHost, mode) {
   for (const target of config.targets) target.releaseCommand = join(root, "bin/release");
   writeFileSync(configPath, JSON.stringify(config));
   writeFileSync(join(root, "host.json"), JSON.stringify({ version: 1, fleetUser: "fixture" }));
-  for (const command of ["bash", "ssh", "sudo", "bun", "rsync", "release", "git", "systemctl"]) {
+  for (const command of ["bash", "ssh", "sudo", "bun", "npm", "rsync", "release", "git", "systemctl"]) {
     writeFileSync(join(root, "bin", command), `#!${process.execPath}\n${hostCommand}`, { mode: 0o700 });
   }
   writeFileSync(join(root, 'bin', 'timeout'), '#!/bin/sh\nif [ "$3" = systemctl ] && [ "$5" = start ]; then shift; shift; exec /usr/bin/timeout --kill-after=2s 15s "$@"; fi\nexec /usr/bin/timeout "$@"\n', { mode: 0o700 });
@@ -256,8 +263,9 @@ function fixture(t, waitingHost, mode) {
   writeFileSync(join(directory, "manifest.json"), JSON.stringify(release));
   writeFileSync(join(directory, "web-manifest.json"), JSON.stringify({ fileName: `${revision}.web.zip`, sha256: hash("web") }));
   const requestPath = join(root, "requests", `${id}.json`);
-  const request = { requestId: id, sourceSha: revision, sourceRef: "refs/heads/submitted", integrationSha: revision,
-    integratedAt: new Date().toISOString(), checks: { status: "passed" }, status: "queued", attempt: 0, failures: [],
+  const request = { requestId: id, sourceSha: revision, sourceRef: `refs/heads/pi-stack-publications/${id}`, integrationSha: revision,
+    sourceSelection: { status: "pinned", sourceSha: revision }, baseSha: revision,
+    integratedAt: new Date().toISOString(), checks: { status: "deferred", phase: "post-serving", androidPlan: { kind: "native" } }, status: "queued", attempt: 0, failures: [],
     android: { release, directory, manifest: join(directory, "manifest.json"), status: "prepared", hosts: {} } };
   writeFileSync(requestPath, JSON.stringify(request));
   const env = { ...process.env, PATH: `${root}/bin:${process.env.PATH}`, FIXTURE_ROOT: root,
@@ -266,7 +274,8 @@ function fixture(t, waitingHost, mode) {
     FIXTURE_PUBLICATION: publication, FIXTURE_LANES_MODULE: new URL('../deploy/publication-hosts.mjs', import.meta.url).href };
   const readRequest = () => mergeHostLanes(JSON.parse(readFileSync(requestPath, 'utf8')), join(root, 'host-lanes'), hostIds.map(id => ({ id })));
   const run = async (operation = "processRequest") => {
-    const args = ["recover-native-history", "_retry"].includes(operation) ? [publication, operation, id, ...(operation === "recover-native-history" ? ["gmktec"] : [])] : ["--input-type=module", "-e", `
+    const args = operation === "post-gmktec" ? [publication, "_post-run", readRequest().hostDelivery.gmktec.inputPath]
+      : ["recover-native-history", "_retry"].includes(operation) ? [publication, operation, id, ...(operation === "recover-native-history" ? ["gmktec"] : [])] : ["--input-type=module", "-e", `
       import { readFileSync } from "node:fs";
       import { ${operation} } from ${JSON.stringify(pathToFileURL(publication).href)};
       ${operation}(JSON.parse(readFileSync(${JSON.stringify(requestPath)}, "utf8")));
@@ -375,7 +384,8 @@ test("another checked request cannot acquire native fences until each original h
   for (const host of hostIds) {
     const installs = f.events().filter(event => event.host === host && event.action === 'install-app-web');
     assert.equal(installs.length, 1, `${host} installs its checked client once, before activation`);
-    assert.ok(f.events().some(event => event.host === host && event.action === 'matched-app-web-proof'), `${host} still verifies served artifact bytes after activation`);
+    assert.ok(f.events().some(event => event.host === host && event.action === 'proof'), `${host} records exact serving markers after activation`);
+    assert.equal(f.events().some(event => event.host === host && event.action === 'matched-app-web-proof'), false, 'artifact qualification is post-serving work');
   }
 });
 
@@ -436,6 +446,64 @@ test("preserved native history retains its original candidate for one evidenced 
 });
 
 describe("publication owner host delivery", { concurrency: 8 }, () => {
+test("fresh delivery pins the submitted SHA and serves both hosts before deferred qualification", async t => {
+  const f = fixture(t, "gmktec", "ready");
+  f.git("update-ref", "refs/pi-stack-publication/owner-source", f.revision);
+  const initial = JSON.parse(readFileSync(f.requestPath, "utf8"));
+  for (const key of ["sourceSelection", "integrationSha", "baseSha", "integratedAt", "checks"]) delete initial[key];
+  writeFileSync(f.requestPath, JSON.stringify(initial));
+  const served = await f.run();
+  assert.equal(served.status, "published", JSON.stringify(served.failure));
+  assert.equal(served.integrationSha, f.revision, "concurrent main must not create a synthetic integration");
+  assert.equal(served.sourceSelection.sourceSha, f.revision);
+  assert.equal(served.checks.status, "deferred");
+  assert.equal(served.checks.phase, "post-serving");
+  assert.equal(served.mainPublication.status, "not-advanced");
+  for (const host of hostIds) {
+    const proof = JSON.parse(readFileSync(served.hosts[host].proof, "utf8"));
+    assert.equal(proof.remoteCommit, f.revision);
+    assert.equal(proof.orchestratorCommit, f.revision);
+    assert.equal(proof.acceptance.kind, "service-start");
+    assert.equal(f.world().hosts[host].selected, f.revision);
+  }
+  assert.equal(f.events().some(event => ["census", "qualification", "post-source-checks", "post-android-tests", "matched-app-web-proof"].includes(event.action)), false);
+  const units = readFileSync(join(f.root, "units.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+  for (const host of hostIds) assert.ok(units.some(args => args.includes("start") && args.includes("--no-block")
+    && args.includes(`pi-stack-publication-post@${id}--${f.revision}--${host}.service`)), `${host} hands qualification to a separate post-serving unit`);
+});
+
+test("failed post-serving checks retain published source, peer proof and host custody", async t => {
+  const f = fixture(t, "gmktec", "ready");
+  const served = await f.run();
+  assert.equal(served.status, "published", JSON.stringify(served.failure));
+  const peer = structuredClone(served.hosts.converge);
+  const proof = readFileSync(peer.proof, "utf8");
+  const boundary = f.events().length;
+  f.update(value => { value.hosts.gmktec.mode = "post-checks-failed"; });
+  const diagnosed = await f.run("post-gmktec");
+  assert.equal(diagnosed.status, "published");
+  assert.deepEqual(diagnosed.hosts, served.hosts);
+  assert.deepEqual(diagnosed.nativeHistory, served.nativeHistory);
+  assert.deepEqual(diagnosed.reservations, served.reservations);
+  assert.deepEqual(diagnosed.hosts.converge, peer);
+  assert.equal(readFileSync(peer.proof, "utf8"), proof);
+  const receipt = JSON.parse(readFileSync(join(f.root, "post-serving", id, f.revision, "gmktec.json"), "utf8"));
+  assert.equal(receipt.status, "failed");
+  assert.equal(receipt.results.checks.exitCode, 42);
+  assert.equal(receipt.results.androidTests.status, "passed", JSON.stringify(receipt) + readFileSync(receipt.log, "utf8"));
+  assert.equal(receipt.results.hostProof.status, "passed", JSON.stringify(receipt) + readFileSync(receipt.log, "utf8"));
+  assert.equal(receipt.results.androidProof.status, "passed");
+  assert.equal(existsSync(join(f.root, "inbox", `pi-stack-post-${id}-gmktec.md`)), true);
+  const after = f.events().slice(boundary);
+  assert.ok(after.some(event => event.action === "post-source-checks"));
+  assert.ok(after.every(event => event.host === "gmktec"));
+  assert.equal(after.some(event => ["reserve", "install-app-web", "deploy", "native-history---restore"].includes(event.action)), false);
+  for (const host of hostIds) assert.equal(f.world().hosts[host].selected, f.revision);
+  const length = f.events().length;
+  await f.run("post-gmktec");
+  assert.equal(f.events().length, length, "a terminal diagnostic receipt is not replayed");
+});
+
 for (const waitingHost of hostIds) for (const mode of ["live-meeting", "live-telephone", "native-source", "native-history", "host-lock"]) {
   test(`owner releases both reservations while ${waitingHost} waits for ${mode}; old completion cannot downgrade a newer peer`, async t => {
     const f = fixture(t, waitingHost, mode);
@@ -571,7 +639,7 @@ test("selected candidate with a pending Root replacement resumes its wrapper rat
   assert.equal(f.world().hosts.gmktec.rootReplacementPending, false);
   const resumed = f.events().slice(boundary);
   assert.equal(resumed.some(event => event.action === 'install-app-web'), false, 'an unfinished executor handoff reuses its already checked client installation');
-  assert.ok(resumed.some(event => event.action === 'matched-app-web-proof'), 'reused installation still has fresh served-byte proof');
+  assert.ok(resumed.some(event => event.action === 'proof'), 'reused installation still requires an exact serving receipt');
   assert.ok(resumed.every(event => event.host === "gmktec"), "successful peer never re-enters delivery");
   assert.deepEqual(resumed.filter(event => ["deploy", "prepare", "host-native-history-advance", "root-executor-replaced", "proof"].includes(event.action)).map(event => event.action),
     ["deploy", "prepare", "host-native-history-advance", "root-executor-replaced", "proof"]);
@@ -648,7 +716,7 @@ for (const mode of ["history-probe-error", "history-unmarked-busy"]) test(`${mod
   }
 });
 
-test("fatal history probe still permits a newly ready peer's delivery before causal failure", async t => {
+test("fatal history probe preserves causal custody while a ready peer serves and only the failed lane queues retry", async t => {
   const f = fixture(t, "gmktec", "native-history");
   f.update(value => { value.hosts.converge.mode = "live-meeting"; });
   const waiting = await f.run();
@@ -659,13 +727,16 @@ test("fatal history probe still permits a newly ready peer's delivery before cau
   assert.equal(refreshed.hosts.gmktec.status, "failed");
   assert.equal(refreshed.hosts.converge.ready, true);
   const boundary = f.events().length;
-  const failed = await f.run();
-  assert.equal(failed.status, "failed");
-  assert.equal(failed.failure.reason, "readiness-probe-failed");
-  assert.equal(failed.hosts.converge.status, "passed");
-  assert.equal(failed.hosts.converge.integrationSha, f.revision);
-  assert.equal(failed.nativeHistory.hosts.gmktec.state, "repair-required");
-  assert.match(failed.failure.hosts.gmktec.waiting.probe.error, /source custody mismatch/);
+  const retrying = await f.run();
+  assert.equal(retrying.status, "queued");
+  assert.equal(retrying.hosts.converge.status, "passed");
+  assert.equal(retrying.hosts.converge.integrationSha, f.revision);
+  assert.equal(retrying.nativeHistory.hosts.gmktec.state, "repair-required");
+  assert.equal(retrying.hostDelivery.gmktec.state, "queued");
+  assert.equal(retrying.hostDelivery.gmktec.retry.failedAttempt, 1);
+  const retained = JSON.parse(readFileSync(retrying.hostDelivery.gmktec.inputPath, "utf8")).request.hosts.gmktec;
+  assert.equal(retained.failure.reason, "readiness-probe-failed");
+  assert.match(retained.failure.waiting.probe.error, /source custody mismatch/);
   assert.equal(f.events().slice(boundary).some(event => event.host === "gmktec" && ["install-app-web", "deploy"].includes(event.action)), false);
 });
 
@@ -694,11 +765,12 @@ test("cancellation of legitimate native history waiting restores pre-migration c
   assert.equal(f.events().filter(event => event.action === "native-history---restore").length, 1);
 });
 
-test("owner accepts a newer already-selected host without installing the older request's app/web", async t => {
+test("an uncompleted host selects this request's exact SHA rather than inheriting another request's newer source", async t => {
   const f = fixture(t, "converge", "live-meeting");
   writeFileSync(join(f.root, "requests", "PUB-1123456789abcdef01234567.json"), JSON.stringify({
     requestId: "PUB-1123456789abcdef01234567", sourceSha: f.newer, integrationSha: f.newer,
-    status: "queued", checks: { status: "passed" }, hosts: { gmktec: { status: "passed", integrationSha: f.newer } },
+    status: "queued", sourceSelection: { status: "pinned", sourceSha: f.newer }, checks: { status: "deferred", phase: "post-serving" },
+    hosts: { gmktec: { status: "passed", integrationSha: f.newer } },
   }));
   f.update(value => {
     value.hosts.gmktec.selected = f.newer;
@@ -707,17 +779,17 @@ test("owner accepts a newer already-selected host without installing the older r
   const request = await f.run();
   assert.equal(request.status, "queued", JSON.stringify(request.failure));
   assert.equal(request.hosts.gmktec.status, "passed");
-  assert.equal(request.hosts.gmktec.superseded, true);
-  assert.equal(request.hosts.gmktec.integrationSha, f.newer);
-  assert.equal(request.hosts.gmktec.android.revision, f.newer);
-  assert.equal(request.hosts.gmktec.android.web.revision, f.newer);
-  assert.equal(f.events().some(event => event.host === "gmktec" && ["install-app-web", "deploy"].includes(event.action)), false);
-  assert.equal(f.world().hosts.gmktec.selected, f.newer);
-  assert.equal(f.world().hosts.gmktec.android, f.newer);
+  assert.equal(request.hosts.gmktec.superseded, undefined);
+  assert.equal(request.hosts.gmktec.integrationSha, f.revision);
+  assert.equal(request.hosts.gmktec.android.revision, f.revision);
+  assert.equal(request.hosts.gmktec.android.web.revision, f.revision);
+  assert.equal(f.events().filter(event => event.host === "gmktec" && event.action === "deploy").length, 1);
+  assert.equal(f.world().hosts.gmktec.selected, f.revision);
+  assert.equal(f.world().hosts.gmktec.android, f.revision);
   assert.equal(existsSync(join(f.root, "gmktec.lock.publication")), false);
 });
 
-for (const divergentHost of hostIds) test(`divergent ancestry on ${divergentHost} stops only that host before artifacts or activation`, async t => {
+for (const divergentHost of hostIds) test(`divergent prior selection on ${divergentHost} does not replace the requested immutable source`, async t => {
   const f = fixture(t, divergentHost, "ready");
   const readyHost = hostIds.find(host => host !== divergentHost);
   f.git("checkout", "-q", "--detach", f.baseline);
@@ -726,31 +798,46 @@ for (const divergentHost of hostIds) test(`divergent ancestry on ${divergentHost
   f.git("checkout", "-q", "--detach", f.revision);
   f.update(value => { value.hosts[divergentHost].selected = divergent; });
   const request = await f.run();
-  assert.equal(request.status, "failed");
-  assert.equal(request.hosts[divergentHost].status, "failed");
-  assert.match(request.hosts[divergentHost].failure.message, /integration omits selected or checkout source/);
-  const ancestry = JSON.parse(readFileSync(join(f.root, "proofs", id, `${divergentHost}-release-ancestry.json`), "utf8"));
-  assert.equal(ancestry.ok, false);
-  assert.deepEqual(ancestry.baselines.map(baseline => [baseline.kind, baseline.commit, baseline.included]),
-    [["live", divergent, false], ["checkout", divergent, false]]);
+  assert.equal(request.status, "published", JSON.stringify(request.failure));
+  assert.equal(request.integrationSha, f.revision);
+  assert.equal(request.checks.status, "deferred");
+  assert.equal(request.hosts[divergentHost].status, "passed");
+  assert.equal(request.hosts[divergentHost].integrationSha, f.revision);
+  assert.equal(existsSync(join(f.root, "proofs", id, `${divergentHost}-release-ancestry.json`)), false, "qualification is not a pre-serving gate");
   assert.equal(request.hosts[readyHost].status, "passed");
   assert.equal(request.hosts[readyHost].android.web.revision, f.revision);
-  assert.equal(f.world().hosts[readyHost].selected, f.revision);
-  assert.equal(f.world().hosts[divergentHost].selected, divergent);
-  assert.ok(f.events().filter(event => event.host === divergentHost)
-    .every(event => ["reserve", "census", "meeting-probe", "native-probe", "release"].includes(event.action)));
+  for (const host of hostIds) assert.equal(f.world().hosts[host].selected, f.revision);
+  assert.equal(f.git("rev-parse", `refs/pi-stack-publication/selected/${divergent}`), divergent, "prior source remains retained");
+  assert.equal(f.events().some(event => ["census", "qualification", "matched-app-web-proof"].includes(event.action)), false);
   for (const host of hostIds) {
     assert.equal(request.reservations[host].state, "released");
     assert.equal(existsSync(join(f.root, `${host}.lock.publication`)), false);
   }
 });
 
-test("owner failure on the first host still commits the second host's matched release and releases custody", async t => {
+test("a successful activation command with mismatched source markers cannot create a serving receipt", async t => {
+  const f = fixture(t, "gmktec", "mismatched-markers");
+  const request = await f.run();
+  assert.equal(request.status, "queued");
+  assert.equal(request.hosts.gmktec.status, "failed");
+  assert.match(request.hosts.gmktec.failure.message, /Host command did not select submitted source/);
+  assert.equal(request.hosts.gmktec.proof, undefined);
+  assert.equal(existsSync(join(f.root, "proofs", id, "gmktec.json")), false);
+  assert.equal(request.hosts.converge.status, "passed");
+  assert.equal(request.hosts.converge.integrationSha, f.revision);
+  for (const host of hostIds) assert.equal(request.reservations[host].state, "released");
+});
+
+test("a failed host schedules its bounded retry while its peer's exact serving receipt stays committed", async t => {
   const f = fixture(t, "gmktec", "failed");
   const request = await f.run();
-  assert.equal(request.status, "failed");
-  assert.match(request.failure.message, /gmktec.*release wrapper exited 42/);
+  assert.equal(request.status, "queued");
+  assert.equal(request.failure, undefined);
+  assert.match(request.hosts.gmktec.failure.message, /gmktec.*release wrapper exited 42/);
   assert.equal(request.hosts.gmktec.status, "failed");
+  assert.equal(request.hostDelivery.gmktec.attempt, 1);
+  assert.deepEqual(request.waiting.hosts, ["gmktec"]);
+  assert.equal(request.checks.status, "deferred");
   assert.equal(request.hosts.converge.status, "passed");
   assert.equal(request.hosts.converge.android.web.revision, f.revision);
   assert.equal(f.world().hosts.converge.selected, f.revision);

@@ -135,12 +135,30 @@ test("cancelled requests read as terminal failures without repair alerts", async
 });
 
 test("published requests deliver completion and reject changing the requester", async t => {
-  const { run, url, state } = await fixture(t, "published");
+  const { run, url, state, receipt, root } = await fixture(t, "published");
+  const served = JSON.parse(readFileSync(receipt, "utf8"));
+  served.sourceSha = completionCommit(root);
+  served.integrationSha = served.sourceSha;
+  served.sourceSelection = { status: "pinned", sourceSha: served.sourceSha };
+  served.checks = { status: "deferred", phase: "post-serving" };
+  served.hosts = { gmktec: { status: "passed" }, converge: { status: "passed" } };
+  served.finalProof = { path: "/fixture/serving-receipts.json" };
+  writeFileSync(receipt, JSON.stringify(served));
+  const postRoot = join(root, "post-serving", requestId, served.sourceSha);
+  mkdirSync(postRoot, { recursive: true });
+  writeFileSync(join(postRoot, "gmktec.json"), JSON.stringify({ status: "failed", failures: ["Full source checks exited 42"] }));
   state.dispatch = true;
   const result = await run(url, sessionId);
+  assert.equal(result.code, 0, result.stderr);
   assert.equal(result.receipt.report.status, "delivered");
+  assert.equal(result.receipt.status, "published");
+  assert.deepEqual(result.receipt.checks, served.checks);
+  assert.equal(result.receipt.failure, undefined);
   assert.match(state.requests[0].text, /Status: published/);
-  assert.doesNotMatch(state.requests[0].text, /Repair source defects/);
+  assert.match(state.requests[0].text, /Hosts: gmktec passed; converge passed/);
+  assert.match(state.requests[0].text, /serving-receipts\.json/);
+  assert.match(state.requests[0].text, /Post-serving diagnostics \(selection unchanged\): gmktec failed: Full source checks exited 42/);
+  assert.doesNotMatch(state.requests[0].text, /Repair source defects|checks passed/);
   const changed = await run(url, "11234567-0123-4123-a123-0123456789ab");
   assert.equal(changed.code, 1);
   assert.match(changed.stderr, /another requester/);
