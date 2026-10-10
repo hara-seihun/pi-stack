@@ -13,6 +13,8 @@ const pendingEvents = [];
 const incoming = new Map();
 let socket, audio, destination, inputGate, renderSink, peer, channel, monitor, room;
 let gptStream, gptPlayback, grant, restoreCapture, startupTimer, proofFrame, outputSource, outputAnalyser;
+let inputAnalyser, outputGate, outputDestination, activityTimer;
+let playout = false;
 let closed = false, started = false, takenOver = false, ready = false, preflight = false, transportCallId, pendingBytes = 0;
 const diagnostics = { phase: 'connecting', remoteTrack: 'none', captureRequests: 0 };
 window.telephoneMediaDiagnostics = () => ({ ...diagnostics, audioState: audio?.state || 'none', connectionState: peer?.connectionState || 'none', retellState: monitor?.status || 'none', incomingTracks: incoming.size, takenOver, ready });
@@ -26,6 +28,7 @@ function close() {
   diagnostics.phase = 'closed';
   abort.abort();
   clearTimeout(startupTimer);
+  clearInterval(activityTimer);
   cancelAnimationFrame(proofFrame);
   restoreCapture?.();
   if (channel?.readyState === 'open' && started) channel.send(JSON.stringify({ type: 'session.close', event_id: crypto.randomUUID() }));
@@ -39,9 +42,11 @@ function close() {
   inputGate?.disconnect();
   outputSource?.disconnect();
   outputAnalyser?.disconnect();
+  inputAnalyser?.disconnect();
+  outputGate?.disconnect();
   renderSink?.disconnect();
   if (gptPlayback) { gptPlayback.pause(); gptPlayback.srcObject = null; }
-  for (const track of destination?.stream.getTracks() || []) track.stop();
+  for (const track of [...(destination?.stream.getTracks() || []), ...(outputDestination?.stream.getTracks() || [])]) track.stop();
   if (audio && audio.state !== 'closed') void audio.close().catch(error => { status.textContent = 'Audio cleanup error: ' + String(error); });
   socket?.close();
   pendingEvents.length = pendingBytes = 0;
@@ -85,11 +90,34 @@ function observeOutput() {
   outputAnalyser.getFloatTimeDomainData(samples);
   const peak = samples.reduce((maximum, sample) => Math.max(maximum, Math.abs(sample)), 0);
   diagnostics.outputPeak = peak;
-  if ((preflight || takenOver) && peak > 0.01) {
+  if (playout && (preflight || takenOver) && peak > 0.01) {
     send({ type: 'audio-proof', bytes: samples.byteLength });
     return;
   }
   proofFrame = requestAnimationFrame(observeOutput);
+}
+function activity() {
+  if (closed || !takenOver) return;
+  const input = new Float32Array(inputAnalyser.fftSize), output = new Float32Array(outputAnalyser.fftSize);
+  inputAnalyser.getFloatTimeDomainData(input);
+  outputAnalyser.getFloatTimeDomainData(output);
+  const rms = samples => Math.sqrt(samples.reduce((sum, sample) => sum + sample * sample, 0) / samples.length);
+  const frequencies = new Float32Array(inputAnalyser.frequencyBinCount);
+  inputAnalyser.getFloatFrequencyData(frequencies);
+  let energy = 0, peak = 0, bin = 0;
+  for (let i = Math.ceil(300 * inputAnalyser.fftSize / audio.sampleRate); i <= Math.floor(3500 * inputAnalyser.fftSize / audio.sampleRate); i++) {
+    const value = 10 ** (frequencies[i] / 10);
+    energy += value;
+    if (value > peak) { peak = value; bin = i; }
+  }
+  const frequency = bin * audio.sampleRate / inputAnalyser.fftSize;
+  const band = [bin - 1, bin, bin + 1].reduce((sum, i) => sum + 10 ** (frequencies[i] / 10), 0);
+  const active = rms(input) > 0.006;
+  send({ type: 'audio-activity', input: active, output: playout && rms(output) > 0.006, tone: active && frequency >= 700 && frequency <= 2000 && energy > 0 && band / energy > 0.85 });
+}
+function setPlayout(enabled) {
+  playout = enabled;
+  outputGate.gain.value = enabled ? 1 : 0;
 }
 async function request(path, body) {
   const response = await fetch(path, {
@@ -162,6 +190,7 @@ async function connectLive() {
     outputAnalyser = audio.createAnalyser();
     outputSource.connect(outputAnalyser);
     outputAnalyser.connect(renderSink);
+    outputSource.connect(outputGate);
     proofFrame = requestAnimationFrame(observeOutput);
     track.onended = () => fail(new Error('GPT Live audio track ended'));
     announceReady();
@@ -213,8 +242,8 @@ async function takeOver() {
   const capture = async constraints => {
     ensureOpen();
     if (!constraints?.audio || constraints.video) throw new Error('Unexpected capture request during Retell takeover');
-    const track = gptStream?.getAudioTracks()[0];
-    if (track?.readyState !== 'live') throw new Error('GPT Live output is not available for Retell takeover');
+    const track = outputDestination?.stream.getAudioTracks()[0];
+    if (!gptStream || track?.readyState !== 'live') throw new Error('GPT Live output is not available for Retell takeover');
     diagnostics.captureRequests++;
     return new MediaStream([track.clone()]);
   };
@@ -235,6 +264,7 @@ async function takeOver() {
   diagnostics.phase = 'taken_over';
   clearTimeout(startupTimer);
   send({ type: 'transport-ready', callId: grant.callId, participantId: grant.participantId });
+  activityTimer = setInterval(activity, 100);
   flushLive();
   status.textContent = 'Connected';
 }
@@ -308,9 +338,16 @@ async function start() {
   inputGate = audio.createGain();
   inputGate.gain.value = 0;
   inputGate.connect(destination);
+  inputAnalyser = audio.createAnalyser();
+  inputAnalyser.fftSize = 2048;
+  inputGate.connect(inputAnalyser);
+  outputDestination = audio.createMediaStreamDestination();
+  outputGate = audio.createGain();
+  outputGate.gain.value = 0;
+  outputGate.connect(outputDestination);
   renderSink = audio.createGain();
   renderSink.gain.value = 0;
-  inputGate.connect(renderSink);
+  inputAnalyser.connect(renderSink);
   renderSink.connect(audio.destination);
   await audio.resume();
   ensureOpen();
@@ -327,10 +364,12 @@ async function start() {
       if (message.type === 'context' && typeof message.text === 'string') {
         sendLive({ type: 'session.commentary.append', event_id: crypto.randomUUID(), delegation_id: null, content: message.text });
       } else if (message.type === 'live-event' && typeof message.event?.type === 'string') sendLive(message.event);
+      else if (message.type === 'playout' && typeof message.enabled === 'boolean' && takenOver) setPlayout(message.enabled);
       else if (message.type === 'transport' && typeof message.callId === 'string' && message.callId) void connectTransport(message.callId).catch(fail);
       else if (message.type === 'preflight' && typeof message.text === 'string' && message.text.trim()) {
         if (!ready || preflight || transportCallId) throw new Error('Audio preflight is not available in this state');
         preflight = true;
+        setPlayout(true);
         diagnostics.phase = 'preflight';
         flushLive();
         sendLive({ type: 'session.commentary.append', event_id: crypto.randomUUID(), delegation_id: null, content: message.text });
