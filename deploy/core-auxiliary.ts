@@ -188,7 +188,7 @@ export function captureAuxiliary(plan: AuxiliaryPlan, progress?: (value: Capture
       scopes.push({ id: scope.id, manager, managerRouting: routing });
       evidence.push({ id: scope.id, state: plan.phase, threads: identity(scope.threads), supervisor: scope.supervisor ? identity(scope.supervisor) : null,
         retained, cursorEvidence, watch, wakes: threadTables.has("thread_wake") ? digestRows(threadDb, "thread_wake") : null,
-        nativeImageSources: imageSources, nativeImageThreads: imageThreads, liveOwner: plan.phase === "baseline" && scope.images ? scope.liveOwner : null, detached, imageTableNames: scope.images ? ["inline_images", "inline_image_versions", "inline_image_messages", "core_image_acceptance", "core_image_sources", "core_image_ingress_errors", "core_image_threads"] : null });
+        nativeImageSources: imageSources, nativeImageThreads: imageThreads?.map(({ id, scopeId, session_file, created_at }) => ({ id, scopeId, session_file, created_at })) ?? null, liveOwner: plan.phase === "baseline" && scope.images ? scope.liveOwner : null, detached, imageTableNames: scope.images ? ["inline_images", "inline_image_versions", "inline_image_messages", "core_image_acceptance", "core_image_sources", "core_image_ingress_errors", "core_image_threads"] : null });
       supervisor?.exec("COMMIT"); threadDb.exec("COMMIT");
     } finally { supervisor?.close(); threadDb.close(); }
   }

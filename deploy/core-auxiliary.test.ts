@@ -97,6 +97,7 @@ test("one declared image registry captures related fleet sources sharing its Rem
   const result = captureAuxiliary(f.plan);
   expect(result.images).toMatchObject({ kind: "configured", registries: [scope.images] });
   expect(result.evidence[0]!.nativeImageSources.map((row: any) => row.threadId)).toEqual(["manager", "fleet-thread"]);
+  expect(result.evidence[0]!.nativeImageThreads.every((row: any) => !Object.hasOwn(row, "sessionRoots"))).toBe(true);
   expect(result.evidence[1]!.nativeImageSources).toBeNull();
   expect(JSON.stringify(result)).not.toContain("PRIVATE_BODY_NOT_EXPORTED");
 });
