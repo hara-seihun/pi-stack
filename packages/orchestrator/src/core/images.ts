@@ -10,7 +10,7 @@ import type { CoreResult } from "./config.js";
 import type { CoreRuntime } from "./service.js";
 import type { ThreadService } from "../threads/service.js";
 import type { Thread } from "../threads/contracts.js";
-import { withIndexedThreadHistory } from "../threads/history.mjs";
+import { captureNativeHistoryWatermark, withNativeHistorySuffix, type NativeHistoryWatermark } from "../threads/history.mjs";
 import { acquireDatabaseOwnership, type ScopeOwnership } from "./ownership.js";
 
 export type CoreImagesSpec = {
@@ -38,6 +38,13 @@ const invalid = (message: string): CoreResult<never> => ({ ok: false, error: { c
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const absolute = (value: unknown): value is string => typeof value === "string" && isAbsolute(value) && resolve(value) === value && !value.includes("\0");
 const inside = (root: string, path: string) => { const suffix = relative(root, path); return suffix === "" || !suffix.startsWith("..") && !isAbsolute(suffix); };
+const instant = (value: unknown): value is string => typeof value === "string" && /^\d{4}-\d{2}-\d{2}T/.test(value) && Number.isFinite(Date.parse(value));
+function trustedEmptySource(value: unknown): boolean {
+  if (!record(value) || value.lastOffset !== -1 || value.lastDigest !== "" || !record(value.priorSource)) return false;
+  const prior = value.priorSource;
+  return prior.kind === "absent" && instant(prior.observedAt)
+    || prior.kind === "created-after-baseline" && instant(prior.createdAt) && instant(prior.baselineStartedAt) && Date.parse(prior.createdAt) >= Date.parse(prior.baselineStartedAt);
+}
 
 export function parseCoreImagesConfig(value: unknown): CoreResult<CoreImagesConfig> {
   if (!record(value)) return invalid("Core images must be explicitly disabled or configured");
@@ -96,8 +103,10 @@ export class CoreImages {
           if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) throw new Error(`Existing image table ${table} is unavailable; adoption never creates a replacement registry`);
         }
         adoptImageSchema(db);
-        db.exec(`CREATE TABLE IF NOT EXISTS core_image_sources(thread_id TEXT PRIMARY KEY,source_path TEXT NOT NULL,revision TEXT NOT NULL,last_offset INTEGER NOT NULL,last_digest TEXT NOT NULL);
+        db.exec(`CREATE TABLE IF NOT EXISTS core_image_sources(thread_id TEXT PRIMARY KEY,source_path TEXT NOT NULL,revision TEXT NOT NULL,last_offset INTEGER NOT NULL,last_digest TEXT NOT NULL,watermark_json TEXT);
           CREATE TABLE IF NOT EXISTS core_image_ingress_errors(thread_id TEXT NOT NULL,message_key TEXT NOT NULL,error TEXT NOT NULL,PRIMARY KEY(thread_id,message_key));`);
+        const sourceColumns = db.query("PRAGMA table_info(core_image_sources)").all() as { name: string }[];
+        if (!sourceColumns.some(column => column.name === "watermark_json")) db.exec("ALTER TABLE core_image_sources ADD COLUMN watermark_json TEXT");
         const receipt = JSON.parse(readFileSync(scope.value.runtime.path(spec.adoptionReceiptPath), "utf8"));
         const watermarks: unknown = receipt.nativeImageSources;
         if (watermarks !== undefined) {
@@ -106,7 +115,8 @@ export class CoreImages {
             if (!record(watermark) || typeof watermark.threadId !== "string" || !watermark.threadId || !absolute(watermark.path)
               || typeof watermark.revision !== "string" || !Number.isSafeInteger(watermark.lastOffset) || Number(watermark.lastOffset) < -1
               || typeof watermark.lastDigest !== "string" || !(Number(watermark.lastOffset) === -1 && watermark.lastDigest === "" || /^[a-f0-9]{64}$/.test(watermark.lastDigest))) throw new Error("Invalid detached native image source watermark");
-            db.query("INSERT OR IGNORE INTO core_image_sources VALUES(?,?,?,?,?)").run(watermark.threadId, watermark.path, watermark.revision, Number(watermark.lastOffset), watermark.lastDigest);
+            if (watermark.priorSource !== undefined && !trustedEmptySource(watermark)) throw new Error("Invalid absent or created-after-baseline native source receipt");
+            db.query("INSERT OR IGNORE INTO core_image_sources(thread_id,source_path,revision,last_offset,last_digest,watermark_json) VALUES(?,?,?,?,?,?)").run(watermark.threadId, watermark.path, watermark.revision, Number(watermark.lastOffset), watermark.lastDigest, watermark.kind === "native-jsonl-watermark" || trustedEmptySource(watermark) ? JSON.stringify(watermark) : null);
           }
         }
         const acceptsPath = (path: string) => {
@@ -222,34 +232,49 @@ export class CoreImages {
   }
 
   private recoverNative(registry: Registry, thread: Thread, source: CoreImageScope): CoreResult<void> {
-    const previous = registry.db.query("SELECT source_path,revision,last_offset,last_digest FROM core_image_sources WHERE thread_id=?").get(thread.id) as { source_path: string; revision: string; last_offset: number; last_digest: string } | null;
-    const recovered = withIndexedThreadHistory(source.runtime.path(thread.sessionFile), undefined, undefined, history => {
-      const boundary = previous && previous.source_path === thread.sessionFile ? history.entries.find(entry => entry.offset === previous.last_offset && entry.digest === previous.last_digest) : undefined;
-      const trusted = Boolean(previous && previous.source_path === thread.sessionFile && (boundary || previous.last_offset === -1 && previous.last_digest === ""));
-      const after = boundary ? boundary.offset : -1;
-      let uncertain = 0;
-      for (const descriptor of history.messages) {
-        if (descriptor.role !== "assistant") continue;
-        const read = history.read(descriptor);
-        if (!read.ok) return { ok: false as const, error: { code: "unavailable" as const, message: read.error.message } };
-        const text = assistantText(read.value.message?.content);
-        if (!text.includes("<pi-remote-image")) continue;
-        if (!trusted || descriptor.offset <= after) {
-          const hash = messageHash(text);
-          const receipt = registry.db.query("SELECT 1 FROM inline_image_messages WHERE session_id=? AND message_key=?").get(thread.id, hash);
-          if (!receipt) uncertain++;
-          continue;
-        }
-        const accepted = this.acceptNative(registry.spec.scopeId, thread.id, messageHash(text), text);
-        if (!accepted.ok) return accepted;
+    const previous = registry.db.query("SELECT source_path,watermark_json FROM core_image_sources WHERE thread_id=?").get(thread.id) as { source_path: string; watermark_json: string | null } | null;
+    const path = source.runtime.path(thread.sessionFile);
+    const checkpoint = (watermark: NativeHistoryWatermark) => registry.db.query(`INSERT INTO core_image_sources(thread_id,source_path,revision,last_offset,last_digest,watermark_json) VALUES(?,?,?,?,?,?)
+      ON CONFLICT(thread_id) DO UPDATE SET source_path=excluded.source_path,revision=excluded.revision,last_offset=excluded.last_offset,last_digest=excluded.last_digest,watermark_json=excluded.watermark_json`).run(thread.id, thread.sessionFile, watermark.revision, watermark.lastOffset, watermark.lastDigest, JSON.stringify(watermark));
+    const uncertainty = (key: string, detail: string) => registry.db.query("INSERT INTO core_image_ingress_errors VALUES(?,?,?) ON CONFLICT(thread_id,message_key) DO UPDATE SET error=excluded.error").run(thread.id, key, `${thread.id}: ${detail}. Historical effects remain unknown; no uncertain record was generated.`);
+    if (previous?.source_path === thread.sessionFile && previous.watermark_json !== null) {
+      let proof: unknown;
+      try { proof = JSON.parse(previous.watermark_json); }
+      catch { return { ok: false, error: { code: "unavailable", message: `Native image source proof ${thread.id} is invalid JSON` } }; }
+      let watermark = proof as NativeHistoryWatermark;
+      if (trustedEmptySource(proof)) {
+        const captured = captureNativeHistoryWatermark(path);
+        if (!captured.ok) return captured.error.code === "missing" ? { ok: true, value: undefined } : { ok: false, error: { code: "unavailable", message: captured.error.message } };
+        watermark = { ...captured.value, size: 0, closedOffset: 0, prefixDigest: messageHash(""), lastOffset: -1, lastLength: 0, lastLine: 0, lastDigest: "", nextLine: 1 };
       }
-      if (uncertain) registry.db.query("INSERT INTO core_image_ingress_errors VALUES(?,'history-gap',?) ON CONFLICT(thread_id,message_key) DO UPDATE SET error=excluded.error").run(thread.id, `${thread.id}: ${uncertain} historical image messages have no trustworthy acceptance watermark. Provider effects are unknown; none were generated during adoption.`);
-      const last = history.entries.reduce<typeof history.entries[number] | null>((last, entry) => !last || entry.offset > last.offset ? entry : last, null);
-      if (last) registry.db.query("INSERT INTO core_image_sources VALUES(?,?,?,?,?) ON CONFLICT(thread_id) DO UPDATE SET source_path=excluded.source_path,revision=excluded.revision,last_offset=excluded.last_offset,last_digest=excluded.last_digest").run(thread.id, thread.sessionFile, history.source.revision, last.offset, last.digest);
-      return { ok: true as const, value: undefined };
-    });
-    if (!recovered.ok) return recovered.error.code === "missing" ? { ok: true, value: undefined } : { ok: false, error: { code: "unavailable", message: `Native image recovery ${thread.id}: ${recovered.error.message}` } };
-    return recovered.value;
+      const recovered = withNativeHistorySuffix(path, watermark, records => {
+        const messages: string[] = [], errors: { key: string; detail: string }[] = [];
+        for (const record of records) {
+          if (record.kind === "uncertain") { errors.push({ key: `native-offset:${record.descriptor.offset}`, detail: record.error.message }); continue; }
+          const entry = record.entry as { type?: string; message?: { role?: string; content?: unknown } };
+          if (entry.type !== "message" || entry.message?.role !== "assistant") continue;
+          const text = assistantText(entry.message.content);
+          if (text.includes("<pi-remote-image")) messages.push(text);
+        }
+        return { messages, errors };
+      });
+      if (recovered.ok) {
+        registry.db.transaction(() => {
+          for (const error of recovered.value.value.errors) uncertainty(error.key, error.detail);
+          for (const text of recovered.value.value.messages) this.acceptNative(registry.spec.scopeId, thread.id, messageHash(text), text);
+          checkpoint(recovered.value.watermark);
+        })();
+        return { ok: true, value: undefined };
+      }
+      if (recovered.error.code === "missing") return { ok: true, value: undefined };
+      if (recovered.error.code !== "stale-source" && recovered.error.code !== "invalid-watermark") return { ok: false, error: { code: "unavailable", message: recovered.error.message } };
+      uncertainty("history-gap", `Native source proof could not be conserved: ${recovered.error.message}`);
+    }
+    const captured = captureNativeHistoryWatermark(path);
+    if (!captured.ok) return captured.error.code === "missing" ? { ok: true, value: undefined } : { ok: false, error: { code: "unavailable", message: `Native image metadata ${thread.id}: ${captured.error.message}` } };
+    if (captured.value.closedOffset > 0) uncertainty("history-gap", "Historical prefix has no full trustworthy source watermark and was not parsed or replayed");
+    checkpoint(captured.value);
+    return { ok: true, value: undefined };
   }
 
   async close(): Promise<void> {

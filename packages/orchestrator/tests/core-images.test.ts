@@ -3,19 +3,19 @@ import { Database } from "bun:sqlite";
 import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CoreImages, parseCoreImagesConfig, type CoreImagesSpec } from "../src/core/images.js";
+import { CoreImages, parseCoreImagesConfig, type CoreImagesSpec, type CoreImagesOptions } from "../src/core/images.js";
 import { InlineImages as Registry } from "../src/core/image-registry.js";
 import { Store } from "../src/store.js";
 import type { ThreadServiceEvent } from "../src/threads/service.js";
 import type { Thread } from "../src/threads/contracts.js";
-import { indexedThreadHistory } from "../src/threads/history.mjs";
+import { captureNativeHistoryWatermark } from "../src/threads/history.mjs";
 import { createImageReader } from "../src/core/image-read.js";
 import { CustodyResources } from "../src/core/custody-resources.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
 
-async function fixture(native?: { watermarked: boolean; baselineTag?: boolean; noSuffix?: boolean }, unavailable = false, related = false) {
+async function fixture(native?: { watermarked: boolean; baselineTag?: boolean; noSuffix?: boolean; largePrefix?: boolean; largeSuffix?: boolean }, unavailable = false, related = false) {
   const root = mkdtempSync(join(tmpdir(), "core-image-adoption-"));
   const databasePath = join(root, "supervisor.sqlite3"), artifactRoot = join(root, "images"), adoptionReceiptPath = join(root, "adopt.json");
   mkdirSync(artifactRoot);
@@ -44,10 +44,11 @@ async function fixture(native?: { watermarked: boolean; baselineTag?: boolean; n
   if (native) {
     writeFileSync(nativePath, JSON.stringify({ type: "session", version: 3, id: "session", timestamp: new Date().toISOString(), cwd: root }) + "\n"
       + JSON.stringify({ type: "message", id: "first", parentId: null, message: { role: "assistant", content: [{ type: "text", text: native.baselineTag ? `<pi-remote-image id="before-watermark" path="${source}" />` : "Before custody transfer" }], timestamp: Date.now() } }) + "\n");
-    const history = indexedThreadHistory(nativePath);
-    if (!history.ok) throw new Error(history.error.message);
-    const last = history.value.entries.at(-1)!;
-    watermark = { threadId: related ? "fleet-id" : "thread", path: nativePath, revision: history.value.source.revision, lastOffset: last.offset, lastDigest: last.digest };
+    if (native.largePrefix) appendFileSync(nativePath, JSON.stringify({ type: "message", id: "giant-old-tool", parentId: "first", message: { role: "toolResult", content: [{ type: "text", text: "x".repeat(9 * 1024 * 1024) }] } }) + "\n");
+    const captured = captureNativeHistoryWatermark(nativePath);
+    if (!captured.ok) throw new Error(captured.error.message);
+    watermark = { threadId: related ? "fleet-id" : "thread", path: nativePath, ...captured.value };
+    if (native.largeSuffix) appendFileSync(nativePath, JSON.stringify({ type: "message", id: "giant-new-tool", parentId: "first", message: { role: "toolResult", content: [{ type: "text", text: "x".repeat(9 * 1024 * 1024) }] } }) + "\n");
     if (!native.noSuffix) appendFileSync(nativePath, JSON.stringify({ type: "message", id: "after", parentId: "first", message: { role: "assistant", content: [{ type: "text", text: nativeText }], timestamp: Date.now() } }) + "\n");
   }
   writeFileSync(adoptionReceiptPath, JSON.stringify({ version: 1, state: "detached", scopeId: "person:images", databasePath,
@@ -63,7 +64,7 @@ async function fixture(native?: { watermarked: boolean; baselineTag?: boolean; n
   const processStat = readFileSync(`/proc/${process.pid}/stat`, "utf8");
   const namespace = { kind: "process" as const, pid: process.pid, startTicks: processStat.slice(processStat.lastIndexOf(")") + 2).split(/\s+/)[19]!, mountNamespaceInode: statSync("/proc/self/ns/mnt", { bigint: true }).ino.toString() };
   const custody = new CustodyResources({ uid: process.getuid!(), gid: process.getgid!(), namespace, retainedRunnerNamespace: namespace, dataDir: root, socketDir: root });
-  const service = new CoreImages({ kind: "configured", registries: [spec] }, { accounts: { store: accountStore, shared: undefined },
+  const options: CoreImagesOptions = { accounts: { store: accountStore, shared: undefined },
     scope: () => ({ ok: true, value: unavailable ? null : { runtime: { path: path => path, readImage: createImageReader(custody) }, uid: process.getuid!(), gid: process.getgid!(), allowsThread: id => id === "thread",
       threads: { snapshot: () => native && !related ? [{ id: "thread", sessionFile: nativePath } as Thread] : [], subscribe: value => { if (!related) listener = value; return () => { if (!related) listener = null; }; } } } }),
     relatedScope: (_registryId, id) => related && id === "person:fleet" ? { ok: true, value: {
@@ -74,10 +75,11 @@ async function fixture(native?: { watermarked: boolean; baselineTag?: boolean; n
     authorize: (_request, _scope, _resource, actions) => {
       (seen as string[][]).push([...actions]);
       return allowed ? { ok: true, value: undefined } : { ok: false, error: { code: "ownership-conflict", message: "No scope grant" } };
-    } });
+    } };
+  const service = new CoreImages({ kind: "configured", registries: [spec] }, options);
   const request = (suffix: string, body: unknown) => service.handle(new Request(`http://127.0.0.1/v1/scopes/person/images/${suffix}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
   cleanups.push(async () => { await service.close(); custody.close(); accountStore.close(); rmSync(root, { recursive: true, force: true }); });
-  return { root, service, spec, source, request, seen, nativeText, emit: (text: string) => listener?.({ threadId: related ? "fleet-id" : "thread", event: { type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } } }), allow: () => { allowed = true; } };
+  return { root, service, options, spec, source, request, seen, nativeText, emit: (text: string) => listener?.({ threadId: related ? "fleet-id" : "thread", event: { type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } } }), allow: () => { allowed = true; } };
 }
 
 test("images require explicit configuration and cannot infer filesystem grants", () => {
@@ -135,14 +137,14 @@ test("post-watermark native images recover with Remote offline and live messages
   expect(images.filter((image: any) => image.id === "after-watermark")).toHaveLength(1);
 });
 
-test("live-owner watermark never silently blesses unacknowledged pre-baseline tags", async () => {
+test("full source proof excludes the old prefix without claiming its tags were accepted", async () => {
   for (const noSuffix of [true, false]) {
     const f = await fixture({ watermarked: true, baselineTag: true, noSuffix });
     expect((await f.service.start()).ok).toBe(true);
     f.allow();
     const result = await (await f.request("sync", { have: {} }))!.json();
     expect(result.value.snapshots.thread.images.map((image: any) => image.id)).not.toContain("before-watermark");
-    expect(result.value.errors[0]).toContain("historical image messages");
+    expect(result.value.errors).toEqual([]);
     if (!noSuffix) expect(result.value.snapshots.thread.images.map((image: any) => image.id)).toContain("after-watermark");
   }
 });
@@ -153,7 +155,7 @@ test("a historical gap without a trustworthy watermark is explicit and never gen
   f.allow();
   const result = await (await f.request("sync", { have: {} }))!.json();
   expect(result.value.snapshots.thread.images.map((image: any) => image.id)).not.toContain("after-watermark");
-  expect(result.value.errors[0]).toContain("historical image messages");
+  expect(result.value.errors[0]).toContain("no full trustworthy source watermark");
   f.emit(`<pi-remote-image id="new-live" path="${f.source}" />`);
   const updated = await (await f.request("sync", { have: {} }))!.json();
   expect(updated.value.snapshots.thread.images.map((image: any) => image.id)).toContain("new-live");
@@ -184,4 +186,60 @@ test("undeclared or unresolved related source never opens a broader thread direc
   const f = await fixture();
   f.spec.relatedThreadScopeIds = ["another-person"];
   expect((await f.service.start()).ok).toBe(false);
+});
+
+test("large historical tool records are metadata-only while trusted image suffix still recovers", async () => {
+  const f = await fixture({ watermarked: true, largePrefix: true });
+  expect((await f.service.start()).ok).toBe(true);
+  f.allow();
+  const result = await (await f.request("sync", { have: {} }))!.json();
+  expect(result.value.snapshots.thread.images.map((image: any) => image.id)).toContain("after-watermark");
+  expect(result.value.errors).toEqual([]);
+});
+
+test("large suffix records remain explicit uncertainty without hiding later image output", async () => {
+  const f = await fixture({ watermarked: true, largeSuffix: true });
+  expect((await f.service.start()).ok).toBe(true);
+  f.allow();
+  const result = await (await f.request("sync", { have: {} }))!.json();
+  expect(result.value.snapshots.thread.images.map((image: any) => image.id)).toContain("after-watermark");
+  expect(result.value.errors).toHaveLength(1);
+  expect(result.value.errors[0]).toContain("uncertain record");
+});
+
+test("legacy five-field source receipt never grants historical replay", async () => {
+  const f = await fixture({ watermarked: true });
+  const receipt = JSON.parse(readFileSync(f.spec.adoptionReceiptPath, "utf8"));
+  receipt.nativeImageSources = receipt.nativeImageSources.map((proof: any) => ({ threadId: proof.threadId, path: proof.path, revision: proof.revision, lastOffset: proof.lastOffset, lastDigest: proof.lastDigest }));
+  writeFileSync(f.spec.adoptionReceiptPath, JSON.stringify(receipt));
+  expect((await f.service.start()).ok).toBe(true);
+  f.allow();
+  const result = await (await f.request("sync", { have: {} }))!.json();
+  expect(result.value.snapshots.thread.images.map((image: any) => image.id)).not.toContain("after-watermark");
+  expect(result.value.errors[0]).toContain("no full trustworthy source watermark");
+});
+
+test("explicit absent and newly-created source receipts conserve the first fresh finalized output", async () => {
+  for (const kind of ["absent", "created-after-baseline"] as const) {
+    const before = new Date(Date.now() - 1000).toISOString();
+    const f = await fixture({ watermarked: false });
+    const receipt = JSON.parse(readFileSync(f.spec.adoptionReceiptPath, "utf8"));
+    const path = join(f.root, "native.jsonl");
+    const saved = readFileSync(path);
+    rmSync(path);
+    const priorSource = kind === "absent" ? { kind, observedAt: before } : { kind, createdAt: new Date().toISOString(), baselineStartedAt: before };
+    receipt.nativeImageSources = [{ threadId: "thread", path, revision: kind, lastOffset: -1, lastDigest: "", priorSource }];
+    writeFileSync(f.spec.adoptionReceiptPath, JSON.stringify(receipt));
+    expect((await f.service.start()).ok).toBe(true);
+    await f.service.close();
+    writeFileSync(path, saved);
+    const replacement = new CoreImages({ kind: "configured", registries: [f.spec] }, f.options);
+    cleanups.unshift(() => replacement.close());
+    expect((await replacement.start()).ok).toBe(true);
+    f.allow();
+    const response = await replacement.handle(new Request("http://127.0.0.1/v1/scopes/person/images/sync", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ have: {} }) }));
+    const result = await response!.json();
+    expect(result.value.snapshots.thread.images.map((image: any) => image.id)).toContain("after-watermark");
+    expect(result.value.errors).toEqual([]);
+  }
 });
