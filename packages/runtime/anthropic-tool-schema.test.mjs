@@ -20,6 +20,10 @@ const union = Type.Union([
 ]);
 const tools = [
   { name: "union", parameters: union },
+  { name: "shaped", parameters: Type.Union([
+    Type.Object({ action: Type.Literal("array"), value: Type.Array(Type.String()) }, { additionalProperties: false }),
+    Type.Object({ action: Type.Literal("object"), value: Type.Object({ model: Type.String() }) }, { additionalProperties: false }),
+  ]) },
   { name: "intersection", parameters: Type.Intersect([Type.Object({ action: Type.Literal("set") }), Type.Object({ reason: Type.String({ minLength: 1 }) })]) },
   { name: "closed", parameters: Type.Object({ paths: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, uniqueItems: true }) }, { additionalProperties: false }) },
   { name: "no_arguments", parameters: Type.Object({}) },
@@ -43,13 +47,17 @@ for (const [name, path] of [["SDK", sdk], ["bundled", bundle]]) test(`${name}: A
     requests.push(params);
     const events = [
       { type: "message_start", message: { id: "msg_fixture", model: model.id, usage: { input_tokens: 1, output_tokens: 0 } } },
-      { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 0 } },
+      { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "call_array", name: "shaped", input: {} } },
+      { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"action":"array","value":["one","two"]}' } },
+      { type: "content_block_stop", index: 0 },
+      { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 0 } },
       { type: "message_stop" },
     ];
     return { asResponse: async () => new Response(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("")) };
   } } } };
   const result = await provider.stream(model, context, { client }).result();
-  assert.equal(result.stopReason, "stop", result.errorMessage);
+  assert.equal(result.stopReason, "toolUse", result.errorMessage);
+  assert.deepEqual(result.content.find(block => block.type === "toolCall").arguments, { action: "array", value: ["one", "two"] });
   assert.equal(requests.length, 1);
   for (const [index, tool] of tools.entries()) {
     const wire = requests[0].tools[index].input_schema;
@@ -63,7 +71,7 @@ for (const [name, path] of [["SDK", sdk], ["bundled", bundle]]) test(`${name}: A
   assert.equal(readFileSync(path, "utf8"), original, "installed provider remains untouched");
 });
 
-test("root object normalization nests combinators without changing accepted inputs", () => {
+test("root object normalization retains branch contracts and root argument types", () => {
   for (const parameters of [
     { oneOf: union.anyOf },
     { type: "object", anyOf: union.anyOf },
@@ -78,6 +86,13 @@ test("root object normalization nests combinators without changing accepted inpu
       assert.equal(Compile(wire).Check(sample), Compile(parameters).Check(sample), JSON.stringify(sample));
     }
   }
+  const shaped = anthropicToolSchema(tools.find(tool => tool.name === "shaped").parameters);
+  assert.deepEqual(shaped.properties.value.anyOf.map(schema => schema.type), ["array", "object"]);
+  const validator = Compile(shaped);
+  assert.equal(validator.Check({ action: "array", value: ["one"] }), true);
+  assert.equal(validator.Check({ action: "object", value: { model: "sol" } }), true);
+  assert.equal(validator.Check({ action: "array", value: '["one"]' }), false);
+  assert.equal(validator.Check({ action: "object", value: '{"model":"sol"}' }), false);
   const object = { type: "object", properties: {}, additionalProperties: false, minProperties: 0 };
   assert.equal(anthropicToolSchema(object), object);
   assert.throws(() => anthropicToolSchema({ anyOf: [{ type: "object" }, { type: "string" }] }), /must describe an object/);

@@ -62,10 +62,13 @@ used by life writes/policy/steering, thread control/wakes and Converge. The shar
 [`anthropic-tool-schema.js`](anthropic-tool-schema.js) retains all constraints and
 requires an object input. Anthropic rejects root `anyOf`, `oneOf` and `allOf`, even
 with `type: "object"`; the adapter places those complete contracts under double
-negation (`not.not`) and advertises their field names at the object root. Nested
-branch constraints retain exactly the original accepted inputs, including permissive
-extras, closed branches and references. Non-object inputs fail explicitly; native
-registrations stay intact.
+negation (`not.not`) and advertises real property schemas at the object root.
+Matching branch properties share a schema; differing schemas use property-level
+`anyOf`, which Anthropic accepts. This keeps arrays/objects typed through argument
+encoding. Nested branch constraints retain operation requirements, exclusions and
+references. The wire constrains supplied declared fields to their advertised types,
+even on a branch whose native permissive extras would tolerate other values; native
+registrations stay intact. Non-object inputs fail explicitly.
 Deployment hashes and applies both repair files. Orchestrator test preparation
 applies the same patch before provider payload tests.
 
