@@ -31,7 +31,7 @@ test("wait kinds retain their reason in one activity; missing or unknown kinds a
     { kind: "deployment", publicationId: "pub" },
     { kind: "message", fromThreadId: "collaborator" },
   ] as const) {
-    const lifecycle = deriveThreadLifecycle({ archived: false, cancelling: false, execution: null, pending: null, delay: null, subscriptions: [], error: null, updatedAt: 10, dependency: { ...dependency, reason: "Reason", since: 10 } as LifecycleObservation["dependency"] });
+    const lifecycle = deriveThreadLifecycle({ archived: false, cancelling: false, execution: null, pending: null, delay: null, subscriptions: [], error: null, updatedAt: 10, dependency: { ...dependency, since: 10 } as LifecycleObservation["dependency"] });
     const projected = projectThreadActivity({ lifecycle });
     expect(projected).toMatchObject({ activity: "awaiting", activitySince: 10, activityDetail: "Reason" });
   }

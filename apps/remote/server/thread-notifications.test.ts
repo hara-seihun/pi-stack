@@ -152,7 +152,7 @@ test("launch provenance never gates another foreground agent's completion", asyn
 
 test("an explicit own wait defers completion and is rechecked without new settlements", async () => {
   const db = database();
-  const agent = thread("agent", { lifecycle: { kind: "waiting", target: "job", reason: "Need result", since: 1, dependency: { kind: "job", jobId: "job", reason: "Need result", since: 1 } }, state: "waiting", waitingOnAgents: { kind: "job", jobId: "job", reason: "Need result", since: 1 } });
+  const agent = thread("agent", { lifecycle: { kind: "waiting", target: "job", since: 1, dependency: { kind: "job", jobId: "job", since: 1 } }, state: "waiting", waitingOnAgents: { kind: "job", jobId: "job", since: 1 } });
   const api = apiFor([agent], [settlement("agent")]);
   await projectThreadNotifications(db, "person", api);
   expect(count(db)).toBe(0);
@@ -204,7 +204,7 @@ for (const [label, overrides] of [
   ["no reply", { finalMessage: null }], ["whitespace", { finalMessage: { role: "assistant", content: [{ type: "text", text: " \n " }] } }], ["cancelled", { outcome: "cancelled" }], ["failed", { outcome: "failed" }],
 ] as Array<[string, Partial<ThreadSettlement>]>) test(`${label} supersedes an earlier deferred reply`, async () => {
   const db = database();
-  const agent = thread("agent", { lifecycle: { kind: "waiting", target: "dispatch", reason: "Waiting for execution dispatch", since: 1 }, pendingMessages: 1 });
+  const agent = thread("agent", { lifecycle: { kind: "waiting", target: "dispatch", since: 1 }, pendingMessages: 1 });
   const receipts = [settlement("agent")]; const api = apiFor([agent], receipts);
   await projectThreadNotifications(db, "person", api); expect(count(db)).toBe(0);
   receipts.push(settlement("agent", 2, overrides)); agent.pendingMessages = 0; agent.lifecycle = { kind: "idle" };
