@@ -542,7 +542,7 @@ test("selected candidate with a pending Root replacement resumes its wrapper rat
   const waiting = await f.run();
   assert.equal(waiting.status, "queued", JSON.stringify(waiting.failure));
   assert.equal(waiting.hosts.gmktec.status, "waiting");
-  assert.equal(waiting.hosts.gmktec.waiting.kind, "host-lock");
+  assert.equal(waiting.hosts.gmktec.waiting.kind, "executor-handoff");
   assert.equal(waiting.hosts.converge.status, "passed");
   assert.equal(f.world().hosts.gmktec.selected, f.revision);
   assert.equal(f.world().hosts.gmktec.rootReplacementPending, true);
@@ -557,7 +557,7 @@ test("selected candidate with a pending Root replacement resumes its wrapper rat
   assert.deepEqual(probed.executorHandoffs, waiting.executorHandoffs);
   assert.deepEqual(probed.nativeHistory, waiting.nativeHistory);
   assert.equal(f.world().hosts.gmktec.rootReplacementPending, true);
-  assert.equal(f.events().length, boundary, "host-lock readiness does not claim an executor was replaced");
+  assert.equal(f.events().length, boundary, "executor readiness does not claim an executor was replaced");
   f.update(value => {
     value.hosts.gmktec.mode = "ready";
     value.hosts.converge.selected = f.newer;
@@ -570,6 +570,8 @@ test("selected candidate with a pending Root replacement resumes its wrapper rat
   assert.equal(completed.nativeHistory.hosts.gmktec.state, "released");
   assert.equal(f.world().hosts.gmktec.rootReplacementPending, false);
   const resumed = f.events().slice(boundary);
+  assert.equal(resumed.some(event => event.action === 'install-app-web'), false, 'an unfinished executor handoff reuses its already checked client installation');
+  assert.ok(resumed.some(event => event.action === 'matched-app-web-proof'), 'reused installation still has fresh served-byte proof');
   assert.ok(resumed.every(event => event.host === "gmktec"), "successful peer never re-enters delivery");
   assert.deepEqual(resumed.filter(event => ["deploy", "prepare", "host-native-history-advance", "root-executor-replaced", "proof"].includes(event.action)).map(event => event.action),
     ["deploy", "prepare", "host-native-history-advance", "root-executor-replaced", "proof"]);
