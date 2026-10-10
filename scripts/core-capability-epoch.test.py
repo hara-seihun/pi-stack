@@ -87,6 +87,28 @@ class Epoch(unittest.TestCase):
                 result = epoch.validate(proof,{**plan,'ownerScopeIds':['owner']})
                 self.assertEqual(result['owners'][0]['native']['socketDir'],str(base))
 
+    def test_before_open_ancestor_rejection_reconciles_only_same_reservation(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as root:
+            base=Path(root)/'owner'; base.mkdir(mode=0o700); local=base/'.local'; local.mkdir(mode=0o755); local.chmod(0o755); database=base/'threads.sqlite3'; database.touch()
+            key=local/'state'/'pi-stack'/'key'; proof=Path(root)/'epoch.json'; proof.write_text('{}'); receipt=Path(root)/'reservation.json'
+            plan={'version':1,'scopeId':'owner','priorCapability':'absent-after-drain','uid':os.getuid(),'gid':os.getgid(),'namespace':{'kind':'host'},'keyBasePath':str(base),'keyPath':str(key),'databasePath':str(database),'ownerScopeIds':['owner'],'sourceProof':{'kind':'detached-capability-epoch','path':str(proof),'sha256':hashlib.sha256(proof.read_bytes()).hexdigest()},'receiptPath':str(receipt)}
+            digest=hashlib.sha256(json.dumps(plan,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+            prior={'version':1,'protocol':'pi-core-initialized-capability-v1','state':'preparing','scopeId':'owner','keyPath':str(key),'planSha256':digest}
+            receipt.write_text(json.dumps(prior))
+            def enter(namespace,command,uid,gid,timeout=10):return subprocess.run(command,check=True,capture_output=True,text=True,timeout=timeout).stdout
+            with patch.object(adopt,'trusted',side_effect=lambda p:json.loads(p.read_text())),patch.object(adopt,'namespace_path'),patch.object(adopt,'enter',side_effect=enter),patch('runpy.run_path',return_value={'validate':lambda proof,plan:proof}):
+                with self.assertRaisesRegex(ValueError,'uncertain'):adopt.initialize_capability(plan)
+                self.assertEqual(adopt.reconcile_capability(plan)['state'],'failed-before-effect')
+                initialized=adopt.initialize_capability(plan);original=key.read_bytes()
+                self.assertEqual(initialized['value']['state'],'initialized')
+                self.assertEqual(initialized['value']['reconciliation']['priorReservation'],prior)
+                self.assertEqual(adopt.initialize_capability(plan)['value']['keyIdentity'],initialized['value']['keyIdentity'])
+                self.assertEqual(key.read_bytes(),original)
+                self.assertEqual(local.stat().st_mode&0o777,0o755)
+                self.assertEqual(key.parent.stat().st_mode&0o777,0o700)
+                with self.assertRaises(ValueError):adopt.reconcile_capability(plan)
+
     def test_epoch_identity_and_full_owner_cohort_are_mandatory(self):
         proof = {'version': 1, 'protocol': 'pi-core-capability-epoch-drained-v1', 'state': 'drained', 'uid': 1007, 'gid': 1010, 'priorKeyPath': '/registered/key', 'owners': [{'scopeId': 'person'}]}
         for change in [{'uid': 1008}, {'keyPath': '/elsewhere/key'}, {'ownerScopeIds': ['person','fleet']}]:

@@ -243,9 +243,10 @@ if len(sys.argv)==5:
    try:current.mkdir(mode=0o700)
    except FileExistsError:pass
   s=current.lstat()
-  if not stat.S_ISDIR(s.st_mode) or current.is_symlink() or s.st_uid!=os.getuid() or s.st_mode&0o077:raise ValueError('new epoch key directory custody changed')
+  if not stat.S_ISDIR(s.st_mode) or current.is_symlink() or s.st_uid!=os.getuid() or s.st_mode&0o022:raise ValueError('new epoch key directory custody changed')
 elif database.parent!=parent:raise ValueError('key must live beside its existing encrypted database')
 if not parent.is_dir() or parent.is_symlink():raise ValueError('existing registered key parent required')
+if parent.stat().st_mode&0o077:raise ValueError('final key parent must be owner-only')
 before=parent.stat()
 if sys.argv[2]=='create':
  fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
@@ -263,6 +264,44 @@ data=p.read_bytes()
 if len(data)!=65 or any(c not in b'0123456789abcdef' for c in data[:64]) or data[-1:]!=b'\n':raise ValueError('initialized key encoding changed')
 print(json.dumps({'dev':str(s.st_dev),'ino':str(s.st_ino),'sha256':hashlib.sha256(data).hexdigest()}))
 '''
+
+
+KEY_ANCESTOR_REJECTION = r'''
+import json,os,stat,sys
+from pathlib import Path
+v=json.loads(sys.argv[1]);key=Path(v['keyPath']);base=Path(v['keyBasePath']);database=Path(v['databasePath'])
+if key.exists() or key.is_symlink():raise ValueError('existing key effect cannot be reconciled as absent')
+if not database.is_file() or database.is_symlink() or not key.parent.is_relative_to(base):raise ValueError('registered database and key base required')
+s=base.lstat()
+if not stat.S_ISDIR(s.st_mode) or base.is_symlink() or s.st_uid!=os.getuid() or s.st_mode&0o022:raise ValueError('registered owner base changed')
+current=base
+for component in key.parent.relative_to(base).parts:
+ current=current/component
+ if not current.exists():raise ValueError('no affirmative original ancestor rejection')
+ s=current.lstat()
+ if not stat.S_ISDIR(s.st_mode) or current.is_symlink() or s.st_uid!=os.getuid() or s.st_mode&0o022:raise ValueError('ancestor is not protected owning storage')
+ if s.st_mode&0o077:
+  print(json.dumps({'code':'owner-ancestor-private-guard-before-open','path':str(current),'identity':{'dev':str(s.st_dev),'ino':str(s.st_ino)},'uid':s.st_uid,'mode':s.st_mode&0o777,'keyEffect':'absent'}));break
+else:raise ValueError('no affirmative original ancestor rejection')
+'''
+
+
+def reconcile_capability(plan):
+    if plan.get('version') != 1 or plan.get('priorCapability') != 'absent-after-drain':
+        raise ValueError('exact missing-key reservation required')
+    path = absolute(plan['receiptPath']); prior = trusted(path)
+    digest = hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    if prior.get('protocol') != 'pi-core-initialized-capability-v1' or prior.get('state') != 'preparing' or prior.get('planSha256') != digest or prior.get('keyPath') != plan['keyPath']:
+        raise ValueError('only this exact preparing key reservation may be reconciled')
+    source = absolute(plan['sourceProof']['path'])
+    if hashlib.sha256(source.read_bytes()).hexdigest() != plan['sourceProof']['sha256']:
+        raise ValueError('original capability retirement proof changed')
+    import runpy
+    runpy.run_path(str(Path(__file__).with_name('core-capability-epoch.py')))['validate'](trusted(source), plan)
+    rejection = json.loads(enter(plan['namespace'], ['python3','-c',KEY_ANCESTOR_REJECTION,json.dumps(plan)],plan['uid'],plan['gid']))
+    receipt = {**prior,'state':'failed-before-effect','reconciliation':{'kind':'affirmative-ancestor-rejection','priorReservation':prior,'rejection':rejection}}
+    publish(path,receipt)
+    return {'ok':True,'state':'failed-before-effect','receiptPath':str(path)}
 
 
 def initialize_capability(plan):
@@ -295,27 +334,35 @@ def initialize_capability(plan):
     prior = trusted(receipt_path) if receipt_path.exists() else None
     if prior is not None and (prior.get('protocol') != 'pi-core-initialized-capability-v1' or prior.get('planSha256') != digest):
         raise ValueError('another capability initialization owns this receipt')
-    if prior_kind == 'absent-after-drain' and prior is not None and prior.get('state') != 'initialized':
+    recovered = prior_kind == 'absent-after-drain' and prior is not None and prior.get('state') == 'failed-before-effect'
+    if recovered:
+        reconciliation = prior.get('reconciliation', {})
+        if reconciliation.get('kind') != 'affirmative-ancestor-rejection' or reconciliation.get('priorReservation', {}).get('state') != 'preparing':
+            raise ValueError('affirmative same-reservation rejection evidence required')
+        rejection = json.loads(enter(plan['namespace'], ['python3','-c',KEY_ANCESTOR_REJECTION,json.dumps(plan)],plan['uid'],plan['gid']))
+        if rejection != reconciliation.get('rejection'):
+            raise ValueError('original rejected ancestor identity changed')
+    if prior_kind == 'absent-after-drain' and prior is not None and prior.get('state') != 'initialized' and not recovered:
         raise ValueError('capability initialization effect is uncertain; inspect and reconcile its exact receipt before continuing')
-    if prior_kind == 'absent-after-drain' and prior is None:
+    if prior_kind == 'absent-after-drain' and (prior is None or recovered):
         import runpy
         runpy.run_path(str(Path(__file__).with_name('core-capability-epoch.py')))['validate'](trusted(source), plan)
-        publish(receipt_path, {'version': 1, 'protocol': 'pi-core-initialized-capability-v1', 'state': 'preparing', 'scopeId': plan['scopeId'], 'priorCapability': prior_kind, 'keyPath': str(key), 'planSha256': digest, 'sourceProof': plan['sourceProof']})
-    identity = json.loads(enter(plan['namespace'], ['/usr/bin/python3', '-c', KEY_INITIALIZATION, str(key), 'inspect' if prior is not None else 'create', str(database), *extra], plan['uid'], plan['gid']))
-    if prior is not None:
+        publish(receipt_path, {'version': 1, 'protocol': 'pi-core-initialized-capability-v1', 'state': 'preparing', 'scopeId': plan['scopeId'], 'priorCapability': prior_kind, 'keyPath': str(key), 'planSha256': digest, 'sourceProof': plan['sourceProof'], **({'reconciliation':prior['reconciliation']} if recovered else {})})
+    identity = json.loads(enter(plan['namespace'], ['/usr/bin/python3', '-c', KEY_INITIALIZATION, str(key), 'inspect' if prior is not None and not recovered else 'create', str(database), *extra], plan['uid'], plan['gid']))
+    if prior is not None and not recovered:
         if prior.get('keyIdentity') != identity:
             raise ValueError('initialized capability identity changed')
         return {'ok': True, 'value': prior}
     receipt = {'version': 1, 'protocol': 'pi-core-initialized-capability-v1', 'state': 'initialized', 'scopeId': plan['scopeId'], 'priorCapability': prior_kind,
-               'keyPath': str(key), 'planSha256': digest, 'keyIdentity': identity, 'sourceProof': plan['sourceProof']}
+               'keyPath': str(key), 'planSha256': digest, 'keyIdentity': identity, 'sourceProof': plan['sourceProof'], **({'reconciliation':prior['reconciliation']} if recovered else {})}
     publish(receipt_path, receipt)
     return {'ok': True, 'value': receipt}
 
 
 def main():
-    actions = {'pin': pin, 'transfer': transfer, 'rebind': rebind, 'retain-fuse': retain_fuse, 'initialize-capability': initialize_capability}
+    actions = {'pin': pin, 'transfer': transfer, 'rebind': rebind, 'retain-fuse': retain_fuse, 'initialize-capability': initialize_capability, 'reconcile-capability': reconcile_capability}
     if os.geteuid() != 0 or len(sys.argv) != 3 or sys.argv[1] not in actions:
-        raise ValueError('usage: root core-adopt pin|retain-fuse|transfer|rebind|initialize-capability ABSOLUTE_ROOT_PLAN')
+        raise ValueError('usage: root core-adopt pin|retain-fuse|transfer|rebind|initialize-capability|reconcile-capability ABSOLUTE_ROOT_PLAN')
     plan = trusted(absolute(sys.argv[2]))
     print(json.dumps(actions[sys.argv[1]](plan)))
 
