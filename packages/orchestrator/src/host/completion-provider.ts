@@ -1,5 +1,5 @@
 import { normalizeContext, type Api, type Context, type Model, type Provider, type ThinkingLevel, type StopReason } from "@earendil-works/pi-ai";
-import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import { nativeProviders } from "../models.js";
 import { createParser } from "eventsource-parser";
 import { providerOAuth } from "../auth/shared-oauth.js";
 import { providerResponseFailure, quarantineProviderCredential, repairProviderCredential } from "../auth/provider-rejection.js";
@@ -28,7 +28,7 @@ export function completionPayload(payload: unknown, input: CompletionInput): Rec
   const { service_tier: _inheritedTier, ...body } = payload as Record<string, unknown>;
   return {
     ...body,
-    ...(input.speed === "priority" ? { service_tier: "priority" } : {}),
+    ...(input.speed === "priority" || input.speed === "ultrafast" ? { service_tier: input.speed } : {}),
     instructions: input.systemPrompt ?? "",
     tools: [],
     tool_choice: "none",
@@ -56,8 +56,8 @@ function completionStopReason(reason: StopReason): "stop" | "length" | "error" |
 }
 
 export async function executeCompletion(input: CompletionInput, run: Run, options: CompletionProviderOptions): Promise<CompletionExecution> {
-  if (input.maxOutputTokens !== undefined) return { state: "failed", error: { code: "unsupported-option", message: "OpenAI Codex rejects max_output_tokens for Luna. No provider request was sent." } };
-  const provider = options.provider ?? builtinProviders().find(provider => provider.id === "openai-codex");
+  if (input.maxOutputTokens !== undefined) return { state: "failed", error: { code: "unsupported-option", message: "OpenAI Codex rejects max_output_tokens. No provider request was sent." } };
+  const provider = options.provider ?? nativeProviders.find(provider => provider.id === run.provider);
   const model = provider?.getModels().find(model => model.id === run.model);
   if (!provider || !model || !run.accountId || run.provider !== provider.id) return { state: "failed", error: { code: "provider", message: "Completion model does not match an admitted OpenAI account." } };
   let dispatched = false, phase: "authentication" | "provider" = "authentication";

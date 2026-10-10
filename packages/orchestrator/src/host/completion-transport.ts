@@ -4,7 +4,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { createConnection } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 export interface CompletionHostBoundary { ledgerPath: string; authPath: string; agentDir: string }
@@ -70,6 +70,19 @@ export async function launchCompletionHost(boundary: CompletionHostBoundary, soc
     process.execPath, "--max-old-space-size=3072", entry, socketPath, boundary.ledgerPath, boundary.authPath, boundary.agentDir],
     { env, timeout: 5_000, maxBuffer: 64 * 1024 });
 }
+export interface CompletionHostCustody { uid: number; gid: number; home: string }
+/** A shared core observes the original UID-bound socket. A missing host is
+ * launched under that same UID/GID, without inheriting the core's private env. */
+export async function launchCompletionHostForCustody(boundary: CompletionHostBoundary, socketPath: string, custody: CompletionHostCustody): Promise<void> {
+  if (!Number.isSafeInteger(custody.uid) || custody.uid < 0 || !Number.isSafeInteger(custody.gid) || custody.gid < 0 || !custody.home.startsWith("/") || custody.home.includes("\0")) throw new Error("Completion host requires explicit valid UID/GID/home custody");
+  if (process.getuid!() !== 0 && (process.getuid!() !== custody.uid || process.getgid!() !== custody.gid)) throw new Error("Completion host custody differs from this controller's actual launch authority");
+  const transport = new URL("./completion-transport.js", pathToFileURL(completionHostEntry())).href;
+  const source = `import { launchCompletionHost } from ${JSON.stringify(transport)}; await launchCompletionHost(JSON.parse(process.argv[1]), process.argv[2]);`;
+  const command = [process.execPath, "--input-type=module", "-e", source, JSON.stringify(boundary), socketPath];
+  if (process.getuid!() === 0) command.unshift("/usr/bin/setpriv", "--reuid", String(custody.uid), "--regid", String(custody.gid), "--init-groups", "--");
+  await run(command[0]!, command.slice(1), { cwd: custody.home, env: { HOME: custody.home, PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", XDG_RUNTIME_DIR: `/run/user/${custody.uid}`, DBUS_SESSION_BUS_ADDRESS: `unix:path=/run/user/${custody.uid}/bus` }, timeout: 10_000, maxBuffer: 64 * 1024 });
+}
+
 export async function ensureCompletionHost(boundary: CompletionHostBoundary, socketPath: string,
   launch = launchCompletionHost, signal?: AbortSignal): Promise<CompletionHostStatus> {
   const status = async () => {

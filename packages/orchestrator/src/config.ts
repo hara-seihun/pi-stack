@@ -1,12 +1,9 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
-import { admissionThinking, catalogModel, type ModelCandidate } from "./catalog.js";
 import type { OrchestratorConfig } from "./domain.js";
 import { defaultSharedAuthPath } from "./auth/shared-oauth.js";
 import { parsePeerHosts } from "./auth/account-peers.js";
-
-const standard = catalogModel("sol")!;
 
 function parsePort(value: unknown): number | undefined {
   if (value === undefined) return undefined;
@@ -32,14 +29,6 @@ export function loadConfig(
   ledgerPath ??= env.PI_ORCHESTRATOR_LEDGER || join(home, ".local/share/pi-orchestrator/ledger.sqlite3");
   let local: any = {};
   try { local = JSON.parse(readFileSync(path,"utf8")); } catch (error: any) { if(error?.code!=="ENOENT") throw error; }
-  const candidate=({provider,model}:ModelCandidate)=>({provider,model,thinking:admissionThinking({provider,model})});
-  const profiles = {
-    ...(local.profiles ?? {
-      standard: [standard],
-      expert: [standard],
-    }),
-    ...Object.fromEntries(["astra", "sol", "luna", "opus"].map(id => [id, [catalogModel(id)!]])),
-  };
   const modelBrokerUrl = env.PI_MODEL_BROKER_URL ?? local.modelBrokerUrl;
   if (modelBrokerUrl !== undefined && typeof modelBrokerUrl !== "string") throw new Error("modelBrokerUrl must be a string");
   const ultrafastModelBrokerUrl = env.PI_CODEX_ULTRAFAST_BROKER_URL ?? local.ultrafastModelBrokerUrl;
@@ -53,12 +42,10 @@ export function loadConfig(
     port: parsePort(env.PI_ORCHESTRATOR_PORT ?? local.port),
     listenHost: env.PI_ORCHESTRATOR_LISTEN_HOST || local.listenHost,
     peers: parsePeerHosts(local.peers),
-    profiles: Object.fromEntries(Object.entries(profiles).map(([profile, candidates]) => [profile, (candidates as ModelCandidate[]).map(candidate)])),
     meterMaxAgeMs: Number(local.meterMaxAgeMs ?? 90*60_000),
     reconcileIntervalMs: Number(local.reconcileIntervalMs ?? 5_000),
     stallAfterMs: Number(local.stallAfterMs ?? 20*60_000),
     killAfterMs: Number(local.killAfterMs ?? 30*60_000),
-    taskManifest: local.taskManifest,
     authPath: env.PI_ORCHESTRATOR_AUTH || local.authPath || defaultSharedAuthPath(ledgerPath, env),
     agentDir: env.PI_AGENT_DIR || env.PI_CODING_AGENT_DIR || local.agentDir || join(home,".pi/agent"),
   };

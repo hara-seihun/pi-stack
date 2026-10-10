@@ -4,8 +4,7 @@ import { admissionThinking, quotaScopeCovers, type ModelCandidate } from "./cata
 import type { CompletionInput } from "./completion-contract.js";
 import { dirname, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import type { Account, BudgetClass, FailureKind, LaneSpec, LeaseKind, ResetCreditReading, Run, RunContext, RunSource, RunState, UsageEntry, UsageTotal } from "./domain.js";
-import { isThinkingLevel, THINKING_LEVELS, type ThinkingLevel } from "./threads/contracts.js";
+import type { Account, BudgetClass, FailureKind, LeaseKind, ResetCreditReading, Run, RunContext, RunSource, RunState, UsageEntry, UsageTotal } from "./domain.js";
 
 import { openSqlite } from "./sqlite.js";
 
@@ -50,21 +49,6 @@ CREATE TABLE meter (
 CREATE INDEX meter_latest ON meter(account_id,meter_id,observed_at DESC);
 CREATE TABLE control (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
 INSERT INTO control VALUES ('launches','enabled');
-CREATE TABLE lane (
-  id TEXT PRIMARY KEY,
-  prompt TEXT NOT NULL,
-  cwd TEXT NOT NULL,
-  profile TEXT NOT NULL,
-  weight REAL NOT NULL CHECK (weight > 0),
-  priority INTEGER NOT NULL DEFAULT 0,
-  doctrine_url TEXT,
-  opening_probe TEXT,
-  updated_at INTEGER NOT NULL,
-  admission TEXT,
-  repair_readiness_command TEXT,
-  thinking_level TEXT,
-  max_active INTEGER CHECK (max_active > 0)
-) STRICT;
 CREATE TABLE run (
   id TEXT PRIMARY KEY,
   source TEXT NOT NULL CHECK (source IN ('direct','lane')),
@@ -104,21 +88,6 @@ CREATE INDEX lease_active ON lease(account_id,ended_at,heartbeat_at);
 ${USAGE_HOUR_SCHEMA}`;
 
 function maybe<T>(value: T | null): T | undefined { return value === null ? undefined : value; }
-
-/** Lane columns added after the version 3 schema shipped, with the control rows they replaced. */
-const LANE_COLUMNS = [["admission", "TEXT"], ["repair_readiness_command", "TEXT"], ["thinking_level", "TEXT"], ["max_active", "INTEGER CHECK (max_active > 0)"]] as const;
-
-function adoptLaneColumns(db: DatabaseSync): void {
-  const present = new Set((db.prepare("SELECT name FROM pragma_table_info('lane')").all() as { name: string }[]).map((column) => column.name));
-  if (LANE_COLUMNS.every(([name]) => present.has(name))) return;
-  for (const [name, type] of LANE_COLUMNS) if (!present.has(name)) db.exec(`ALTER TABLE lane ADD COLUMN ${name} ${type}`);
-  for (const row of db.prepare("SELECT key,value FROM control WHERE key GLOB 'lane-admission:*' OR key GLOB 'lane-repair:*'").all() as { key: string; value: string }[]) {
-    const separator = row.key.indexOf(":"), id = row.key.slice(separator + 1);
-    if (row.key.slice(0, separator) === "lane-admission") db.prepare("UPDATE lane SET admission=? WHERE id=?").run(row.value || "force", id);
-    else db.prepare("UPDATE lane SET repair_readiness_command=? WHERE id=?").run((row.value ? JSON.parse(row.value) : null)?.readinessCommand ?? null, id);
-  }
-  db.exec("DELETE FROM control WHERE key GLOB 'lane-admission:*' OR key GLOB 'lane-repair:*'");
-}
 
 /**
  * What the machine knew when it cooled an account: the cooldown it wrote, when
@@ -170,7 +139,6 @@ export class Store {
     const row = db.prepare("SELECT version FROM meta").get() as { version: number };
     if (row.version !== SCHEMA_VERSION) { db.close(); throw new Error(`unsupported orchestrator schema ${row.version}`); }
     db.exec("DROP TABLE IF EXISTS live_state");
-    adoptLaneColumns(db);
     adoptCooldownEvidence(db);
     // Frozen subscription dollars per list-price dollar, one row per provider-hour. See person-usage.ts.
     db.exec("CREATE TABLE IF NOT EXISTS usage_rate (provider TEXT NOT NULL, hour INTEGER NOT NULL, rate REAL NOT NULL, PRIMARY KEY(provider,hour)) STRICT");
@@ -237,7 +205,6 @@ export class Store {
       id:r.id, provider:r.provider, label:maybe(r.label), enabled:!!r.enabled,
       cooldownUntil:maybe(r.cooldown_until), concurrency:r.concurrency,
       use:this.control(`account-use:${r.id}`)==="voice"?"voice":"shared",
-      reservation:JSON.parse(this.control(`account-reservation:${r.id}`)||"null")??undefined,
     }));
   }
   account(id: string): Account | undefined { return this.accounts().find((a) => a.id === id); }
@@ -355,34 +322,6 @@ export class Store {
       .map((row)=>({accountId:row.account_id,model:row.model,component:row.component,tokens:row.tokens}));
   }
 
-  reconcileLanes(lanes:readonly LaneSpec[], at=Date.now()): void {
-    const ids=new Set<string>();
-    for(const lane of lanes){
-      for(const key of Object.keys(lane))if(!["id","prompt","cwd","profile","weight","priority","doctrineUrl","openingProbe","repair","admission","thinkingLevel","maxActive"].includes(key))throw new Error(`unsupported lane field ${key}`);
-      if(lane.maxActive!==undefined&&(!Number.isSafeInteger(lane.maxActive)||lane.maxActive<=0))throw new Error(`lane ${lane.id} maxActive must be a positive safe integer`);
-      if(lane.admission!==undefined&&!["force","background"].includes(lane.admission))throw new Error(`lane ${lane.id} admission must be force or background`);
-      if(lane.thinkingLevel!==undefined&&!isThinkingLevel(lane.thinkingLevel))throw new Error(`lane ${lane.id} thinkingLevel must be one of ${THINKING_LEVELS.join(", ")}`);
-      if(lane.repair!==undefined&&(!lane.repair||typeof lane.repair!=="object"||Object.keys(lane.repair).some(key=>key!=="readinessCommand")||typeof lane.repair.readinessCommand!=="string"||!lane.repair.readinessCommand.trim()))throw new Error(`lane ${lane.id} repair requires a readinessCommand`);
-      if(!lane.id||ids.has(lane.id))throw new Error(`invalid or duplicate lane id ${lane.id}`);
-      ids.add(lane.id);
-      if(!Number.isFinite(lane.weight)||lane.weight<=0)throw new Error(`lane ${lane.id} requires a positive weight`);
-      for(const key of ["prompt","cwd","profile"] as const)if(typeof lane[key]!=="string"||!lane[key])throw new Error(`lane ${lane.id} requires ${key}`);
-    }
-    this.transaction(() => {
-      const ids=new Set(lanes.map((lane)=>lane.id));
-      for (const lane of lanes) this.db.prepare(`INSERT INTO lane(id,prompt,cwd,profile,weight,priority,doctrine_url,opening_probe,updated_at,admission,repair_readiness_command,thinking_level,max_active)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET prompt=excluded.prompt,cwd=excluded.cwd,profile=excluded.profile,
-        weight=excluded.weight,priority=excluded.priority,doctrine_url=excluded.doctrine_url,
-        opening_probe=excluded.opening_probe,updated_at=excluded.updated_at,admission=excluded.admission,
-        repair_readiness_command=excluded.repair_readiness_command,thinking_level=excluded.thinking_level,max_active=excluded.max_active`)
-        .run(lane.id,lane.prompt,lane.cwd,lane.profile,lane.weight,lane.priority??0,lane.doctrineUrl??null,lane.openingProbe??null,at,
-          lane.admission??"force",lane.repair?.readinessCommand??null,lane.thinkingLevel??null,lane.maxActive??null);
-      for (const row of this.db.prepare("SELECT id FROM lane").all() as {id:string}[]) if(!ids.has(row.id)) this.db.prepare("DELETE FROM lane WHERE id=?").run(row.id);
-    });
-  }
-  lanes(): LaneSpec[] { return (this.db.prepare("SELECT * FROM lane ORDER BY priority DESC,weight DESC,id").all() as any[]).map((r)=>({id:r.id,prompt:r.prompt,cwd:r.cwd,profile:r.profile,weight:r.weight,maxActive:maybe(r.max_active),priority:r.priority,doctrineUrl:maybe(r.doctrine_url),openingProbe:maybe(r.opening_probe),admission:(maybe(r.admission)??"force") as BudgetClass,thinkingLevel:maybe(r.thinking_level) as ThinkingLevel|undefined,repair:maybe(r.repair_readiness_command)===undefined?undefined:{readinessCommand:r.repair_readiness_command as string}})); }
-  lane(id:string):LaneSpec|undefined{return this.lanes().find((x)=>x.id===id);}
-
   createRuns(input:{count:number;source:RunSource;sourceId?:string;prompt:string;cwd:string;profile:string;budget:BudgetClass;context?:RunContext}):string[]{
     const now=Date.now(),ids:string[]=[];
     this.transaction(()=>{for(let i=0;i<input.count;i++){const id=randomUUID();ids.push(id);this.db.prepare(`INSERT INTO run(id,source,source_id,prompt,cwd,profile,budget,state,created_at,updated_at)
@@ -392,15 +331,8 @@ export class Store {
   run(id:string):Run|undefined{const r=this.db.prepare("SELECT * FROM run WHERE id=?").get(id) as any;return r?this.mapRuns([r])[0]:undefined;}
   runs(states?:readonly RunState[]):Run[]{const storedStates=states?.map(state=>state);const rows=storedStates?.length?this.db.prepare(`SELECT * FROM run WHERE state IN (${storedStates.map(()=>'?').join(',')}) ORDER BY created_at`).all(...storedStates):this.db.prepare("SELECT * FROM run ORDER BY created_at").all();return this.mapRuns(rows as any[]).filter(run=>!states?.length||states.includes(run.state));}
   admissionQueue():Run[]{
-    const rows=this.db.prepare(`SELECT run.* FROM run LEFT JOIN lane ON run.source='lane' AND lane.id=run.source_id
-      WHERE run.state='queued' AND run.account_id IS NULL
-      ORDER BY CASE run.budget WHEN 'force' THEN 0 ELSE 1 END,
-        CASE run.source WHEN 'direct' THEN 0 ELSE 1 END,
-        COALESCE(lane.priority,0) DESC,
-        CASE WHEN lane.id IS NULL THEN 0 ELSE
-          CAST((SELECT count(*) FROM run active WHERE active.source='lane' AND active.source_id=run.source_id AND active.state IN ('starting','running')) AS REAL)/lane.weight
-        END,
-        COALESCE(lane.weight,0) DESC,run.created_at,run.id`).all();
+    const rows=this.db.prepare(`SELECT run.* FROM run JOIN control ON control.key='completion-run:'||run.id
+      WHERE run.state='queued' AND run.account_id IS NULL ORDER BY run.created_at,run.id`).all();
     return this.mapRuns(rows as any[]);
   }
   private mapRuns(rows:any[]):Run[]{

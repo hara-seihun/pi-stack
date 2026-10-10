@@ -5,7 +5,7 @@ const content = (name: string) => ({ "application/json": { schema: ref(name) } }
 const record = { description: "Durable completion status. Replaying the same request ID never creates another logical request. Only explicit pre-execution rate-limit rejections may receive another durable attempt; unknown outcomes remain fenced.", content: content("CompletionRecord") };
 const errors = Object.fromEntries([
   ["400", "Invalid request"], ["404", "Request not found"], ["409", "Request ID conflict or invalid state"],
-  ["422", "Unsupported native provider option"], ["500", "Orchestrator failure"],
+  ["403", "Model not granted or disabled"], ["422", "Unsupported native provider option"], ["500", "Provider custody failure"], ["503", "Model policy unavailable"],
 ].map(([status, description]) => [status!, { description, content: content("CompletionErrorResponse") }]));
 const parameters = [{ name: "requestId", in: "path", required: true, schema: CompletionRecordSchema.anyOf[0]!.properties.requestId }];
 
@@ -17,7 +17,7 @@ export const COMPLETION_OPENAPI = {
       parameters,
       put: {
         operationId: "submitCompletion",
-        description: "Atomically stores caller input and one tool-free Orchestrator run. Same ID and identical input replay the existing record; changed input conflicts. Network disconnect does not cancel work. Luna accepts native strict JSON schema; maxOutputTokens is rejected before admission on the Codex route.",
+        description: "Atomically stores principal-scoped caller input and one tool-free provider run. New requests require an exact Pi Codex model or established alias, explicit thinkingLevel and speed. Same ID and identical input replay existing custody, including adopted inputs with unset historical settings; changed input conflicts. Network disconnect does not cancel work. Native strict JSON schema is supported; maxOutputTokens is rejected before admission. Record.settings distinguishes explicit new inputs from historical unset settings.",
         requestBody: { required: true, content: content("CompletionInput") },
         responses: { "200": record, "202": record, ...errors },
       },

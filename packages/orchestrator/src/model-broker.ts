@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { allowanceRefusal, BROKER_USAGE_PATH, brokerUsage, WeeklyAllowances } from "./broker-usage.js";
+import { allowanceRefusal, BROKER_USAGE_PATH, brokerUsageAcrossStores, WeeklyAllowances } from "./broker-usage.js";
 import { weekResetsAt } from "./person-usage.js";
 import { zstdDecompressSync } from "node:zlib";
 import { once } from "node:events";
@@ -8,9 +8,12 @@ import { createServer, type IncomingMessage, type ServerResponse, type Server } 
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { createParser } from "eventsource-parser";
 import { Store } from "./store.js";
-import { CompletionService } from "./completion.js";
+import { CompletionService, completionModel } from "./completion.js";
+import { COMPLETION_OPENAPI } from "./completion-openapi.js";
+import type { CompletionOutcome, CompletionRecord } from "./completion-contract.js";
+import type { ProviderController } from "./provider-controller.js";
 import { completionHttpStatus, isCompletionInput, isCompletionRequestId } from "./completion-contract.js";
-import { catalogModel, modelDrainsMeter } from "./catalog.js";
+import { modelDrainsMeter } from "./catalog.js";
 import { allowsAccountUse, type UsageComponent } from "./domain.js";
 import { imageAuth } from "./image-service.js";
 import { chooseInteractiveAccount, eligibleInteractiveAccounts } from "./auth/account-selection.js";
@@ -81,20 +84,51 @@ interface DispatchReceipt {
 const dispatchKey = (principal: string) => `broker-dispatches:${principal}`;
 
 export type BrokerTransport = (url: string, init: RequestInit) => Promise<Response>;
-export function createModelBroker(config: ModelBrokerConfig, availability: ModelAvailabilityStore, transport: BrokerTransport = fetch) {
-  const store = Store.open(config.ledgerPath);
-  // Grants are desired state the broker owns for every consumer of the ledger, including daemon
-  // admission of completions this broker queued earlier. Reloading the grant file republishes them.
+export interface RetainedCompletionOwner {
+  id: string;
+  store: Store;
+  controller?: ProviderController;
+}
+interface CompletionAlias { state: "adopting" | "ready"; ownerId: string; requestId: string }
+export interface EmbeddedBrokerOptions {
+  store: Store;
+  controller?: ProviderController;
+  completionOwners?: readonly RetainedCompletionOwner[];
+}
+export function createModelBroker(config: ModelBrokerConfig, availability: ModelAvailabilityStore, transport: BrokerTransport = fetch, embedded?: EmbeddedBrokerOptions) {
+  const store = embedded?.store ?? Store.open(config.ledgerPath);
+  if (store.path !== config.ledgerPath) throw new Error("Broker store differs from its configured ledger custody");
+  if (embedded?.controller && embedded.controller.store !== store) throw new Error("Broker and provider controller must share one Store");
+  // Grants are desired state the broker owns for every declared ledger consumer.
+  // Reloading the grant file republishes them for retained and new completion custody.
   const grants = new Map(config.listeners.map(listener => [listener.principal, { accounts: listener.accounts, models: listener.models, weeklyUsd: listener.weeklyUsd }]));
-  const allowances = new WeeklyAllowances(store);
+  const completionOwners = new Map<string, { store: Store; service: CompletionService; controller?: ProviderController }>();
+  completionOwners.set("current", { store, service: embedded?.controller?.completions ?? new CompletionService(store, process.cwd()), controller: embedded?.controller });
+  for (const owner of embedded?.completionOwners ?? []) {
+    if (!/^[A-Za-z0-9._-]+$/.test(owner.id) || completionOwners.has(owner.id) || [...completionOwners.values()].some(value => value.store.path === owner.store.path)) throw new Error("Retained completion owner must have a unique declared identity and ledger");
+    if (owner.controller && owner.controller.store !== owner.store) throw new Error("Retained completion controller has different ledger custody");
+    completionOwners.set(owner.id, { store: owner.store, service: owner.controller?.completions ?? new CompletionService(owner.store, process.cwd()), controller: owner.controller });
+  }
+  const allowanceLedgers = [...completionOwners.values()].map(owner => new WeeklyAllowances(owner.store));
+  const allowances = { spent: (principal: string, maxAgeMs?: number) => allowanceLedgers.reduce((total, owner) => total + owner.spent(principal, maxAgeMs), 0) };
   const overAllowance = (principal: string) => {
     const weeklyUsd = grants.get(principal)!.weeklyUsd;
     if (weeklyUsd === undefined) return null;
     const used = allowances.spent(principal);
     return used >= weeklyUsd ? allowanceRefusal(weeklyUsd) : null;
   };
-  const publish = () => store.publishBrokerGrants([...grants].map(([principal, grant]) => ({ principal, ...grant })), config.grantOwner);
-  const completions = new CompletionService(store, process.cwd());
+  const publish = () => {
+    for (const owner of completionOwners.values()) owner.store.publishBrokerGrants([...grants].map(([principal, grant]) => ({ principal, ...grant })), config.grantOwner);
+  };
+  const mappedOwner = (principal: string, requestId: string) => {
+    const ownedId = `broker-${scoped(principal, requestId)}`;
+    const encoded = store.control(`completion-alias:${ownedId}`);
+    if (!encoded) return { id: ownedId, owner: completionOwners.get("current")! };
+    const alias = JSON.parse(encoded) as CompletionAlias;
+    const owner = completionOwners.get(alias.ownerId);
+    if (alias.state !== "ready" || !owner || !isCompletionRequestId(alias.requestId)) return undefined;
+    return { id: alias.requestId, owner };
+  };
   const providers = new Map(builtinProviders().filter(provider => provider.id in BROKER_ROUTES).map(provider => [provider.id, provider]));
   const auth = new Map([...providers].map(([id, provider]) => [id, providerOAuth(provider, config.authPath)]));
   const active = new Set<Promise<void>>();
@@ -102,6 +136,8 @@ export function createModelBroker(config: ModelBrokerConfig, availability: Model
   const sticky = new Map<string, string>();
   const shutdown = new AbortController();
   const servers: Server[] = [];
+  let draining = false;
+  let closed: Promise<void> | undefined;
   const dispatches = (principal: string): DispatchReceipt[] => JSON.parse(store.control(dispatchKey(principal)) ?? "[]");
   const saveDispatch = (receipt: DispatchReceipt) => {
     receipt.updatedAt = Date.now();
@@ -130,25 +166,46 @@ export function createModelBroker(config: ModelBrokerConfig, availability: Model
     }
     if (req.method === "GET" && req.url === BROKER_USAGE_PATH) {
       let body: string;
-      try { body = JSON.stringify(brokerUsage(store, listener.principal, grant.accounts, Date.now(), grant.weeklyUsd === undefined ? null : { weeklyUsd: grant.weeklyUsd, usedUsd: allowances.spent(listener.principal, 0), resetsAt: new Date(weekResetsAt()).toISOString() })); }
+      try { body = JSON.stringify(brokerUsageAcrossStores([...completionOwners.values()].map(owner => owner.store), listener.principal, grant.accounts, Date.now(), grant.weeklyUsd === undefined ? null : { weeklyUsd: grant.weeklyUsd, usedUsd: allowances.spent(listener.principal, 0), resetsAt: new Date(weekResetsAt()).toISOString() })); }
       catch (error) { console.error(`Model broker usage failed for ${listener.principal}: ${error instanceof Error ? error.message : "unknown error"}`); json(res, 500, "Usage is unavailable"); return; }
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
       res.end(body);
       return;
     }
-    const completionRoute = /^\/v1\/completions\/([^/?]+)$/.exec(req.url ?? "");
-    if (completionRoute && (req.method === "GET" || req.method === "PUT")) {
+    if (req.method === "GET" && req.url === "/v1/completions/openapi.json") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(COMPLETION_OPENAPI));
+      return;
+    }
+    const completionRoute = /^\/v1\/completions\/([^/?]+)(\/(?:cancel|retry|attempts))?$/.exec(req.url ?? "");
+    if (completionRoute) {
       const reply = (status: number, value: unknown) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(value)); };
       const error = (status: number, code: string, message: string) => reply(status, { error: { code, message } });
       let requestId: string;
       try { requestId = decodeURIComponent(completionRoute[1]!); }
       catch { return error(400, "invalid-request", "Invalid completion request ID encoding."); }
       if (!isCompletionRequestId(requestId)) return error(400, "invalid-request", "Invalid completion request ID.");
-      const ownedId = `broker-${scoped(listener.principal, requestId)}`;
-      if (req.method === "GET") {
+      const mapped = mappedOwner(listener.principal, requestId);
+      if (!mapped) return error(503, "invalid-state", "Completion custody adoption is unfinished or its declared ledger owner is unavailable; reuse this ID after reconciliation.");
+      const ownedId = mapped.id, completions = mapped.owner.service;
+      const outcomeReply = (outcome: CompletionOutcome<CompletionRecord>, status = 200) => outcome.ok
+        ? reply(status, { ...outcome.value, requestId })
+        : error(completionHttpStatus(outcome.error.code), outcome.error.code, outcome.error.message);
+      if (req.method === "GET" && completionRoute[2] === "/attempts") {
+        const attempts = completions.attempts(ownedId);
+        return attempts ? reply(200, { attempts }) : error(404, "not-found", "Completion not found.");
+      }
+      if (req.method === "POST" && completionRoute[2] === "/cancel") {
+        const outcome = completions.cancel(ownedId);
+        mapped.owner.controller?.tick();
+        return outcomeReply(outcome);
+      }
+      if (req.method === "POST" && completionRoute[2] === "/retry") return outcomeReply(completions.retry(ownedId));
+      if (req.method === "GET" && !completionRoute[2]) {
         const record = completions.get(ownedId);
         return record ? reply(200, { ...record, requestId }) : error(404, "not-found", "Completion not found.");
       }
+      if (req.method !== "PUT" || completionRoute[2]) return error(405, "invalid-request", "Unsupported completion operation.");
       let input: unknown;
       try {
         let length = 0; const chunks: Buffer[] = [];
@@ -156,18 +213,21 @@ export function createModelBroker(config: ModelBrokerConfig, availability: Model
         input = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       } catch { return error(400, "invalid-request", "Invalid completion JSON."); }
       if (!isCompletionInput(input)) return error(400, "invalid-request", "Invalid completion input.");
-      const model = catalogModel(input.model)!;
+      const model = completionModel(input.model);
+      if (!model) return error(400, "invalid-request", "The selected model is not in Pi's Codex catalogue.");
+      const previous = completions.get(ownedId);
+      if (previous) return outcomeReply(completions.submit(ownedId, input, { principal: listener.principal, accounts: grant.accounts, models: grant.models }));
       const unavailable = sharedModelRefusal(availability, `${model.provider}/${model.model}`);
       if (unavailable) return reply(completionHttpStatus(unavailable.code), { error: { code: unavailable.code, message: unavailable.message } });
       if (!grant.models.includes(`${model.provider}/${model.model}`)) return error(403, "invalid-request", "This model is not shared with your Unix account.");
-      const refusal = completions.get(ownedId) ? null : overAllowance(listener.principal);
+      const refusal = overAllowance(listener.principal);
       if (refusal) return error(403, "invalid-state", refusal);
-      const outcome = store.transaction(() => {
-        const outstanding = (store.db.prepare("SELECT c.value FROM control c JOIN run r ON c.key='completion:'||(SELECT value FROM control WHERE key='completion-run:'||r.id) WHERE r.state IN ('queued','starting','running')").all() as { value: string }[]).filter(row => JSON.parse(row.value).access?.principal === listener.principal).length;
+      const outcome = mapped.owner.store.transaction<CompletionOutcome<CompletionRecord>>(() => {
+        const outstanding = [...completionOwners.values()].flatMap(owner => owner.store.db.prepare("SELECT c.value FROM control c JOIN run r ON c.key='completion:'||(SELECT value FROM control WHERE key='completion-run:'||r.id) WHERE r.state IN ('queued','starting','running')").all() as { value: string }[]).filter(row => JSON.parse(row.value).access?.principal === listener.principal).length;
         if (!completions.get(ownedId) && outstanding >= listener.maxInFlight) return { ok: false as const, error: { code: "invalid-state", message: "Your completion request limit is full." } };
         return completions.submit(ownedId, input, { principal: listener.principal, accounts: grant.accounts, models: grant.models });
       });
-      return outcome.ok ? reply(202, { ...outcome.value, requestId }) : error(400, outcome.error.code, outcome.error.message);
+      return outcomeReply(outcome, 202);
     }
     const family = (Object.keys(BROKER_ROUTES) as BrokerFamily[]).find(id => req.url === BROKER_ROUTES[id].path || id === "anthropic" && req.url === `${BROKER_ROUTES[id].path}?beta=true`);
     if (req.method !== "POST" || !family) { json(res, 404, "Only new model requests are available"); return; }
@@ -355,7 +415,45 @@ export function createModelBroker(config: ModelBrokerConfig, availability: Model
       inflight.set(listener.principal, (inflight.get(listener.principal) ?? 1) - 1);
     }
   };
+  publish();
+  const trackedRequest = (principal: string, req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    if (draining) { json(res, 503, "Broker custody is draining; reconcile accepted IDs with its successor"); return Promise.resolve(); }
+    const listener = config.listeners.find(candidate => candidate.principal === principal);
+    if (!listener) { json(res, 403, "Principal has no model grant"); return Promise.resolve(); }
+    const work = request(listener, req, res).catch(error => {
+      console.error("Model broker request failed:", error instanceof Error ? error.message : String(error));
+      json(res, 500, "Broker request failed");
+    });
+    active.add(work);
+    void work.finally(() => active.delete(work));
+    return work;
+  };
   return {
+    request: trackedRequest,
+    /** Trusted adoption binds an exact old stored identity; it never submits provider work. */
+    adoptCompletion(principal: string, requestId: string, storedRequestId: string, ownerId = "current"): CompletionOutcome<CompletionRecord> {
+      if (!isCompletionRequestId(requestId) || !isCompletionRequestId(storedRequestId)) return { ok: false, error: { code: "invalid-request", message: "Invalid adoption identity" } };
+      const grant = grants.get(principal);
+      if (!grant) return { ok: false, error: { code: "invalid-request", message: "Principal has no broker grant" } };
+      const owner = completionOwners.get(ownerId);
+      if (!owner) return { ok: false, error: { code: "invalid-state", message: "Retained ledger owner is not registered" } };
+      const ownedId = `broker-${scoped(principal, requestId)}`, aliasKey = `completion-alias:${ownedId}`;
+      const reverseKey = `completion-public-owner:${JSON.stringify([ownerId, storedRequestId])}`;
+      const reserved = store.transaction<CompletionOutcome<void>>(() => {
+        const encoded = store.control(aliasKey), alias = encoded ? JSON.parse(encoded) as CompletionAlias : undefined;
+        if (alias && (alias.requestId !== storedRequestId || alias.ownerId !== ownerId) || !alias && completionOwners.get("current")!.service.get(ownedId) && (ownerId !== "current" || ownedId !== storedRequestId)) return { ok: false, error: { code: "request-conflict", message: "Public ID already has different custody" } };
+        const reverse = store.control(reverseKey);
+        if (reverse && reverse !== ownedId) return { ok: false, error: { code: "request-conflict", message: "Stored completion already has another public identity" } };
+        store.setControl(aliasKey, JSON.stringify({ state: "adopting", ownerId, requestId: storedRequestId } satisfies CompletionAlias));
+        store.setControl(reverseKey, ownedId);
+        return { ok: true, value: undefined };
+      });
+      if (!reserved.ok) return reserved;
+      const adopted = owner.service.adoptAccess(storedRequestId, { principal, accounts: grant.accounts, models: grant.models });
+      if (!adopted.ok) return adopted;
+      store.setControl(aliasKey, JSON.stringify({ state: "ready", ownerId, requestId: storedRequestId } satisfies CompletionAlias));
+      return { ok: true, value: { ...adopted.value, requestId } };
+    },
     /** Apply a reloaded grant file. Listener principals and ports are process topology; only what
      * each principal may spend changes here. */
     applyGrants(listeners: readonly BrokerListener[]): void {
@@ -369,11 +467,7 @@ export function createModelBroker(config: ModelBrokerConfig, availability: Model
       try {
         publish();
         for (const listener of config.listeners) {
-          const server = createServer((req, res) => {
-            const work = request(listener, req, res);
-            active.add(work);
-            void work.finally(() => active.delete(work));
-          });
+          const server = createServer((req, res) => { void trackedRequest(listener.principal, req, res); });
           attachMeetRecognitionBroker(server, shutdown.signal, () => {
             const count = inflight.get(listener.principal) ?? 0;
             if (count >= listener.maxInFlight) return false;
@@ -386,11 +480,17 @@ export function createModelBroker(config: ModelBrokerConfig, availability: Model
         return servers.map(server => (server.address() as { port: number }).port);
       } catch (error) { await this.close(); throw error; }
     },
-    async close() {
-      shutdown.abort();
-      for (const server of servers) { server.closeAllConnections(); server.close(); }
-      await Promise.allSettled(active);
-      store.close();
+    close(): Promise<void> {
+      if (!closed) closed = (async () => {
+        draining = true;
+        const listeners = servers.map(server => new Promise<void>(resolve => server.close(() => resolve())));
+        await Promise.all([...active]);
+        for (const server of servers) server.closeIdleConnections();
+        await Promise.all(listeners);
+        shutdown.abort();
+        if (!embedded) store.close();
+      })();
+      return closed;
     },
   };
 }

@@ -1,23 +1,29 @@
-import { orchestratorUrl } from "./config.js";
+import { readFileSync } from "node:fs";
 import { modelBrokerUrl } from "./model-broker-contract.js";
 import { completionError, isCompletionRecord, isCompletionRequestId, type CompletionError, type CompletionInput, type CompletionFetch, type CompletionOutcome, type CompletionRecord } from "./completion-contract.js";
 
-/** Codes a daemon or broker answers with when it refuses a request; anything else is a protocol fault. */
+/** Codes a broker answers with when it refuses a request; anything else is a protocol fault. */
 const REJECTION_CODES = ["invalid-request", "unsupported-option", "not-found", "request-conflict", "invalid-state", "model-disabled", "model-policy-unavailable"] as const satisfies readonly CompletionError["code"][];
 
 export interface CompletionClientOptions {
   readonly baseUrl?: string;
+  readonly tokenFile?: string;
   readonly fetch?: CompletionFetch;
   readonly timeoutMs?: number;
 }
 export interface CompletionCallOptions { readonly signal?: AbortSignal }
 
 export class CompletionClient {
-  private readonly baseUrl: string;
+  private readonly baseUrl: string | undefined;
+  private readonly tokenFile: string | undefined;
+  private readonly requiresToken: boolean;
   private readonly fetch: CompletionFetch;
   private readonly timeoutMs: number;
   constructor(options: CompletionClientOptions = {}) {
-    this.baseUrl = (options.baseUrl ?? modelBrokerUrl() ?? orchestratorUrl()).replace(/\/$/, "");
+    const coreUrl = process.env.PI_CORE_URL;
+    this.baseUrl = (options.baseUrl ?? (coreUrl ? `${coreUrl.replace(/\/$/, "")}/v1/model-broker` : modelBrokerUrl()))?.replace(/\/$/, "");
+    this.tokenFile = options.tokenFile ?? process.env.PI_CORE_TOKEN_FILE;
+    this.requiresToken = options.baseUrl === undefined && coreUrl !== undefined;
     this.fetch = options.fetch ?? globalThis.fetch;
     this.timeoutMs = options.timeoutMs ?? 15_000;
   }
@@ -35,11 +41,19 @@ export class CompletionClient {
   }
   private async call(requestId: string, method: string, suffix: string, input: CompletionInput | undefined, options: CompletionCallOptions): Promise<CompletionOutcome<CompletionRecord>> {
     if (!isCompletionRequestId(requestId)) return completionError("invalid-request", "Invalid completion request ID; openapi.json is reserved.");
+    if (!this.baseUrl) return completionError("invalid-request", "Set PI_CORE_URL and PI_CORE_TOKEN_FILE, or an explicit principal-bound model broker URL.");
+    if (this.requiresToken && !this.tokenFile) return completionError("authentication", "PI_CORE_TOKEN_FILE is required for core inference.");
     let response: Response;
     try {
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      if (this.tokenFile) {
+        const token = readFileSync(this.tokenFile, "utf8").trim();
+        if (!token || /\s/.test(token)) return completionError("authentication", "Core token file is empty or invalid.");
+        headers.authorization = `Bearer ${token}`;
+      }
       response = await this.fetch(`${this.baseUrl}/v1/completions/${encodeURIComponent(requestId)}${suffix}`, {
         method,
-        headers: { "content-type": "application/json" },
+        headers,
         ...(input === undefined ? {} : { body: JSON.stringify(input) }),
         signal: AbortSignal.any([AbortSignal.timeout(this.timeoutMs), ...(options.signal ? [options.signal] : [])]),
       });

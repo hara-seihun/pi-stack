@@ -150,14 +150,14 @@ it("a fleet worker's own answer lifts its account's stale hold, and its refusal 
 it("lets fleet admission see the lifted hold without meters being consulted for the lift", () => {
   const store = anthropicPool();
   try {
-    const config = { ...loadConfig("/missing"), profiles: { opus: [{ provider: "anthropic", model: opus }] } };
+    const config = loadConfig("/missing");
     for (const id of ["anthropic", "anthropic-2", "anthropic-3"]) store.setCooldown(id, Date.now() + DAY, { model: opus, at: Date.now() - 10_000 });
     // Low subscription meters are not evidence about a monthly spend ceiling.
     for (const id of ["anthropic", "anthropic-2", "anthropic-3"]) store.recordMeter(id, "anthropic-7d", 5, Date.now() + DAY);
     expect(store.accounts().every(account => account.cooldownUntil)).toBe(true);
-    expect(assignFleet(store, "opus", "force", config).assignment).toBeUndefined();
+    expect(assignFleet(store, { provider: "anthropic", model: opus }, "force", config).assignment).toBeUndefined();
     store.recordProviderSuccess("anthropic-3", { model: opus, startedAt: Date.now(), source: "model-broker" });
-    expect(assignFleet(store, "opus", "force", config).assignment?.accountId).toBe("anthropic-3");
+    expect(assignFleet(store, { provider: "anthropic", model: opus }, "force", config).assignment?.accountId).toBe("anthropic-3");
   } finally { store.close(); }
 });
 
@@ -169,7 +169,7 @@ it("a completed completion lifts a hold refused before its admission, never one 
   try {
     store.upsertAccount({ id: "codex", provider: "openai-codex" });
     const service = new CompletionService(store, "/tmp");
-    const input = { model: "luna" as const, prompt: "p", systemPrompt: "s" };
+    const input = { model: "luna" as const, prompt: "p", systemPrompt: "s", thinkingLevel: "low" as const, speed: "standard" as const };
     const run = (requestId: string) => {
       const record = value(service.submit(requestId, input));
       expect(store.assignRun(record.runId, { accountId: "codex", provider: "openai-codex", model: "gpt-6-luna", unit: `completion:${record.runId}`, releasePath: "/release" })).toBe(true);

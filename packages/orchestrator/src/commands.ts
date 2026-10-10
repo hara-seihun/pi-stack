@@ -1,51 +1,44 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { loadConfig, orchestratorUrl } from "./config.js";
-import { Daemon } from "./daemon.js";
+import { loadConfig } from "./config.js";
 import { Store } from "./store.js";
 import { readUsageEvidence } from "./usage-evidence.js";
 import { randomUUID } from "node:crypto";
 import { createThreadClient } from "./threads/http.js";
-import { isThreadState, isThinkingLevel, resolveDelivery, THINKING_LEVELS, type Delivery, type Result, type SettingsOverrides, type SpawnThread, type Thread } from "./threads/contracts.js";
+import { isThreadState, isThinkingLevel, THINKING_LEVELS, type Result, type SettingsOverrides, type SpawnThread, type Thread } from "./threads/contracts.js";
 import { providerOAuth, transactSharedCredential } from "./auth/shared-oauth.js";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { AccountTransfer, prepareWithDrainWait, transferEndpoint, transferPeer } from "./auth/account-transfer.js";
 import { fetchAccountFromPeer, resolveFetchPeer, resolvePeerHost } from "./auth/account-peers.js";
-import { isAccountReservation } from "./admission-reservation.js";
 import { isSpeed, SPEEDS } from "./threads/speed.js";
-import { getRandomName } from "./nebulani-names.js";
 
 export const COMMANDS=[
-  ["names","Generate Nebulani agent names locally: --count N"],
-  ["daemon","Run reconciliation and the local API"],
-  ["status","Print accounts, lanes, leases, and active threads"],
+  ["status","Print provider accounts, leases, and active threads"],
   ["usage-evidence","Print a read-only 24-hour quota and token snapshot; optional --ledger FILE"],
   ["run","Spawn fresh threads with --prompt TEXT [--model MODEL] [--count N] [--ephemeral[=true|false]] [--background] [--mode live]"],
-  ["schedule","Create and manage recurring thread jobs"],
-  ["wave","Spawn a one-off batch from a declared lane [--count N] [--background]"],
   ["list","List threads [--parent ID] [--state STATE] [--limit N] [--cursor CURSOR]"],
   ["read","Read a thread's native history: THREAD_ID [--limit N] [--cursor CURSOR]"],
-  ["send","Send to THREAD_ID with --prompt TEXT [--delivery queue|steer|hardSteer]; steer by default, agents cannot queue"],
+  ["send","Send to THREAD_ID with --prompt TEXT at the next completed-output boundary"],
   ["close","Cancel and archive THREAD_ID; subscribers receive cancellation"],
   ["cancel","Cancel THREAD_ID's current work without closing its conversation"],
   ["reopen","Restore THREAD_ID without resuming interrupted work"],
   ["dependencies","Subscribe to peer results: THREAD_ID PEER_ID...; --clear releases them"],
   ["pause / resume","Set or clear the global launch halt; --ordinary controls only ordinary work"],
-  ["account","Import, refresh, inspect capabilities, remove, list, reserve, or exclusively transfer pooled accounts"],
+  ["account","Import, refresh, inspect capabilities, remove, list, or exclusively transfer pooled accounts"],
   ["peer","List configured account-transfer peers"],
 ] as const;
 export const USAGE=`usage: pi-orchestrator ${COMMANDS.map(([name])=>name.replace(" / ","|")).join("|")}`;
-export const ACCOUNT_USAGE=`usage: pi-orchestrator account list | capabilities [ID] | import ID --provider openai-codex|anthropic --credential-file FILE [--label LABEL] | refresh ID | disable ID | enable ID | remove ID | use ID shared|voice | transfer ID --to PEER_OR_SSH_HOST [--wait-for-drain [DURATION]] | fetch ID --from PEER [--wait-for-drain [DURATION]] | transfer-status ID | reserve ID --metadata JSON --reason TEXT | unreserve ID | reservation ID`;
+export const ACCOUNT_USAGE=`usage: pi-orchestrator account list | capabilities [ID] | import ID --provider openai-codex|anthropic --credential-file FILE [--label LABEL] | refresh ID | disable ID | enable ID | remove ID | use ID shared|voice | transfer ID --to PEER_OR_SSH_HOST [--wait-for-drain [DURATION]] | fetch ID --from PEER [--wait-for-drain [DURATION]] | transfer-status ID`;
 
-const base=()=>orchestratorUrl();
-const threadBase=()=>process.env.PI_THREAD_API_URL??`${base()}/v1/threads`;
-// Inside a thread, the capability proves which thread is calling; the owner refuses a claimed parent or sender without it.
-const threadClient=()=>createThreadClient(threadBase(),fetch,{token:process.env.PI_THREAD_TOKEN||undefined});
+const base=()=>{const url=process.env.PI_CORE_URL;if(!url)throw new Error("PI_CORE_URL is required");return url.replace(/\/$/,"");};
+const threadBase=()=>{if(process.env.PI_THREAD_API_URL)return process.env.PI_THREAD_API_URL;const scope=process.env.PI_CORE_SCOPE_ID;if(!scope)throw new Error("PI_CORE_SCOPE_ID is required outside a thread");return `${base()}/v1/scopes/${encodeURIComponent(scope)}/thread-owner`;};
+const credentials=()=>{const path=process.env.PI_CORE_TOKEN_FILE;if(!path)throw new Error("PI_CORE_TOKEN_FILE is required");const token=readFileSync(path,"utf8").trim();if(!token||/\s/.test(token))throw new Error("Invalid core token file");return {authorization:`Bearer ${token}`};};
+const threadClient=()=>{const url=threadBase(),token=process.env.PI_THREAD_TOKEN||undefined,auth=token?{}:credentials();return createThreadClient(url,(endpoint,init)=>fetch(endpoint,{...init,headers:{...Object.fromEntries(new Headers(init?.headers)),...auth}}),{token});};
 const ledgerPath=()=>process.env.PI_ORCHESTRATOR_LEDGER||join(homedir(),".local/share/pi-orchestrator/ledger.sqlite3");
 function flags(args:string[]):{named:Map<string,string>;positional:string[]}{const named=new Map<string,string>(),positional:string[]=[];for(let i=0;i<args.length;i++){const value=args[i]!;if(!value.startsWith("--")){positional.push(value);continue;}const [name,inline]=value.slice(2).split("=",2);if(inline!==undefined)named.set(name!,inline);else if(["force","background","descendants","resume"].includes(name!))named.set(name!,"true");else if(args[i+1]&&!args[i+1]!.startsWith("--"))named.set(name!,args[++i]!);else named.set(name!,"true");}return{named,positional};}
 function required(named:Map<string,string>,key:string):string{const value=named.get(key);if(!value)throw new Error(`--${key} is required`);return value;}
-async function request(path:string,method="GET",value?:unknown):Promise<any>{const response=await fetch(`${base()}${path}`,{method,headers:{"content-type":"application/json"},body:value===undefined?undefined:JSON.stringify(value)});const body=await response.json();if(!response.ok)throw new Error(typeof body.error==="string"?body.error:body.error?.message??`orchestrator returned ${response.status}`);return body;}
+async function request(path:string,method="GET",value?:unknown):Promise<any>{const response=await fetch(`${base()}/v1/providers${path.replace(/^\/v1/,"")}`,{method,headers:{"content-type":"application/json",...credentials()},body:value===undefined?undefined:JSON.stringify(value)});const body=await response.json();if(!response.ok)throw new Error(typeof body.error==="string"?body.error:body.error?.message??`orchestrator returned ${response.status}`);return body;}
 function output(value:unknown):void{console.log(JSON.stringify(value,null,2));}
 function threadOutput<T>(result:Result<T>):void{output(result);if(!result.ok)process.exitCode=1;}
 function switchEnabled(named:Map<string,string>,key:string):boolean{
@@ -66,21 +59,6 @@ function duration(value:string|undefined,name:string,defaultMs:number):number|un
   const units={ms:1,s:1_000,m:60_000,h:3_600_000} as const;
   const result=Number(match[1])*units[match[2] as keyof typeof units];
   if(!Number.isSafeInteger(result)||result<1||result>24*3_600_000)throw new Error(`${name} must be between 1ms and 24h`);
-  return result;
-}
-function scheduleDuration(value:string):number{
-  const match=/^(\d+)(s|m|h|d)$/.exec(value);
-  if(!match)throw new Error("--every must use s, m, h, or d");
-  const units={s:1_000,m:60_000,h:3_600_000,d:86_400_000} as const;
-  const result=Number(match[1])*units[match[2] as keyof typeof units];
-  if(!Number.isSafeInteger(result)||result<1_000||result>366*86_400_000)throw new Error("--every must be between 1s and 366d");
-  return result;
-}
-function scheduleStart(value:string|undefined):number|undefined{
-  if(value===undefined)return undefined;
-  if(value==="now")return Date.now();
-  const result=Date.parse(value);
-  if(!Number.isFinite(result))throw new Error("--start must be now or an ISO 8601 timestamp");
   return result;
 }
 function threadSettings(named:Map<string,string>):SettingsOverrides|undefined{
@@ -110,23 +88,6 @@ export async function dispatch(argv:string[]):Promise<void>{
     console.log(USAGE);
     return;
   }
-  if(command==="names"){
-    const count=rest.length===2&&rest[0]==="--count"&&/^[1-9]\d*$/.test(rest[1]!)?Number(rest[1]):NaN;
-    if(!Number.isSafeInteger(count)||count<1||count>1000){
-      console.error("usage: pi-orchestrator names --count N (1..1000)");process.exitCode=1;return;
-    }
-    output({names:Array.from({length:count},()=>getRandomName())});return;
-  }
-  if(command==="daemon"){
-    const store=Store.open(ledgerPath());
-    try{
-      const retirement=await new Daemon(store,loadConfig()).start();
-      store.close();
-      // Only control-plane waits are retired here. Accepted execution belongs to independent owners.
-      process.exit(retirement.edges.some(edge=>edge.state==="error")?1:0);
-    }finally{if(!store.closed)store.close();}
-    return;
-  }
   if(command==="usage-evidence"){
     if(rest.length!==0&&(rest.length!==2||rest[0]!=="--ledger")){
       console.error("usage: pi-orchestrator usage-evidence [--ledger FILE]");process.exitCode=1;return;
@@ -153,62 +114,17 @@ export async function dispatch(argv:string[]):Promise<void>{
       throw new Error("dependencies requires THREAD_ID PEER_ID... or THREAD_ID --clear");
     threadOutput(await threadClient().control({threadId,action:"dependencies",threadIds}));return;
   }
-  if(command==="schedule"){
-    const [action,...tail]=rest;
-    if(action===undefined||action==="help"||action==="--help"){
-      console.log("usage: pi-orchestrator schedule list | create --prompt TEXT --every DURATION [--start now|ISO] [--cwd PATH] [--model MODEL] [--thinking LEVEL] [--speed standard|priority|ultrafast] [--background] [--id ID] [--title TITLE] | show ID | pause ID | resume ID | remove ID --yes");
-      return;
-    }
-    const {named,positional}=flags(tail);
-    if(action==="list"){
-      if(positional.length||named.size)throw new Error("schedule list accepts no options");
-      output(await request("/v1/schedules"));return;
-    }
-    if(action==="create"){
-      const allowed=new Set(["id","title","prompt","cwd","every","start","model","thinking","speed","background","force"]);
-      for(const key of named.keys())if(!allowed.has(key))throw new Error(`Unknown schedule option --${key}`);
-      const force=switchEnabled(named,"force"),background=switchEnabled(named,"background");
-      if(force&&background)throw new Error("Choose --force or --background");
-      const prompt=named.get("prompt")??positional.join(" ");
-      if(!prompt.trim())throw new Error("schedule create requires --prompt");
-      const every=required(named,"every");
-      output(await request("/v1/schedules","POST",{
-        ...(named.has("id")?{id:named.get("id")}:{}) ,...(named.has("title")?{title:named.get("title")}:{}) ,
-        prompt,cwd:named.get("cwd")??process.cwd(),intervalMs:scheduleDuration(every),startAt:scheduleStart(named.get("start")),
-        settings:threadSettings(named),admission:background?"background":"force",
-      }));return;
-    }
-    const id=positional[0];
-    if(!id||positional.length!==1)throw new Error(`schedule ${action} requires one schedule id`);
-    if(action==="show"){
-      if(named.size)throw new Error("schedule show accepts no options");
-      output(await request(`/v1/schedules/${encodeURIComponent(id)}`));return;
-    }
-    if(action==="pause"||action==="resume"){
-      if(named.size)throw new Error(`schedule ${action} accepts no options`);
-      output(await request(`/v1/schedules/${encodeURIComponent(id)}/${action}`,"POST"));return;
-    }
-    if(action==="remove"){
-      if([...named.keys()].some(key=>key!=="yes")||!switchEnabled(named,"yes"))throw new Error("schedule remove requires --yes because it permanently deletes the schedule definition");
-      output(await request(`/v1/schedules/${encodeURIComponent(id)}`,"DELETE"));return;
-    }
-    throw new Error("schedule action must be list, create, show, pause, resume, or remove");
-  }
-  if(command==="run"||command==="wave"){
+  if(command==="run"){
     const {named,positional}=flags(rest),count=positiveInteger(named.get("count")??"1","--count");
-    const allowed=new Set(["count","force","background","model","thinking","speed",...(command==="run"?["prompt","cwd","title","parent","ephemeral","mode"]:["lane"])]);
+    const allowed=new Set(["count","force","background","model","thinking","speed","prompt","cwd","title","parent","ephemeral","mode"]);
     for(const key of named.keys())if(!allowed.has(key))throw new Error(`Unknown ${command} option --${key}`);
     const force=switchEnabled(named,"force"),background=switchEnabled(named,"background");
     if(force&&background)throw new Error("Choose --force or --background");
     const settings=threadSettings(named),admission=background?"background":"force";
-    if(command==="run"){
+    {
       const message=named.get("prompt")??positional.join(" ");
       if(!message.trim())throw new Error("run requires --prompt");
       await spawnThreads({message,cwd:named.get("cwd")??process.cwd(),title:named.get("title"),parentId:named.get("parent"),settings,admission,ephemeral:named.has("ephemeral")?switchEnabled(named,"ephemeral"):!!process.env.PI_THREAD_ID,...(named.has("mode")?{metadata:{mode:named.get("mode"),liveDispatcher:named.get("mode")==="live"}}:{})},count);
-    }else{
-      if(process.env.PI_THREAD_ID||process.env.PI_THREAD_CAN_SPAWN==="0")throw new Error("Agents cannot launch unparented waves; use thread_spawn from the parent conversation");
-      const id=named.get("lane")??positional[0];if(!id)throw new Error("wave requires a lane");
-      output(await request("/v1/wave","POST",{lane:id,count,settings,...(force||background?{admission}:{})}));
     }
     return;
   }
@@ -225,11 +141,10 @@ export async function dispatch(argv:string[]):Promise<void>{
     threadOutput(await threadClient().read({threadId,cursor:named.get("cursor"),limit:named.has("limit")?positiveInteger(named.get("limit")!,"--limit"):undefined}));return;
   }
   if(command==="send"){
-    const {named,positional}=flags(rest),threadId=positional[0],text=named.get("prompt")??positional.slice(1).join(" "),senderId=process.env.PI_THREAD_ID||undefined,delivery=named.get("delivery")??resolveDelivery({senderId});
+    const {named,positional}=flags(rest),threadId=positional[0],text=named.get("prompt")??positional.slice(1).join(" "),senderId=process.env.PI_THREAD_ID||undefined;
     if(!threadId||!text.trim())throw new Error("send requires a thread id and --prompt");
-    if(senderId&&delivery==="queue")throw new Error("Agents must use steer or hardSteer; they cannot queue messages");
-    if(!['queue','steer','hardSteer'].includes(delivery))throw new Error(`--delivery must be ${senderId?"steer or hardSteer":"queue, steer, or hardSteer"}`);
-    threadOutput(await threadClient().send({requestId:randomUUID(),threadId,senderId,text,delivery:delivery as Delivery}));return;
+    if([...named.keys()].some(key=>key!=="prompt"))throw new Error("send accepts only --prompt");
+    threadOutput(await threadClient().send({requestId:randomUUID(),threadId,senderId,text,delivery:"pending"}));return;
   }
   if(command==="peer"){
     if(rest.length!==1||rest[0]!=="list")throw new Error("usage: pi-orchestrator peer list");
@@ -266,19 +181,6 @@ export async function dispatch(argv:string[]):Promise<void>{
       const waitForDrainMs=duration(named.get("wait-for-drain"),"--wait-for-drain",10*60_000);
       const signal=AbortSignal.timeout((waitForDrainMs??0)+120_000);
       await fetchAccountFromPeer(id,source,waitForDrainMs,signal);
-      return;
-    }
-    if(action==="reserve"||action==="unreserve"||action==="reservation"){
-      const path=`/v1/accounts/${encodeURIComponent(id)}/reservation`;
-      if(action==="reservation")output(await request(path));
-      else if(action==="unreserve")output(await request(path,"DELETE"));
-      else {
-        let metadata:unknown;
-        try{metadata=JSON.parse(required(named,"metadata"));}catch{throw new Error("--metadata must be a JSON object");}
-        const reservation={metadata,reason:required(named,"reason")};
-        if(!isAccountReservation(reservation))throw new Error("--metadata must be a nonempty object of string values and --reason must be nonempty");
-        output(await request(path,"PUT",reservation));
-      }
       return;
     }
     if(action==="transfer"||action==="transfer-status"){
@@ -331,7 +233,7 @@ export async function dispatch(argv:string[]):Promise<void>{
       output({id,provider:account.provider,expires:new Date(refreshed.expires).toISOString()});
       return;
     }
-    throw new Error("account action must be import, refresh, capabilities, remove, list, use, transfer, fetch, reserve, or reservation");
+    throw new Error("account action must be import, refresh, capabilities, remove, list, use, transfer, or fetch");
   }
   throw new Error(USAGE);
 }

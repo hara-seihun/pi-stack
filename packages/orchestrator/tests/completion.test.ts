@@ -12,7 +12,7 @@ import { loadConfig } from "../src/config.js";
 import { assignCompletion } from "../src/policy.js";
 import { noModelPolicy } from "./fixtures/model-availability.js";
 
-const input: CompletionInput = { model: "luna", prompt: "  exact user\n", systemPrompt: "exact system", metadata: { application: "test", nested: { b: 2, a: 1 } } };
+const input: CompletionInput = { model: "luna", thinkingLevel: "max", speed: "standard", prompt: "  exact user\n", systemPrompt: "exact system", metadata: { application: "test", nested: { b: 2, a: 1 } } };
 const execution: CompletionExecution = { state: "completed", result: { text: "  exact result\n", provider: "openai-codex", model: "gpt-6-luna", responseId: "resp-provider", usage: { input: 10, output: 4, cacheRead: 2, cacheWrite: 0, totalTokens: 16, reasoning: 1 }, stopReason: "stop" } };
 function value<T>(result: CompletionOutcome<T>): T { if (!result.ok) throw new Error(result.error.message); return result.value; }
 function assign(store: Store, id: string) {
@@ -25,7 +25,7 @@ describe("durable completions", () => {
     const store = Store.open(":memory:"), service = new CompletionService(store, "/tmp");
     try {
       expect(service.submit("cap", { ...input, maxOutputTokens: 128 })).toMatchObject({ ok: false, error: { code: "unsupported-option" } });
-      expect(service.submit("wrong", { ...input, model: "astra" })).toMatchObject({ ok: false, error: { code: "invalid-request" } });
+      expect(service.submit("wrong", { ...input, model: "missing" })).toMatchObject({ ok: false, error: { code: "invalid-request" } });
       expect(isCompletionInput({ ...input, tools: ["bash"] })).toBe(false);
       expect(service.submit("openapi.json", input)).toMatchObject({ ok: false, error: { code: "invalid-request" } });
       expect(store.runs()).toHaveLength(0);
@@ -51,7 +51,7 @@ describe("durable completions", () => {
   });
 
   it.each([
-    ["luna", undefined, "max"],
+    ["luna", "max", "max"],
     ["luna", "high", "high"],
     ["luna", "medium", "medium"],
     ["luna", "off", "off"],
@@ -129,7 +129,7 @@ describe("durable completions", () => {
         if (lost) { lost = false; throw new Error("response lost"); }
         return Response.json(record);
       });
-      const client = new CompletionClient({ fetch: transport });
+      const client = new CompletionClient({ baseUrl: "http://fixture", fetch: transport });
       expect(await client.submit("network-id", input)).toMatchObject({ ok: false, error: { code: "transport" } });
       expect(value(await client.submit("network-id", input)).state).toBe("queued");
       expect(await client.get("openapi.json")).toMatchObject({ ok: false, error: { code: "invalid-request" } });

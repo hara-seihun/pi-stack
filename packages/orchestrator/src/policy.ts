@@ -1,13 +1,13 @@
 import { completionFeedbackRefusal } from "./completion-feedback.js";
+import { completionModel } from "./completion.js";
 import { admissionThinking, modelDrainsMeter, type ModelCandidate } from "./catalog.js";
-import { reservationMatchesRun } from "./admission-reservation.js";
 import { allowsAccountUse, type BudgetClass, type OrchestratorConfig } from "./domain.js";
 import type { Store } from "./store.js";
 import { sharedCredentialRejection } from "./auth/shared-oauth.js";
 import { modelUnsupportedEvidence, modelUnsupportedReason } from "./auth/model-entitlement.js";
 import { sharedModelRefusal, type ModelAvailabilityStore } from "./threads/model-availability.js";
 
-function credentialRefusal(cfg: OrchestratorConfig, alias: string): string | undefined {
+function credentialRefusal(cfg: Pick<OrchestratorConfig,"authPath">, alias: string): string | undefined {
   const state = sharedCredentialRejection(cfg.authPath, alias);
   return state?.state === "login-required" ? "shared OAuth credential requires login" : state ? "shared OAuth credential awaiting refresh" : undefined;
 }
@@ -17,7 +17,7 @@ export interface Refusal { readonly accountId:string; readonly reason:string; }
 export interface Capacity { readonly state:"available"|"unavailable"; readonly spent:number; readonly reason:string; }
 
 /** Provider availability; the global execution authority owns agent capacity. */
-export function accountCapacity(store:Store,accountId:string,_budget:BudgetClass,cfg:OrchestratorConfig,now=Date.now(),runId?:string,model?:string):Capacity{
+export function accountCapacity(store:Store,accountId:string,_budget:BudgetClass,cfg:Pick<OrchestratorConfig,"authPath">,now=Date.now(),runId?:string,model?:string):Capacity{
   const account=store.account(accountId)!;
   const meters=store.latestMeters(accountId).filter(meter=>!model||modelDrainsMeter(account.provider,model,meter.meter_id));
   const spent=Math.max(0,...meters.map((m)=>Number(m.used_percent)));
@@ -25,18 +25,17 @@ export function accountCapacity(store:Store,accountId:string,_budget:BudgetClass
   if(!allowsAccountUse(account,"fleet"))return stop(account.enabled?"reserved for voice":"disabled");
   const credential = credentialRefusal(cfg, accountId);
   if(credential)return stop(credential);
-  if(account.reservation&&!reservationMatchesRun(store,account.reservation,runId))return stop(`reserved capacity: ${account.reservation.reason}`);
   if(account.cooldownUntil&&account.cooldownUntil>now)return stop("account cooling down");
   if(meters.some((m)=>m.used_percent>=100))return stop("provider quota exhausted");
   return{state:"available",spent,reason:"provider capacity available"};
 }
 
-export function assign(store:Store,profile:string,budget:BudgetClass,cfg:OrchestratorConfig,now=Date.now(),pinnedAccount?:string,runId?:string,execution:"user"|"root-repair"="user",excludedAccounts:ReadonlySet<string>=new Set()):{assignment?:Assignment;refusals:Refusal[]}{
+export function assign(store:Store,model:ModelCandidate,budget:BudgetClass,cfg:OrchestratorConfig,now=Date.now(),pinnedAccount?:string,runId?:string,execution:"user"|"root-repair"="user",excludedAccounts:ReadonlySet<string>=new Set()):{assignment?:Assignment;refusals:Refusal[]}{
   if(store.control("launches")==="paused")return{refusals:[{accountId:"*",reason:"emergency halt"}]};
   const repair=execution==="root-repair";
   if(!repair&&store.control("ordinary-launches")==="paused")return{refusals:[{accountId:"*",reason:"ordinary work paused"}]};
   if(repair&&store.control("repair-owner")&&store.control("repair-owner")!==runId)return{refusals:[{accountId:"*",reason:"repair already owned"}]};
-  const candidates=cfg.profiles[profile];if(!candidates?.length)throw new Error(`unknown model profile ${profile}`);
+  const candidates=[model];
   const refusals:Refusal[]=[];const choices:(Assignment&{spent:number})[]=[];
   for(const candidate of candidates){
     for(const account of store.accounts().filter((a)=>a.provider===candidate.provider&&(pinnedAccount===undefined||a.id===pinnedAccount))){
@@ -52,7 +51,7 @@ export function assign(store:Store,profile:string,budget:BudgetClass,cfg:Orchest
   const load=(accountId:string)=>store.activeSessionLeases(accountId,120_000,now).length;
   choices.sort((a,b)=>load(a.accountId)-load(b.accountId)||a.spent-b.spent||a.accountId.localeCompare(b.accountId));
   const candidate=choices[0];
-  const affinityKey=profile==="thread"&&runId&&candidate
+  const affinityKey=runId&&candidate
     ? `thread-account-affinity:${JSON.stringify([runId,candidate.provider,candidate.model])}` : undefined;
   const retained=affinityKey?store.control(affinityKey):undefined;
   // Account-bound thinking and prompt caches survive an idle thread, not a move to a less busy sibling.
@@ -62,7 +61,7 @@ export function assign(store:Store,profile:string,budget:BudgetClass,cfg:Orchest
   return{assignment,refusals};
 }
 
-export function assignCompletion(store:Store,runId:string,profile:string,cfg:OrchestratorConfig,availability:Pick<ModelAvailabilityStore,"decide">,now=Date.now()):{assignment?:Assignment;refusals:Refusal[]}{
+export function assignCompletion(store:Store,runId:string,_profile:string,cfg:Pick<OrchestratorConfig,"authPath"|"meterMaxAgeMs">,availability:Pick<ModelAvailabilityStore,"decide">,now=Date.now(),excludedAccounts:ReadonlySet<string>=new Set()):{assignment?:Assignment;refusals:Refusal[]}{
   if(store.control("launches")==="paused")return{refusals:[{accountId:"*",reason:"emergency halt"}]};
   if(store.control("ordinary-launches")==="paused")return{refusals:[{accountId:"*",reason:"ordinary work paused"}]};
   const requestId=store.control(`completion-run:${runId}`);
@@ -76,10 +75,11 @@ export function assignCompletion(store:Store,runId:string,profile:string,cfg:Orc
   const grant=principal===undefined?undefined:store.brokerGrant(principal);
   if(retryAt>now)return{refusals:[{accountId:"*",reason:`provider retry scheduled at ${retryAt}`} ]};
   const run=store.run(runId);
+  const selected=completion?.input ? completionModel(completion.input.model) : undefined;
   const candidates=run?.provider&&run.model?[{provider:run.provider,model:run.model,thinking:run.thinking}]
-    :cfg.profiles[profile]?.map(candidate=>({...candidate,thinking:completion?.input.thinkingLevel??admissionThinking(candidate)}));
-  if(!candidates?.length)throw new Error(`unknown completion profile ${profile}`);
-  const refusals:Refusal[]=[],choices:(Assignment&{spent:number;reserved:boolean})[]=[];
+    :selected?[{...selected,thinking:completion.input.thinkingLevel??admissionThinking(selected)}]:[];
+  if(!candidates.length)return{refusals:[{accountId:"*",reason:"completion has no valid explicit Pi model"}]};
+  const refusals:Refusal[]=[],choices:(Assignment&{spent:number})[]=[];
   for(const candidate of candidates){
     // A brokered completion is a shared-model request: the household policy refuses a disabled
     // model even when the principal's grant includes it, as the broker does for live requests.
@@ -87,20 +87,20 @@ export function assignCompletion(store:Store,runId:string,profile:string,cfg:Orc
     if(disabled){refusals.push({accountId:"*",reason:disabled.message});continue;}
     for(const account of store.accounts().filter(account=>account.provider===candidate.provider)){
       const meters=store.latestMeters(account.id),credential=credentialRefusal(cfg,account.id),unsupported=modelUnsupportedEvidence(store,account.id,candidate.model,now);
-      const reason=principal!==undefined&&!grant?`no live model broker grant for ${principal}`
+      const reason=excludedAccounts.has(account.id)?"requested service tier unavailable"
+        :principal!==undefined&&!grant?`no live model broker grant for ${principal}`
         :grant&&(!grant.accounts.includes(account.id)||!grant.models.includes(`${candidate.provider}/${candidate.model}`))?"account or model not shared with completion owner"
         :!allowsAccountUse(account,"fleet")?"account unavailable"
         :credential?credential
         :unsupported?modelUnsupportedReason(unsupported)
-        :account.reservation&&!reservationMatchesRun(store,account.reservation,runId)?"reserved for another completion queue"
         :account.cooldownUntil&&account.cooldownUntil>now?"account cooling down"
         :!meters.length||meters.some(meter=>now-meter.observed_at>cfg.meterMaxAgeMs||meter.observed_at>now+60_000)?"missing or stale provider quota"
         :meters.some(meter=>meter.used_percent>=100)?"provider quota exhausted":completionFeedbackRefusal(store,account.id,now);
       if(reason){refusals.push({accountId:account.id,reason});continue;}
-      choices.push({...candidate,accountId:account.id,spent:Math.max(...meters.map(meter=>meter.used_percent)),reserved:!!account.reservation});
+      choices.push({...candidate,accountId:account.id,spent:Math.max(...meters.map(meter=>meter.used_percent))});
     }
     if(choices.length)break;
   }
-  choices.sort((a,b)=>Number(b.reserved)-Number(a.reserved)||a.spent-b.spent||a.accountId.localeCompare(b.accountId));
+  choices.sort((a,b)=>a.spent-b.spent||a.accountId.localeCompare(b.accountId));
   return{assignment:choices[0],refusals};
 }

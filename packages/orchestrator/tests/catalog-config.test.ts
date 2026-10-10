@@ -56,36 +56,4 @@ describe("shared model selection", () => {
     expect(catalogAgentType("anthropic/claude-sonnet-4-6").key).toBe("sonnet");
   });
 
-  it("offers single-model profiles independently of host lane preferences", () => {
-    const root = mkdtempSync(join(tmpdir(), "pi-model-config-"));
-    const path = join(root, "config.json");
-    const hostProfiles = {
-      standard: [{ provider: "openai-codex", model: "gpt-6-sol", thinking: "high" }],
-      review: [{ provider: "openai-codex", model: "gpt-6-astra", thinking: "max" }],
-    };
-    try {
-      const defaults = loadConfig(path).profiles;
-      writeFileSync(path, JSON.stringify({ profiles: {
-        ...hostProfiles,
-        sol: [{ provider: "openai-codex", model: "gpt-6-astra" }],
-      } }));
-      const configured = loadConfig(path).profiles;
-      expect(configured.standard).toEqual(hostProfiles.standard);
-      expect(configured.review).toEqual([{ provider: "openai-codex", model: "gpt-6-astra", thinking: "high" }]);
-      expect(configured.expert).toBeUndefined();
-      for (const id of openaiModels) {
-        const { provider, model, thinking } = catalogModel(id)!;
-        expect(defaults[id]).toEqual([{ provider, model, thinking }]);
-        expect(configured[id]).toEqual(defaults[id]);
-      }
-      expect(configured.opus?.[0]?.provider).toBe("anthropic");
-      writeFileSync(path, JSON.stringify({ profiles: { review: [
-        { provider: "openai-codex", model: "gpt-5.6-sol" },
-        { provider: "anthropic", model: "claude-opus-5" },
-      ] } }));
-      expect(loadConfig(path).profiles.review.map(candidate => candidate.provider)).toEqual(["openai-codex", "anthropic"]);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
 });

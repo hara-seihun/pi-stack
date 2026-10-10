@@ -52,8 +52,8 @@ export class Fleet {
       if (recovering && !held) return { ok: false, error: { code: "unavailable", message: `Execution ${executionId} has no recorded account lease` } };
       if (held && excluded.has(held.account_id)) return { ok: false, error: { code: "unavailable", message: `Recorded account ${held.account_id} does not currently advertise ${settings.speed} for ${candidate.model}` } };
       const selected = held ? { assignment: { ...candidate, accountId: held.account_id }, refusals: [] }
-        : assign(this.store, "thread", admissionClass(thread),
-          { ...this.config, profiles: { thread: [candidate] } }, Date.now(), undefined, thread.id, rootRepair ? "root-repair" : "user", excluded);
+        : assign(this.store, candidate, admissionClass(thread),
+          this.config, Date.now(), undefined, thread.id, rootRepair ? "root-repair" : "user", excluded);
       if (!selected.assignment) {
         const now=Date.now();
         // Every account that could serve this provider refuses the model itself: a capacity wait would wait forever.
@@ -82,7 +82,7 @@ export class Fleet {
   }
 
   private admitBroker(thread: Thread, settings: ThreadSettings, recovering: boolean, executionId: string, brokerUrl: string): Result<ThreadAdmission> {
-    if (thread.metadata?.execution === "root-repair") return { ok: false, error: { code: "invalid_request", message: "Root repair is unavailable when this daemon uses a model broker" } };
+    if (thread.metadata?.execution === "root-repair") return { ok: false, error: { code: "invalid_request", message: "Root repair is unavailable in a broker-backed execution scope" } };
     const slash = settings.model.indexOf("/");
     const provider = slash > 0 ? settings.model.slice(0, slash) : "";
     if (!(provider in BROKER_ROUTES)) return { ok: false, error: { code: "invalid_request", message: `Model provider ${provider || settings.model} is unavailable through the model broker` } };
@@ -134,6 +134,7 @@ export class Fleet {
       case "entry_appended": case "session_info_changed": case "thinking_level_changed": case "bash_execution_update":
       case "response": case "extension_ui_request": case "extension_error": case "user_bash":
       case "owner_execution_phase": case "model_request_start": case "session_changed":
+      case "tool_operation_result": case "thread_landed":
       case "command_settled": case "runner_attached": case "thread_error": case "thread_message_inserted": return;
     }
     assertNever(event);

@@ -1,4 +1,5 @@
-import { planUsage, type PlanUsageSnapshot } from "./client.js";
+import { cachePercent, planUsage, type PlanAccountUsage, type PlanMetricUsage, type PlanUsage, type PlanUsageSnapshot } from "./client.js";
+import { ORCHESTRATOR_CATALOG } from "./catalog.js";
 import { personalUsage, personUsage, weekResetsAt, weekStart, type PersonalUsage } from "./person-usage.js";
 import type { Store } from "./store.js";
 
@@ -55,6 +56,51 @@ export function brokerUsage(store: Store, principal: string, accounts: readonly 
     personal: personalUsage(store, principal, now),
     allowance,
   };
+}
+
+/** Retained ledgers keep their usage evidence and frozen rates. Sum each ledger once;
+ * meter observations for the same granted alias select the newest observation. */
+export function brokerUsageAcrossStores(stores: readonly Store[], principal: string, accounts: readonly string[], now = Date.now(), allowance: WeeklyAllowance | null = null): BrokerUsage {
+  if (!stores.length || new Set(stores.map(store => store.path)).size !== stores.length) throw new Error("Broker usage requires unique declared ledger owners");
+  if (stores.length === 1) return brokerUsage(stores[0]!, principal, accounts, now, allowance);
+  const snapshots = stores.map(store => brokerUsage(store, principal, accounts, now));
+  const totals = stores.flatMap(store => store.usageSince(now - 24 * 3_600_000));
+  const mean = (values: number[]) => values.length ? Math.round(values.reduce((a, b) => a + b, 0) / values.length) : null;
+  const plans: Record<string, PlanUsage> = {};
+  for (const definition of ORCHESTRATOR_CATALOG.plans) {
+    const metrics: Record<string, PlanMetricUsage> = {};
+    const counts: number[] = [];
+    const accountIds = new Set<string>();
+    for (const metric of definition.metrics) {
+      const observations = new Map<string, PlanAccountUsage>();
+      for (const snapshot of snapshots) for (const account of snapshot.plans.plans[definition.id]?.metrics[metric.id]?.accounts ?? []) {
+        const previous = observations.get(account.accountId);
+        if (!previous || (account.readingAt ? Date.parse(account.readingAt) : -Infinity) > (previous.readingAt ? Date.parse(previous.readingAt) : -Infinity)) observations.set(account.accountId, account);
+      }
+      const observed = [...observations.values()], ready = observed.filter(account => account.state === "ready");
+      for (const account of observed) accountIds.add(account.accountId);
+      counts.push(ready.length);
+      const expected = ready.flatMap(account => account.resetAt && account.windowHours && Date.parse(account.resetAt) > now
+        ? [Math.max(0, Math.min(100, (Date.parse(account.resetAt) - now) * 100 / (account.windowHours * 3_600_000)))] : []);
+      const percentLeft = mean(ready.flatMap(account => account.percentLeft === null ? [] : [account.percentLeft])), expectedPercentLeft = mean(expected);
+      metrics[metric.id] = { accounts: observed, percentLeft, expectedPercentLeft,
+        paceDelta: percentLeft === null || expectedPercentLeft === null ? null : percentLeft - expectedPercentLeft,
+        cachePercent: cachePercent(totals, metric.model, new Set(observations.keys())) };
+    }
+    const checkedCount = counts.length ? Math.min(...counts) : 0;
+    plans[definition.id] = { metrics, planCount: accountIds.size, checkedCount,
+      state: accountIds.size && checkedCount === accountIds.size ? "ready" : checkedCount ? "partial" : "unavailable" };
+  }
+  const personal = snapshots[0]!.personal;
+  const periods = Object.fromEntries((["day", "week"] as const).map(period => {
+    const combined: Record<string, { tokens: number; value: number; spend: number }> = {};
+    for (const snapshot of snapshots) for (const [planId, figures] of Object.entries(snapshot.personal.periods[period].plans)) {
+      const sum = combined[planId] ??= { tokens: 0, value: 0, spend: 0 };
+      sum.tokens += figures.tokens; sum.value += figures.value; sum.spend += figures.spend;
+    }
+    return [period, { since: personal.periods[period].since, until: personal.periods[period].until, plans: combined }];
+  })) as PersonalUsage["periods"];
+  return { plans: { plans, updatedAt: new Date(now).toISOString() }, personal: { periods, weekResetsAt: personal.weekResetsAt }, allowance };
 }
 
 /** Reads the caller's own usage from her broker listener. */

@@ -6,7 +6,8 @@ import { SharedOAuthAuth } from "../src/auth/shared-oauth.js";
 import { AnthropicMeterSampler, parseAnthropicUsage } from "../src/meters-anthropic.js";
 import { CodexMeterSampler } from "../src/meters-codex.js";
 import { Store } from "../src/store.js";
-import { Daemon } from "../src/daemon.js";
+import { ProviderController } from "../src/provider-controller.js";
+import { ModelAvailabilityStore } from "../src/threads/model-availability.js";
 import { loadConfig } from "../src/config.js";
 
 /** Codex sampling also reads the account's banked resets, on its own route. */
@@ -137,12 +138,13 @@ it("retains failed refresh credentials, reports the blocker, and spaces attempts
     const auth = new SharedOAuthAuth({ path, providerId: "anthropic", refresh, toAuth: async () => ({ apiKey: "unused" }) });
     const fetch = vi.fn();
     const sampler = new AnthropicMeterSampler(store, { auth, fetch });
-    const daemon = new Daemon(store, { ...loadConfig("/missing"), authPath: path, taskManifest: undefined }, "/release") as any;
-    daemon.anthropicMeters = sampler;
-    daemon.codexMeters.sample = async () => [];
-    await daemon.reconcile();
-    expect(daemon.status().meterErrors).toEqual([{ accountId: "anthropic", outcome: "credential-failed", detail: "Error: refresh denied" }]);
-    await daemon.reconcile();
+    const controller = new ProviderController(store, { ...loadConfig("/missing"), authPath: path, autoReset: false }, new ModelAvailabilityStore(join(root, "policy.json")), "/release") as any;
+    controller.anthropicMeters = sampler;
+    controller.codexMeters.sample = async () => [];
+    await controller.reconcile();
+    expect(JSON.parse(store.control("meter-error:anthropic")!)).toEqual([{ accountId: "anthropic", outcome: "credential-failed", detail: "Error: refresh denied" }]);
+    await controller.reconcile();
+    await controller.detach();
     expect(refresh).toHaveBeenCalledTimes(1);
     expect(fetch).not.toHaveBeenCalled();
     expect(JSON.parse(readFileSync(path, "utf8")).anthropic).toMatchObject({ ...expired, piCredentialState: { state: "refresh-required" } });

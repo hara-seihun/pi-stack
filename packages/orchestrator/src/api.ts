@@ -12,7 +12,6 @@ export {
 } from "./catalog.js";
 export { DELEGATION_POLICY } from "./delegation-policy.js";
 export { anthropicSignatureChannel, projectAnthropicNarrationMessage } from "pi-orchestrator/anthropic-narration";
-export { getRandomName } from "./nebulani-names.js";
 export { loadConfig, orchestratorUrl } from "./config.js";
 export { configuredAgentCapacity, configuredAgentCapacitySettings, configuredAgentCapacityStatus, createAgentCapacityClient, GLOBAL_AGENT_LIMIT, AGENT_CAPACITY_AUTHORITY, AGENT_CAPACITY_CLIENT_CONFIG } from "./agent-capacity.js";
 export type { AgentCapacity, AgentExecution, CapacityCustody, CapacityLease, CapacityObservation, AgentCapacityStatus, AgentCapacityClientManifest } from "./agent-capacity.js";
@@ -55,7 +54,11 @@ export { WatchList, watchInterval, watchSettings, DEFAULT_WATCH_INTERVAL_MS, typ
 export { archivedAcrossOwners } from "./threads/archived.js";
 export { ThreadDirectory, type ThreadOwner } from "./threads/directory.js";
 export { importRemoteThreads } from "./threads/import.js";
-export type { LaneManifest, LaneSpec, LaneReadiness, Run } from "./domain.js";
+export type { Run } from "./domain.js";
+export { Store } from "./store.js";
+export { providerHttp } from "./provider-http.js";
+export { ProviderController, type ProviderControllerConfig } from "./provider-controller.js";
+export { createModelBroker, validateBrokerConfig, loadBrokerConfig, type ModelBrokerConfig, type BrokerListener, type EmbeddedBrokerOptions, type RetainedCompletionOwner } from "./model-broker.js";
 export { CompletionClient, type CompletionClientOptions, type CompletionCallOptions } from "./completion-client.js";
 export { COMPLETION_OPENAPI } from "./completion-openapi.js";
 export { CompletionAttemptSchema, CompletionAttemptsSchema, type CompletionAttempt, CompletionInputSchema, CompletionRecordSchema, CompletionResultSchema, CompletionUsageSchema, CompletionErrorResponseSchema,

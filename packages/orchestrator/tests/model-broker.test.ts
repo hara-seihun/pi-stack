@@ -164,12 +164,11 @@ test.each(["unavailable", "transport-failure"])("Ultrafast refuses a %s capabili
   expect(f.store.activeLeases()).toHaveLength(0);
 });
 
-test.each(["disabled", "reserved", "voice", "quota"])("Ultrafast entitlement does not bypass an account's %s exclusion", async exclusion => {
+test.each(["disabled", "voice", "quota"])("Ultrafast entitlement does not bypass an account's %s exclusion", async exclusion => {
   const t = tierTransport(new Set(["shared-account"]));
   const f = await fixture(t.transport);
   f.regrant(["shared"], ["openai-codex/gpt-6-astra"]);
   if (exclusion === "disabled") f.store.setAccountEnabled("shared", false);
-  if (exclusion === "reserved") f.store.setControl("account-reservation:shared", JSON.stringify({ metadata: { purpose: "batch" }, reason: "batch reservation" }));
   if (exclusion === "voice") f.store.setControl("account-use:shared", "voice");
   if (exclusion === "quota") f.store.recordMeter("shared", "codex-7d", 100, Date.now() + 60_000, Date.now());
   expect((await f.post(astraBody("ultrafast"))).status).toBe(503);
@@ -284,7 +283,7 @@ test("a disable applied while the broker runs reaches the next request and queue
   const f = await fixture(transport);
   const now = Date.now();
   for (const id of ["shared", "owner-only"]) f.store.recordMeter(id, "primary", 10, now + 60_000, now);
-  const queued = await new CompletionClient({ baseUrl: f.url }).submit("queued-before-disable", { model: "luna", prompt: "title this" });
+  const queued = await new CompletionClient({ baseUrl: f.url }).submit("queued-before-disable", { model: "luna", thinkingLevel: "low", speed: "standard", prompt: "title this" });
   expect(queued.ok).toBe(true);
   if (!queued.ok) return;
   const admit = () => assignCompletion(f.store, queued.value.runId, "luna", loadConfig(undefined, f.store.path), f.availability);
@@ -297,7 +296,7 @@ test("a disable applied while the broker runs reaches the next request and queue
   expect(after.status).toBe(403);
   expect((await after.json()).error).toMatchObject({ code: "model-disabled", model: "openai-codex/gpt-6-luna", policy: f.availability.path });
   expect(admit()).toEqual({ refusals: [{ accountId: "*", reason: expect.stringMatching(/^openai-codex\/gpt-6-luna is disabled by the household model availability policy/) }] });
-  const fresh = await new CompletionClient({ baseUrl: f.url }).submit("submitted-after-disable", { model: "luna", prompt: "title this" });
+  const fresh = await new CompletionClient({ baseUrl: f.url }).submit("submitted-after-disable", { model: "luna", thinkingLevel: "low", speed: "standard", prompt: "title this" });
   expect(fresh).toEqual({ ok: false, error: { code: "model-disabled", message: expect.stringContaining(f.availability.path) } });
   expect(f.store.runs()).toHaveLength(1);
   expect(transport).toHaveBeenCalledOnce();
@@ -497,10 +496,10 @@ test.each(["title", "remote-name:thread-1:2"])("durable completion %s retains id
   const transport = vi.fn(async () => sse({}));
   const f = await fixture(transport);
   const owner = new CompletionService(f.store, f.root);
-  expect(owner.submit(requestId, { model: "luna", prompt: "private owner prompt" }).ok).toBe(true);
+  expect(owner.submit(requestId, { model: "luna", thinkingLevel: "low", speed: "standard", prompt: "private owner prompt" }).ok).toBe(true);
   const client = new CompletionClient({ baseUrl: f.url });
   expect(await client.get(requestId)).toMatchObject({ ok: false, error: { code: "not-found" } });
-  const input = { model: "luna" as const, prompt: "public title", thinkingLevel: "low" as const };
+  const input = { model: "luna" as const, prompt: "public title", thinkingLevel: "low" as const, speed: "standard" as const };
   const submitted = await client.submit(requestId, input);
   expect(submitted).toMatchObject({ ok: true, value: { requestId, state: "queued" } });
   if (!submitted.ok) return;
@@ -516,7 +515,7 @@ test.each(["title", "remote-name:thread-1:2"])("durable completion %s retains id
 
 test("a waiting completion follows the principal's current grant, not the pool it was submitted with", async () => {
   const f = await fixture(async () => sse({}));
-  const submitted = await new CompletionClient({ baseUrl: f.url }).submit("remote-name:thread-7:3", { model: "luna", prompt: "title this" });
+  const submitted = await new CompletionClient({ baseUrl: f.url }).submit("remote-name:thread-7:3", { model: "luna", thinkingLevel: "low", speed: "standard", prompt: "title this" });
   expect(submitted.ok).toBe(true);
   if (!submitted.ok) return;
   const now = Date.now();
@@ -524,7 +523,7 @@ test("a waiting completion follows the principal's current grant, not the pool i
   const admit = () => assignCompletion(f.store, submitted.value.runId, "luna", loadConfig(undefined, f.store.path), noModelPolicy);
   expect(admit().assignment?.accountId).toBe("shared");
   f.regrant(["owner-only"]);
-  expect(await new CompletionClient({ baseUrl: f.url }).submit("remote-name:thread-7:3", { model: "luna", prompt: "title this" })).toEqual(submitted);
+  expect(await new CompletionClient({ baseUrl: f.url }).submit("remote-name:thread-7:3", { model: "luna", thinkingLevel: "low", speed: "standard", prompt: "title this" })).toEqual(submitted);
   expect(admit().assignment?.accountId).toBe("owner-only");
   f.regrant(["owner-only"], [`anthropic/${anthropicModel.id}`]);
   expect(admit().assignment).toBeUndefined();

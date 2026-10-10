@@ -1,10 +1,18 @@
-import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import { nativeProviders } from "./models.js";
 import { catalogModel } from "./catalog.js";
 import { completionCanonical, completionError, isCompletionExecution, isCompletionInput, isCompletionRecord, isCompletionRequestId, type CompletionExecution, type CompletionInput, type CompletionOutcome, type CompletionRecord, type CompletionAttempt } from "./completion-contract.js";
 import type { Store } from "./store.js";
 import type { RunState } from "./domain.js";
 import { assertNever } from "./threads/runtime-events.js";
 import { recordCompletionRejection, recordCompletionSuccess } from "./completion-feedback.js";
+import { modelSpeedModes } from "./threads/speed.js";
+
+export function completionModel(id: string): { provider: string; model: string } | undefined {
+  const alias = catalogModel(id);
+  const selected = alias ? { provider: alias.provider, model: alias.model } : /^openai-codex\/[^/\s]+$/.test(id) ? { provider: "openai-codex", model: id.slice("openai-codex/".length) } : undefined;
+  if (!selected || selected.provider !== "openai-codex") return undefined;
+  return nativeProviders.find(provider => provider.id === selected.provider)?.getModels().some(model => model.id === selected.model) ? selected : undefined;
+}
 
 export interface CompletionAccess { principal: string; accounts: string[]; models: string[] }
 interface StoredCompletion {
@@ -97,9 +105,9 @@ export class CompletionService {
     return attempts.sort((a,b) => a.startedAt-b.startedAt || a.attemptId.localeCompare(b.attemptId));
   }
   private requeue(value: StoredCompletion, retryAt: number): CompletionRecord {
-    const { requestId, runId, model, metadata, createdAt } = value.record;
+    const { requestId, runId, model, metadata, settings, createdAt } = value.record;
     value.attemptCount ??= value.attemptId ? 1 : 0;
-    value.record = { requestId, runId, model, metadata, createdAt, updatedAt: Date.now(), state: "queued", attemptCount: value.attemptCount, retryAt };
+    value.record = { requestId, runId, model, metadata, settings, createdAt, updatedAt: Date.now(), state: "queued", attemptCount: value.attemptCount, retryAt };
     delete value.attemptId; delete value.receipt;
     this.store.requeueRejectedCompletion(runId);
     this.save(value);
@@ -124,11 +132,7 @@ export class CompletionService {
   }
 
   submit(requestId: string, input: unknown, access?: CompletionAccess): CompletionOutcome<CompletionRecord> {
-    if (!isCompletionRequestId(requestId) || !isCompletionInput(input)) return completionError("invalid-request", "Expected a request ID, Luna, prompt, and supported completion options.");
-    if (input.maxOutputTokens !== undefined) return completionError("unsupported-option", "OpenAI Codex rejects max_output_tokens for Luna. No run was created; a provider-enforced output cap is unavailable.");
-    const selected = catalogModel(input.model)!;
-    const model = builtinProviders().find(provider => provider.id === selected.provider)?.getModels().find(model => model.id === selected.model);
-    if (!model || (input.maxOutputTokens !== undefined && input.maxOutputTokens > model.maxTokens)) return completionError("invalid-request", "maxOutputTokens exceeds the selected provider model's output limit.");
+    if (!isCompletionRequestId(requestId) || !isCompletionInput(input)) return completionError("invalid-request", "Expected a request ID, exact model, prompt, and supported completion options.");
     return this.store.transaction(() => {
       const previous = this.stored(requestId);
       if (previous) {
@@ -139,12 +143,28 @@ export class CompletionService {
         this.synchronize(previous);
         return { ok: true, value: previous.record };
       }
+      const selected = completionModel(input.model);
+      if (!selected) return completionError("invalid-request", "The selected model is not in Pi's Codex catalogue.");
+      if (input.thinkingLevel === undefined || input.speed === undefined) return completionError("invalid-request", "New completions require explicit thinkingLevel and speed. Existing immutable inputs may be replayed unchanged.");
+      if (!modelSpeedModes(selected.provider, selected.model).includes(input.speed)) return completionError("unsupported-option", "The selected model does not support the requested speed; no other tier was selected.");
+      if (input.maxOutputTokens !== undefined) return completionError("unsupported-option", "OpenAI Codex rejects max_output_tokens. No run was created; a provider-enforced output cap is unavailable.");
       const [runId] = this.store.createRuns({ count: 1, source: "direct", prompt: input.prompt, cwd: this.cwd, profile: input.model, budget: "force", context: { tools: [] } });
       const now = Date.now();
-      const record: CompletionRecord = { requestId, runId: runId!, model: input.model, metadata: input.metadata, state: "queued", createdAt: now, updatedAt: now };
+      const record: CompletionRecord = { requestId, runId: runId!, model: input.model, metadata: input.metadata, settings: { thinkingLevel: input.thinkingLevel, speed: input.speed }, state: "queued", createdAt: now, updatedAt: now };
       this.save({ input, record, ...(access ? { access } : {}) });
       this.store.setControl(`completion-run:${runId}`, requestId);
       return { ok: true, value: record };
+    });
+  }
+
+  adoptAccess(requestId: string, access: CompletionAccess): CompletionOutcome<CompletionRecord> {
+    return this.store.transaction(() => {
+      const value = this.stored(requestId);
+      if (!value) return completionError("not-found", "Completion to adopt was not found.");
+      if (value.access && value.access.principal !== access.principal) return completionError("request-conflict", "Completion already belongs to another principal.");
+      value.access = access;
+      this.save(value);
+      return { ok: true, value: value.record };
     });
   }
 
@@ -216,7 +236,7 @@ export class CompletionService {
         }
       }
       value.receipt = outcome;
-      if (value.record.state !== "cancelled") value.record = { requestId: value.record.requestId, runId, model: value.record.model, metadata: value.record.metadata, createdAt: value.record.createdAt, updatedAt: Date.now(), attemptCount: value.attemptCount ?? 1, ...outcome };
+      if (value.record.state !== "cancelled") value.record = { requestId: value.record.requestId, runId, model: value.record.model, metadata: value.record.metadata, settings: value.record.settings, createdAt: value.record.createdAt, updatedAt: Date.now(), attemptCount: value.attemptCount ?? 1, ...outcome };
       this.save(value);
       if (value.record.state !== "cancelled") this.store.finishCompletionRun(runId, completionRunResult(outcome));
       this.store.endLease(`run:${runId}`);

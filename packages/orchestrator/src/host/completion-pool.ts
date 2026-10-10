@@ -18,7 +18,7 @@ export class CompletionPool {
   private readonly observation = new AbortController();
   private ensuring?: Promise<CompletionHostStatus>;
   private detached = false;
-  constructor(private readonly store: Store, _service: CompletionService, config: OrchestratorConfig,
+  constructor(private readonly store: Store, _service: CompletionService, config: Pick<OrchestratorConfig, "authPath" | "agentDir">,
     private readonly options: CompletionPoolOptions = {}) {
     setMaxListeners(0, this.observation.signal);
     this.boundary = store.path === ":memory:" ? undefined : { ledgerPath: resolve(store.path), authPath: resolve(config.authPath), agentDir: resolve(config.agentDir) };
