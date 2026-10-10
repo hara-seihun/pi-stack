@@ -11,7 +11,7 @@ type FileResult = { ok: true; text: string } | { ok: false; error: "missing" | "
 type TrustedFileReader = (path: string, secret: boolean) => FileResult;
 const account = /^[a-z_][a-z0-9_-]{0,63}$/;
 const environment = /^[a-z][a-z0-9-]{0,31}$/;
-const scope = /^[a-zA-Z0-9_.:/-]{1,200}$/;
+const scope = /^[a-z][a-z0-9:._-]{0,159}$/;
 const MAX_BODY = 2_100_000;
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const exact = (value: Record<string, unknown>, keys: string[]) => keys.length === Object.keys(value).length && keys.every(key => Object.hasOwn(value, key));

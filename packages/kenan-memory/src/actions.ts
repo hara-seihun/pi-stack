@@ -52,6 +52,7 @@ export class ActionStore {
       CREATE TABLE IF NOT EXISTS external_actions(id TEXT PRIMARY KEY,owner TEXT NOT NULL,intent_key TEXT NOT NULL,recipients TEXT NOT NULL,transport TEXT NOT NULL,payload TEXT NOT NULL,digest TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('accepted','inflight','succeeded','failed-before-effect','uncertain','held')),revision INTEGER NOT NULL,token TEXT,result TEXT NOT NULL,evidence TEXT,resolved INTEGER NOT NULL CHECK(resolved IN (0,1)),created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(owner,intent_key,recipients));
       CREATE TABLE IF NOT EXISTS external_action_dispatches(owner TEXT NOT NULL,action_id TEXT NOT NULL,revision INTEGER NOT NULL,at INTEGER NOT NULL,PRIMARY KEY(owner,action_id,revision));
       CREATE TABLE IF NOT EXISTS external_action_requests(owner TEXT NOT NULL,request_id TEXT NOT NULL,action_id TEXT NOT NULL,PRIMARY KEY(owner,request_id));
+      CREATE TABLE IF NOT EXISTS external_action_scopes(owner TEXT NOT NULL,scope TEXT NOT NULL,action_id TEXT NOT NULL,recipients TEXT NOT NULL,PRIMARY KEY(owner,scope,action_id));
       CREATE TABLE IF NOT EXISTS external_recipient_aliases(owner TEXT NOT NULL,alias TEXT NOT NULL,group_id TEXT NOT NULL,PRIMARY KEY(owner,alias));
       CREATE TABLE IF NOT EXISTS external_contact_slots(owner TEXT NOT NULL,recipient TEXT NOT NULL,action_id TEXT NOT NULL,PRIMARY KEY(owner,recipient));
       CREATE TABLE IF NOT EXISTS external_contact_holds(owner TEXT NOT NULL,recipient TEXT NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(owner,recipient));

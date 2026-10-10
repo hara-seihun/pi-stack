@@ -11,7 +11,7 @@ export class ActionHttpClient {
     this.url = `${origin.origin}/v1/external-actions`;
     this.headers = { "content-type": "application/json", ...(env.PI_REMOTE_SERVER_URL && env.PI_THREAD_TOKEN ? { "x-pi-thread-token": env.PI_THREAD_TOKEN } : {}) };
   }
-  private async request<T>(operation: string, input: unknown): Promise<ActionResult<T>> {
+  async request<T>(operation: string, input: unknown): Promise<ActionResult<T>> {
     try {
       const response = await fetch(this.url, { method: "POST", headers: this.headers, body: JSON.stringify({ operation, input }), signal: AbortSignal.timeout(5000) });
       const result = await response.json();

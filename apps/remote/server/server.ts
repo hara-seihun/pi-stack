@@ -124,6 +124,7 @@ import { MachineActions } from "./machine-actions";
 import { createMessagingService } from "./messaging";
 import { ActionStore, ActionClient } from "kenan-memory/actions";
 import { externalActionsEndpoint, ownedPhoneActionCaller } from "./external-actions";
+import { proxyOwnWorkActions, workActionsEndpoint } from "./work-action-authority";
 import { PiReactions, nativeMessageExists, reactToMessage } from "./reactions";
 import { parseMessageReference } from "./message-protocol";
 import { decodeMessageReply, encodeMessageReply, replyFromNativeEntry } from "./message-replies";
@@ -1815,10 +1816,13 @@ const server = Bun.serve<SocketData>({
       const result = featureUsage.record(parsed.value, resolved.kind === "person" ? "human" : "agent");
       return json(result, result.ok ? 200 : 503);
     }
+    if (url.pathname === "/v1/work-external-actions") return workActionsEndpoint(req, externalActions instanceof ActionStore ? externalActions : null, MESSAGE_OWNER.id);
     if (url.pathname === "/v1/external-actions") {
-      if (MANAGER_ENVIRONMENT_ID !== ENVIRONMENT_ID) return json({ ok: false, error: "unavailable", message: "This environment does not own canonical actions; use the account-bound router, never a local fallback ledger" }, 409);
       const resolved = callers.resolve(caller);
       const admitted = !("error" in resolved) && phoneCallerAllowed(resolved, process.getuid?.() ?? -1);
+      const work = await proxyOwnWorkActions(req.clone(), admitted, process.env.USER ?? "");
+      if (work) return work;
+      if (MANAGER_ENVIRONMENT_ID !== ENVIRONMENT_ID) return json({ ok: false, error: "unavailable", message: "This environment does not own canonical actions; use the account-bound router, never a local fallback ledger" }, 409);
       const phone = ownedPhoneActionCaller(req, MESSAGE_OWNER.id, peer?.address === "127.0.0.1" || peer?.address === "::1");
       const canReconcile = phone || !("error" in resolved) && (resolved.kind === "person" || resolved.kind === "process" && resolved.uid === process.getuid?.() || resolved.kind === "thread" && resolved.threadId === manager?.snapshot().managerThreadId);
       return externalActionsEndpoint(req, externalActions, admitted || phone, canReconcile);

@@ -52,6 +52,10 @@ printf '%s' '{"id":"ACTION_ID"}' | bun /srv/pi/runtime/node_modules/kenan-memory
 
 CLI operations: submit, inspect/list, claim, dispatch, finish, reconcile, recover, retry, followup, hold/release-recipient and link-recipients. JSON stdin and typed JSON results preserve request identity after ambiguous acknowledgements. Credentials never travel in process arguments. `PI_KENAN_ACTION_CLI` selects the mail helper source for fixtures; production uses the deployed immutable runtime.
 
+## Work-only scope
+
+[Work-only action interface](work-external-actions.md) defines the bounded capability route and atomic scope projection over this same canonical authority. It provides scoped submission/inspection and transport fencing without personal listing/payload access or general environment grants. Its source fixtures do not assert configured serving; an unavailable work route stays fail-closed until owning scoped acceptance.
+
 ## Receipt projection
 
 Memory capture remains gated by `oneKenan`. Every journal attempt is fsync-written before its covered effect; outcome-write failure does not turn a successful send into permission to retry. The authority remains canonical even if journal delivery is unavailable. Journal receipts are `MemoryInput` with owner, recipients/affected subjects, thread/room where known, occurrence time, stable external ID and compact summary. Explicit private marking and conservative keywords assist privacy classification; they do not replace disclosure judgment.
