@@ -151,7 +151,7 @@ if os.environ.get('FIXTURE_STOP_FAIL') and sys.argv[1:]==['disable','--now',os.e
         self.assertEqual(list((shared/'private').iterdir()),[])
         root_config=json.loads((self.root/'etc/pi-stack/kenan-root.json').read_text())
         for key in ('cwd','agentDir','sessionsDir'):
-            self.assertTrue(pathlib.Path(root_config[key]).is_relative_to(shared/'private'))
+            self.assertTrue(pathlib.Path(root_config[key]).is_relative_to(shared/'private') and pathlib.Path(root_config[key])!=shared/'private')
         self.command('rollback')
         self.assertEqual(home.stat().st_mode&0o777,0o700)
         self.assertEqual(proof.read_text(),'Bun ignores explicit cache settings here')

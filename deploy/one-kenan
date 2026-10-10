@@ -258,7 +258,7 @@ def install():
          'rootAdminCapabilityFile':str(shared/'root-admin-capability'),'rootConsentCapabilityFile':str(consent_capability),
          'routerPort':router_port,'brokerUser':operator,'memoryTimezoneGroup':'pi-timezones-readers'}
     fresh(target('/etc/pi-stack/one-kenan.json'),json.dumps(one,indent=2)+'\n')
-    root={**root_config,'version':1,'cwd':str(shared/'private'),'agentDir':str(shared/'private/.pi/agent'),
+    root={**root_config,'version':1,'cwd':str(shared/'private/root-cwd'),'agentDir':str(shared/'private/.pi/agent'),
           'sessionsDir':str(shared/'private/root-sessions'),'brokerUrl':f'http://127.0.0.1:{ports["rootBrokerPort"]}',
           'people':[{'person':person['user'],'displayName':person['displayName']} for person in people]}
     fresh(target('/etc/pi-stack/kenan-root.json'),json.dumps(root,indent=2)+'\n')

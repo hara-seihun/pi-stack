@@ -307,6 +307,10 @@ if [[ ! -x $dependency_release/node_modules/.bin/pi ]]; then
   node "$runtime_source/patch-shared-rpc.mjs" "$stage/node_modules"
   node "$runtime_source/patch-managed-cli.mjs" "$stage/node_modules"
   rm -f "$stage/node_modules/pi-orchestrator" "$stage/node_modules/pi-remote"
+  # Memory runs from this closure and imports pi-orchestrator/person-timezone; scope that link to Memory alone.
+  rsync -a packages/orchestrator/src "$stage/packages/orchestrator/"
+  install -d "$stage/packages/kenan-memory/node_modules"
+  ln -sfn ../../orchestrator "$stage/packages/kenan-memory/node_modules/pi-orchestrator"
   rm -rf "$stage/node_modules/@hara-seihun"
   dependency_stage="$dependencies_root/.stage.$$.${RANDOM}"
   pi_stack_as_root install -d -m 755 "$dependency_stage"
