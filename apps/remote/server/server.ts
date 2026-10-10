@@ -1,5 +1,7 @@
 import { Database } from "bun:sqlite";
 import { CoreClient, coreConfiguration } from "./core-client";
+import { startCoreCallbacks } from "./core-callbacks";
+import { unixGatewayFetch } from "pi-orchestrator/core-gateway";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync, watchFile, unwatchFile } from "node:fs";
 import { homedir, userInfo } from "node:os";
@@ -257,7 +259,7 @@ const MANAGER_ENVIRONMENT_ID = process.env.PI_REMOTE_MANAGER_ENVIRONMENT ?? ENVI
 if (!/^[a-z][a-z0-9-]{0,31}$/.test(MANAGER_ENVIRONMENT_ID)) throw new Error("PI_REMOTE_MANAGER_ENVIRONMENT must be an environment ID");
 let coreError: string | null = null;
 const coreConfig = unwrap(coreConfiguration());
-const core = new CoreClient(coreConfig, createThreadClient, fetch, message => {
+const core = new CoreClient(coreConfig, createThreadClient, unixGatewayFetch, message => {
   coreError = message;
   observeError(db, "core", message);
   signalSync();
@@ -436,7 +438,7 @@ const json = (data: unknown, status = 200) => new Response(JSON.stringify(data),
   },
 });
 
-const inlineImages = new InlineImages(db, coreConfig, signalSync, message => observeError(db, "images", message));
+const inlineImages = new InlineImages(db, coreConfig, signalSync, message => observeError(db, "images", message), core.fetch);
 
 /** Live event streams by id, the only thing a client keeps open. */
 const streams = new Map<string, ClientStream>();
@@ -1577,6 +1579,30 @@ phoneReplies = new PhoneReplies(db, {
   },
   feedback: message => observeError(db, "phone-replies", message),
 });
+const callbackUid = process.getuid?.();
+if (callbackUid === undefined) throw new Error("Remote core callbacks require a Unix process identity");
+const coreCallbacks = unwrap(await startCoreCallbacks(coreConfig, callbackUid, {
+  async prepare(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return error("Expected scoped thread/message input", 400);
+    const input = value as { thread?: Thread; message?: ThreadMessage };
+    if (!input.thread || !input.message || typeof input.thread.id !== "string" || input.message.threadId !== input.thread.id) return error("Expected scoped thread/message input", 400);
+    const owned = await threads.inspect(input.thread.id, { context: "omit" });
+    if (!owned.ok) return threadError(owned.error);
+    return json(await prepareThreadMessage(owned.value.thread, input.message));
+  },
+  async relay(operation, value, signal) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return error("Expected a manager relay envelope", 400);
+    const body = value as { input?: unknown; environmentId?: unknown };
+    if (!body.input || typeof body.input !== "object" || Array.isArray(body.input) || Object.keys(body).some(key => key !== "input" && key !== "environmentId")) return error("Expected a manager relay envelope", 400);
+    try {
+      return await fetch(`http://127.0.0.1:${process.env.PI_REMOTE_ROUTER_PORT ?? "8788"}/v1/agent-manager/${operation}`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+        signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
+      });
+    } catch (cause) { return json({ ok: false, error: { code: "unavailable", message: `Manager relay outcome unconfirmed: ${String(cause)}; reconcile the original request identity` } }, 503); }
+  },
+}));
+
 const requestTimings = new RequestTimings();
 const server = Bun.serve<SocketData>({
   hostname: HOST,
@@ -1594,27 +1620,7 @@ const server = Bun.serve<SocketData>({
     if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
     if (shuttingDown && !supervisorRelease.accepts(req.method, url.pathname)) return error("Supervisor is handing over; retry after activation", 503);
     if (API.health.match(req.method, url.pathname)) return json({ ok: coreError === null, version: VERSION, environmentId: ENVIRONMENT_ID, releaseCommit: RELEASE_COMMIT, core: { scopeId: coreConfig.scopeId, error: coreError }, meetingRuntime: { protocol: "meet-runtime-v1", lifetime: "person-service" } }, coreError === null ? 200 : 503);
-    if (url.pathname === "/v1/core/prepare-message" && req.method === "POST") {
-      if (req.headers.get("authorization") !== `Bearer ${coreConfig.token}`) return error("Core service authentication required", 403);
-      const input = await readBody(req);
-      if (!input?.thread || !input?.message || typeof input.thread.id !== "string" || input.message.threadId !== input.thread.id) return error("Expected scoped thread/message input", 400);
-      const owned = await threads.inspect(input.thread.id, { context: "omit" });
-      if (!owned.ok) return threadError(owned.error);
-      return json(await prepareThreadMessage(owned.value.thread, input.message));
-    }
-    if (url.pathname.startsWith("/v1/core/manager-relay/") && req.method === "POST") {
-      if (req.headers.get("authorization") !== `Bearer ${coreConfig.token}`) return error("Core service authentication required", 403);
-      const operation = url.pathname.slice("/v1/core/manager-relay/".length);
-      if (!["managerNotificationPolicy", "managerWorkSummary", "send", "questionOrigin", "managerQuestionCustody", "managerReplies"].includes(operation)) return error("Unknown core manager transport operation", 400);
-      const body = await readBody(req);
-      if (!body?.input || typeof body.input !== "object" || Array.isArray(body.input) || Object.keys(body).some(key => key !== "input" && key !== "environmentId")) return error("Expected a manager relay envelope", 400);
-      try {
-        return await fetch(`http://127.0.0.1:${process.env.PI_REMOTE_ROUTER_PORT ?? "8788"}/v1/agent-manager/${operation}`, {
-          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
-          signal: AbortSignal.any([req.signal, AbortSignal.timeout(30_000)]),
-        });
-      } catch (cause) { return json({ ok: false, error: { code: "unavailable", message: `Manager relay outcome unconfirmed: ${String(cause)}; reconcile the original request identity` } }, 503); }
-    }
+    if (url.pathname.startsWith("/v1/core/")) return error("Core callbacks require the scoped kernel-peer socket", 403);
     const peer = httpServer.requestIP(req);
     const caller: CallerSource = { headers: req.headers, socket: peer ? { address: peer.address, port: peer.port, localAddress: HOST, localPort: PORT } : undefined };
     const resolvedCaller = callers.resolve(caller);
@@ -2561,7 +2567,7 @@ const supervisorRelease = new SupervisorRelease({
     core.close();
   },
   detach: async () => ({ ok: true, value: undefined }),
-  closeImages: async () => { await phoneReplies!.close(); await messaging.close(); externalActions?.close(); await closeImageGeneration(); },
+  closeImages: async () => { await coreCallbacks.close(); await phoneReplies!.close(); await messaging.close(); externalActions?.close(); await closeImageGeneration(); },
   stopServer: () => { server.stop(true); },
   closeDatabase: () => db.close(),
   exit: code => process.exit(code),

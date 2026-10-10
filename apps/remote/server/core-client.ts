@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { ThreadApi, Thread, ThreadInspection, ThreadMessage, ThreadSettlement, PiEvent, Result, BrokerUsage, PersonUsageWindow } from "pi-orchestrator/api";
 import type { CoreProjection, CoreEvent } from "../../../packages/orchestrator/src/core/contracts";
@@ -9,14 +8,18 @@ type Fetch = typeof fetch;
 export type ThreadClientFactory = (url: string, fetcher: (input: string | URL | Request, init?: RequestInit) => Promise<Response>) => ThreadApi;
 const failure = (message: string): Result<never> => ({ ok: false, error: { code: "unavailable", message } });
 
-export function coreConfiguration(env: NodeJS.ProcessEnv = process.env): Result<{ url: string; token: string; scopeId: string }> {
-  if (!env.PI_CORE_URL || !env.PI_CORE_TOKEN_FILE || !env.PI_CORE_SCOPE_ID) return failure("Remote requires PI_CORE_URL, PI_CORE_TOKEN_FILE and PI_CORE_SCOPE_ID; it cannot host an agent engine");
+export type CoreClientConfig = { url: string; scopeId: string; principalId: string; gatewayId: string; socketPath: string; coreUid: number; callbackSocket: string };
+export type CoreGatewayFetch = (peer: { socketPath: string; peerUid: number }, input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+export function coreConfiguration(env: NodeJS.ProcessEnv = process.env): Result<CoreClientConfig> {
+  if (!env.PI_CORE_URL || !env.PI_CORE_GATEWAY_ID || !env.PI_CORE_SCOPE_ID || !env.PI_CORE_PRINCIPAL_ID || !env.PI_CORE_CALLBACK_SOCKET || env.PI_CORE_CALLBACK_UID === undefined) return failure("Remote requires an explicit host-owned core URL, gateway, scope, principal and kernel-peer callback binding; it cannot host an agent engine");
   try {
     const url = new URL(env.PI_CORE_URL);
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) return failure("PI_CORE_URL must be an HTTP service URL without credentials, query or fragment");
-    const token = readFileSync(env.PI_CORE_TOKEN_FILE, "utf8").trim();
-    if (!token || /\s/.test(token)) return failure("PI_CORE_TOKEN_FILE must contain one bearer token");
-    return { ok: true, value: { url: url.toString().replace(/\/$/, ""), token, scopeId: env.PI_CORE_SCOPE_ID } };
+    if (!/^[a-zA-Z0-9_.:-]+$/.test(env.PI_CORE_GATEWAY_ID) || !/^[a-zA-Z0-9_.:-]+$/.test(env.PI_CORE_SCOPE_ID)) return failure("Core scope and gateway must name their registered host bindings");
+    const coreUid = Number(env.PI_CORE_CALLBACK_UID);
+    if (!/^(0|[1-9][0-9]*)$/.test(env.PI_CORE_CALLBACK_UID) || !Number.isSafeInteger(coreUid)) return failure("PI_CORE_CALLBACK_UID must explicitly name the core Unix UID");
+    if (env.PI_CORE_CALLBACK_SOCKET !== `/run/pi-stack/gateways/remote-${env.PI_CORE_SCOPE_ID}/callback.sock`) return failure("Core callback socket must be the prepared scope-owned gateway path");
+    return { ok: true, value: { url: url.toString().replace(/\/$/, ""), scopeId: env.PI_CORE_SCOPE_ID, principalId: env.PI_CORE_PRINCIPAL_ID, gatewayId: env.PI_CORE_GATEWAY_ID, socketPath: `/run/pi-stack/gateways/${env.PI_CORE_GATEWAY_ID}.sock`, coreUid, callbackSocket: env.PI_CORE_CALLBACK_SOCKET } };
   } catch (error) { return failure(`Core configuration unavailable: ${String(error)}`); }
 }
 
@@ -34,15 +37,19 @@ export class CoreClient {
   private readonly transport: Fetch;
   private readonly caller = new AsyncLocalStorage<{ token: string | null }>();
 
-  constructor(config: { url: string; token: string; scopeId: string }, threadClient: ThreadClientFactory, fetcher: Fetch = fetch, private feedback: (message: string | null) => void = () => {}) {
+  constructor(config: CoreClientConfig, threadClient: ThreadClientFactory, fetcher: CoreGatewayFetch, private feedback: (message: string | null) => void = () => {}) {
+    if (!/^[a-zA-Z0-9_.:-]+$/.test(config.gatewayId) || config.socketPath !== `/run/pi-stack/gateways/${config.gatewayId}.sock` || !Number.isSafeInteger(config.coreUid) || config.coreUid < 0) throw new Error("Core client requires its explicit registered Unix gateway socket");
     this.serviceUrl = config.url;
     this.base = `${config.url}/v1/scopes/${encodeURIComponent(config.scopeId)}`;
     this.transport = ((input, init) => {
-      const headers = new Headers(init?.headers);
-      headers.set("authorization", `Bearer ${config.token}`);
+      const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+      // Actor claims never become core authority. The selected Unix socket is
+      // verified by SO_PEERCRED and fixes principal, scopes and route ceiling.
+      headers.delete("authorization");
+      headers.delete("x-pi-kenan-admin");
       const token = this.caller.getStore()?.token;
       if (token) headers.set("x-pi-thread-token", token);
-      return fetcher(input, { ...init, headers });
+      return fetcher({ socketPath: config.socketPath, peerUid: config.coreUid }, input, { ...init, headers });
     }) as Fetch;
     const client = threadClient(`${this.base}/thread-owner`, this.transport);
     this.api = Object.fromEntries(Object.entries(client).map(([name, call]) => [name, async (...args: unknown[]) => {
@@ -64,6 +71,8 @@ export class CoreClient {
       return result;
     }])) as unknown as ThreadApi;
   }
+
+  get fetch(): Fetch { return this.transport; }
 
   withCaller<T>(request: Request, operation: () => T): T {
     return this.caller.run({ token: request.headers.get("x-pi-thread-token") }, operation);

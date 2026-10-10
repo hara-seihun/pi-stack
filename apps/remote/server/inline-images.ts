@@ -2,7 +2,7 @@ import type { Database } from "bun:sqlite";
 import type { InlineImage, InlineImageSnapshot } from "./inline-image-contract";
 
 export type InlineImagesClientResult<T> = { ok: true; value: T } | { ok: false; error: { code: "storage" | "unavailable" | "rejected" | "conflict"; message: string } };
-export type InlineImagesCoreConfig = { url: string; token: string; scopeId: string };
+export type InlineImagesCoreConfig = { url: string; scopeId: string };
 type Pending = { thread_id: string; message_key: string; text: string };
 const failure = (code: "storage" | "unavailable" | "rejected" | "conflict", message: string): Extract<InlineImagesClientResult<never>, { ok: false }> => ({ ok: false, error: { code, message } });
 
@@ -14,7 +14,7 @@ export class InlineImages {
   private abort = new AbortController();
   private base: string;
   constructor(private db: Database, private config: InlineImagesCoreConfig, private changed: () => void,
-    private feedback: (message: string | null) => void, private transport: typeof fetch = fetch) {
+    private feedback: (message: string | null) => void, private transport: typeof fetch) {
     this.base = `${config.url}/v1/scopes/${encodeURIComponent(config.scopeId)}/images`;
     db.exec("CREATE TABLE IF NOT EXISTS core_image_outbox(thread_id TEXT NOT NULL REFERENCES thread_views(id) ON DELETE CASCADE,message_key TEXT NOT NULL,text TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','rejected')),error TEXT,PRIMARY KEY(thread_id,message_key));");
     const seedTables = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('inline_image_versions','inline_images')").all();
@@ -45,7 +45,7 @@ export class InlineImages {
 
   private async request<T>(suffix: string, body: unknown): Promise<InlineImagesClientResult<T>> {
     try {
-      const response = await this.transport(`${this.base}/${suffix}`, { method: "POST", headers: { authorization: `Bearer ${this.config.token}`, "content-type": "application/json" },
+      const response = await this.transport(`${this.base}/${suffix}`, { method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify(body), signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(15_000)]) });
       const result = await response.json();
       if (!response.ok || result?.ok !== true) return failure(response.status === 409 ? "conflict" : response.status >= 500 ? "unavailable" : "rejected", String(result?.error?.message ?? `Core image service returned HTTP ${response.status}`));

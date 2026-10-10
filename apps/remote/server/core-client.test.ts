@@ -1,23 +1,24 @@
 import { expect, test } from "bun:test";
 import { createThreadClient } from "../../../packages/orchestrator/src/threads/http";
-import { CoreClient, coreConfiguration } from "./core-client";
+import { CoreClient, coreConfiguration, type CoreGatewayFetch } from "./core-client";
 import type { CoreProjection } from "../../../packages/orchestrator/src/core/contracts";
 import type { Thread } from "pi-orchestrator/api";
 
-const config = { url: "http://core.test", token: "fixture-secret", scopeId: "person/one" };
+const config = { url: "http://core.test", scopeId: "person/one", principalId: "person:one", gatewayId: "remote-one", socketPath: "/run/pi-stack/gateways/remote-one.sock", coreUid: 0, callbackSocket: "/run/pi-stack/gateways/remote-one/callback.sock" };
 const thread = { id: "retained-thread", revision: 7, metadata: {}, state: "idle" } as unknown as Thread;
 const projection = (): CoreProjection => ({ cursor: 12, threads: [thread], archivedTotal: 31_054, pending: { [thread.id]: [] }, inputs: { [thread.id]: [] }, settlements: {}, live: { [thread.id]: { text: "snapshot", thinking: "", tools: [] } }, managerThreadId: "retained-manager" });
 
 test("aggregate analytics and manager replies use authenticated core endpoints with explicit scope boundaries", async () => {
   const calls: string[] = [];
-  const client = new CoreClient(config, createThreadClient, (async (input, init) => {
+  const client = new CoreClient(config, createThreadClient, (async (peer, input, init) => {
+    expect(peer).toEqual({ socketPath: config.socketPath, peerUid: 0 });
     const url = String(input); calls.push(url);
-    expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${config.token}`);
+    expect(new Headers(init?.headers).get("authorization")).toBeNull();
     if (url.includes("/projection")) return Response.json({ ok: true, value: projection() });
     if (url.includes("/people-usage")) return Response.json({ since: "start", until: "end", subscriptions: [], rows: [] });
     expect(JSON.parse(String(init?.body))).toEqual({ after: 12, limit: 100 });
     return Response.json({ ok: true, value: { managerThreadId: "other-manager", cursor: 13, replies: [] } });
-  }) as typeof fetch);
+  }) as CoreGatewayFetch);
   await client.refreshProjection();
   expect((await client.peopleUsage("week")).ok).toBe(true);
   expect(calls).toContain("http://core.test/v1/providers/people-usage?period=week");
@@ -28,19 +29,24 @@ test("aggregate analytics and manager replies use authenticated core endpoints w
 
 test("unset core configuration is an explicit error, never an invitation to create a local engine", () => {
   expect(coreConfiguration({})).toMatchObject({ ok: false, error: { code: "unavailable" } });
+  const env = { PI_CORE_URL: "http://core.test", PI_CORE_SCOPE_ID: "person:one", PI_CORE_PRINCIPAL_ID: "registered-person", PI_CORE_GATEWAY_ID: "remote:one", PI_CORE_CALLBACK_SOCKET: "/run/pi-stack/gateways/remote-person:one/callback.sock", PI_CORE_CALLBACK_UID: "0" };
+  expect(coreConfiguration(env)).toMatchObject({ ok: true, value: { socketPath: "/run/pi-stack/gateways/remote:one.sock", coreUid: 0, principalId: "registered-person" } });
+  expect(coreConfiguration({ ...env, PI_CORE_CALLBACK_UID: undefined, PI_CORE_TOKEN_FILE: "/old/token" }).ok).toBe(false);
+  expect(coreConfiguration({ ...env, PI_CORE_CALLBACK_SOCKET: "/run/pi-stack/gateways/remote-another/callback.sock" }).ok).toBe(false);
+  expect(coreConfiguration({ ...env, PI_CORE_GATEWAY_ID: "../another" }).ok).toBe(false);
 });
 
 test("projection is scoped/authenticated and inspection preserves selected archived rows across refresh", async () => {
   const urls: string[] = [];
   const archived = { ...thread, id: "archived-selected", metadata: { archived: true } };
-  const client = new CoreClient(config, createThreadClient, (async (input, init) => {
+  const client = new CoreClient(config, createThreadClient, (async (_peer, input, init) => {
     const url = String(input); urls.push(url);
-    expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${config.token}`);
+    expect(new Headers(init?.headers).get("authorization")).toBeNull();
     if (url.endsWith("/inspect")) return Response.json({ ok: true, value: { thread: archived, pending: [], inputs: [] } });
     const value = projection();
     if (new URL(url).searchParams.get("ids") === archived.id) value.threads.push(archived);
     return Response.json({ ok: true, value });
-  }) as typeof fetch);
+  }) as CoreGatewayFetch);
   expect((await client.refreshProjection()).ok).toBe(true);
   expect(client.get(thread.id)).toEqual(thread);
   expect(client.archivedCount()).toBe(31_054);
@@ -55,24 +61,25 @@ test("projection is scoped/authenticated and inspection preserves selected archi
 
 test("native proxy preserves capability and exact message identity without changing delivery", async () => {
   const body = { threadId: thread.id, requestId: "original-admission", text: "original text" };
-  const client = new CoreClient(config, createThreadClient, (async (input, init) => {
+  const client = new CoreClient(config, createThreadClient, (async (_peer, input, init) => {
     expect(String(input)).toBe("http://core.test/v1/scopes/person%2Fone/thread-owner/send");
     expect(new Headers(init?.headers).get("x-pi-thread-token")).toBe("native-capability");
-    expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${config.token}`);
+    expect(new Headers(init?.headers).get("authorization")).toBeNull();
+    expect(new Headers(init?.headers).get("x-pi-kenan-admin")).toBeNull();
     expect(JSON.parse(String(init?.body))).toEqual(body);
     return Response.json({ ok: true, value: { id: "accepted-original" } });
-  }) as typeof fetch);
-  const response = await client.forward(new Request("http://remote.test/v1/threads/send", { method: "POST", headers: { "x-pi-thread-token": "native-capability", authorization: "Bearer cannot-select-another-owner" }, body: JSON.stringify(body) }), "/v1/threads");
+  }) as CoreGatewayFetch);
+  const response = await client.forward(new Request("http://remote.test/v1/threads/send", { method: "POST", headers: { "x-pi-thread-token": "native-capability", authorization: "Bearer cannot-select-another-owner", "x-pi-kenan-admin": "true" }, body: JSON.stringify(body) }), "/v1/threads");
   expect((await response.json()).value.id).toBe("accepted-original");
   client.close();
 });
 
 test("concurrent UI adapters preserve each native caller capability through core methods", async () => {
   const identities: string[] = [];
-  const client = new CoreClient(config, createThreadClient, (async (_input, init) => {
+  const client = new CoreClient(config, createThreadClient, (async (_peer, _input, init) => {
     identities.push(new Headers(init?.headers).get("x-pi-thread-token")!);
     return Response.json({ ok: true, value: thread });
-  }) as typeof fetch);
+  }) as CoreGatewayFetch);
   await Promise.all(["native-a", "native-b"].map(token => client.withCaller(new Request("http://remote.test/v1/sessions/retained-thread/abort", { headers: { "x-pi-thread-token": token } }), async () => {
     await Promise.resolve();
     return client.api.control({ threadId: thread.id, action: "cancel" });
@@ -84,11 +91,11 @@ test("concurrent UI adapters preserve each native caller capability through core
 test("resync refreshes before notifying UI and failure retains the last known projection", async () => {
   let stream!: ReadableStreamDefaultController<Uint8Array>;
   let requests = 0, fail = false;
-  const client = new CoreClient(config, createThreadClient, (async (input) => {
+  const client = new CoreClient(config, createThreadClient, (async (_peer, input) => {
     if (String(input).includes("/events?")) return new Response(new ReadableStream({ start(controller) { stream = controller; } }));
     requests++;
     return fail ? Response.json({ ok: false, error: { code: "unavailable", message: "Core down" } }, { status: 503 }) : Response.json({ ok: true, value: { ...projection(), cursor: requests === 1 ? 12 : 13 } });
-  }) as typeof fetch);
+  }) as CoreGatewayFetch);
   await client.refreshProjection();
   const delivered = new Promise<void>(resolve => client.subscribe(change => { expect(change.threadId).toBe(thread.id); expect(change.live?.text).toBe("snapshot"); expect(requests).toBe(2); resolve(); }));
   client.start();
@@ -104,13 +111,13 @@ test("resync refreshes before notifying UI and failure retains the last known pr
 test("atomic live snapshot discards buffered deltas at its cursor and applies only newer events", async () => {
   let stream!: ReadableStreamDefaultController<Uint8Array>;
   let requests = 0;
-  const client = new CoreClient(config, createThreadClient, (async input => {
+  const client = new CoreClient(config, createThreadClient, (async (_peer, input) => {
     if (String(input).includes("/events?")) return new Response(new ReadableStream({ start(controller) { stream = controller; } }));
     const value = projection();
     value.cursor = ++requests === 1 ? 12 : 15;
     value.live[thread.id] = { text: requests === 1 ? "old" : "included", thinking: "", tools: [] };
     return Response.json({ ok: true, value });
-  }) as typeof fetch);
+  }) as CoreGatewayFetch);
   await client.refreshProjection();
   let text = "";
   const delivered = new Promise<void>(resolve => client.subscribe(change => {

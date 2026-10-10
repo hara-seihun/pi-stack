@@ -19,7 +19,7 @@ test("Remote kill/unconfirmed delivery preserves exact image message in a durabl
   const delivered: unknown[] = [];
   let available = false;
   const transport = async (input: string | URL | Request, init?: RequestInit) => {
-    expect(new Headers(init!.headers).get("authorization")).toBe("Bearer owned-token");
+    expect(new Headers(init!.headers).get("authorization")).toBeNull();
     if (String(input).endsWith("/accept")) {
       delivered.push(JSON.parse(String(init!.body)));
       if (!available) throw new Error("Lost core acceptance response");
@@ -27,7 +27,7 @@ test("Remote kill/unconfirmed delivery preserves exact image message in a durabl
     }
     return Response.json({ ok: true, value: { snapshots: {}, errors: [] } });
   };
-  const config = { url: "http://127.0.0.1:8791", token: "owned-token", scopeId: "person" };
+  const config = { url: "http://127.0.0.1:8791", scopeId: "person" };
   const messages: Array<string | null> = [];
   const client = new InlineImages(f.db, config, () => {}, message => messages.push(message), transport as typeof fetch);
   const text = '<pi-remote-image id="request" prompt="draw" />';
@@ -49,7 +49,7 @@ test("Remote kill/unconfirmed delivery preserves exact image message in a durabl
 
 test("a rejected image message remains explicit and is never silently dropped", async () => {
   const f = fixture();
-  const client = new InlineImages(f.db, { url: "http://127.0.0.1:8791", token: "owned-token", scopeId: "person" }, () => {}, () => {},
+  const client = new InlineImages(f.db, { url: "http://127.0.0.1:8791", scopeId: "person" }, () => {}, () => {},
     (async () => Response.json({ ok: false, error: { message: "No data execute/use grant" } }, { status: 403 })) as unknown as typeof fetch);
   try {
     client.accept("thread", "denied", '<pi-remote-image id="denied" prompt="draw" />');
