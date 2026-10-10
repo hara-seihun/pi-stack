@@ -432,6 +432,13 @@ function retry(requestId) {
     throw new Error("Native history custody remains repair-held; recover-native-history must establish safe restoration before unchanged-source retry");
   }
   recoverOutstandingCustody(request);
+  if (repair.outcome.deliveryOwnerSourceSha) {
+    const source = repair.outcome.deliveryOwnerSourceSha;
+    const installed = JSON.parse(readFileSync(join(stateRoot, 'owner-code.json'), 'utf8'));
+    if (installed.version !== 1 || installed.sourceSha !== source) throw new Error('Delivery owner repair is no longer installed');
+    retainHostSource(source, request.failure.log, request);
+    request.publicationOwnerSha = source;
+  }
   if (repair.outcome.ownerSourceSha && Object.values(request.nativeHistory?.hosts ?? {}).some(host => host.state === "resume-required")) {
     throw new Error("Preserved native history requires its original integration; finish that candidate before integrating owner source");
   }
@@ -2673,6 +2680,13 @@ function acceptRepairResult(repair) {
   if (outcome.status === "source-fixed") {
     validateSha(outcome.sourceSha);
     if (!(outcome.workspace ?? repair.workspace)) throw new Error("Source repair must identify its registered workspace");
+  }
+  if (outcome.deliveryOwnerSourceSha) {
+    if (outcome.status !== 'infrastructure-fixed' || outcome.ownerSourceSha) throw new Error('Delivery owner repair needs infrastructure evidence without product reintegration');
+    validateSha(outcome.deliveryOwnerSourceSha);
+    const installed = JSON.parse(readFileSync(join(stateRoot, 'owner-code.json'), 'utf8'));
+    if (installed.version !== 1 || installed.sourceSha !== outcome.deliveryOwnerSourceSha || checked('git', ['-C', checkout, 'rev-parse', `${ownerSourceRef}^{commit}`]) !== outcome.deliveryOwnerSourceSha) throw new Error('Delivery owner repair must be installed and retained');
+    checked('git', ['-C', checkout, 'merge-base', '--is-ancestor', request.publicationOwnerSha, outcome.deliveryOwnerSourceSha]);
   }
   if (outcome.ownerSourceSha) {
     if (outcome.status !== "infrastructure-fixed") throw new Error("Owner control source belongs to an existing-publication infrastructure repair");

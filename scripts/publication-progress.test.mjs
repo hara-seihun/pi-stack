@@ -557,6 +557,29 @@ test("repair-result refuses an active owner and requires a saved proof", t => {
   assert.equal(existsSync(f.environment.PI_STUB_LOG), false);
 });
 
+test('delivery owner repair retains checked integration and successful peer without product reintegration', t => {
+  const f = repairFixture(t, 'blocked');
+  const repository = join(f.root, 'repository');
+  assert.equal(run('git', ['-C', repository, 'update-ref', 'refs/pi-stack-publication/owner-source', f.repairedSha]).status, 0);
+  writeJson(join(f.root, 'owner-code.json'), { version: 1, sourceSha: f.repairedSha });
+  const hosts = { converge: { status: 'passed', proof: 'retained-peer-proof' }, gmktec: { status: 'failed', failure: f.request.failure } };
+  writeJson(f.requestPath, { ...f.request, integrationSha: f.request.sourceSha, publicationOwnerSha: f.request.sourceSha, checks: { status: 'passed' }, hosts });
+  const evidence = join(f.root, 'owner-proof.json');
+  writeJson(evidence, { passed: true });
+  writeJson(f.repair.result, { status: 'infrastructure-fixed', deliveryOwnerSourceSha: f.repairedSha, summary: 'positive proof consumer corrected', evidence });
+  const accepted = runPublication(f.root, f.bin, 'repair-result', f.environment);
+  assert.equal(accepted.status, 0, accepted.stderr);
+  const retried = runPublication(f.root, f.bin, '_retry', f.environment);
+  assert.equal(retried.status, 0, retried.stderr);
+  const request = JSON.parse(readFileSync(f.requestPath, 'utf8'));
+  assert.equal(request.status, 'queued');
+  assert.equal(request.integrationSha, f.request.sourceSha);
+  assert.equal(request.publicationOwnerSha, f.repairedSha);
+  assert.deepEqual(request.checks, { status: 'passed' });
+  assert.deepEqual(request.hosts, { converge: hosts.converge });
+  assert.ok(existsSync(join(f.root, 'integrations', f.repairedSha, '.git')));
+});
+
 test("repair-run launches the registered local Pi process once and accepts each terminal result", async t => {
   const cases = [
     { status: "blocked", summary: "upstream credentials are required", expected: "blocked" },
