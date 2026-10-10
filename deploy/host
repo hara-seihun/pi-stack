@@ -295,6 +295,7 @@ if (( services )) && [[ ${PI_STACK_DEPLOY_NO_SUDO:-0} != 1 ]]; then
   timezone_users=()
   for user in "${users[@]}"; do timezone_users+=(--user "$user"); done
   pi_stack_as_root python3 "$root/apps/remote/server/pi-timezone-provision" --configure "${timezone_users[@]}"
+  pi_stack_as_root python3 "$root/deploy/outbound-transports" --tools "$tools"
   if jq -e '.oneKenan == true' "$PI_STACK_HOST_FILE" >/dev/null; then
     pi_stack_as_root install -m755 "$root/deploy/one-kenan-runtime" /usr/local/libexec/pi-kenan-runtime
   fi

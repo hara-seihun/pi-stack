@@ -44,6 +44,7 @@ const jobs = [
   ["Meet recognition protocol", "python3", ["-B", "-m", "unittest", "discover", "-s", "apps/meet-recognition", "-p", "test_protocol.py"]],
   ["action journal publication", "bun", ["test", "deploy/action-journal.test.ts"]],
   ["mail send boundary", "python3", ["-B", "tools/mail-send/test_send.py"]],
+  ["raw outbound boundary", "python3", ["-B", "tools/raw-outbound-guard/test_guard.py"]],
   ...testFiles(root, 'packages/kenan-memory/tests', /\.test\.tsx?$/).map(file => [`memory test: ${file}`, 'bun', ['test', file], { checkInputs: [file] }]),
   ["life import", "bun", ["test", "scripts/life-import.test.ts"]],
   ...testFiles(root, 'packages/kenan-root/tests', /\.test\.tsx?$/).map(file => [`root test: ${file}`, 'bun', ['test', file], { checkInputs: [file] }]),

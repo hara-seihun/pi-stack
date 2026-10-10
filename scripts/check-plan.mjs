@@ -38,6 +38,7 @@ const shipping = {
   'Meet recognition protocol': ['apps/meet-recognition'],
   'action journal publication': ['deploy'],
   'mail send boundary': ['tools/mail-send'],
+  'raw outbound boundary': ['tools/raw-outbound-guard', 'deploy/outbound-transports', 'deploy/host', 'config/tools.json'],
   'life import': ['scripts/life-import.ts', 'scripts/life-import.test.ts', 'packages/kenan-memory'],
   mcp: ['tools/mcp'],
   'mcp-script': ['tools/mcp-script', 'tools/mcp'],

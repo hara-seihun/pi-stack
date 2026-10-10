@@ -1,0 +1,106 @@
+#!/usr/bin/python3
+"""Read-only entrypoints for installed transports; dispatch belongs to Pi owners."""
+import json
+import os
+import pathlib
+import sys
+
+CONFIG = pathlib.Path('/etc/pi-stack/raw-outbound-transports.json')
+SIGNAL_READ = frozenset(('version', 'getAttachment', 'getAvatar', 'getSticker',
+    'getUserStatus', 'listAccounts', 'listCalls', 'listContacts', 'listDevices',
+    'listGroups', 'listIdentities', 'listStickerPacks', 'receive'))
+SIGNAL_VALUE = frozenset(('-d', '--data-dir', '-c', '--config', '-a', '--account',
+    '-u', '--username', '--bus-name', '-o', '--output', '--service-environment',
+    '--trust-new-identities', '--log-file'))
+SIGNAL_FLAG = frozenset(('-v', '--verbose', '--scrub-log', '--disable-send-log',
+    '--dbus', '--dbus-system'))
+SMTP_VALUE = frozenset(('-C', '--file', '-a', '--account', '--host', '--port',
+    '--source-ip', '--proxy-host', '--proxy-port', '--socket', '--timeout',
+    '--protocol', '--domain', '--auth', '--user', '--tls', '--tls-starttls',
+    '--tls-trust-file', '--tls-crl-file', '--tls-fingerprint', '--tls-certcheck',
+    '--tls-key-file', '--tls-cert-file', '--tls-priorities', '--tls-host-override',
+    '--tls-min-dh-prime-bits'))
+SMTP_MODE = frozenset(('-S', '--serverinfo', '-P', '--pretend'))
+
+
+def diagnostic(name, args):
+    if name == 'sendmail':
+        return args in (['-bp'], ['-bP'])
+    if args in (['--help'], ['--version']):
+        return True
+    if name == 'signal-cli':
+        if args == ['-h']:
+            return True
+        i = 0
+        while i < len(args):
+            token = args[i]
+            option, equals, _ = token.partition('=')
+            if option in SIGNAL_VALUE:
+                i += 1 if equals else 2
+                if i > len(args):
+                    return False
+            elif token in SIGNAL_FLAG:
+                i += 1
+            else:
+                return token in SIGNAL_READ
+        return False
+    if name == 'msmtp':
+        mode = None
+        i = 0
+        while i < len(args):
+            token = args[i]
+            option, equals, _ = token.partition('=')
+            if token in SMTP_MODE:
+                if mode is not None:
+                    return False
+                mode = token
+                i += 1
+            elif option in SMTP_VALUE:
+                if equals and option.startswith('--'):
+                    i += 1
+                elif option in ('-C', '-a') and i + 1 < len(args) and not args[i + 1].startswith('-'):
+                    i += 2
+                else:
+                    return False
+            else:
+                return False
+        return mode is not None
+    return False
+
+
+def error(code, message):
+    print(json.dumps({'ok': False, 'error': code, 'message': message,
+                      'effect': 'not-dispatched'}), file=sys.stderr)
+    return 77
+
+
+def main(name, args, providers, execute=os.execv):
+    if name not in ('signal-cli', 'msmtp', 'sendmail'):
+        return error('unknown-transport', 'Invoke signal-cli, msmtp or sendmail.')
+    if not diagnostic(name, args):
+        return error('canonical-action-required',
+            'Raw outbound transport is disabled. Use pi-signal or pi-mail-send; '
+            'the owner reserves the external action before dispatch. '
+            'Signal RPC/daemon and unknown commands are not read-only routes.')
+    provider = providers.get(name)
+    if not isinstance(provider, str) or not pathlib.Path(provider).is_absolute():
+        return error('transport-unavailable', 'This host has no declared raw read provider.')
+    try:
+        execute(provider, [provider, *args])
+    except OSError:
+        return error('transport-unavailable', 'The declared read provider could not start.')
+    return 0
+
+
+def entry():
+    try:
+        providers = json.loads(CONFIG.read_text())
+        if not isinstance(providers, dict):
+            raise ValueError('Expected object')
+    except (OSError, ValueError):
+        return error('transport-unavailable', 'Host transport declaration is missing or invalid.')
+    return main(pathlib.Path(sys.argv[0]).name, sys.argv[1:], providers)
+
+
+if __name__ == '__main__':
+    sys.exit(entry())
