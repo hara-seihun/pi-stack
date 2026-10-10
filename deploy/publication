@@ -2089,7 +2089,6 @@ function deliverHost(request, target, logPath, previous) {
     }
     if (request.executorHandoffs?.[target.id]) { delete request.executorHandoffs[target.id]; writeRequest(request); }
     if (!deployed.ok) throw new Error(`${target.id} release wrapper exited ${deployed.status}`);
-    publishAndroidArtifact(request, logPath, [target]);
     const proof = verifyTarget(target, request.integrationSha);
     const android = currentAndroidProof(target, request.integrationSha);
     const path = join(proofRoot, request.requestId, `${target.id}.json`);

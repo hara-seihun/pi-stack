@@ -372,6 +372,11 @@ test("another checked request cannot acquire native fences until each original h
   assert.equal(complete.status, "published", JSON.stringify(complete.failure));
   assert.deepEqual(complete.hosts.converge, peerProof);
   assert.ok(f.events().slice(boundary).every(event => event.host === "gmktec"));
+  for (const host of hostIds) {
+    const installs = f.events().filter(event => event.host === host && event.action === 'install-app-web');
+    assert.equal(installs.length, 1, `${host} installs its checked client once, before activation`);
+    assert.ok(f.events().some(event => event.host === host && event.action === 'matched-app-web-proof'), `${host} still verifies served artifact bytes after activation`);
+  }
 });
 
 test('one repair-held native boundary prevents automatic rollback of its still-owned peer', t => {
