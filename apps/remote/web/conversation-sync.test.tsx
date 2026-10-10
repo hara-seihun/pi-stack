@@ -221,6 +221,20 @@ test("manager has one contact header with avatar and state, without automatic co
   }
 });
 
+test("manager buffers the exact silent token and its streaming prefixes without hiding ordinary text", () => {
+  for (const liveText of ["<", "<s", "<silent/>"]) {
+    expect(render({ session: { ...session, manager: true }, liveText })).not.toContain('class="live-answer"');
+  }
+  expect(render({ session: { ...session, manager: true }, liveText: "The token is <silent/>." })).toContain('class="live-answer"');
+  expect(render({ liveText: "<silent/>" })).toContain('class="live-answer"');
+  const html = render({ session: { ...session, manager: true }, entries: [
+    { key: "machine", signature: "machine", kind: "user", inputOrigin: "machine", text: "A worker settled" },
+    { key: "quiet", signature: "quiet", kind: "assistant", text: "<silent/>" },
+  ] });
+  expect(html).not.toContain("chat-bubble");
+  expect(html).not.toContain("A worker settled");
+});
+
 test("canonical manager always has Send, never a stop control, while ordinary worker controls remain unchanged", () => {
   for (const phase of ["thinking", "responding", "waiting_on_tool"] as const) {
     const working: Session = { ...session, manager: true, state: "running", activity: phase, lifecycle: { kind: "working", phase, since: 1 } };

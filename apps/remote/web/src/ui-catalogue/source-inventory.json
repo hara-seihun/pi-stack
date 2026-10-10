@@ -32,6 +32,7 @@
         "AppUpdateStatus",
         "AttentionScreen",
         "ClientCacheContext.Provider",
+        "DismissibleError",
         "FilesScreen",
         "Inbox",
         "InspectorSheet",
@@ -60,15 +61,11 @@
       "children": []
     },
     {
-      "name": "ScrollContent",
-      "path": "ConversationView.tsx",
-      "children": []
-    },
-    {
       "name": "ConversationView",
       "path": "ConversationView.tsx",
       "children": [
-        "ScrollContent"
+        "ScrollPositionBoundary",
+        "ScrollPositionContext.Provider"
       ]
     },
     {
@@ -175,9 +172,15 @@
       "children": []
     },
     {
+      "name": "ChatsTab",
+      "path": "app/Shell.tsx",
+      "children": []
+    },
+    {
       "name": "TabNav",
       "path": "app/Shell.tsx",
       "children": [
+        "Button",
         "TabIcon"
       ]
     },
@@ -393,13 +396,13 @@
         "Composer",
         "ConversationHeader",
         "ConversationModelMeta",
+        "ConversationStatus",
         "ConversationView",
         "DismissibleError",
         "InlineImagesContext.Provider",
         "Markdown",
         "QuestionsComposer",
         "ReplyComposer",
-        "StatusIcon",
         "Transcript"
       ]
     },
@@ -411,6 +414,7 @@
         "AgentRoute",
         "ChatMessage",
         "CopyButton",
+        "InputStatus",
         "Markdown"
       ]
     },
@@ -451,11 +455,21 @@
       ]
     },
     {
+      "name": "WorkEntry",
+      "path": "features/conversation/Transcript.tsx",
+      "children": [
+        "MessageEntry",
+        "OutgoingEntry",
+        "Step"
+      ]
+    },
+    {
       "name": "WorkCard",
       "path": "features/conversation/Transcript.tsx",
       "children": [
         "Step",
-        "VirtualTranscript"
+        "VirtualTranscript",
+        "WorkEntry"
       ]
     },
     {
@@ -473,7 +487,9 @@
     {
       "name": "VirtualTranscript",
       "path": "features/conversation/VirtualTranscript.tsx",
-      "children": []
+      "children": [
+        "ScrollPositionBoundary"
+      ]
     },
     {
       "name": "RouteName",
@@ -490,6 +506,16 @@
     {
       "name": "AgentDisclosure",
       "path": "features/conversation/agent-message.tsx",
+      "children": []
+    },
+    {
+      "name": "InputStatus",
+      "path": "features/conversation/input-status.tsx",
+      "children": []
+    },
+    {
+      "name": "ManagerContextSelection",
+      "path": "features/conversation/manager-context-selection.tsx",
       "children": []
     },
     {
@@ -711,6 +737,13 @@
       "children": []
     },
     {
+      "name": "ConversationStatus",
+      "path": "features/status/ConversationStatus.tsx",
+      "children": [
+        "StatusPill"
+      ]
+    },
+    {
       "name": "StatusIcon",
       "path": "features/status/StatusIcon.tsx",
       "children": []
@@ -894,6 +927,14 @@
       ]
     },
     {
+      "name": "ManagerResult",
+      "path": "app/manager-request.ts",
+      "variants": [
+        "ok:true",
+        "ok:false"
+      ]
+    },
+    {
       "name": "LoadResult",
       "path": "app/preload-view.tsx",
       "variants": [
@@ -1014,13 +1055,6 @@
         "\"active\"",
         "\"waiting\"",
         "\"idle\""
-      ]
-    },
-    {
-      "name": "RenderedTranscriptItem",
-      "path": "features/conversation/Transcript.tsx",
-      "variants": [
-        "kind:\"step\""
       ]
     },
     {
@@ -1161,28 +1195,24 @@
       ]
     },
     {
+      "name": "ConversationConnection",
+      "path": "features/status/ConversationStatus.tsx",
+      "variants": [
+        "kind:\"connected\"",
+        "kind:\"syncing\"",
+        "kind:\"disconnected\""
+      ]
+    },
+    {
       "name": "StatusKey",
       "path": "features/status/thread-status.ts",
       "variants": [
+        "\"working\"",
+        "\"typing\"",
         "\"queued\"",
-        "\"admitting\"",
-        "\"starting\"",
-        "\"preparing\"",
-        "\"finishing\"",
-        "\"cancelling\"",
-        "\"recovering\"",
-        "\"reporting_error\"",
-        "\"thinking\"",
-        "\"responding\"",
-        "\"preparing_tool\"",
-        "\"waiting_for_model\"",
-        "\"waiting_for_capacity\"",
-        "\"waiting_to_retry\"",
-        "\"tool\"",
-        "\"compacting\"",
-        "\"retrying\"",
         "\"waiting\"",
         "\"stopping\"",
+        "\"reporting_error\"",
         "\"error\"",
         "\"archived\"",
         "\"idle\"",
@@ -1422,9 +1452,9 @@
     }
   ],
   "fingerprints": {
-    "App.tsx": "47fad81c5a2b92b083dff7f05e1d102def1623b03305fcde36aa88b7a5c9983d",
-    "Composer.tsx": "363750842edfcefbe5a384419cf5ac177238589cd38a4dbbc18a9804489d8097",
-    "ConversationView.tsx": "7f248b3ff17eeafc99a9550eb57191397993c694075f9b88e0016922eb05edc4",
+    "App.tsx": "bac286f685737faaf2bf2b874150ed9d34564af7e7e428d443dc969040cea9ef",
+    "Composer.tsx": "763a5a7f38d507cfc2f4c601abfad9a08ea296901ad3230377d00d047bfa66bf",
+    "ConversationView.tsx": "5b7afa13c754375adc42d9291f5e2a49219608a31524980f2a29f9f8f21c3681",
     "DrawingCanvas.tsx": "c291c97dea3c6210609da78f1d4cebafc7555243952534fead1d738c30e1b2a2",
     "DrawingColourPicker.tsx": "db48fefb9143dd4170c766e2c15b7b1a23f507a4db241aaf3d1a724e81a7c17e",
     "EnvironmentControl.tsx": "f781aca16f6955eaa64b4a2e044891f62d037fced7c98b2c1fd6246a833e3347",
@@ -1439,11 +1469,14 @@
     "android-app.ts": "58ac25ee0ad3bd710a848ff4ffd48057f17481a37dca1fd0a061c5b7aa3e0b29",
     "android-download.tsx": "b9b94526574d8d77ce88312a18d576d9361919987d1798049f610a7663055dce",
     "app/Sheet.tsx": "6074393463d2d87607bd4f632b701ba3442120238fdfe1a6ba70bffbd960d328",
-    "app/Shell.tsx": "9ff9ab29cb35127d5fab722a28cf40fe03edf92be84419e274e61ce60f24e2f8",
+    "app/Shell.tsx": "562445a7fa16cd55e99d364fa841a33a97ab8e7f2a84f42c0eee30a794dde849",
     "app/layout.ts": "0c1049666dd365f49d34c4c678a12b895e811e256451990edfb2cf3311ac66b5",
+    "app/long-press.ts": "e65299c77fc53e4202829bbfafa9ee181667cb61c6713b5cf40c2c4c4fd7f89d",
+    "app/manager-request.ts": "7d6491cb14be4750bc4fb5bfb37eb7c78a8d70214f2fb0b131ce1c30ef1d6dab",
+    "app/mono.ts": "29cab13976a7de3b42ae97e0b56e50a109929277ba45234f0e160e19d8ab6205",
     "app/preload-view.tsx": "73465867d21021d68ab92c0baf5343c4cd7e824f8bb0a04a29bc44766e7bf5bc",
     "app/routes.ts": "476c1a7a2a4af8ae42859db7c0da2652ba9c1b605b1b00cd694aeef970f81057",
-    "app/system-back.ts": "edcd9467d5126497c095bc05eada6246f1c5178aa34b98dae6722505db0ddeda",
+    "app/system-back.ts": "f4490d819623828d00a77c3bea4ff21596cba875e11705fd3120439a9821f87d",
     "app/use-visible-selection.ts": "931d87b89f2ce788a3331ad5f103d325118e9602b833075a7522762b05e3806c",
     "app-path.ts": "d46122a4cc897843d0a0835884c3adeaf3eebb984e441eed0450ec835893f0d3",
     "app-update-state.ts": "6e5faa9f56df3a3c895c1452c022ad3a0cb1d96a2ab059d02e51f1420ac78b38",
@@ -1453,7 +1486,7 @@
     "cached-media.tsx": "8075fb0ab60c6bcd9cedd7e9da7edb82dd1be707f8fe590d7e50df0fee63a4d2",
     "calendar.tsx": "d1b884800d97d84a7616141879f11c340b6ccc8083ce9e9d626c9c45f1184db0",
     "chat-drawing.tsx": "1794ce14e705c0476c5fd4f228348d56b6c98d8e5b59366c0c3ebec93fbe76b1",
-    "chat-message.tsx": "697a30e5344516465af93c7e1c96fed370e5f49b93a633f5a890a70b5aba5573",
+    "chat-message.tsx": "0c82aedcef23b73b2a949e9ff344cc099ae0155cae8d318b31fe2f578a8b072e",
     "chat-picker-lazy.tsx": "7e3e26eeeb0a8d454f0c40190fd7fd8dafd8fde56a58ce4d36c36cdb94077d41",
     "chat-picker-options.ts": "3cf5cacd83d440661ae49e9406cc30a212d08d02e4a7ff159f27437388c5d03d",
     "chat-row.tsx": "e91e801cae74f594153fa0a4d74c6ba1407a0f27a5f25b1c1c779c5e1a8e6fce",
@@ -1461,37 +1494,41 @@
     "client-cache.ts": "1cac3fe6a0f700384c9f97203785f39fb49ff3240e9ad34a786c601d63f10955",
     "client.ts": "ec1b4ba4d0069aecb9e4f15f7e726b94f42d535a02dd7abed20f28ac18a15458",
     "context.tsx": "912c4ab3276e51e45f32a7177a79e98ec4d3ec54e2a2274192434e0b9fa0710d",
+    "controller-replacement.ts": "317952b32e0bc9a841a6030bfd0b07f9af76efa99a45fdb171746d963924c928",
     "dismissible-error.tsx": "fcd8bb238ac33234040c02ad58efc656b99f28658e3039f67835278ea7d3a261",
     "drawing-drafts.ts": "16e0c686f061806d800d1b1bf4aeec1dc23cc62c229b40e8d8857ec74659c6df",
     "drawing-paper.ts": "185d7431e95ad4985f9737b09bbeb219146290a79bca5457e8db856c3ba2afa6",
     "error-feedback.ts": "da973dc8f3c60589cea05a753449a9f38750d84293ee6ae3d5180d3ad93995c7",
     "feature-usage.ts": "71e862861666646ce3971a062700a7aed9da31633137abada08b311b3e28fbdd",
-    "features/agents/AgentsScreen.tsx": "402d58595f46d0c31eaf7ffc04e57ca5c84722169ece24352d44dc9b4a55aaaa",
-    "features/agents/agent-directory.ts": "41cf9cff2388285cd3bba5ffd8ddb3e84c9df24a4f2e0abb35f8d846447c92b6",
+    "features/agents/AgentsScreen.tsx": "2c295a5b90096ea0ad40fa89f840d968ff2245203324eb4f1a40c29394dcc9e1",
+    "features/agents/agent-directory.ts": "c8c0344cfebbf6fc9ce737aaab21cfa10d6660de45542c6b5c683250207de255",
     "features/agents/agent-task.ts": "956260397191eed6e9bff97c3e5e4ed0f3304b157f4aaf179fe41399c2f5b119",
-    "features/chats/Inbox.tsx": "17892cb1fa4d9d1e91278917d806ffecb65516e5c3c8667d76b9d6211a3ebc7a",
+    "features/chats/Inbox.tsx": "04e9457a8e0bea4d611f280a29e513cb625c1c4e0bf760094b81dbc2a621443e",
     "features/chats/use-thread-color.tsx": "bbf9f6d31368a1060f998391ee7fea7e70cbb091f710d52e15bce9e4f5f30f5d",
     "features/conversation/ContextTokens.tsx": "626065ccbc879ee13e18da0c9a90c1a1b34641a67ffd5b764c2284b5f50c3238",
-    "features/conversation/ConversationScreen.tsx": "022f0abbeb26d87bc4e92ff0ffa4e195f51da9a04a5557c43ce11f1d1707e1db",
-    "features/conversation/Transcript.tsx": "982950dd9bf9bdb8813f96d1bdcc2f23ead3cbf0edc8c950f15d44be3e2754f6",
-    "features/conversation/VirtualTranscript.tsx": "a7d7b54290e07bf0fd53a6ff047c1c369bdc0822c2c6d757332e51733fd9942e",
-    "features/conversation/agent-message.tsx": "ed3f5df199721bfaa378fdf107f07bebecb8948b5913b7f0d3da835829102e05",
+    "features/conversation/ConversationScreen.tsx": "810a43b6010fbf07ce91d53d1f8c7bc3739257ee5a041f23f8100f98de1aa298",
+    "features/conversation/Transcript.tsx": "6585b075f2bbec1897ea13babe41a3d8d06aae383ef2bb8a2ca9f9dcfae670ff",
+    "features/conversation/VirtualTranscript.tsx": "b1123ed560f1a74be5a5a1c1d21ad197b043f5b401b69c5cf22c399853209431",
+    "features/conversation/agent-message.tsx": "aa548c11165dcbff637b03522373beaf5d4a020d745acec86ce67de88a2e8665",
+    "features/conversation/chat-group.ts": "a71613ad1e9b26c4b367cfcd36945017307dbcde91823a2935d4dca000b4e1bc",
+    "features/conversation/input-status.tsx": "23496f5b1489f2094ad8b746025a0175e76c5976d3de050d324d4cad48104c56",
     "features/conversation/item-bodies.ts": "8a4c524e13155aa47a281cc733c3156d0c6228c7e4146aca86b810acf5b8eaa4",
-    "features/conversation/live-text.ts": "95cd2d812cf825141d993446f34a7d862af60f7c109005d1e4286a15e211dfc7",
+    "features/conversation/live-text.ts": "3cc1354c965c318c350cba0b9c9d94c922211a8b235a577728352e875e1396d3",
+    "features/conversation/manager-context-selection.tsx": "15fee37e3921eb1ca63bd15527995b01e0b4068e78405d5deb1bea83f6486a4e",
     "features/conversation/message-body.ts": "909ab834123b71984b8674cfe80f1c3c17b6c2e5e505a05f70d2f22c00ff5c15",
     "features/conversation/question-content.tsx": "d7bd6792dfa9c3140e88045a4217761a506295600b598dbd76a4f2c09b1fe817",
     "features/conversation/question-drafts.ts": "748d7d852f4123601407c39162be5e6790e6fc1a07143045fb025d2a81e02761",
     "features/conversation/questions.tsx": "3a314d58b8e0adde7554b00c6b485706f3969e212854c7356cbcb898652d4b85",
     "features/conversation/thread-chips.tsx": "105af63d8226d9bc8088b41ff9eff12f143ff79c5f26289dbcb5b19e9ed8c771",
-    "features/conversation/tool-summary.ts": "0f47c8521293b9ddd0cb458bbc57c05d2dab1fbf9d42fa83fc07e5e80a0e4a53",
-    "features/conversation/transcript-entries.ts": "e8ded160bc62120b435f3c0a21f44afdca5e1532b84dde0f862ccc9f11027a2c",
-    "features/conversation/transcript-model.ts": "0e3eb01bb1090e010c26bbdd54b566cdb5643fbfe3f03d0d0b874f10057d0021",
-    "features/conversation/transcript-store.ts": "e38366c91a6b828dc085ff19ec07be45a9462301580f68f91868d399c8cd0f80",
+    "features/conversation/tool-summary.ts": "fd57dd13c626ed1535b32688ae30405964d658f98e962f7f763e2260630c8e67",
+    "features/conversation/transcript-entries.ts": "adf756c7abbeef1fda7fb734ceae16864d634d9ca3576bd0fe12e2275d1efd31",
+    "features/conversation/transcript-model.ts": "9e7ed49e55fc8ff198f7ee1186559fcbec3e041cdfce44a3d40f359375aa6b57",
+    "features/conversation/transcript-store.ts": "a4782d050a7695c7d9bb2f9f9748537d3a8b20e628832e14624c3a2b465ba694",
     "features/conversation/visible-heads.ts": "2ba5234c6a6f44af413e56917de5b000cb2a19075517d391755b6f6d9f7dc805",
     "features/files/FilesScreen.tsx": "8add7fe8f0297f8e1585bc7e1a3300e443348c00ef3f422b60111dcef34737e4",
     "features/files/editor-launch.ts": "6ff53cf660c00a5b5399825ee9fe6f7c2d4d9c661754a85e4d2b4fb5c9c93124",
     "features/files/file-kind.ts": "622388b8917ac672ad4fb9225f8a5e7db67b023eb8da2246ff6fcba8ae177529",
-    "features/inspector/InspectorSheet.tsx": "a60316cd257060935541399dbad61ee637597bac9b71290f2aca270b879788fc",
+    "features/inspector/InspectorSheet.tsx": "0debf806668cf1622203ff500bd5022040414d43f2afcaa10eedc26ed2a6d2c2",
     "features/machine/FeatureUsage.tsx": "9e6fe4f31a43f447faa7c0212fd94136d3d621530fab7203fa13bc10efef4bc0",
     "features/machine/MachineScreen.tsx": "172b2c6aba4cf0ffe3828b166d5e870b8892f286234b06ba7e81be0108e99971",
     "features/machine/MachineTab.tsx": "462c98bd66123dd389238ce6396a2dd088641a74fb0644f28d8ef2cb26b39cd5",
@@ -1503,10 +1540,11 @@
     "features/settings/SettingsScreen.tsx": "9d04c4cc66a4b6b2b823f3e7baa1e42778d339d95533d228a85819547d00b641",
     "features/settings/SpeechSettings.tsx": "2448837ce541eb35ba634fde86190e910e95f185f3c99ba897565167ca3e37e4",
     "features/settings/client-timezone.ts": "f5bd1f48c248b9148700b7e2b89803076c5023e28501e951845c0ea557297c03",
+    "features/status/ConversationStatus.tsx": "701f1834f47ff3decd6d1c00508b4fa8d1969c5888e127578474b0ea4206e25b",
     "features/status/StatusIcon.tsx": "c24ea6370cae1ad67a7422e58d00d33a38f332b6d3bef7297efa84d2643c295a",
-    "features/status/StatusPill.tsx": "34bca2994a1e3f7ea48116a1d25f216dc772b6808f90b3af2abc574e316a0e38",
+    "features/status/StatusPill.tsx": "35ed55ad59be06e9c13614e135e1d5742ab759b13443e8dc0441c9a726d7caac",
     "features/status/model-glyph.tsx": "c41f1d5896acd32107aeede398177c42f4329c36ab3607a4dfc6a2cf199c3cf1",
-    "features/status/thread-status.ts": "f100003fa0b29b41f7b361ba6e8a2dc6d380305f4bd2184ba6a45f4847fb48e3",
+    "features/status/thread-status.ts": "741faf93e6e06e2a7d35988fe0066775f142e523752008c91d503ff2c3aa4cf8",
     "features/status/visual-clock.ts": "008c1f167373c0007038c6204faa3cd00cbc233bc52565417588737acef8276f",
     "file-drop.ts": "feab4c338631b9029c2302384817b4226dd1afc7acae537bbbe862c189913504",
     "globals.d.ts": "d554a1fcbde711e74081fffd8353886097af0fa57bb1e77034896b85cac07136",
@@ -1515,13 +1553,14 @@
     "inline-images.ts": "28e2527a88bf8d4ba6b0d520ff9ed0abf1a1b8960bbc679d107a96a867dc9dad",
     "live-media.ts": "288f01bf363a3279eba9ad037e7cf23a22488c955c4e3e9be9dae9d54e9de7e1",
     "main.tsx": "47b14ad649a8fc977ae16f7725c3acf48d3bfdd3e37a585c27ec68c7b8ac6dfc",
+    "manager-client.ts": "fe540ef15b0c38890dbe43737eb30cc09c4e89defe15b9674a83f553365cc638",
     "markdown-dom.ts": "c1cc9df64004c30169a8a5047c289c96e271b3ce426fe0e76f7c8cffeb889edf",
     "markdown-engine.ts": "4b9488ccd3f97d4943bd6a5134e40c4570fad4c94eb36079d3f076bb21b2ae86",
     "math-engine.ts": "79fa6bccdb09ba56a6c01f52161281239401061bad4edb28a4f0ed8158404a2c",
     "meet/adapter.ts": "b53c29c1399ccc8a54760e7519cf22028fb61d1cda46bafc00a6c2745eff165f",
     "meet/browser.ts": "bf362c777d5ee198c0d90c99344ae173a8deaa35ca152d8b51421b02891edfc3",
     "meet/external-room.ts": "d7a0306c0e04e1d843e7dd8618208d4f0fc8992db5c50ed081693e26a74a2827",
-    "meet/media.ts": "f95f50330f2804d2672c273c05d6f29c02e07a33db57e88eccfadc1fcb9e906d",
+    "meet/media.ts": "1a5280c1726fd1ba6df592667c3d746b5fe0124c0132b1db4d055297748b143d",
     "meet/poll.ts": "dd5ceaec0a05cf50ae1d4512ee7c8c348a05ed4294c2998b4edace1bdda92677",
     "meet/transcription.ts": "525f19557311b02178b8c6eee45f00b05c39f521011497cf56f8d94236ea980f",
     "meet/transport.ts": "e1fb5557f75ae1083232adc9289c37592c7175989366b72f5f99bca21fd1875f",
@@ -1531,17 +1570,17 @@
     "message-reactions.tsx": "786adc7aecae7ececf032a625efaa6b829820b01da34eb166edd9355b5ffeffe",
     "message-reply.tsx": "338194a2f5f4e5fca3b269e5c0ea11817652dc4ad373536701042e3bd8e7db72",
     "model-groups.ts": "205ae6bcec2d72491b6e407ab73550585f895f0fe46f076f9433bb96a6e2e675",
-    "native.ts": "dba4391eb76c45c13b5adb480064a36e53541d22ad18628eb76d014e53c63a04",
+    "native.ts": "fbd72f72e8462e32d9b123d9379178ea52a9f4df709326abf4c94320c6bd65d7",
     "near-viewport.ts": "40694ccaccbd66eb72c5084d5da3ba9d1ba2cae24a5c3e9b378c9eb3fa4a1664",
     "needs-you.tsx": "1b20eb09d4b18766e91cba1543aa7ea83e1c79a4266d72bcf588065a5e76df2b",
     "network-join.tsx": "4c6e6d8f9a67955b57043ceb55520d408d77857ed199fbbbdc7ef10813ef9114",
     "notification-control.tsx": "0f281136ca71b7151742742b7f0bd6f0855c1e608b4de853ecdf26ca595b39e6",
-    "notifications.ts": "95772f438359c77ebdb83aba6b946a92851d9aa966fc428888906836cac261f6",
+    "notifications.ts": "7eff527c84aef52a30fdf030d3f8158c4335772c760a80bfeb2c97152a0cf1b4",
     "pending-closes.ts": "05d285460b1519017e942707fae684c5174fddd0d00dc96ed4c9de0e3de91b0b",
     "permissions-setup.tsx": "361d0e5f65ec03bb8589be0d15fc5678b8f557ed9f98ced24cb7556601a0c5a0",
     "person.ts": "9e8936b718a2900b24ef3a5c04957fc894f747b52629cba23054475f0faf0e77",
     "phone-access.ts": "0d5de0007857e2afaaeb259a8a095aa91d37f2a79cdcb7496d75d5643600d2ad",
-    "prompt-outbox.ts": "c2b751704d1e835c78989ce16700d49810b77843184ab02b18fb37247f62673e",
+    "prompt-outbox.ts": "b8d0fffbb87b5063a15c465a6f96d8026e77daeb864121cac24a9167a0876416",
     "prompt-storage.ts": "cf0363dd3e6ffdd4472231caf0e9524711d07b356ce135432a9c1a3449cbf39c",
     "prompt-submissions.ts": "d1f1743e4b665ee7a13db7990a33f550fcd44bcba7738524dcdaf4b083de8bd2",
     "reply-drafts.ts": "515dfc7da923a6e5a9287f4519b11d09d4ee303f7156d14edf034fdabf5d6313",
@@ -1550,21 +1589,22 @@
     "room-sync.ts": "d5c0bc4425035d22510f9cad78f6d60cdb28b2691e992b1dab2298c6731c05e2",
     "rooms.tsx": "a9689b68436543b4e52da92114b5e70f79c108d6a3bc4b5dd6291f9ba0dbb4cc",
     "router-auth.ts": "4b9cbae22cb0664f89c3444c853aaa5b7aeed35164d158bb5ebb00481c962f1f",
-    "scroll-position.ts": "e1cbb147e87540251bfe51c99d87bb3a0a427aec8147a15e408f1d434f494ca6",
+    "scroll-boundary.tsx": "142a9b4b2c086a4ca1f15662939fa73d4e3f53f45574c02d8a95f34a6169affd",
+    "scroll-position.ts": "c4b7705e355ed8526b6d75f50ac90ba335ca44da37680781bbbe5b3f5b8557f3",
     "speech-preferences.ts": "d7bfb9aa45abcdd4b004234cfe9813e4aacb6291372e17a8f37160fdc1bb9a3a",
     "speech.ts": "fd57ebda6c91c4148db3a83ea2fe7159fc241bdd7471ccec01da3dfa97a8d8f0",
-    "stream.ts": "04147de69443d0a4cffe77d9d8100cf9af563c8c4368e81fe83be558b3cc870e",
+    "stream.ts": "038ddb313e47427237bed616fb536f40c4d7d73e0bc05fe90a7197a073c95ff7",
     "streaming-markdown.ts": "602fb1ebde77775afea90d9bcc0463b6b6ac265eddb33156420e633255fdf03f",
     "thread-controls.tsx": "117dcfad30f315155b4c2f3542978667d01d667c09feb940b668968808346730",
     "thread-discovery.ts": "1b8f71871516601b634f837881b1e64667bf2ccb17f20bd39955ca2395dd862e",
     "thread-notifications.ts": "da37065dfbae199dfd1b8b959a0a5bb393590dc501955e7aa0f84c4f453ec7e2",
     "thread-settings.tsx": "66016465c436ba5813bdbba472bf4a189c0fbcc9d7e8673cfc4367eea70958d9",
-    "thread-start-menu.tsx": "1b72bbb9225634d4abef45d5030f923cb8e17d890bdf022c2a4cc435d9c52697",
+    "thread-start-menu.tsx": "b90f77a0e61fd1ca6259efb8683d4de0ecf73a14a69e12e5cfb9af4b09ee1f61",
     "thread-start-state.ts": "aaabed2c9cab638291c08076aa40387213d4356d1090137032f810c0ed54a97e",
-    "thread-state.ts": "aa4e284afd8a28794c62a7e70b8c7d2e75be3e388d99327fcde9c5d00ca50acd",
+    "thread-state.ts": "17090bc467952ac0b4f57c7bbd2ee41fe0330b148ddd09e98ee943c34914b114",
     "toasts.tsx": "1c65c21289018f9656677c7c2feb9aab5534e22a05ed86da69939de3eb1574fd",
     "transcript-cache.ts": "f8faead919b3c1d930faa55fca88e8d2437a6a62c68a9ed6858009963c8d8897",
-    "types.ts": "5a0504af24318f331a504f75f93dc2c97c83743df32a6e38d389dfd600927d25",
+    "types.ts": "9ce2201bf28c338c793854a33ab2688e28dd0bd26fa955ff247451022559ad38",
     "undo-closes.ts": "06596093622974be04cb9279b813cbe4be086a19c33c7730871e0ee1632902ee",
     "virtual-message-navigation.ts": "7918bfdfb96f78e465f19dcfb969513cf07aecce83d16f7da0184e72a562843e",
     "voice-lazy.ts": "978e070c72abd60d0462ce2bb4105e2bc4005e3a946879accef6c1a0ed761fdc",
@@ -1573,5 +1613,5 @@
     "voice.ts": "6fa96af26120c8e8e63da57dc7c33a0d60f45cabcbabec3251a58a1c75c9bdc7",
     "websocket.ts": "dd03584b7a8a295b481c7b0426abcb245f88a2d6ff60b3f55cf7f117b7e126a2"
   },
-  "styleFingerprint": "ab76c0bf7a357b238b58330ef201a1a8b57f1f819b5fe421705174c85bc4fad9"
+  "styleFingerprint": "95fff37794261f11ca2f1ea2ad5f61b2c8dd5c759d91ddd0adce11aec710d548"
 }
