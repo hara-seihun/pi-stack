@@ -138,6 +138,15 @@ test("SSE parses split chunks, comments, multiline data and CRLF; invalid varian
   expect(() => streamEventFromFrame({ event: "error", data: "not JSON" })).toThrow("Invalid stream input");
 });
 
+test("SSE split CRLF never dispatches an event before its data", () => {
+  const parser = new EventStreamParser();
+  expect(parser.push("event: reconcile\r")).toEqual([]);
+  expect(parser.push('\ndata: {"resource":"state"}\r')).toEqual([]);
+  expect(parser.push("\n\r")).toEqual([{ event: "reconcile", data: '{"resource":"state"}' }]);
+  expect(parser.push("\n")).toEqual([]);
+  expect(parser.push("event: reconcile\n\n")).toEqual([]);
+});
+
 test("finite reconciliation acknowledges visible resources before disposable push opens", () => harness(async h => {
   const pending = deferred<Response>();
   const client = h.client(call => call.path === "/v1/reconcile" ? pending.promise : h.push(call.signal), { subscription: { session: "a", viewing: true } });
@@ -152,6 +161,47 @@ test("finite reconciliation acknowledges visible resources before disposable pus
   expect(h.calls.every(call => call.init.method === "POST" && call.init.cache === "no-store")).toBe(true);
 }));
 
+test("healthy revalidation and subscription changes never report transport recovery", () => harness(async h => {
+  const pending = deferred<Response>();
+  let waiting = false;
+  const client = h.client(call => call.path === "/v1/reconcile"
+    ? waiting ? pending.promise : h.response(call.body)
+    : h.push(call.signal), { subscription: { session: "a", viewing: true }, listen: true });
+  client.start(); await h.time.flush();
+  const settled = h.statuses.length;
+  waiting = true;
+  h.window.dispatchEvent(new Event("focus")); await h.time.flush();
+  await h.time.advance(RECONCILE_TIMEOUT_MS - 1);
+  expect(client.state()).toBe("open");
+  expect(h.statuses.slice(settled).every(status => status.state === "open")).toBe(true);
+  expect(h.selections.at(-1)).toEqual({ sessionId: "a", ready: false });
+  pending.resolve(h.response(h.calls[2].body)); await h.time.flush();
+  waiting = false;
+  client.update({ thinking: true }); await h.time.flush();
+  client.update({ session: "b" }); await h.time.flush();
+  client.invalidate("live:b"); await h.time.flush();
+  client.reconnect(); await h.time.flush();
+  expect(h.statuses.slice(settled).every(status => status.state === "open")).toBe(true);
+  expect(h.selections.at(-1)).toEqual({ sessionId: "b", ready: true });
+}));
+
+test("recovery grace starts at a failed finite request, not ordinary synchronization", () => harness(async h => {
+  let pending = false;
+  const client = h.client(call => pending ? new Promise<Response>(() => {})
+    : call.path === "/v1/reconcile" ? h.response(call.body) : h.push(call.signal));
+  client.start(); await h.time.flush();
+  pending = true;
+  client.reconnect(); await h.time.flush();
+  await h.time.advance(RECONCILE_TIMEOUT_MS - 1);
+  expect(client.state()).toBe("open");
+  await h.time.advance(1);
+  expect(h.statuses.at(-1)).toMatchObject({ state: "connecting", error: "", diagnostic: "State synchronization timed out" });
+  await h.time.advance(RECONNECT_GRACE_MS - 1);
+  expect(h.statuses.some(status => status.state === "offline")).toBe(false);
+  await h.time.advance(1);
+  expect(h.statuses.at(-1)).toMatchObject({ state: "offline", error: "Connection lost. Reconnecting…" });
+}));
+
 test("finite sync succeeds with permanently unavailable push; first recovery has no one-second floor", () => harness(async h => {
   const client = h.client(call => {
     if (call.path === "/v1/reconcile") return h.response(call.body);
@@ -160,11 +210,13 @@ test("finite sync succeeds with permanently unavailable push; first recovery has
   client.start(); await h.time.flush();
   expect(client.state()).toBe("open");
   expect(h.selections.at(-1)?.ready).toBe(true);
+  const settled = h.statuses.length;
   await h.time.advance(0);
   expect(h.calls.filter(call => call.path === "/v1/reconcile")).toHaveLength(2);
   await h.time.advance(RECONNECT_GRACE_MS * 3);
   expect(client.state()).toBe("open");
   expect(h.statuses.some(status => status.state === "offline")).toBe(false);
+  expect(h.statuses.slice(settled).every(status => status.state === "open")).toBe(true);
   expect(h.calls.every(call => ["/v1/reconcile", "/v1/stream"].includes(call.path))).toBe(true);
 }));
 
@@ -434,6 +486,22 @@ for (const malformed of ["JSON", "envelope", "event", "snapshot"]) {
   }));
 }
 
+test("a finite acknowledgement cannot clear a failure before the whole response is valid", () => harness(async h => {
+  let malformed = false;
+  const client = h.client(call => malformed
+    ? finite([hello, h.reconcile("state"), h.reconcile("transcript:a"), h.reconcile("live:a"), h.ack(call.body), { type: "unknown" }])
+    : new Response(null, { status: 503 }), { subscription: { session: "a", viewing: true } });
+  client.start(); await h.time.flush();
+  await h.time.advance(RECONNECT_GRACE_MS);
+  expect(client.state()).toBe("offline");
+  const settled = h.statuses.length;
+  malformed = true;
+  client.reconnect(); await h.time.flush();
+  expect(h.statuses.slice(settled).some(status => status.state === "open")).toBe(false);
+  expect(h.selections.some(status => status.ready)).toBe(false);
+  expect(h.statuses.at(-1)?.error).toContain("Invalid stream input");
+}));
+
 test("malformed push is explicit even after finite sync succeeded", () => harness(async h => {
   const client = h.client();
   client.start(); await h.time.flush();
@@ -460,10 +528,12 @@ test("invalidation drops only its held hash; accepted push revisions become the 
 test("a missing patch base is forgotten before immediate finite repair", () => harness(async h => {
   const client = h.client(undefined, { subscription: { session: "a", viewing: true } });
   client.start(); await h.time.flush();
+  const settled = h.statuses.length;
   h.wires[0].emit({ type: "reconcile", resource: "live:a", revision: "new", base: "missing", kind: "patch", patch: { op: "replace", value: { type: "live", sessionId: "a", text: "hi" } } });
   await h.time.flush(); await h.time.advance(0);
   expect(h.calls[2].path).toBe("/v1/reconcile");
   expect(h.calls[2].body.have).not.toHaveProperty("live:a");
   expect(h.calls[2].body.have?.["transcript:a"]).toBe(revisionOf(transcript("a")));
+  expect(h.statuses.slice(settled).every(status => status.state === "open")).toBe(true);
   expect(client.state()).toBe("open");
 }));

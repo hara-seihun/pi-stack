@@ -38,14 +38,20 @@ export class EventStreamParser {
   private buffer = "";
   private event = "";
   private data: string[] = [];
+  private afterCR = false;
 
   push(chunk: string): StreamFrame[] {
+    if (this.afterCR && chunk.length) {
+      if (chunk.startsWith("\n")) chunk = chunk.slice(1);
+      this.afterCR = false;
+    }
     this.buffer += chunk;
     const frames: StreamFrame[] = [];
     for (;;) {
       const end = this.buffer.search(/\r\n|\n|\r/);
       if (end < 0) break;
       const line = this.buffer.slice(0, end);
+      this.afterCR = this.buffer[end] === "\r" && end === this.buffer.length - 1;
       this.buffer = this.buffer.slice(end + (this.buffer.startsWith("\r\n", end) ? 2 : 1));
       const frame = this.line(line);
       if (frame) frames.push(frame);
@@ -55,7 +61,7 @@ export class EventStreamParser {
 
   private line(line: string): StreamFrame | null {
     if (line === "") {
-      if (!this.data.length && !this.event) return null;
+      if (!this.data.length) { this.event = ""; return null; }
       const frame = { event: this.event || "message", data: this.data.join("\n") };
       this.event = "";
       this.data = [];
@@ -73,6 +79,7 @@ export class EventStreamParser {
 }
 
 export class StreamProtocolError extends Error {}
+class StreamReplicaError extends Error {}
 
 /** Invalid wire input never becomes a healthy event or a silent no-op. */
 export function streamEventFromFrame(frame: StreamFrame): StreamWireEvent | null {
@@ -190,7 +197,6 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
     authenticationError = "";
   };
   const recovered = () => {
-    acknowledged = true;
     failures = 0;
     clearRecovery();
     setStatus("open");
@@ -210,9 +216,9 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
     watchdog = setTimeout(() => active.abort(new Error("The stream went silent")), DEAD_STREAM_MS);
   };
 
-  const deliver = (event: StreamWireEvent) => {
+  const deliver = (event: StreamWireEvent, source: "finite" | "push") => {
     if (event.type === "hello") {
-      if (!subscription.session || !subscription.viewing) recovered();
+      if (source === "finite" && (!subscription.session || !subscription.viewing)) acknowledged = true;
       options.onEvent(event);
       return;
     }
@@ -220,8 +226,11 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
       if (event.sessionId !== subscription.session || event.selectionId !== subscription.selectionId) return;
       const have = replica.have();
       if (["state", `transcript:${event.sessionId}`, `live:${event.sessionId}`].some(resource => !event.have[resource] || have[resource] !== event.have[resource])) return;
-      recovered();
-      options.onSelectionStatus?.({ sessionId: event.sessionId, ready: true });
+      if (source === "finite") acknowledged = true;
+      else {
+        recovered();
+        options.onSelectionStatus?.({ sessionId: event.sessionId, ready: true });
+      }
       return;
     }
     if (event.type === "reconcile") {
@@ -231,7 +240,7 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
       if (!result.ok) {
         if (result.reason !== "Base revision mismatch") throw new StreamProtocolError(`Invalid ${event.resource} frame: ${result.reason}`);
         replica.forget(event.resource);
-        throw new StreamProtocolError(`Lost base for ${event.resource}; requesting retained state again`);
+        throw new StreamReplicaError(`Lost base for ${event.resource}; requesting retained state again`);
       }
       try { validateStreamSnapshot(event.resource, result.value); }
       catch (error) {
@@ -254,7 +263,6 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
     const active = new AbortController();
     controller = active;
     beginSelection();
-    beginRecovery();
     const deadline = setTimeout(() => active.abort(new Error("State synchronization timed out")), RECONCILE_TIMEOUT_MS);
     try {
       if (options.beforeReconcile) {
@@ -279,10 +287,13 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
       for (const value of events) {
         if (mine !== generation || !runnable()) return;
         const event = streamEventFromFrame({ event: "", data: JSON.stringify(value) });
-        if (event) deliver(event);
+        if (event) deliver(event, "finite");
         if (event?.type === "error") throw new StreamProtocolError(event.message);
       }
+      if (mine !== generation || !runnable()) return;
       if (!acknowledged) throw new StreamProtocolError("State synchronization did not acknowledge this selection");
+      recovered();
+      if (subscription.session && subscription.viewing) options.onSelectionStatus?.({ sessionId: subscription.session, ready: true });
       options.onActivity?.(true);
     } finally { clearTimeout(deadline); }
     if (mine !== generation || !runnable()) return;
@@ -314,7 +325,7 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
         for (const frame of parser.push(decoder.decode(value, { stream: true }))) {
           if (mine !== generation || stopped) return;
           const event = streamEventFromFrame(frame);
-          if (event) deliver(event);
+          if (event) deliver(event, "push");
         }
         options.onActivity?.(true);
       }
@@ -327,7 +338,8 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
       options.onActivity?.(false);
       if (error instanceof StreamProtocolError || authenticationMessage(error)) throw error;
       // The replica was reconciled independently. A push failure does not undo it.
-      schedule(pushFailures++ === 0 ? 0 : Math.min(MAX_RETRY_MS, 250 * 2 ** Math.min(pushFailures, 5)));
+      if (error instanceof StreamReplicaError) schedule(0);
+      else schedule(pushFailures++ === 0 ? 0 : Math.min(MAX_RETRY_MS, 250 * 2 ** Math.min(pushFailures, 5)));
     } finally { clearTimeout(openingDeadline); }
   }
 
@@ -348,8 +360,11 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
       (error: unknown) => {
         if (mine !== generation || stopped) return;
         clearWatchdog();
-        failed(controller?.signal.aborted ? controller.signal.reason : error);
-        schedule(failures++ === 0 ? 0 : Math.min(MAX_RETRY_MS, 250 * 2 ** Math.min(failures, 5)));
+        if (error instanceof StreamReplicaError) schedule(0);
+        else {
+          failed(controller?.signal.aborted ? controller.signal.reason : error);
+          schedule(failures++ === 0 ? 0 : Math.min(MAX_RETRY_MS, 250 * 2 ** Math.min(failures, 5)));
+        }
       },
     );
   }
@@ -381,6 +396,7 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
       if (!stopped) return;
       stopped = false;
       failures = 0;
+      if (state === "connecting") setStatus("connecting");
       if (listen) {
         window.addEventListener("online", wake);
         window.addEventListener("pi-network-changed", wake);
