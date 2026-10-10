@@ -8,8 +8,9 @@ test("history metadata derives from the reader contract and keeps the system pre
   let contractReads = 0;
   conversation({
     on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
-    exec: async (command: string, args: string[]) => {
+    exec: async (command: string, args: string[], options: { timeout: number }) => {
       expect([command, ...args]).toEqual(["read-thread", "--contract"]);
+      expect(options.timeout).toBe(20_000);
       contractReads++;
       return { code: 0, stdout: JSON.stringify(READ_THREAD_CONTRACT), stderr: "", killed: false };
     },
@@ -49,5 +50,22 @@ test("a failed command contract is reported and not retained as working metadata
   );
   await expect(describe()).rejects.toThrow("unsupported contract");
   fail = false;
+  expect((await describe()).systemPrompt).toContain(HISTORY_MARKER);
+});
+
+test("a killed zero-exit contract probe reports its startup deadline and retains no contract", async () => {
+  const handlers = new Map<string, (...args: any[]) => any>();
+  let killed = true;
+  conversation({
+    on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
+    exec: async () => ({ code: 0, stdout: killed ? "" : JSON.stringify(READ_THREAD_CONTRACT), stderr: "", killed }),
+  } as unknown as ExtensionAPI);
+  const describe = (signal = new AbortController().signal) => handlers.get("before_agent_start")!(
+    { systemPrompt: "Existing system" },
+    { signal, sessionManager: { getSessionFile: () => undefined } },
+  );
+  await expect(describe()).rejects.toThrow("20-second startup deadline exceeded");
+  await expect(describe(AbortSignal.abort())).rejects.toThrow("session cancelled");
+  killed = false;
   expect((await describe()).systemPrompt).toContain(HISTORY_MARKER);
 });
