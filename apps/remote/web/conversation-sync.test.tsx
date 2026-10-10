@@ -203,7 +203,8 @@ test("manager chat sides follow sender identity without reordering canonical mes
   expect(html).toContain('class="transcript-message-human"');
   expect(html).toContain('class="transcript-message-agent"');
   expect(html).toContain('data-transcript-source="native-human:0"');
-  expect(html.indexOf("First instruction")).toBeLessThan(html.indexOf("Second reply"));
+  expect(html).toContain('data-transcript-source="native-agent:0"');
+  expect(html.indexOf('data-transcript-source="native-human:0"')).toBeLessThan(html.indexOf('data-transcript-source="native-agent:0"'));
   expect(render({ entries })).not.toContain("manager-conversation");
 });
 
