@@ -56,6 +56,19 @@ function expectOrder(html: string, fragments: string[]) {
   }
 }
 
+test("empty and streamed-to-empty assistants leave no rendered row, avatar or spacing", () => {
+  const blank = entry("streamed-answer", "assistant", { text: " \n", streaming: true });
+  for (const mono of [true, false]) for (const autoCollapse of [true, false]) {
+    const options = { mono, autoCollapse };
+    const baseline = render({ ...options, entries: [user] });
+    expect(render({ ...options, entries: [user, blank] })).toBe(baseline);
+    const visible = render({ ...options, entries: [user, { ...blank, text: "Authored reply", signature: "nonempty" }] });
+    expect(visible).toContain('class="message assistant');
+    expect(render({ ...options, entries: [user, { ...blank, text: "", signature: "empty" }] })).toBe(baseline);
+    expect(render({ ...options, entries: [user, ...work, blank] })).toBe(render({ ...options, entries: [user, ...work] }));
+  }
+});
+
 test("omitting autoCollapse preserves the compact WorkCard, as does explicit true", () => {
   const html = render();
   expect(render({ autoCollapse: true })).toBe(html);
@@ -97,13 +110,14 @@ test("mono keeps assistant text plain after tools and before an unsettled wait, 
   expect(JSON.stringify(entries)).toBe(before);
 });
 
-test("mono never projects hidden wake inputs or their assistant replies as visible narration", () => {
+test("mono retains hidden wake activity in collapsed work rather than visible narration", () => {
   const html = render({ mono: true, entries: [user, entry("wake input", "user", { monoVisibility: "hidden" }), entry("quiet answer", "assistant", { monoVisibility: "hidden" }), entry("quiet tool", "toolCall", { monoVisibility: "hidden", toolCall: { name: "read", arguments: {} } }), answer] });
   expect(html.match(/class="message user/g)).toHaveLength(1);
   expect(html.match(/class="message assistant/g)).toHaveLength(1);
   expect(html).not.toContain("wake input");
   expect(html).not.toContain("quiet answer");
-  expect(html).not.toContain("work-card");
+  expect(html).toContain('class="work-card running"');
+  expect(html).toContain("Work · 3 steps");
 });
 
 test("autoCollapse false renders every intervening entry individually expanded and in transcript order", () => {

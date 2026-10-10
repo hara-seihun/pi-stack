@@ -43,7 +43,7 @@ it("counts signed narration as text while retaining exact source and branch pagi
   ];
   const path = source(entries);
   const native = index(path), manager = index(path, undefined, managerVisibility);
-  expect(native.messages.map(record => record.displayedItemCount)).toEqual([1, 3, 1]);
+  expect(native.messages.map(record => record.displayedItemCount)).toEqual([1, 3, 0]);
   expect(manager.messages.map(record => record.monoVisibility)).toEqual(["hidden", "visible", "visible"]);
   expect(native.messages[1]!.blocks.map(block => block.type)).toEqual(["text", "thinking", "toolCall"]);
   expect(manager.source).toEqual(native.source);
@@ -297,15 +297,16 @@ it("bounds global cached metadata bytes and rejects an individually oversized in
   expect(index(oversized).messages.map(record => record.id)).toEqual(["repaired"]);
 });
 
-it("counts the successful empty-answer projection without counting collapsed blank text blocks", () => {
+it("counts authored assistant content without manufacturing items for empty replies", () => {
   const examples = [
-    { content: [], stopReason: "stop", count: 1 },
+    { content: [], stopReason: "stop", count: 0 },
+    { content: " \n", stopReason: "stop", count: 0 },
     { content: [], stopReason: "toolUse", count: 0 },
     { content: [{ type: "thinking", thinking: " " }], stopReason: "stop", count: 0 },
     { content: [{ type: "thinking", thinking: "reason" }], stopReason: "stop", count: 1 },
-    { content: [{ type: "text", text: " " }, { type: "text", text: "" }], stopReason: "stop", count: 1 },
-    { content: [{ type: "thinking", thinking: "reason" }, { type: "text", text: " " }, { type: "text", text: "" }], stopReason: "stop", count: 2 },
-    { content: [{ type: "text", text: "answer" }, { type: "text", text: "" }], stopReason: "stop", count: 2 },
+    { content: [{ type: "text", text: " " }, { type: "text", text: "" }], stopReason: "stop", count: 0 },
+    { content: [{ type: "thinking", thinking: "reason" }, { type: "text", text: " " }, { type: "text", text: "" }], stopReason: "stop", count: 1 },
+    { content: [{ type: "text", text: "answer" }, { type: "text", text: "" }], stopReason: "stop", count: 1 },
   ];
   const path = source(examples.map((example, index) => message(String(index), index ? String(index - 1) : null,
     "assistant", example.content, { stopReason: example.stopReason })));
