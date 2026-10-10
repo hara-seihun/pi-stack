@@ -142,6 +142,25 @@ export function appendLiveThinking(items: TranscriptItem[], liveThinking?: strin
   return [...items.slice(0, humanIndex + 1), work, ...items.slice(humanIndex + 1)];
 }
 
+export function messengerWork(items: TranscriptItem[], working: boolean): TranscriptItem[] {
+  const humanIndex = items.findLastIndex(item => item.kind === "user");
+  const activeWorkIndex = working ? items.findIndex((item, index) => index > humanIndex && item.kind === "work") : -1;
+  const visible = items.flatMap((item, index): TranscriptItem[] => {
+    if (item.kind !== "work") return [item];
+    const nextHuman = items.findIndex((next, nextIndex) => nextIndex > index && next.kind === "user");
+    const hasReply = items.slice(index + 1, nextHuman < 0 ? items.length : nextHuman).some(next => next.kind === "assistant");
+    return hasReply || index === activeWorkIndex ? [{ ...item, running: index === activeWorkIndex }] : [];
+  });
+  if (!working || activeWorkIndex >= 0) return visible;
+  const human = items[humanIndex];
+  const key = human?.kind === "user" ? `work-after:${human.entry.key}` : "work-after:start";
+  const latest: ContextEntry = { key: `${key}:typing`, signature: `${key}:typing`, kind: "notice", text: "Working" };
+  const work: TranscriptItem = { kind: "work", key, entries: [], running: true, latest,
+    summary: { toolCalls: 0, thinkingBlocks: 0, files: [], commands: 0, hasErrors: false } };
+  const insertion = visible.findLastIndex(item => item.kind === "user") + 1;
+  return [...visible.slice(0, insertion), work, ...visible.slice(insertion)];
+}
+
 export function buildStableTranscript(entries: ContextEntry[], mono = false): TranscriptItem[] {
   const items: TranscriptItem[] = [];
   let work: ContextEntry[] = [];

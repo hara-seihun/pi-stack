@@ -1016,8 +1016,12 @@ export class ThreadService implements ThreadApi {
     }
     await this.releaseCapacity(id);
     // Native custody recovery cannot clear an unrelated model admission wait.
-    if (this.get(id)?.metadata?.admissionWait?.message?.startsWith("Global agent capacity:"))
-      this.clearAdmissionWait(id);
+    const wait = this.get(id)?.metadata?.admissionWait;
+    if (wait !== undefined && wait !== null) {
+      if (typeof wait !== "object" || !("message" in wait) || typeof wait.message !== "string")
+        throw new Error(`Invalid admission wait metadata for ${id}`);
+      if (wait.message.startsWith("Global agent capacity:")) this.clearAdmissionWait(id);
+    }
     return true;
   }
   private serial<T>(id: string, operation: () => Promise<T>): Promise<T> {

@@ -165,6 +165,20 @@ test("following latest writes only at idle and owned scroll events keep followin
   expect(page.scroller.scrollTop).toBe(1880);
 });
 
+test("a pinned viewport follows a complete reply landing in one finalization commit", () => {
+  const page = fixture();
+  page.move(1000);
+  const position = new ReadingAnchor();
+  position.setReading(page.scroller, false);
+  const before = position.beforeUpdate(page.scroller);
+  page.growBelow(3000);
+  position.afterUpdate(page.scroller, before);
+  expect(page.scroller.scrollTop).toBe(4000);
+  expect(position.onScroll(page.scroller)).toEqual({ reading: false, programmatic: true });
+  position.afterResize(page.scroller);
+  expect(page.scroller.scrollTop).toBe(4000);
+});
+
 test("replacement DOM is reacquired by message identity; browser anchoring is not double-applied", () => {
   let top = 300;
   let replaced = false;

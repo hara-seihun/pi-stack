@@ -103,9 +103,22 @@ button.agent-route-name:hover, button.agent-route-name:focus-visible { text-deco
 .manager-conversation .live-answer > .chat-bubble { width: fit-content; min-width: 0; max-width: min(80%, 68ch); border-bottom-left-radius: 4px; }
 .manager-conversation .work-card { margin: 4px 0; }
 .manager-conversation .work-card-header { font-weight: 500; font-size: 12px; }
+.chat-work .work-card-header { width: fit-content; min-height: 32px; padding: 2px 0; }
+.typing-dots { display: inline-flex; align-items: center; gap: 5px; height: 32px; padding: 0 14px; border-radius: 18px 18px 18px 4px; background: var(--surface-2); }
+.typing-dots > span { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: chat-typing 1.2s ease-in-out infinite; }
+.typing-dots > span:nth-child(2) { animation-delay: .16s; }
+.typing-dots > span:nth-child(3) { animation-delay: .32s; }
+.chat-work-finished { padding: 0 4px; font-size: 11px; opacity: .7; }
+@keyframes chat-typing { 0%, 60%, 100% { opacity: .45; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-3px); } }
+@media (prefers-reduced-motion: reduce) { .typing-dots > span { animation: none; } }
 @media (max-width: 600px) {
   .manager-conversation .scroll-content { padding: 12px 12px 16px; }
   .manager-conversation .chat-bubble { padding: 9px 12px; }
 }
 .message-input-status { color: var(--muted); font-size: 12px; padding: 0 14px 6px; overflow-wrap: anywhere; }
 .message-input-failed { color: var(--danger); }
+.prompt-delivery { padding: 3px 8px 0; color: var(--muted); font-size: 11px; text-align: right; }
+.prompt-delivery[data-delivery="failed"] { color: var(--danger); }
+.prompt-delivery button { min-height: 36px; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.prompt-delivery-error { display: block; overflow-wrap: anywhere; }
+.prompt-delivery button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

@@ -47,7 +47,7 @@ export function ConversationHeader({ title, subtitle, status, onBack, onOpenInsp
   </header>;
 }
 
-export function ConversationScreen({ session, ancestors, entries, liveText, liveThinking, thinkingActive, autoCollapse = true, images, offline, syncing = false, pending, home, prompt, attachments, slashCommands, drawing, uploadError, controlError, earlierAvailable, loadingEarlier, earlierError, onShowEarlier, newerAvailable, onShowNewer, onJumpLatest, onVisibleRange, outbox, onThinkingOpen, onBack, onOpenInspector, onOpenAncestor, onOpenQueue, questions, questionsResource, onRetryQuestions, onQuestionAccepted, onEdit, reply, onReply, onCancelReply, onPrompt, onSend, onStop, onResume, onReconnect, onRemoveAttachment, onUpload, onPaste, onDraw, onDismissControlError, showBack, showIdentity = true, mono }: {
+export function ConversationScreen({ session, ancestors, entries, liveText, liveThinking, thinkingActive, autoCollapse = true, images, offline, syncing = false, pending, home, prompt, attachments, slashCommands, drawing, uploadError, controlError, earlierAvailable, loadingEarlier, earlierError, onShowEarlier, newerAvailable, onShowNewer, onJumpLatest, onVisibleRange, outbox, sentPromptId, onRetryPrompt, onDiscardPrompt, onThinkingOpen, onBack, onOpenInspector, onOpenAncestor, onOpenQueue, questions, questionsResource, onRetryQuestions, onQuestionAccepted, onEdit, reply, onReply, onCancelReply, onPrompt, onSend, onStop, onResume, onReconnect, onRemoveAttachment, onUpload, onPaste, onDraw, onDismissControlError, showBack, showIdentity = true, mono }: {
   session: Session;
   mono?: { hintSeen: boolean; onClassic(): void; onHintSeen(): void; saving: boolean };
   ancestors: Session[];
@@ -65,6 +65,9 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
   onJumpLatest?(): void;
   onVisibleRange?(range: VisibleTranscriptRange | null): void;
   outbox?: ReactNode;
+  sentPromptId?: string;
+  onRetryPrompt?(requestId: string): void;
+  onDiscardPrompt?(requestId: string): void;
   onThinkingOpen(open: boolean): void;
   images: ReadonlyMap<string, InlineImage> | null;
   offline: string;
@@ -132,11 +135,11 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
     {!mono && ancestors.length > 0 && <nav className="ancestry" aria-label="Launched by">{ancestors.map(ancestor => <button key={ancestor.id} type="button" title={ancestor.name || undefined} onClick={() => onOpenAncestor(ancestor)}>{agentName(ancestor) ?? (ancestor.name || ancestor.id)}</button>)}</nav>}
     <DismissibleError className="conversation-error" dismissLabel="Dismiss thread error" message={controlError} resetKey={session.id} onDismiss={async () => { onDismissControlError(); return { ok: true as const }; }} />
     {outbox}
-    <ConversationView key={session.id} active newerAvailable={newerAvailable} onJumpLatest={onJumpLatest} label={`Chat with ${mono ? AGENT_NAME : session.name || "Agent"}`} drawing={drawing} transcript={<InlineImagesContext.Provider value={images}>
+    <ConversationView key={session.id} active sentPromptId={sentPromptId} newerAvailable={newerAvailable} onJumpLatest={onJumpLatest} label={`Chat with ${mono ? AGENT_NAME : session.name || "Agent"}`} drawing={drawing} transcript={<InlineImagesContext.Provider value={images}>
       {(syncing || offline) && entries.length === 0 && <div className="conversation-loading" role={offline ? "alert" : "status"}><strong>{offline ? "Conversation unavailable" : "Opening conversation…"}</strong><span>{offline || "Waiting for the selected environment to return its history."}</span></div>}
-      <Transcript entries={entries} mono={!!mono || session.manager === true} messenger={session.manager === true} liveThinking={liveThinking} thinkingActive={thinkingActive} autoCollapse={autoCollapse} sessionId={session.id} home={home} images={images}
-        earlierAvailable={earlierAvailable} loadingEarlier={loadingEarlier} earlierError={earlierError} onShowEarlier={onShowEarlier} newerAvailable={newerAvailable} onShowNewer={onShowNewer} onVisibleRange={onVisibleRange} onThinkingOpen={onThinkingOpen} onEdit={onEdit} onReply={onReply} />
-      {visibleLiveText && <div className="live-answer"><ChatMessage kind="assistant" appearance={session.manager ? "bubble" : undefined} label={AGENT_NAME} avatar={agentAvatar()} text={visibleLiveText} contentFormat="markdown" renderMarkdown={text => <Markdown source={text} sessionId={session.id} streaming assistant />} /></div>}
+      <Transcript entries={entries} mono={!!mono || session.manager === true} messenger={session.manager === true} working={session.state === "running" || session.state === "waiting"} liveThinking={liveThinking} thinkingActive={thinkingActive} autoCollapse={autoCollapse} sessionId={session.id} home={home} images={images}
+        earlierAvailable={earlierAvailable} loadingEarlier={loadingEarlier} earlierError={earlierError} onShowEarlier={onShowEarlier} newerAvailable={newerAvailable} onShowNewer={onShowNewer} onVisibleRange={onVisibleRange} onThinkingOpen={onThinkingOpen} onEdit={onEdit} onReply={onReply} onRetryPrompt={onRetryPrompt} onDiscardPrompt={onDiscardPrompt} />
+      {!session.manager && visibleLiveText && <div className="live-answer"><ChatMessage kind="assistant" appearance={session.manager ? "bubble" : undefined} label={AGENT_NAME} avatar={agentAvatar()} text={visibleLiveText} contentFormat="markdown" renderMarkdown={text => <Markdown source={text} sessionId={session.id} streaming assistant />} /></div>}
     </InlineImagesContext.Provider>}>
       <DismissibleError className="conversation-error" dismissLabel="Dismiss upload error" message={uploadError} resetKey={session.id} />
       {questionsResource?.state === "failed" && <div className="conversation-error" role="alert">Could not load questions: {questionsResource.error}. {questions.length > 0 ? "Showing previous questions; their status may have changed." : "Chat remains available."} <button type="button" onClick={onRetryQuestions}>Retry questions</button></div>}

@@ -84,6 +84,28 @@ test("mono preserves execution and queue state without exposing orchestration de
   expect(typing).not.toContain("Internal output phase");
 });
 
+test("manager token updates leave the bubble timeline unchanged, then a durable reply lands once", () => {
+  const active: Session = { ...session, manager: true, state: "running", activity: "responding", lifecycle: { kind: "working", phase: "responding", since: 1 } };
+  const first = render({ session: active, liveText: "First token" });
+  const long = render({ session: active, liveText: "A long partial answer\n".repeat(100) });
+  expect(long).toBe(first);
+  expect(first).toContain('class="typing-dots"');
+  expect(first).not.toContain('class="live-answer"');
+  const committed = { kind: "assistant" as const, key: "answer", signature: "answer", text: "Complete final answer" };
+  const finished = render({ session: { ...session, manager: true }, entries: [...props.entries, committed] });
+  expect(finished.match(/aria-label="Message from Kenan"/g)).toHaveLength(1);
+  expect(finished).not.toContain('class="typing-dots"');
+  expect(finished).toContain('aria-label="Show work for this reply"');
+});
+
+test("a silent manager turn leaves no typing bubble or work affordance after settling", () => {
+  const html = render({ session: { ...session, manager: true }, entries: [...props.entries,
+    { kind: "assistant", key: "silent", signature: "silent", text: "<silent/>", monoVisibility: "hidden" }] });
+  expect(html).not.toContain('class="typing-dots"');
+  expect(html).not.toContain('class="work-card');
+  expect(html).not.toContain("&lt;silent/&gt;");
+});
+
 test("connection synchronization never replaces canonical execution state or the cached transcript", () => {
   const updating = render({ syncing: true });
   expect(header(updating)).toContain('data-connection="syncing">Syncing conversation</span>');
@@ -221,11 +243,10 @@ test("manager has one contact header with avatar and state, without automatic co
   }
 });
 
-test("manager buffers the exact silent token and its streaming prefixes without hiding ordinary text", () => {
-  for (const liveText of ["<", "<s", "<silent/>"]) {
+test("manager partial text stays outside the timeline while ordinary workers retain streaming", () => {
+  for (const liveText of ["<", "<s", "<silent/>", "The token is <silent/>."])  {
     expect(render({ session: { ...session, manager: true }, liveText })).not.toContain('class="live-answer"');
   }
-  expect(render({ session: { ...session, manager: true }, liveText: "The token is <silent/>." })).toContain('class="live-answer"');
   expect(render({ liveText: "<silent/>" })).toContain('class="live-answer"');
   const html = render({ session: { ...session, manager: true }, entries: [
     { key: "machine", signature: "machine", kind: "user", inputOrigin: "machine", text: "A worker settled" },
