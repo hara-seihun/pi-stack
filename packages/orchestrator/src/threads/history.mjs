@@ -9,6 +9,7 @@ export const MAX_HISTORY_INDEX_BYTES = 64 * 1024 * 1024;
 export const MAX_HISTORY_INDEXES = 32;
 const SCAN_CHUNK_BYTES = 64 * 1024;
 const indexes = new Map();
+const snapshotDescriptors = new WeakMap();
 let indexedMetadataBytes = 0;
 const decoder = new TextDecoder("utf-8", { fatal: true });
 const ok = value => ({ ok: true, value });
@@ -122,22 +123,16 @@ function recordMetadata(entry, raw, path, line, offset) {
       return failure("invalid-record", path, `Invalid session tool metadata at line ${line}`, { line, offset });
     }
     blocks.push(Object.freeze({ index, type: block.type,
-      displayed: block.type !== "thinking" || Boolean(String(block.thinking || "").trim()),
+      displayed: block.type === "thinking" ? Boolean(String(block.thinking || "").trim())
+        : message.role === "assistant" && block.type === "text" ? Boolean(String(block.text || "").trim()) : true,
       ...(block.type === "toolCall" ? { toolCallId: block.id } : {}),
       ...(block.name != null ? { name: block.name } : {}),
       ...(block.namespace != null ? { namespace: block.namespace } : {}),
     }));
   }
-  let displayedItemCount = message.role === "assistant" && Array.isArray(message.content)
-    ? blocks.filter(block => block.displayed).length + Number(blocks.length === 0 && Boolean(message.errorMessage)) : 1;
-  if (message.role === "assistant" && message.stopReason === "stop" && !message.errorMessage && Array.isArray(message.content)) {
-    const text = message.content.filter(block => block.type === "text");
-    if ((message.content.length === 0 || text.length > 0)
-      && message.content.every(block => block.type === "text" || block.type === "thinking")
-      && text.every(block => typeof block.text === "string" && !block.text.trim())) {
-      displayedItemCount = blocks.filter(block => block.type === "thinking" && block.displayed).length + 1;
-    }
-  }
+  const displayedItemCount = message.role === "assistant" && Array.isArray(message.content)
+    ? blocks.filter(block => block.displayed).length + Number(blocks.length === 0 && Boolean(message.errorMessage))
+    : message.role === "assistant" && typeof message.content === "string" && !message.content.trim() ? 0 : 1;
   return ok(Object.freeze({ ...base, role: message.role, timestamp: timestampMs(timestamp) ?? null,
     blocks: Object.freeze(blocks), toolCallIds: Object.freeze(blocks.filter(block => block.type === "toolCall").map(block => block.toolCallId)),
     toolResultId: message.role === "toolResult" ? message.toolCallId ?? null : null, displayedItemCount,
@@ -247,18 +242,62 @@ function readIndexedRecord(source, descriptors, descriptor) {
   if (descriptor.length > MAX_HISTORY_RECORD_BYTES) return failure("oversized-record", source.path, `Session record exceeds ${MAX_HISTORY_RECORD_BYTES} bytes`, { line: descriptor.line, offset: descriptor.offset, limit: MAX_HISTORY_RECORD_BYTES });
   return withSource(source.path, fd => {
     if (stamp(fstatSync(fd, { bigint: true })) !== source.revision) return failure("stale-source", source.path, "Session revision changed; refresh the history index");
-    const raw = Buffer.allocUnsafe(descriptor.length);
-    let position = 0;
-    while (position < raw.length) {
-      const bytes = readSync(fd, raw, position, raw.length - position, descriptor.offset + position);
-      if (!bytes) return failure("stale-source", source.path, "Session record changed during reading");
-      position += bytes;
-    }
-    if (stamp(statSync(source.path, { bigint: true })) !== source.revision || createHash("sha256").update(raw).digest("hex") !== descriptor.digest) {
+    const record = readRecordAt(fd, source, descriptor);
+    if (stamp(fstatSync(fd, { bigint: true })) !== source.revision || stamp(statSync(source.path, { bigint: true })) !== source.revision) {
       return failure("stale-source", source.path, "Session record changed during reading");
     }
-    return parseRecord(raw, source.path, descriptor.line, descriptor.offset);
+    return record;
   });
+}
+
+function readRecordAt(fd, source, descriptor) {
+  const raw = Buffer.allocUnsafe(descriptor.length);
+  let position = 0;
+  while (position < raw.length) {
+    const bytes = readSync(fd, raw, position, raw.length - position, descriptor.offset + position);
+    if (!bytes) return failure("stale-source", source.path, "Session record changed during reading");
+    position += bytes;
+  }
+  if (createHash("sha256").update(raw).digest("hex") !== descriptor.digest) {
+    return failure("stale-source", source.path, "Session record changed during reading");
+  }
+  return parseRecord(raw, source.path, descriptor.line, descriptor.offset);
+}
+
+/** Project a bounded window synchronously; discard the whole projection if its exact revision changes. */
+export function withIndexedThreadHistory(path, leafId, options, project) {
+  path = resolve(path);
+  let generation;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let retryable = true;
+    const result = withSource(path, fd => {
+      const indexed = indexedThreadHistory(path, leafId, options);
+      if (!indexed.ok) return indexed;
+      const history = indexed.value, source = history.source;
+      if (generation !== undefined && generation !== source.generation) {
+        retryable = false;
+        return failure("stale-source", path, "Session was rewritten or replaced during window reading");
+      }
+      generation = source.generation;
+      if (stamp(fstatSync(fd, { bigint: true })) !== source.revision) return failure("stale-source", path, "Session changed before window reading");
+      const descriptors = snapshotDescriptors.get(history);
+      let active = true;
+      const scoped = Object.freeze({ ...history, read: descriptor => {
+        if (!active || !descriptors.has(descriptor)) return failure("invalid-descriptor", path, "Record descriptor does not belong to this active history snapshot");
+        if (descriptor.length > MAX_HISTORY_RECORD_BYTES) return failure("oversized-record", path, `Session record exceeds ${MAX_HISTORY_RECORD_BYTES} bytes`, { limit: MAX_HISTORY_RECORD_BYTES });
+        return readRecordAt(fd, source, descriptor);
+      } });
+      let value;
+      try { value = project(scoped); }
+      finally { active = false; }
+      if (stamp(fstatSync(fd, { bigint: true })) !== source.revision || stamp(statSync(path, { bigint: true })) !== source.revision) {
+        return failure("stale-source", path, "Session changed during window reading");
+      }
+      return ok(value);
+    });
+    if (result.ok || !retryable || result.error.code !== "stale-source") return result;
+  }
+  return failure("stale-source", path, "Session kept changing during window reading; refresh the history index");
 }
 
 function trimIndexCache() {
@@ -340,6 +379,7 @@ export function indexedThreadHistory(path, leafId, options) {
     const descriptors = new Set(branch.value.entries);
     const value = Object.freeze({ source, entries: branch.value.entries, messages: branch.value.messages,
       read: descriptor => readIndexedRecord(source, descriptors, descriptor) });
+    snapshotDescriptors.set(value, descriptors);
     cache.snapshots.set(snapshotKey, { value, bytes });
     cache.metadataBytes += bytes; indexedMetadataBytes += bytes;
     trimIndexCache();

@@ -19,6 +19,7 @@ interface WireSchema extends TSchema {
   anyOf?: WireSchema[];
   allOf?: WireSchema[];
   oneOf?: WireSchema[];
+  not?: WireSchema;
 }
 const zeroArgumentTools = new Set(["watch_list", "manager_questions_list"]);
 const affectedFields = {
@@ -63,6 +64,11 @@ it("registered agent tools advertise usable wire parameters; only named zero-arg
   for (const name of tools.keys()) {
     const schema = wireSchema(name);
     expect(schema.type, name).toBe("object");
+    for (const keyword of ["anyOf", "oneOf", "allOf"]) expect(Object.hasOwn(schema, keyword), `${name}: forbidden root ${keyword}`).toBe(false);
+    for (const [field, property] of Object.entries(schema.properties ?? {})) {
+      const typed = property as WireSchema;
+      expect(typed.type !== undefined || typed.anyOf !== undefined || typed.oneOf !== undefined || typed.allOf !== undefined || "$ref" in typed, `${name}.${field}: root property must expose its real type`).toBe(true);
+    }
     const fields = rootFields(schema);
     if (fields.length === 0) empty.push(name);
     expect(fields.length === 0, name).toBe(zeroArgumentTools.has(name));
@@ -90,8 +96,7 @@ it.each(Object.entries(affectedFields))("%s retains advertised fields and origin
   const original = JSON.parse(JSON.stringify(tools.get(name)!.parameters));
   const wire = wireSchema(name);
   expect(rootFields(wire)).toEqual([...fields].sort());
-  expect(wire.anyOf, `${name} operation branches`).toEqual(original.anyOf);
-  expect(wire.allOf, `${name} intersection constraints`).toEqual(original.allOf);
+  expect(wire.not, `${name} exact operation contract`).toEqual({ not: original });
   expect(Compile(wire).Check({}), `${name} must not accept an empty request`).toBe(false);
 });
 
@@ -117,17 +122,17 @@ const steering = {
 const cases = [
   {
     name: "thread_wake",
-    valid: [{ action: "set", reason: "Recover deployment", cadenceMs: 60000 }, { action: "set", reason: "Recover deployment", cadenceMs: 60000, nextDueAt: 0 }, { action: "list" }, { action: "cancel" }, { action: "list", cadenceMs: "permissive extra field" }],
+    valid: [{ action: "set", reason: "Recover deployment", cadenceMs: 60000 }, { action: "set", reason: "Recover deployment", cadenceMs: 60000, nextDueAt: 0 }, { action: "list" }, { action: "cancel" }, { action: "list", cadenceMs: 60000 }],
     invalid: [{ action: "set" }, { action: "set", reason: "Recover deployment", cadenceMs: 59999 }, { action: "set", reason: "", cadenceMs: 60000 }, { action: "set", reason: "Recover deployment", cadenceMs: 60000, nextDueAt: -1 }, { action: "unknown" }],
   },
   {
     name: "thread_control",
-    valid: [{ action: "close", threadId: "peer" }, { action: "reopen" }, { action: "cancel" }, { action: "dependencies", threadIds: [] }, { action: "settings", settings: { thinkingLevel: "high", speed: "standard" } }, { action: "retryWaiting" }, { action: "cancelMessage", messageId: "pending" }, { action: "promoteMessage", messageId: "pending", delivery: "hardSteer" }, { action: "close", settings: "permissive extra field" }],
+    valid: [{ action: "close", threadId: "peer" }, { action: "reopen" }, { action: "cancel" }, { action: "dependencies", threadIds: [] }, { action: "settings", settings: { thinkingLevel: "high", speed: "standard" } }, { action: "retryWaiting" }, { action: "cancelMessage", messageId: "pending" }, { action: "promoteMessage", messageId: "pending", delivery: "hardSteer" }, { action: "close", settings: { model: "sol" } }],
     invalid: [{ action: "dependencies" }, { action: "dependencies", threadIds: ["peer", "peer"] }, { action: "settings" }, { action: "settings", settings: { thinkingLevel: "unknown" } }, { action: "cancelMessage" }, { action: "promoteMessage", messageId: "pending" }, { action: "promoteMessage", messageId: "pending", delivery: "unknown" }, { action: "unknown" }],
   },
   {
     name: "converge",
-    valid: [{ action: "bash", command: "pwd", cwd: "/work", timeout: 55 }, { action: "read", path: "README.md", offset: 1, limit: 2000 }, { action: "write", path: "empty.txt", content: "" }, { action: "edit", path: "README.md", edits: [{ oldText: "before", newText: "after" }] }, { action: "read", path: "README.md", command: 123 }],
+    valid: [{ action: "bash", command: "pwd", cwd: "/work", timeout: 55 }, { action: "read", path: "README.md", offset: 1, limit: 2000 }, { action: "write", path: "empty.txt", content: "" }, { action: "edit", path: "README.md", edits: [{ oldText: "before", newText: "after" }] }, { action: "read", path: "README.md", command: "pwd" }],
     invalid: [{ action: "bash" }, { action: "bash", command: "pwd", cwd: "relative" }, { action: "bash", command: "pwd", timeout: 0 }, { action: "read" }, { action: "read", path: "README.md", offset: 0 }, { action: "write", path: "empty.txt" }, { action: "edit", path: "README.md", edits: [] }, { action: "edit", path: "README.md", edits: [{ newText: "after" }] }, { action: "unknown" }],
   },
   {
@@ -162,7 +167,7 @@ const cases = [
 ];
 
 describe.each(cases)("$name wire validation", ({ name, valid, invalid }) => {
-  it("accepts each operation branch, preserving permissive branch extras", () => {
+  it("accepts each operation branch, retaining correctly typed branch extras", () => {
     const validator = Compile(wireSchema(name));
     for (const input of valid) expect(validator.Check(input), JSON.stringify(input)).toBe(true);
   });

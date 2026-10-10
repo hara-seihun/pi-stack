@@ -8,6 +8,7 @@ import { rootService } from "../src/service.js";
 import { RootRequestStore } from "../src/requests.js";
 import type { RootExecutor } from "../src/root-runtime.js";
 import type { ConsentBridge } from "../src/consent-contract.js";
+import { rootRequestResponse } from "../../kenan-memory/src/root-transport.js";
 
 const directories: string[] = [];
 afterEach(() => { for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }); });
@@ -34,12 +35,46 @@ function fixture() {
       const body = JSON.parse(String(init!.body));
       if (String(url).endsWith("admit")) { admissions++; await admissionGate; return Response.json({ ok: true, value: admission }); }
       if (String(url).endsWith("resume-request")) return Response.json({ ok: true, value: admission });
-      if (String(url).endsWith("authorize-request")) return body.callerToken === "person-token" ? Response.json({ ok: true, value: { authorized: true } }) : Response.json({ ok: false }, { status: 403 });
+      if (String(url).endsWith("authorize-request") || String(url).endsWith("authenticate-caller")) return body.callerToken === "person-token" ? Response.json({ ok: true, value: { authorized: true } }) : Response.json({ ok: false }, { status: 403 });
       accounting++; return allowAccounting ? Response.json({ ok: true }) : Response.json({ ok: false }, { status: 503 });
     }) as typeof fetch });
   return { path, admission, id, post, get, service, bridge, accepted, acknowledged, counts: () => ({ admissions, executions, accounting, deliveries }), setAccounting: (allowed: boolean) => allowAccounting = allowed };
 }
 const chosen: RootExecutor = async (_admission, _request, onExecution) => { onExecution?.(); return { ok: true, value: { reply: "Only the chosen reply", subjects: ["bob"] } }; };
+
+test("submit timeout before acceptance recovers a durable not-accepted receipt and fences a late POST", async () => {
+  const f = fixture();
+  let store = new RootRequestStore(f.path);
+  const lostTransport = (async (_url: unknown, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+    init.signal!.addEventListener("abort", () => reject(init.signal!.reason), { once: true });
+  })) as typeof fetch;
+  expect(await rootRequestResponse("http://root/v1/ask", { method: "POST", headers: { [KENAN_REQUEST_HEADER]: f.id } }, AbortSignal.timeout(5), lostTransport, 1)).toEqual({ ok: false, error: "aborted" });
+  const handle = f.service(store, chosen);
+  expect((await handle(f.get("invalid-token"))).status).toBe(404);
+  expect(store.notAccepted(f.id)).toBe(false);
+  const recovered = await handle(f.get());
+  expect(recovered.status).toBe(200);
+  expect(await recovered.json()).toEqual({ requestId: f.id, state: "not-accepted", safeToResubmit: true });
+  store.close(); store = new RootRequestStore(f.path);
+  const restarted = f.service(store, chosen);
+  expect(await (await restarted(f.post())).json()).toEqual({ requestId: f.id, state: "not-accepted", safeToResubmit: true });
+  expect(f.counts()).toMatchObject({ admissions: 0, executions: 0, deliveries: 0 });
+  expect(store.get(f.id)).toBeUndefined();
+  store.close();
+});
+
+test("recovery waits for concurrent admission instead of declaring accepted work safe to repeat", async () => {
+  const f = fixture(), store = new RootRequestStore(f.path), gate = deferred(), model = deferred();
+  const handle = f.service(store, async (root, text, started) => { started?.(); await model.promise; return chosen(root, text); }, f.bridge, gate.promise);
+  const post = handle(f.post());
+  await Bun.sleep(1);
+  const lookup = handle(f.get());
+  gate.resolve();
+  expect((await post).status).toBe(202);
+  expect(await (await lookup).json()).toEqual({ requestId: f.id, status: "pending" });
+  expect(store.notAccepted(f.id)).toBe(false);
+  model.resolve(); await handle.settled(); store.close();
+});
 
 test("asynchronous admission returns before the model; concurrent retries never repeat execution and completion arrives without status polling", async () => {
   const f = fixture(), store = new RootRequestStore(f.path), model = deferred(), admitted = deferred();

@@ -21,6 +21,8 @@ PiStack's [unified thread service](../../docs/threads.md) owns every stack agent
 
 [`patch-managed-cli.mjs`](patch-managed-cli.mjs) places the CLI's initial and replacement session factories under [`createManagedAgentSession`](../orchestrator/src/threads/native-session.ts). The CLI loads that owner at session creation, not SDK import: Pi's SDK barrel also exports the CLI, so eagerly importing the owner from the CLI would cycle back through the SDK. Help and application SDK imports do not acquire execution custody. Application SDK callers use that same exported `pi-orchestrator/api` factory and await its `close()`. Runtime preparation verifies this selected SDK/managed CLI closure, including actual Bash output and descendant-cleanup behavior; unused bundled CLI storage copies are not deployment dependencies. A missing required managed contract reports its name before any candidate selection. Native prompt, continuation, compaction, shell and tool execution become durable `ThreadService` operations. Nested calls share the active operation; direct tool calls receive their own operation. Admission happens before the native factory, and release waits for all native children to settle. Native `ModelRuntime.complete` requests with no executing agent remain direct inference.
 
+The immutable dependency identity includes [`deploy/runtime`](../../deploy/runtime), so changing the bundle recipe or staging layout cannot reuse a closure produced by an earlier recipe. [`deploy-runtime-closure.test.mjs`](../../scripts/deploy-runtime-closure.test.mjs) executes that recipe and its hash inputs, proves recipe changes invalidate the cache, and loads the bundled owner without a runtime-wide `pi-orchestrator` link.
+
 Argv travels in a private mode-0600 manifest, not the manager's process arguments. Environment is inherited directly; no manager-readable environment file or private namespace-entry privilege is needed. Each terminal host retains its ThreadService database and owning scope/cgroup/boot/UID receipt under `~/.pi/agent/managed` (or `PI_CODING_AGENT_DIR/managed`). After native exit, the watcher stops the whole native scope and [`native-recovery.mjs`](native-recovery.mjs) reconciles its databases in the originating namespace. `BindsTo` stops native/tools execution if the watcher dies; the IO client also performs recovery after watcher exit. [`native-owner-recovery.ts`](../orchestrator/src/threads/native-owner-recovery.ts) requires a previous boot, or an inactive/absent recorded unit with an empty/absent recorded cgroup, to prove execution and all tool children stopped. Active or unknown owners retain custody. If both client and watcher are killed, the next same-owner terminal launch reconciles the retained receipt without replaying callbacks. Ordinary application services own their own lifecycle; their caller-supplied databases are not assigned a terminal unit by inference.
 
 Each originating service must start after its own user manager/runtime directory so its namespace contains that UID's bus. This includes private Remote, Root and room service accounts; a later host-side runtime-directory mount is not automatically visible inside an existing private namespace. The host service configuration owns that ordering, never a cross-user bus or plaintext filesystem grant.
@@ -60,8 +62,15 @@ parameter schemas in the SDK and bundled Anthropic provider. Pi 0.87.1's non-str
 converter retained only root `properties` and `required`, erasing object unions
 used by life writes/policy/steering, thread control/wakes and Converge. The shared
 [`anthropic-tool-schema.js`](anthropic-tool-schema.js) retains all constraints and
-adds Anthropic's required root `type: "object"` when union/intersection branches
-already imply it. Non-object inputs fail explicitly; native registrations stay intact.
+requires an object input. Anthropic rejects root `anyOf`, `oneOf` and `allOf`, even
+with `type: "object"`; the adapter places those complete contracts under double
+negation (`not.not`) and advertises real property schemas at the object root.
+Matching branch properties share a schema; differing schemas use property-level
+`anyOf`, which Anthropic accepts. This keeps arrays/objects typed through argument
+encoding. Nested branch constraints retain operation requirements, exclusions and
+references. The wire constrains supplied declared fields to their advertised types,
+even on a branch whose native permissive extras would tolerate other values; native
+registrations stay intact. Non-object inputs fail explicitly.
 Deployment hashes and applies both repair files. Orchestrator test preparation
 applies the same patch before provider payload tests.
 

@@ -10,25 +10,11 @@ function object(value: unknown): JsonObject | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : null;
 }
 
-export function displayAssistantMessage(message: JsonObject): JsonObject {
-  if (message.role !== "assistant" || message.stopReason !== "stop" || message.errorMessage
-    || !Array.isArray(message.content)) return message;
-  const content = message.content;
-  const text = content.filter((block) => object(block)?.type === "text");
-  if ((content.length > 0 && text.length === 0)
-    || content.some((block) => !["text", "thinking"].includes(String(object(block)?.type)))
-    || text.some((block) => typeof block.text !== "string" || block.text.trim())) return message;
-  return { ...message, content: [
-    ...content.filter((block) => object(block)?.type !== "text"),
-    { type: "text", text: "👍" },
-  ] };
-}
-
 /** The page and full-download paths use the same per-record projection. */
 export function displayContextMessage(value: unknown, imageReference?: ImageReference, metrics?: ResponseMetrics): unknown {
   const source = object(value);
   if (!source) return value;
-  const original = source.role === "assistant" ? displayAssistantMessage(projectAnthropicNarrationMessage(source)) : source;
+  const original = source.role === "assistant" ? projectAnthropicNarrationMessage(source) : source;
   const message = { ...projectMessageReply(original) };
   if (message.role === "assistant") {
     for (const key of ["api", "provider", "model", "usage", "stopReason", "responseId", "rawStopReason"]) delete message[key];

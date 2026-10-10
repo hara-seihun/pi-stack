@@ -308,8 +308,13 @@ export async function installLegacyMaintenance(options) {
   const prototype = api.ThreadService?.prototype;
   if (!prototype || !['start','close','attach','execution','send','spawn','deliverScheduledWakes','rpc','busy','adoptReference','wake'].every(key => typeof prototype[key] === 'function')) throw new Error('Selected legacy ThreadService has no supported maintenance seam');
   const originalStart = prototype.start, originalAttach = prototype.attach, originalDetach = prototype.detach;
-  const originalWake = prototype.wake, originalDrain = prototype.drain;
+  const originalWake = prototype.wake, originalDrain = prototype.drain, originalRoute = prototype.routeNotifications;
   prototype.wake = function(...args) { if (!dispatchPaused.has(this)) return originalWake.apply(this, args); };
+  // Cross-owner notification routing targets peer supervisors that are themselves
+  // retiring. Its in-flight retry counts as a busy operation, so routing during
+  // maintenance would hold this owner's readiness hostage to a peer that only
+  // serves after activation. Queued notifications stay durable for the successor.
+  if (typeof originalRoute === 'function') prototype.routeNotifications = function(...args) { return dispatchPaused.has(this) ? Promise.resolve() : originalRoute.apply(this, args); };
   if (typeof originalDrain === 'function') prototype.drain = function(...args) { return dispatchPaused.has(this) ? Promise.resolve() : originalDrain.apply(this, args); };
   if (typeof originalDetach === 'function') prototype.detach = async function(...args) {
     detaching.add(this);
@@ -475,6 +480,7 @@ export async function installLegacyMaintenance(options) {
       for (const service of services) dispatchPaused.delete(service);
       prototype.start = originalStart; prototype.attach = originalAttach; prototype.wake = originalWake;
       if (originalDrain) prototype.drain = originalDrain;
+      if (originalRoute) prototype.routeNotifications = originalRoute;
       if (originalDetach) prototype.detach = originalDetach;
       delete receipt.error; save('restored'); value = receipt;
     }

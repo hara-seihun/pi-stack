@@ -922,7 +922,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   }, [cache, patch, stateRef]);
 
   const thinkingOpen = useCallback((open: boolean) => {
-    if (mono || !autoCollapse) return;
+    if (!mono && !autoCollapse) return;
     stream.current?.update({ thinking: open });
     if (!open) liveText.clearThinking();
   }, [autoCollapse, liveText, mono]);

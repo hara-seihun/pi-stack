@@ -2,8 +2,18 @@
 set -euo pipefail
 phase=$1 root=$2 user=$3 control=$4
 source "$control/deploy/lib"
+case $phase in browser|model) ;; *) exit 64;; esac
+runtime=${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}
+cache=${PI_STACK_DOCTOR_CACHE_ROOT:-$(dirname "$runtime")/.pi-stack-doctors}/$user
+key=$(pi_stack_as_root node "$control/deploy/doctor-cache.mjs" key "$phase" "$runtime" "$(pi_stack_home "$user")" "$control")
+status=0
+pi_stack_as_root node "$control/deploy/doctor-cache.mjs" verify "$cache" "$key" "$phase" || status=$?
+if (( status == 0 )); then exit 0; fi
+(( status == 3 )) || exit "$status"
 case $phase in
   browser) pi_stack_run_as "$user" node "$control/packages/runtime/browser-doctor.mjs" ;;
-  model) pi_stack_run_as "$user" node "${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}/node_modules/.bin/pi-model-selection-doctor" ;;
-  *) exit 64 ;;
+  model) pi_stack_run_as "$user" node "$runtime/node_modules/.bin/pi-model-selection-doctor" ;;
 esac
+after=$(pi_stack_as_root node "$control/deploy/doctor-cache.mjs" key "$phase" "$runtime" "$(pi_stack_home "$user")" "$control")
+[[ $after == "$key" ]] || { echo 'runtime doctor inputs changed during proof; refusing to cache its result' >&2; exit 66; }
+pi_stack_as_root node "$control/deploy/doctor-cache.mjs" record "$cache" "$key" "$phase"

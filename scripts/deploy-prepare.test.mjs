@@ -391,7 +391,7 @@ test("preparation still refuses dirty source", () => {
   } finally { f.close(); }
 });
 
-test("runtime dependency cache tracks its recipe, compaction recovery and both Kenan packages", () => {
+test("runtime dependency cache tracks its build recipe, package exports, compaction recovery and both Kenan packages", () => {
   const f = fixture();
   try {
     const runtime = readFileSync(join(root, "deploy/runtime"), "utf8");
@@ -400,6 +400,7 @@ test("runtime dependency cache tracks its recipe, compaction recovery and both K
     const inputs = [...hashScript.matchAll(/^\s+sha256sum (.+)\n/gm)].flatMap(match => match[1].split(" "));
     const changedInputs = [
       "deploy/runtime",
+      "packages/orchestrator/package.json",
       "packages/runtime/extensions/codex-compaction/retry.mjs",
       ...["kenan-memory", "kenan-root"].flatMap(name => [
         `packages/${name}/src/nested/fixture.ts`,

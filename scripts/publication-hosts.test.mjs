@@ -1,74 +1,18 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test, { describe } from "node:test";
-import { hostWaitKind, rollForwardHosts } from "../deploy/publication-hosts.mjs";
+import { hostWaitKind, mergeHostLanes } from "../deploy/publication-hosts.mjs";
 import { progressBudgetExhausted } from "../deploy/publication-control.mjs";
 import { publicationConfig } from "./publication-fixture.mjs";
 
 const hostIds = ["gmktec", "converge"];
 const publication = process.env.PI_PUBLICATION_TEST_COMMAND ?? new URL("../deploy/publication", import.meta.url).pathname;
 const id = "PUB-0123456789abcdef01234567";
-
-for (const waitingHost of hostIds) {
-  for (const kind of ["live-meeting", "live-telephone", "native-source", "native-history", "host-lock"]) {
-    test(`${kind} on ${waitingHost} does not hold its peer; restart retries only the pending host`, () => {
-      const request = {};
-      const calls = [];
-      const durable = [];
-      const targets = hostIds.map(id => ({ id }));
-      const first = rollForwardHosts(request, targets, {
-        deliver(target) {
-          calls.push(target.id);
-          return target.id === waitingHost
-            ? { status: "waiting", waiting: { kind, host: target.id }, nextAttemptAt: "2026-10-07T12:00:00Z" }
-            : { status: "passed", integrationSha: "old", android: { revision: "old", web: { revision: "old" } } };
-        },
-        save: value => durable.push(structuredClone(value)),
-      });
-      assert.deepEqual(first, { status: "waiting", hosts: [waitingHost] });
-      assert.deepEqual(calls, hostIds);
-      assert.equal(durable.length, 2);
-      const ready = hostIds.find(host => host !== waitingHost);
-      const successful = structuredClone(request.hosts[ready]);
-      const restarted = structuredClone(durable.at(-1));
-      calls.length = 0;
-      const second = rollForwardHosts(restarted, targets, {
-        deliver(target, previous) {
-          calls.push(target.id);
-          assert.deepEqual(previous, request.hosts[waitingHost]);
-          return { status: "passed", integrationSha: "old", android: { revision: "old", web: { revision: "old" } } };
-        },
-        save: value => durable.push(structuredClone(value)),
-      });
-      assert.deepEqual(second, { status: "passed" });
-      assert.deepEqual(calls, [waitingHost]);
-      assert.deepEqual(restarted.hosts[ready], successful);
-    });
-  }
-}
-
-for (const failure of ["throw", "returned"]) test(`${failure} failure on the first host still delivers and saves the second`, () => {
-  const request = {};
-  const saved = [];
-  const outcome = rollForwardHosts(request, hostIds.map(id => ({ id })), {
-    deliver(target) {
-      if (target.id === "gmktec") {
-        if (failure === "throw") throw new Error("host activation failed");
-        return { status: "failed", failure: { message: "host activation failed" } };
-      }
-      assert.equal(saved[0].hosts.gmktec.status, "failed", "failure is durable before the next host starts");
-      return { status: "passed", integrationSha: "ready" };
-    },
-    save: value => saved.push(structuredClone(value)),
-  });
-  assert.deepEqual(outcome, { status: "failed", hosts: ["gmktec"] });
-  assert.equal(saved.at(-1).hosts.converge.status, "passed");
-});
 
 // Host commands are fixture boundaries, while the owner, Git ancestry, proof hashing,
 // filesystem receipts and reservation scripts execute unchanged in subprocesses.
@@ -94,6 +38,18 @@ if (name === "ssh") {
   while (args[0] === "-o") args.splice(0, 2);
   args.shift();
   exec(args.shift(), args, { input: readFileSync(0, "utf8"), env: { ...process.env, FIXTURE_HOST: "converge", PI_STACK_HOST_LOCK_PATH: join(root, "converge.lock") } });
+} else if (name === "systemctl") {
+  appendFileSync(join(root, "units.jsonl"), JSON.stringify(args) + "\n");
+  if (args.includes("show")) { process.stdout.write("inactive\n"); process.exit(0); }
+  if (args.includes("start")) {
+    const unit = args.find(value => value.startsWith("pi-stack-publication-host@"));
+    if (unit) {
+      const result = spawnSync(process.execPath, [process.env.FIXTURE_PUBLICATION, "host-run", unit.slice("pi-stack-publication-host@".length, -".service".length)], { encoding: 'utf8', timeout: 15000, env: process.env });
+      if (result.status !== 0) appendFileSync(join(root, 'unit-errors'), result.stderr + '\n' + result.error + '\n');
+      process.stderr.write(result.stderr);
+      process.exit(result.status ?? 1);
+    }
+  }
 } else if (name === "git") {
   const position = args.indexOf("fetch");
   if (position !== -1) args[args.indexOf("origin", position)] = join(root, "origin.git");
@@ -181,7 +137,8 @@ if (name === "ssh") {
 } else if (name === "release") {
   const state = world();
   const mode = state.hosts[host].mode;
-  const request = JSON.parse(readFileSync(join(root, "requests", "PUB-0123456789abcdef01234567.json"), "utf8"));
+  const { mergeHostLanes } = await import(process.env.FIXTURE_LANES_MODULE);
+  const request = mergeHostLanes(JSON.parse(readFileSync(join(root, "requests", "PUB-0123456789abcdef01234567.json"), "utf8")), join(root, "host-lanes"), [{id:host}]);
   const custody = request.nativeHistory.hosts[host];
   assert.deepEqual(custody, { state: "restore-required", integrationSha: args[0] }, "wrapper starts only after durable native custody");
   assert.equal(request.android.release.revision, args[0], "checked app/web artifact is prepared before wrapper preparation");
@@ -235,6 +192,10 @@ function fixture(t, waitingHost, mode) {
   git("config", "commit.gpgsign", "false");
   git("config", "core.hooksPath", "/dev/null");
   mkdirSync(join(repository, "deploy"));
+  const candidateDeploy = new URL('../deploy/', pathToFileURL(publication));
+  for (const name of readdirSync(candidateDeploy).filter(name => name.startsWith('publication') || ['action-journal.mjs', 'release-checkout', 'meeting-census', 'phone-census', 'native-prerequisites'].includes(name))) {
+    copyFileSync(new URL(name, candidateDeploy), join(repository, 'deploy', name));
+  }
   writeFileSync(join(repository, "deploy/android-update"), "fixture artifact capability\n");
   writeFileSync(join(repository, "deploy/native-history-boundary"), "# native-history-boundary-fixture\n");
   writeFileSync(join(repository, "deploy/native-history-bridge.mjs"), "export const MAINTENANCE_INTAKE = 'always-open-v1';\n");
@@ -243,6 +204,7 @@ function fixture(t, waitingHost, mode) {
   const baseline = git("rev-parse", "HEAD");
   git("commit", "--allow-empty", "-qm", "requested integration");
   const revision = git("rev-parse", "HEAD");
+  writeFileSync(join(root, 'owner-code.json'), JSON.stringify({ version: 1, sourceSha: revision }));
   git("commit", "--allow-empty", "-qm", "newer ready host delivery");
   const newer = git("rev-parse", "HEAD");
   const origin = join(root, "origin.git");
@@ -256,9 +218,10 @@ function fixture(t, waitingHost, mode) {
   for (const target of config.targets) target.releaseCommand = join(root, "bin/release");
   writeFileSync(configPath, JSON.stringify(config));
   writeFileSync(join(root, "host.json"), JSON.stringify({ version: 1, fleetUser: "fixture" }));
-  for (const command of ["bash", "ssh", "sudo", "bun", "rsync", "release", "git"]) {
+  for (const command of ["bash", "ssh", "sudo", "bun", "rsync", "release", "git", "systemctl"]) {
     writeFileSync(join(root, "bin", command), `#!${process.execPath}\n${hostCommand}`, { mode: 0o700 });
   }
+  writeFileSync(join(root, 'bin', 'timeout'), '#!/bin/sh\nif [ "$3" = systemctl ] && [ "$5" = start ]; then shift; shift; exec /usr/bin/timeout --kill-after=2s 15s "$@"; fi\nexec /usr/bin/timeout "$@"\n', { mode: 0o700 });
   const worldPath = join(root, "world.json");
   writeFileSync(worldPath, JSON.stringify({ hosts: Object.fromEntries(hostIds.map(host => [host,
     { mode: host === waitingHost ? mode : "ready", selected: baseline, android: baseline }])) }));
@@ -277,14 +240,16 @@ function fixture(t, waitingHost, mode) {
   writeFileSync(requestPath, JSON.stringify(request));
   const env = { ...process.env, PATH: `${root}/bin:${process.env.PATH}`, FIXTURE_ROOT: root,
     PI_STACK_PUBLICATION_STATE: root, PI_STACK_PUBLICATION_CONFIG: configPath, PI_STACK_HOST_FILE: join(root, "host.json"),
-    PI_STACK_HOST_LOCK_PATH: join(root, "gmktec.lock"), PI_STACK_PUBLICATION_ALERT_INBOX: join(root, "inbox") };
+    PI_STACK_HOST_LOCK_PATH: join(root, "gmktec.lock"), PI_STACK_PUBLICATION_ALERT_INBOX: join(root, "inbox"),
+    FIXTURE_PUBLICATION: publication, FIXTURE_LANES_MODULE: new URL('../deploy/publication-hosts.mjs', import.meta.url).href };
+  const readRequest = () => mergeHostLanes(JSON.parse(readFileSync(requestPath, 'utf8')), join(root, 'host-lanes'), hostIds.map(id => ({ id })));
   const run = async (operation = "processRequest") => {
     const args = ["recover-native-history", "_retry"].includes(operation) ? [publication, operation, id, ...(operation === "recover-native-history" ? ["gmktec"] : [])] : ["--input-type=module", "-e", `
       import { readFileSync } from "node:fs";
       import { ${operation} } from ${JSON.stringify(pathToFileURL(publication).href)};
       ${operation}(JSON.parse(readFileSync(${JSON.stringify(requestPath)}, "utf8")));
     `];
-    const child = spawn(process.execPath, args, { env, timeout: 20000, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, args, { env, timeout: 30000, stdio: ["ignore", "pipe", "pipe"] });
     let stderr = "";
     child.stdout.resume();
     child.stderr.on("data", chunk => stderr += chunk);
@@ -293,12 +258,12 @@ function fixture(t, waitingHost, mode) {
       child.once("close", resolve);
     });
     assert.equal(status, 0, stderr);
-    return JSON.parse(readFileSync(requestPath, "utf8"));
+    return readRequest();
   };
   const events = () => existsSync(join(root, "events.jsonl")) ? readFileSync(join(root, "events.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line)) : [];
   const world = () => JSON.parse(readFileSync(worldPath, "utf8"));
   const update = change => { const value = world(); change(value); writeFileSync(worldPath, JSON.stringify(value)); };
-  return { root, run, events, world, update, revision, newer, baseline, git, requestPath, env };
+  return { root, run, readRequest, events, world, update, revision, newer, baseline, git, requestPath, env };
 }
 
 test("native source validation is effect-free and rejects obsolete or closed-intake boundary source", t => {
@@ -430,7 +395,7 @@ test("preserved native history retains its original candidate for one evidenced 
   mkdirSync(repairDir, { recursive: true });
   writeFileSync(join(repairDir, "receipt.json"), JSON.stringify({id:"causal-repair", failure:request.failure,
     outcome:{status:"infrastructure-fixed",evidence:join(f.root,"focused-proof.json")}}));
-  writeFileSync(join(f.root, "bin", "systemctl"), "#!/bin/sh\nexit 0\n", {mode:0o700});
+
   const queued = await f.run("_retry");
   assert.equal(queued.status, "queued");
   assert.equal(queued.integrationSha, f.revision);
@@ -451,20 +416,22 @@ for (const waitingHost of hostIds) for (const mode of ["live-meeting", "live-tel
     const first = await f.run();
     assert.equal(first.status, "queued", JSON.stringify(first.failure));
     assert.equal(first.hosts[waitingHost].status, "waiting");
-    assert.equal(first.hosts[waitingHost].waiting.kind, mode);
-    assert.equal(first.hosts[readyHost].status, "passed");
+    assert.equal(first.hosts[waitingHost].waiting.kind, mode, JSON.stringify(first.hostDelivery) + '\n' + (existsSync(join(f.root, 'unit-errors')) ? readFileSync(join(f.root, 'unit-errors'), 'utf8') : ''));
+    assert.equal(first.hosts[readyHost].status, "passed", JSON.stringify(first.hostDelivery));
     assert.equal(first.hosts[readyHost].integrationSha, f.revision);
     assert.equal(first.hosts[readyHost].android.revision, f.revision);
     assert.equal(first.hosts[readyHost].android.web.revision, f.revision);
     if (mode === "native-history") {
       assert.equal(first.nativeHistory.hosts[waitingHost].state, "restore-required");
-      assert.equal(f.world().hosts[waitingHost].android, f.baseline);
+      assert.equal(f.world().hosts[waitingHost].android, f.revision, 'checked matching client is offered before server activation');
+      assert.equal(first.hosts[waitingHost].proof, undefined, 'published client is not full host delivery');
+      assert.equal(first.android.hosts[waitingHost].revision, f.revision);
       assert.equal(f.world().hosts[waitingHost].selected, f.baseline, "old source serves throughout immutable preparation and busy boundary");
       const custody = { state: "restore-required", integrationSha: f.revision };
       assert.deepEqual(first.nativeHistory.hosts[waitingHost], custody);
       const hostEvents = f.events().filter(event => event.host === waitingHost);
       assert.deepEqual(hostEvents.filter(event => ["install-app-web", "deploy", "prepare", "host-native-history-advance"].includes(event.action)).map(event => event.action),
-        ["deploy", "prepare", "host-native-history-advance"]);
+        ["install-app-web", "deploy", "prepare", "host-native-history-advance"]);
       assert.deepEqual(hostEvents.find(event => event.action === "deploy").custody, custody);
       assert.deepEqual(hostEvents.find(event => event.action === "host-native-history-advance").custody, custody);
       assert.equal(hostEvents.find(event => event.action === "prepare").serving, f.baseline);
@@ -621,7 +588,7 @@ for (const mode of ["history-probe-error", "history-unmarked-busy"]) test(`${mod
     await assert.rejects(f.run("_retry"), /custody remains repair-held/);
     writeFileSync(repair.path, JSON.stringify(repair));
     await assert.rejects(f.run("recover-native-history"), /restoration refused/);
-    const retained = JSON.parse(readFileSync(f.requestPath, "utf8"));
+    const retained = f.readRequest();
     assert.equal(retained.status, "failed");
     assert.equal(retained.nativeHistory.hosts.gmktec.state, "repair-required");
     assert.match(retained.nativeHistoryRecoveries.at(-1).error, /restoration refused/);
@@ -635,6 +602,20 @@ for (const mode of ["history-probe-error", "history-unmarked-busy"]) test(`${mod
     assert.deepEqual(recovered.nativeHistoryRecoveries.at(-1).hosts, ["gmktec"]);
     assert.deepEqual(recovered.failure, failed.failure);
     assert.deepEqual(JSON.parse(readFileSync(repair.path, "utf8")), repair);
+    writeFileSync(repair.path, JSON.stringify({ ...repair, outcome: { status: 'infrastructure-fixed', evidence: join(f.root, 'focused-proof.json') } }));
+    const retry = await f.run('_retry');
+    assert.equal(retry.status, 'queued');
+    assert.equal(retry.integrationSha, f.revision);
+    assert.deepEqual(retry.hosts.converge, completedPeer, 'evidenced retry does not erase a successful peer');
+    const afterRecovery = f.events().length;
+    const published = await f.run();
+    assert.equal(published.status, 'published', JSON.stringify(published.failure));
+    assert.deepEqual(published.hosts.converge, completedPeer);
+    assert.equal(readFileSync(completedPeer.proof, 'utf8'), proof);
+    assert.ok(f.events().slice(afterRecovery).every(event => event.host === 'gmktec'), 'only the repaired host may acquire new custody');
+    assert.equal(published.hosts.gmktec.integrationSha, f.revision);
+    assert.ok(published.nativeHistoryRecoveries.some(receipt => receipt.status === 'failed' && /restoration refused/.test(receipt.error)));
+    assert.ok(published.nativeHistoryRecoveries.some(receipt => receipt.status === 'restored' && receipt.hosts.includes('gmktec')));
   }
 });
 
