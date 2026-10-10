@@ -10,6 +10,7 @@ import {
   opendirSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
   readlinkSync,
@@ -21,7 +22,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { homedir, userInfo } from "node:os";
+import { homedir, tmpdir, userInfo } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
@@ -1707,27 +1708,63 @@ function capacityIntent(args) {
   return { intent, headroomBytes, growthBytes };
 }
 
-function sourceCapacityPlan(repository, sourceCommit, intent, blockSize, mirror) {
+function sparseSourcePaths(entries, patterns) {
+  if (patterns.length === 0) return null;
+  const scratch = mkdtempSync(path.join(tmpdir(), "pi-workspace-selection-"));
+  try {
+    run("git", ["init", "--quiet", scratch]);
+    const empty = git(scratch, ["hash-object", "-w", "--stdin"], { input: "" });
+    const symlink = git(scratch, ["hash-object", "-w", "--stdin"], { input: "." });
+    const topology = entries.map(({ mode, type, hash, name }) =>
+      `${mode} ${type === "commit" ? hash : mode === "120000" ? symlink : empty}\t${name}\0`).join("");
+    git(scratch, ["update-index", "--add", "-z", "--index-info"], { input: topology });
+    const tree = git(scratch, ["write-tree"]);
+    git(scratch, ["read-tree", "--empty"]);
+    const rules = path.join(scratch, ".git", "info", "sparse-checkout");
+    writeFileSync(rules, `${patterns.join("\n")}\n`, { mode: 0o600 });
+    // Ask checkout itself: ignore-pattern queries disagree on directory reinclusions.
+    // Identical path/mode topology with tiny blobs avoids opening any source blob.
+    git(scratch, ["-c", "core.sparseCheckout=true", "-c", "core.sparseCheckoutCone=false", "read-tree", "-m", "-u", tree]);
+    return new Set(git(scratch, ["ls-files", "-t", "-z"]).split("\0")
+      .filter(entry => entry.startsWith("H ")).map(entry => entry.slice(2)));
+  } finally { rmSync(scratch, { recursive: true, force: true }); }
+}
+
+function sourceCapacityPlan(repository, sourceCommit, intent, blockSize, mirror, sparsePatterns = []) {
+  if (!existsSync(repository)) {
+    if (!mirror || !existsSync(mirror) || existsSync(path.join(mirror, "objects", "info", "alternates"))) {
+      fail("source capacity estimate unknown: remote commit needs independent durable mirror custody; remote import remains unestimated");
+    }
+    const resolved = command("git", ["--git-dir", mirror, "rev-parse", "--verify", `${sourceCommit}^{commit}`]);
+    if (resolved.status !== 0 || resolved.stdout !== sourceCommit) {
+      fail("source capacity estimate unknown: remote commit is absent from durable mirror custody; remote import remains unestimated");
+    }
+    repository = mirror;
+  }
   if (!Number.isSafeInteger(blockSize) || blockSize <= 0) fail("source capacity estimate unknown: invalid filesystem allocation unit");
   const filters = command("git", ["-C", repository, "config", "--get-regexp", "^filter\\..*\\.(smudge|process)$"]);
   if (filters.status !== 1) fail("source capacity estimate unknown: configured checkout filters need an independently budgeted installer");
-  const entries = git(repository, ["ls-tree", "-rlz", sourceCommit]).split("\0").filter(Boolean);
-  let constructionBytes = 16 * 1024 ** 2;
-  for (const entry of entries) {
-    const match = entry.match(/^(\d+) (blob|commit) [0-9a-f]+\s+(\d+|-)\t(.+)$/su);
+  const entries = git(repository, ["ls-tree", "-rlz", sourceCommit]).split("\0").filter(Boolean).map(entry => {
+    const match = entry.match(/^(\d+) (blob|commit) ([0-9a-f]+)\s+(\d+|-)\t(.+)$/su);
     if (match === null) fail("source capacity estimate unknown: malformed Git tree entry");
-    const [, mode, type, size, name] = match;
+    const [, mode, type, hash, size, name] = match;
     if (type === "commit" && mode !== "160000") fail("source capacity estimate unknown: unsupported tree entry");
+    return { mode, type, hash, size, name };
+  });
+  const selected = sparseSourcePaths(entries, sparsePatterns);
+  let constructionBytes = 16 * 1024 ** 2;
+  for (const { size, name } of entries) {
     if (name.endsWith(".gitattributes") && /(?:working-tree-encoding|filter)=/u.test(git(repository, ["show", `${sourceCommit}:${name}`]))) {
       fail("source capacity estimate unknown: checkout attribute transformation");
     }
-    // Whole-tree upper bound includes sparse exclusions, CRLF expansion, index and directories.
-    constructionBytes += (size === "-" ? 0 : 2 * Math.ceil(Number(size) / blockSize) * blockSize) + 4 * blockSize + Buffer.byteLength(name) * 2;
+    const materialized = selected === null || selected.has(name);
+    const blobBytes = materialized && size !== "-" ? 2 * Math.ceil(Number(size) / blockSize) * blockSize : 0;
+    constructionBytes += blobBytes + 4 * blockSize + Buffer.byteLength(name) * 2;
   }
   const sourceImportBytes = sourceImportCapacity(repository, sourceCommit, mirror);
   constructionBytes += sourceImportBytes;
   if (!Number.isSafeInteger(constructionBytes)) fail("source capacity estimate exceeds supported byte range");
-  return { ...intent, estimate: "whole-tree-upper-bound", constructionBytes, sourceImportBytes, sourceCommit };
+  return { ...intent, estimate: selected === null ? "whole-tree-upper-bound" : "git-sparse-upper-bound", constructionBytes, sourceImportBytes, sourceCommit };
 }
 
 function sourceImportCapacity(repository, sourceCommit, mirror) {
@@ -1882,7 +1919,7 @@ function capacityReservations(database, device, reservedPath, measure) {
   const priced = rows.map(row => {
       const plan = JSON.parse(row.plan_json);
       if (!["source-only", "budgeted", "unestimated"].includes(plan.intent) ||
-        plan.estimate !== (plan.intent === "unestimated" ? "unknown" : "whole-tree-upper-bound")) fail("invalid capacity ledger intent or estimate");
+        !(plan.intent === "unestimated" ? ["unknown"] : ["whole-tree-upper-bound", "git-sparse-upper-bound"]).includes(plan.estimate)) fail("invalid capacity ledger intent or estimate");
       capacityRequirement(plan, []);
       headroomBytes = Math.max(headroomBytes, plan.headroomBytes,
         plan.intent === "unestimated" ? plan.constructionBytes : 0);
@@ -2047,7 +2084,7 @@ function cachedImmutableSource(mirror, repository, ref) {
   return cached.status === 0 && cached.stdout === ref ? ref : null;
 }
 
-function resolveSource(statePath, mirror, repository, upstream, ref) {
+function resolveRequestedSource(repository, ref) {
   if (existsSync(repository)) {
     const resolved = command("git", ["-C", repository, "rev-parse", "--verify", `${ref}^{commit}`]);
     if (resolved.status !== 0) fail(`cannot resolve source ${ref}: ${resolved.stderr}`);
@@ -2064,11 +2101,22 @@ function resolveSource(statePath, mirror, repository, upstream, ref) {
     if (named === undefined) fail(`cannot resolve source ${ref}; provide an exact remote ref or full commit`);
     ref = refs.get(`${named}^{}`) ?? refs.get(named);
   }
+  return ref;
+}
+
+function resolveSource(statePath, mirror, repository, upstream, ref) {
+  ref = resolveRequestedSource(repository, ref);
   const cached = cachedImmutableSource(mirror, repository, ref);
   if (cached !== null) return cached;
   return withResourceLock(statePath, `mirror:${mirror}`, () => {
     const shared = cachedImmutableSource(mirror, repository, ref);
     if (shared !== null) return shared;
+    if (existsSync(path.join(mirror, "objects", "info", "alternates"))) fail(`shared mirror must own its objects independently: ${mirror}`);
+    if (/^[0-9a-f]{40}$/u.test(ref) && existsSync(mirror)
+      && command("git", ["--git-dir", mirror, "cat-file", "-e", `${ref}^{commit}`]).status === 0) {
+      run("git", ["--git-dir", mirror, "update-ref", sourceRefFor(repository, ref), ref]);
+      return ref;
+    }
     prepareMirror(mirror, repository, upstream);
     if (/^[0-9a-f]{4,39}$/u.test(ref)) {
       run("git", ["--git-dir", mirror, "fetch", "--prune", "--no-tags", "origin"], { timeout: 120_000 });
@@ -2225,9 +2273,13 @@ function createWorkspace(database, args, statePath) {
       assertCapacity(root, args, database);
       plan = { intent: "unestimated", estimate: "unknown", constructionBytes: Math.ceil(numberFlag(args, "min-free-gib", DEFAULT_MIN_FREE_GIB) * 1024 ** 3), growthBytes: 0, headroomBytes: 0 };
     } else {
-      if (!existsSync(repository)) fail("source capacity estimate unknown: budgeted intent requires an existing local Git object source; remote import remains unestimated");
-      sourceCommit = git(repository, ["rev-parse", "--verify", `${ref}^{commit}`]);
-      plan = sourceCapacityPlan(repository, sourceCommit, intent, statfsSync(root).bsize, mirror);
+      sourceCommit = resolveRequestedSource(repository, ref);
+      if (!/^[0-9a-f]{40}$/u.test(sourceCommit) && !existsSync(repository)) {
+        const resolved = command("git", ["--git-dir", mirror, "rev-parse", "--verify", `${sourceCommit}^{commit}`]);
+        if (resolved.status !== 0) fail("source capacity estimate unknown: remote commit is absent from durable mirror custody; remote import remains unestimated");
+        sourceCommit = resolved.stdout;
+      }
+      plan = sourceCapacityPlan(repository, sourceCommit, intent, statfsSync(root).bsize, mirror, sparsePatterns);
     }
     const device = String(statSync(root).dev);
     withResourceLock(statePath, `capacity:${device}`, () => {
@@ -2268,7 +2320,7 @@ function createWorkspace(database, args, statePath) {
     if (intent !== null && sourceCommit === null) fail("budgeted pending creation has no immutable source custody");
     const plan = intent === null
       ? { intent: "unestimated", estimate: "unknown", constructionBytes: Math.ceil(numberFlag(args, "min-free-gib", DEFAULT_MIN_FREE_GIB) * 1024 ** 3), growthBytes: 0, headroomBytes: 0 }
-      : sourceCapacityPlan(repository, sourceCommit, intent, statfsSync(root).bsize, mirror);
+      : sourceCapacityPlan(repository, sourceCommit, intent, statfsSync(root).bsize, mirror, sparsePatterns);
     const device = String(statSync(root).dev);
     withResourceLock(statePath, `capacity:${device}`, () => {
       plan.admission = assertCapacity(root, args, database, destination, plan);
