@@ -123,14 +123,28 @@ def check(host):
     return protocol
 
 
+def release_matches(host, role, running):
+    if running == host.expected:
+        return True
+    source = pathlib.Path(__file__).resolve().parent.parent
+    plan = pathlib.Path(os.environ.get('PI_STACK_HOST_PLAN', str(pathlib.Path(host.config.get('runtimeRoot', '/srv/pi/runtime')).parent / '.pi-stack-release-plan.json')))
+    if not plan.is_file() or not (source / '.git').exists():
+        return False
+    value = json.loads(plan.read_text())
+    if value.get('candidate') != host.expected:
+        return False
+    proof = host.command('node', str(source / 'deploy/host-plan.mjs'), 'verify-owner', str(source), str(plan), role, str(running))
+    return json.loads(proof).get('ok') is True
+
+
 def prove(host):
     result = {}
     for role, unit in UNITS.items():
         if host.command('systemctl', 'is-active', unit) != 'active':
             raise RuntimeError(f'{unit} is not active')
         health = host.health(role)
-        if health.get('ok') is not True or health.get('releaseCommit') != host.expected:
-            raise RuntimeError(f'{unit} running release does not match {host.expected}')
+        if health.get('ok') is not True or not release_matches(host, role, health.get('releaseCommit')):
+            raise RuntimeError(f'{unit} running source does not match {host.expected}')
         result[role] = {'unit': unit, 'releaseCommit': health['releaseCommit']}
     return {'enabled': True, 'consumers': result}
 
@@ -140,18 +154,18 @@ def activate_rooms(host):
     if previous_pid is not None:
         host.command('systemctl', 'kill', '--kill-whom=main', '--signal=SIGUSR2', UNITS['rooms'])
         host.ready('rooms', previous_pid)
-    elif host.health('rooms').get('releaseCommit') != host.expected:
+    elif not release_matches(host, 'rooms', host.health('rooms').get('releaseCommit')):
         host.command('systemctl', 'reload', '--no-block', UNITS['rooms'])
         host.ready('rooms')
     host.finish_room_migration(migration)
     health = host.health('rooms')
-    if health.get('ok') is not True or health.get('releaseCommit') != host.expected:
-        raise RuntimeError('pi-rooms.service running release does not match the selected release')
+    if health.get('ok') is not True or not release_matches(host, 'rooms', health.get('releaseCommit')):
+        raise RuntimeError('pi-rooms.service running source does not match the selected release')
     return {'enabled': True, 'consumers': {'rooms': {'unit': UNITS['rooms'], 'releaseCommit': health['releaseCommit']}}}
 
 
 def activate(host):
-    stale = [role for role in ('memory', 'root') if host.health(role).get('releaseCommit') != host.expected]
+    stale = [role for role in ('memory', 'root') if not release_matches(host, role, host.health(role).get('releaseCommit'))]
     if not stale:
         activate_rooms(host)
         return prove(host)

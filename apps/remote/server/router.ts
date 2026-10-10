@@ -31,7 +31,7 @@ const KEY_DIR = process.env.PI_REMOTE_KEY_DIR ?? "/run/pi-remote-keys";
 const UPSTREAM_CREDENTIAL_DIR = process.env.PI_REMOTE_UPSTREAM_CREDENTIAL_DIR ?? "/var/lib/pi-remote/upstream-credentials";
 /** pi-orchestrator's UPSTREAM_CREDENTIAL_HEADER; inbound copies are stripped with every other x-pi-remote- header. */
 const UPSTREAM_CREDENTIAL_HEADER = "x-pi-remote-upstream";
-const WEB_DIR = join(import.meta.dir, "../web/dist");
+const WEB_DIR = process.env.PI_REMOTE_WEB_ROOT ?? join(import.meta.dir, "../web/dist");
 const UNLOCK_TIMEOUT_MS = Number(process.env.PI_REMOTE_UNLOCK_TIMEOUT_MS ?? "20000");
 const VERSION = "2.0.0";
 

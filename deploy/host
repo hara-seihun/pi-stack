@@ -69,7 +69,12 @@ if (( services )); then
 fi
 
 recognition_base=${PI_STACK_MEET_RECOGNITION_DEST:-/srv/pi/meet-recognition}
-previous_recognition=$(readlink -f "$recognition_base" 2>/dev/null || true)
+previous_recognition=""
+if (( recognition )) && [[ -e $recognition_base || -L $recognition_base ]]; then
+  [[ -L $recognition_base ]] || { echo 'Meet recognition selection is not a managed symlink; adopt it before replacement' >&2; exit 66; }
+  previous_recognition=$(readlink -e "$recognition_base") || { echo 'Meet recognition selection is dangling or recursive' >&2; exit 66; }
+  [[ $previous_recognition != $(realpath -sm "$recognition_base") ]] || { echo 'Meet recognition selection points to itself' >&2; exit 66; }
+fi
 recognition_was_active=0
 recognition_was_enabled=0
 recognition_started=0
@@ -134,7 +139,7 @@ restore_recognition() {
       wait "$recognition_pid" 2>/dev/null || true
     fi
     echo 'release failed; restoring previous Meet recognition selection and service state' >&2
-    if [[ -n $previous_recognition && -d $previous_recognition ]]; then
+    if [[ -n $previous_recognition && $previous_recognition != $(realpath -sm "$recognition_base") && -d $previous_recognition ]]; then
       pi_stack_as_root ln -s "$previous_recognition" "$candidate" &&
         pi_stack_as_root mv -Tf "$candidate" "$recognition_base" || { echo 'Meet recognition selection rollback failed' >&2; restore_failed=1; }
     else
@@ -191,6 +196,9 @@ if [[ -z ${PI_STACK_HOST_PHASE:-} ]]; then
   remote=${PI_STACK_REMOTE_DEST:-/srv/pi/pi-remote}
   export PI_STACK_PREVIOUS_REMOTE=$(cat "$remote/.pi-stack-commit" 2>/dev/null || true)
   export PI_STACK_PREVIOUS_REMOTE_RELEASE=$(readlink -f "$remote" || true)
+  export PI_REMOTE_PERSONS_DIR=$(pi_stack_persons_dir)
+  export PI_STACK_HOST_PLAN=${PI_STACK_HOST_PLAN:-$(dirname "${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}")/.pi-stack-release-plan.json}
+  pi_stack_as_root node "$root/deploy/host-plan.mjs" create "$root" "$(git -C "$root" rev-parse HEAD)" "$PI_STACK_PREVIOUS_REMOTE" "$PI_STACK_HOST_PLAN" "$PI_STACK_HOST_FILE"
   phase() {
     local name=$1 seconds=$2; shift 2
     echo "release phase=$name started deadline=${seconds}s"
@@ -229,6 +237,15 @@ if [[ -z ${PI_STACK_HOST_PHASE:-} ]]; then
     fi
     (( activation_status == 0 )) || exit "$activation_status"
   fi
+  pi_stack_as_root node --input-type=module - "$PI_STACK_HOST_PLAN" <<'JS'
+import { readFileSync, writeFileSync, renameSync, chmodSync } from 'node:fs';
+const path = process.argv[2];
+const plan = JSON.parse(readFileSync(path, 'utf8'));
+const temporary = `${path}.${process.pid}.tmp`;
+writeFileSync(temporary, JSON.stringify({ ...plan, state: 'accepted' }) + '\n', { mode: 0o644 });
+chmodSync(temporary, 0o644);
+renameSync(temporary, path);
+JS
   echo "deployed Pi stack $(git -C "$root" rev-parse HEAD) for ${users[*]}"
   exit 0
 fi
@@ -253,6 +270,21 @@ for component in orchestrator remote tools; do
   pi_stack_select_release "$PI_STACK_RELEASES_ROOT/$component/$expected" "$destination" "$expected"
 done
 "$root/deploy/orchestrator" --links-only
+if (( services )) && [[ ${PI_STACK_DEPLOY_NO_SUDO:-0} != 1 ]]; then
+  [[ $remote =~ ^/[a-zA-Z0-9_./-]+$ ]] || { echo 'invalid selected Remote path for router web assets' >&2; exit 64; }
+  pi_stack_as_root bash -s -- "$remote" <<'ROOT'
+set -euo pipefail
+path=/etc/systemd/system/pi-remote-router.service.d/40-web-release.conf
+value=$(printf '[Service]\nEnvironment=PI_REMOTE_WEB_ROOT=%s/web/dist\n' "$1")
+if [[ ! -f $path || $(<"$path") != "$value" ]]; then
+  install -d -m755 "$(dirname "$path")"
+  printf '%s\n' "$value" > "$path.tmp"
+  chmod 644 "$path.tmp"
+  mv -T "$path.tmp" "$path"
+  systemctl daemon-reload
+fi
+ROOT
+fi
 if (( recognition )); then
   recognition_started=1
   "$root/deploy/meet-recognition" --select
@@ -307,9 +339,19 @@ done
   exit 0
 fi
 [[ $PI_STACK_HOST_PHASE == activation ]] || exit 64
-# Every enabled or running person's daemon restarts on release; live workers keep the
-# release they recorded. The front door restarts only when Pi Remote changed, and each
-# running supervisor is then handed the new release without ending active turns.
+owner_changed() {
+  [[ -n ${PI_STACK_HOST_PLAN:-} ]] || return 0
+  jq -e --arg owner "$1" --arg expected "$expected" '.protocol == "pi-host-plan-v1" and .candidate == $expected and (.owners[$owner].changed | type == "boolean")' "$PI_STACK_HOST_PLAN" >/dev/null || { echo 'host owner plan is invalid' >&2; exit 66; }
+  jq -e --arg owner "$1" '.owners[$owner].changed' "$PI_STACK_HOST_PLAN" >/dev/null
+}
+owner_matches() {
+  local owner=$1 running=$2
+  [[ $running == "$expected" ]] && return 0
+  [[ -n ${PI_STACK_HOST_PLAN:-} ]] || return 1
+  node "$root/deploy/host-plan.mjs" verify-owner "$root" "$PI_STACK_HOST_PLAN" "$owner" "$running" >/dev/null
+}
+# Unchanged owners keep their recorded release. Source equality is proved against
+# their actual running commit, not inferred from the selected symlink.
 router_base=http://127.0.0.1:${PI_REMOTE_ROUTER_PORT:-8788}
 # The front door starts every open person's supervisor before it listens, so
 # right after a restart the port is closed for as long as those starts take.
@@ -332,18 +374,25 @@ remote_matches_release() {
   wait_for_router || return 1
   mapfile -t unlocked_users < <(curl -fsS --max-time 2 "$router_base/v1/router-health" 2>/dev/null | jq -r '.people[] | select(.unlocked) | .user' 2>/dev/null)
   for user in "${unlocked_users[@]}"; do
-    [[ $(supervisor_commit "$user") == "$target_commit" ]] || return 1
+    if [[ $target_commit == "$expected" ]]; then
+      owner_matches remote "$(supervisor_commit "$user")" || return 1
+    else
+      [[ $(supervisor_commit "$user") == "$target_commit" ]] || return 1
+    fi
   done
 }
 activate_remote() {
   local target_commit=$1 user response deadline
   local -a unlocked_users=()
-  pi_stack_as_root systemctl restart pi-remote-router.service || return 1
+  if [[ $target_commit != "$expected" ]] || owner_changed router; then
+    pi_stack_as_root systemctl restart pi-remote-router.service || return 1
+  fi
   wait_for_router || return 1
   # A supervisor the front door has just started already runs the selected
   # release; only one that reports another commit is asked to hand over.
   mapfile -t unlocked_users < <(curl -fsS --max-time 2 "$router_base/v1/router-health" 2>/dev/null | jq -r '.people[] | select(.unlocked) | .user' 2>/dev/null)
   for user in "${unlocked_users[@]}"; do
+    if [[ $target_commit == "$expected" ]] && ! owner_changed remote && owner_matches remote "$(supervisor_commit "$user")"; then continue; fi
     [[ $(supervisor_commit "$user") == "$target_commit" ]] && continue
     PI_REMOTE_SERVICE="pi-remote@$user.service" "$root/apps/remote/activate"
   done
@@ -352,7 +401,11 @@ activate_remote() {
   while (( SECONDS < deadline )); do
     pending=()
     for user in "${unlocked_users[@]}"; do
-      [[ $(supervisor_commit "$user") == "$target_commit" ]] || pending+=("$user")
+      if [[ $target_commit == "$expected" ]] && ! owner_changed remote; then
+        owner_matches remote "$(supervisor_commit "$user")" || pending+=("$user")
+      else
+        [[ $(supervisor_commit "$user") == "$target_commit" ]] || pending+=("$user")
+      fi
     done
     (( ${#pending[@]} == 0 )) && return 0
     sleep 0.1
@@ -365,13 +418,15 @@ activate_remote() {
 activate_daemons() {
   local failed=0 broker_units
   local -a brokers=()
-  if (( ${#daemons[@]} )); then
+  if owner_changed daemons && (( ${#daemons[@]} )); then
     pi_stack_as_root systemctl restart "${daemons[@]}" || failed=1
   fi
-  broker_units=$(pi_stack_as_root systemctl list-units --type=service --state=running --no-legend 'pi-model-broker.service' 'pi-stack-model-broker@*.service') || failed=1
-  mapfile -t brokers < <(printf '%s\n' "$broker_units" | awk '$1 ~ /^(pi-model-broker\.service|pi-stack-model-broker@.*\.service)$/ {print $1}')
-  if (( ${#brokers[@]} )); then
-    pi_stack_as_root systemctl restart "${brokers[@]}" || failed=1
+  if owner_changed brokers; then
+    broker_units=$(pi_stack_as_root systemctl list-units --type=service --state=running --no-legend 'pi-model-broker.service' 'pi-stack-model-broker@*.service') || failed=1
+    mapfile -t brokers < <(printf '%s\n' "$broker_units" | awk '$1 ~ /^(pi-model-broker\.service|pi-stack-model-broker@.*\.service)$/ {print $1}')
+    if (( ${#brokers[@]} )); then
+      pi_stack_as_root systemctl restart "${brokers[@]}" || failed=1
+    fi
   fi
   return "$failed"
 }
@@ -382,7 +437,7 @@ if [[ ${PI_STACK_FORCE_ROLLBACK:-0} != 1 ]]; then
     "$root/deploy/meet-recognition-service" --activate &
     recognition_pid=$!
   fi
-if [[ $previous_remote != "$expected" ]]; then
+if owner_changed remote || owner_changed router; then
   activate_remote "$expected" || activation_failed=1
 elif ! remote_matches_release "$expected"; then
   # Publication can finish before a deployment is interrupted. Reconcile a
@@ -391,7 +446,9 @@ elif ! remote_matches_release "$expected"; then
 fi
 
 if (( activation_failed == 0 )); then
-  if ! "$root/deploy/voice" --activate || ! "$root/deploy/phone" --activate; then activation_failed=1; fi
+  for service in voice phone; do
+    if owner_changed "$service" && ! "$root/deploy/$service" --activate; then activation_failed=1; fi
+  done
 fi
 if (( activation_failed == 0 )) && [[ ${PI_STACK_DEPLOY_NO_SUDO:-0} != 1 ]]; then
   "$root/deploy/timezone-ready" "$router_base" || activation_failed=1
@@ -405,7 +462,7 @@ fi
 # Root replacement pauses dispatch only; durable intake remains accepting.
 if ! "$root/deploy/one-kenan-access-release" "$PI_STACK_HOST_FILE"; then
   activation_failed=1
-elif jq -e '.oneKenan == true' "$PI_STACK_HOST_FILE" >/dev/null; then
+elif jq -e '.oneKenan == true' "$PI_STACK_HOST_FILE" >/dev/null && { owner_changed root || owner_changed memory || owner_changed rooms; }; then
   if [[ ${PI_STACK_DEPLOY_NO_SUDO:-0} != 1 ]]; then
     consumer_status=0
     pi_stack_as_root python3 "$root/deploy/one-kenan-activate" activate --host "$PI_STACK_HOST_FILE" --expected "$expected" || consumer_status=$?

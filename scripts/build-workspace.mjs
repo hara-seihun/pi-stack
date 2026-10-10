@@ -60,11 +60,32 @@ const inputFiles = [...new Set([
 ])].sort();
 const revision = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' });
 if (revision.status !== 0) throw new Error('Cannot identify build source');
-const sourceIdentity = name === 'remote' ? revision.stdout.trim() : '';
-const inputs = createHash('sha256').update(digestFiles(inputFiles)).update(sourceIdentity).digest('hex');
+const sourceIdentity = revision.stdout.trim();
+const inputs = digestFiles(inputFiles);
+function bindRevision() {
+  if (name !== 'remote') return;
+  for (const name of ['release-revision.js']) {
+    const path = join(root, build.output, name);
+    if (!existsSync(path)) continue;
+    const html = readFileSync(path, 'utf8');
+    const next = html.replace(/globalThis\.__PI_STACK_RELEASE_REVISION__="[a-f0-9]{40}"/g, `globalThis.__PI_STACK_RELEASE_REVISION__="${sourceIdentity}"`);
+    if (next !== html) {
+      writeFileSync(path, next);
+      for (const suffix of ['.gz', '.br']) rmSync(path + suffix, { force: true });
+    }
+  }
+}
+function writeReceipt(output) {
+  mkdirSync(dirname(receiptPath), { recursive: true });
+  const temporary = `${receiptPath}.${process.pid}.tmp`;
+  writeFileSync(temporary, JSON.stringify({ inputs, output, node: process.version, revision: sourceIdentity }) + "\n");
+  renameSync(temporary, receiptPath);
+}
 const receiptPath = join(root, "node_modules", `.pi-stack-build-${name}.json`);
 const receipt = existsSync(receiptPath) ? JSON.parse(readFileSync(receiptPath, "utf8")) : null;
 if (receipt?.inputs === inputs && receipt.node === process.version && receipt.output === outputDigest()) {
+  bindRevision();
+  if (receipt.revision !== sourceIdentity) writeReceipt(outputDigest());
   console.log(`reused Pi ${name} build ${inputs.slice(0, 12)}`);
   process.exit(0);
 }
@@ -76,12 +97,10 @@ if (result.status !== 0) {
   console.error(`Pi ${name} build failed: ${result.error?.message ?? result.signal ?? result.status}`);
   process.exit(result.status || 1);
 }
+bindRevision();
 const output = outputDigest();
-if (!output || createHash('sha256').update(digestFiles(inputFiles)).update(sourceIdentity).digest('hex') !== inputs) {
+if (!output || digestFiles(inputFiles) !== inputs) {
   console.error(`Pi ${name} build produced no files or its inputs changed during the build`);
   process.exit(1);
 }
-mkdirSync(dirname(receiptPath), { recursive: true });
-const temporary = `${receiptPath}.${process.pid}.tmp`;
-writeFileSync(temporary, JSON.stringify({ inputs, output, node: process.version }) + "\n");
-renameSync(temporary, receiptPath);
+writeReceipt(output);

@@ -108,7 +108,17 @@ pi_stack_download_artifact() {
 
 pi_stack_dependency_key() {
   local root=$1
-  sha256sum "$root/package.json" "$root/package-lock.json" | cut -d' ' -f1 | sha256sum | cut -d' ' -f1
+  (
+    cd "$root" || exit
+    {
+      sha256sum package.json package-lock.json
+      for directory in apps packages tools; do
+        if [[ -d $directory ]]; then
+          find "$directory" -name node_modules -prune -o -name package.json -type f -print0 | sort -z | xargs -0 -r sha256sum
+        fi
+      done
+    } | sha256sum | cut -d' ' -f1
+  )
 }
 
 pi_stack_prepare_dependencies() {
