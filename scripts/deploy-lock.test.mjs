@@ -411,6 +411,7 @@ case $1 in
   show)
     [ "\${DISCOVERY_EXIT:-0}" = 0 ] || exit "$DISCOVERY_EXIT"
     case $2 in pi-stack-phone.service|pi-stack-voice.service) echo loaded; exit 0;; esac
+    if [ "$4" = ActiveState ]; then echo "\${DAEMON_ACTIVE_STATE:-active}"; exit 0; fi
     case $4 in
       pi-orchestrator@alice.service) echo "\${ALICE_UNIT_STATE:-enabled}";;
       pi-orchestrator@guest-person.service) echo "\${GUEST_UNIT_STATE:-${enableGuest ? "enabled-runtime" : "disabled"}}";;
@@ -431,7 +432,7 @@ case $1 in
         exit 91
       fi
       exit "\${DAEMON_RESTART_EXIT:-0}";; esac;;
-  is-active|reset-failed|stop) exit 0;;
+  is-active|reset-failed|stop|start) exit 0;;
   *) exit 64;;
 esac
 exit 0
@@ -547,6 +548,7 @@ exit 64
     assert.doesNotMatch(readFileSync(systemctlTrace, "utf8"), /^restart /m, "staging failure cannot activate services");
     const beforeDeferral = readFileSync(activationTrace, "utf8");
     for (const doctorFailure of [false, true]) {
+      rmSync(join(directory, '.pi-stack-doctors'), { recursive: true, force: true });
       for (const doctor of ["BROWSER", "MODEL"]) rmSync(join(doctorSettlement, `${doctor}.settled`), { force: true });
       const deferred = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...env,
         ACTIVATION_CENSUS_FAIL: "28", DOCTOR_SETTLEMENT_DIR: doctorSettlement,
@@ -557,6 +559,8 @@ exit 64
       for (const doctor of ["BROWSER", "MODEL"]) assert.ok(existsSync(join(doctorSettlement, `${doctor}.settled`)), "deferral must join both proof jobs");
       assert.equal(readFileSync(activationTrace, "utf8"), beforeDeferral, "unknown meetings cannot activate or rollback Remote");
     }
+    rmSync(join(directory, '.pi-stack-doctors'), { recursive: true, force: true });
+    rmSync(join(directory, '.pi-stack-release-plan.json'), { force: true });
     const activationFailure = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...env, DAEMON_RESTART_EXIT: "1", DOCTOR_SETTLEMENT_DIR: doctorSettlement } });
     assert.equal(activationFailure.status, 1, activationFailure.stderr);
     for (const doctor of ["BROWSER", "MODEL"]) assert.ok(existsSync(join(doctorSettlement, `${doctor}.settled`)), "failed activation must join both proof jobs before releasing custody");
@@ -566,8 +570,21 @@ exit 64
     assert.equal(readFileSync(env.PREPARE_TRACE, "utf8"), preparationBefore, "verified prepared artifacts are reused without rebuilding components");
     assert.equal(readFileSync(activationTrace,"utf8"),"pi-remote@alice.service\n");
     const again = readFileSync(systemctlTrace, "utf8");
-    assert.deepEqual(restartedDaemons(again), expectedDaemons, "unchanged releases still reconcile every daemon");
-    assert.doesNotMatch(again, /restart pi-remote-router/);
+    // The preceding deliberately failed activation owns an unfinished plan;
+    // this retry completes its changed owners. Accepted identical plans then do no restarts.
+    assert.deepEqual(restartedDaemons(again), expectedDaemons, "failed activation retains its changed-owner recovery plan");
+    rmSync(systemctlTrace, { force: true });
+    const acceptedRepeat = spawnSync(join(deploy, 'host'), [hostFile], { encoding: 'utf8', env });
+    assert.equal(acceptedRepeat.status, 0, acceptedRepeat.stderr);
+    assert.deepEqual(restartedDaemons(readFileSync(systemctlTrace, 'utf8')), [], 'accepted unchanged source does not restart daemons');
+    assert.match(again, /restart pi-remote-router/, 'unfinished recovery plan still reconciles its router');
+    assert.doesNotMatch(readFileSync(systemctlTrace, 'utf8'), /restart pi-remote-router/, 'accepted unchanged source leaves the router running');
+    rmSync(systemctlTrace, { force: true });
+    const inactiveRepeat = spawnSync(join(deploy, 'host'), [hostFile], { encoding: 'utf8', env: { ...env, DAEMON_ACTIVE_STATE: 'inactive' } });
+    assert.equal(inactiveRepeat.status, 0, inactiveRepeat.stderr);
+    const inactiveTrace = readFileSync(systemctlTrace, 'utf8');
+    assert.deepEqual(restartedDaemons(inactiveTrace), [], 'cold enabled owners are started without restarting unchanged owners');
+    assert.match(inactiveTrace, /^start pi-orchestrator@/m);
 
     rmSync(systemctlTrace,{force:true});
     resetPreparation();
@@ -577,6 +594,7 @@ exit 64
     assert.equal(existsSync(preparedReceipt()), false, "failed runtime preparation cannot record prepared success");
     assert.doesNotMatch(readFileSync(systemctlTrace, "utf8"), /^restart /m, "failed prepared runtime proof vetoes service activation");
     rmSync(systemctlTrace,{force:true});
+    rmSync(join(directory, '.pi-stack-release-plan.json'), { force: true });
     const disabled=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:{...env,GUEST_UNIT_STATE:"disabled",ALICE_UNIT_STATE:"disabled"}});
     assert.equal(disabled.status,0,disabled.stderr);
     assert.deepEqual(restartedDaemons(readFileSync(systemctlTrace,"utf8")),
@@ -590,6 +608,7 @@ exit 64
       assert.equal(existsSync(systemctlTrace), false, `${service} preflight blocks service activation`);
     }
     for (const failure of [{ BROWSER_SMOKE_EXIT: "1" }, { MODEL_SMOKE_EXIT: "1" }]) {
+      rmSync(join(directory, '.pi-stack-doctors'), { recursive: true, force: true });
       const doctorFailure = spawnSync(join(deploy, "host"), [hostFile], { encoding: "utf8", env: { ...env, ...failure } });
       assert.notEqual(doctorFailure.status, 0);
       assert.match(doctorFailure.stderr, /runtime doctor failed/);
@@ -605,8 +624,9 @@ exit 64
 
     // A release the clients cannot use goes back to the previous Pi Remote.
     const before=readlinkSync(destinations.PI_STACK_REMOTE_DEST);
-    writeFileSync(join(repository,"release"),"broken\n");assert.equal(spawnSync("git",["-C",repository,"add","release"]).status,0);assert.equal(spawnSync("git",["-C",repository,"-c","user.name=test","-c","user.email=test@example.test","commit","-qm","broken"]).status,0);
+    writeFileSync(join(repository,"packages/runtime/release-fixture.mjs"),"broken\n");assert.equal(spawnSync("git",["-C",repository,"add","packages/runtime/release-fixture.mjs"]).status,0);assert.equal(spawnSync("git",["-C",repository,"-c","user.name=test","-c","user.email=test@example.test","commit","-qm","broken"]).status,0);
     for (const failure of [{ SMOKE_EXIT: "1" }, { DAEMON_RESTART_EXIT: "1" }, { BROWSER_SMOKE_EXIT: "1" }, { MODEL_SMOKE_EXIT: "1" }]) {
+      rmSync(join(directory, '.pi-stack-doctors'), { recursive: true, force: true });
       rmSync(activationTrace,{force:true});rmSync(env.VOICE_TRACE,{force:true});rmSync(env.PHONE_TRACE,{force:true});
       const broken=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:{...env,...failure}});assert.notEqual(broken.status,0);
       assert.match(broken.stderr,/returning Pi Remote to/);

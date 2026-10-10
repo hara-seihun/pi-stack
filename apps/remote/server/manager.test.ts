@@ -1,29 +1,29 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import type { SpawnThread, Thread, ThreadApi } from "pi-orchestrator/api";
-import { Manager, MANAGER_HEARTBEAT_MS, managerDestination, managerSettings, parseManagerPatch } from "./manager";
+import { Manager, managerDestination, managerSettings, parseManagerPatch } from "./manager";
 import { configuredThreadDestinations, defaultThreadDestinations } from "./thread-model-defaults";
 
 function fixture() {
   const db = new Database(":memory:");
   const spawned: SpawnThread[] = [];
   const wakes: Parameters<ThreadApi["wakeSchedule"]>[0][] = [];
-  let rejectWake = false;
+  let rejectSpawn = false;
   const api: Pick<ThreadApi, "spawn" | "wakeSchedule"> = {
-    async spawn(input) { spawned.push(input); return { ok: true, value: { id: input.id } as Thread }; },
+    async spawn(input) { spawned.push(input); return rejectSpawn ? { ok: false, error: { code: "unavailable", message: "owner suspended" } } : { ok: true, value: { id: input.id } as Thread }; },
     async wakeSchedule(input) {
       wakes.push(input);
-      return rejectWake ? { ok: false, error: { code: "unavailable", message: "owner suspended" } } : { ok: true, value: null };
+      return { ok: true, value: null };
     },
   };
   const settings = managerSettings(undefined);
   if (!settings.ok) throw new Error(settings.error.message);
   const make = () => new Manager(db, api, () => ({ ok: true, value: { cwd: "/example/person", metadata: { profileId: "personal", contextFiles: ["PROFILE.md"] } } }), settings.value, () => {});
-  return { db, make, spawned, wakes, rejectWake: (value: boolean) => { rejectWake = value; } };
+  return { db, make, spawned, wakes, rejectSpawn: (value: boolean) => { rejectSpawn = value; } };
 }
 
 describe("person manager view", () => {
-  test("creation is lazy, serialized, restart-safe and does not reset a cancelled heartbeat", async () => {
+  test("creation is lazy, serialized, restart-safe and creates no unconditional wake", async () => {
     const f = fixture();
     let manager = f.make();
     expect(manager.snapshot()).toEqual({ view: "classic", managerThreadId: null, hintSeen: false });
@@ -38,8 +38,7 @@ describe("person manager view", () => {
     expect(f.spawned[0]!.metadata).not.toHaveProperty("foreground");
     expect(f.spawned[0]!.createdBy).toEqual({ kind: "person", via: "router" });
     expect(f.spawned[0]!.settings).toEqual({ model: "anthropic/claude-opus-5-5", thinkingLevel: "high", speed: "standard" });
-    expect(f.wakes).toHaveLength(1);
-    expect(f.wakes[0]).toMatchObject({ action: "set", cadenceMs: MANAGER_HEARTBEAT_MS });
+    expect(f.wakes).toHaveLength(0);
     const snapshot = manager.snapshot();
     if (snapshot.view !== "mono") throw new Error("Expected mono after successful initialization");
     const id = snapshot.managerThreadId;
@@ -48,26 +47,24 @@ describe("person manager view", () => {
     await manager.update({ view: "mono", hintSeen: false });
     expect(manager.snapshot()).toEqual({ view: "mono", managerThreadId: id, hintSeen: true });
     expect(f.spawned).toHaveLength(1);
-    expect(f.wakes).toHaveLength(1);
+    expect(f.wakes).toHaveLength(0);
     f.db.close();
   });
 
   test("interrupted provisioning retries the same identity before committing mono", async () => {
     const f = fixture();
-    f.rejectWake(true);
+    f.rejectSpawn(true);
     let manager = f.make();
     expect((await manager.update({ view: "mono" })).ok).toBe(false);
     expect(manager.snapshot().view).toBe("classic");
     const id = manager.snapshot().managerThreadId;
     if (id === null) throw new Error("Provisioning must retain its reserved identity");
     manager = f.make();
-    f.rejectWake(false);
+    f.rejectSpawn(false);
     expect((await manager.update({ view: "mono" })).ok).toBe(true);
     expect(f.spawned[1]!.id).toBe(id);
     expect(f.spawned[1]!.requestId).toBe(f.spawned[0]!.requestId);
-    const firstWake = f.wakes[0]!, secondWake = f.wakes[1]!;
-    if (firstWake.action !== "set" || secondWake.action !== "set") throw new Error("Expected heartbeat initialization");
-    expect(secondWake.requestId).toBe(firstWake.requestId);
+    expect(f.wakes).toHaveLength(0);
     f.db.close();
   });
 

@@ -14,7 +14,7 @@ const directory = [
   session("launcher", { foreground: true, agentName: "Renian", name: "Publish release" }),
   session("quiet", { parentId: "launcher" }),
   session("active", { parentId: "launcher", state: "running", lifecycle: { kind: "working", phase: "thinking", since: 1 }, activity: "thinking" }),
-  session("waiting", { parentId: "active", state: "waiting", lifecycle: { kind: "waiting", target: "job", reason: "Wait for build", since: 1 }, activity: "awaiting", waitingOnAgents: { kind: "job", jobId: "compile", reason: "Wait for build", since: 1 } }),
+  session("waiting", { parentId: "active", state: "waiting", lifecycle: { kind: "waiting", target: "job", since: 1 }, activity: "awaiting", waitingOnAgents: { kind: "job", jobId: "compile", since: 1 } }),
   session("system", { origin: "fleet" }), session("watch", { watchList: true }), session("detached"),
   session("gone-parent", { parentId: "archived-launcher" }), session("closed", { archivedAt: "2026-01-02T00:00:00Z" }),
 ];
@@ -52,15 +52,14 @@ test("resource failure keeps a visibly stale usable directory, never a successfu
   expect(html).toContain("Task quiet");
   expect(html).toContain('class="agent-group" open=""');
   expect(html).toContain('data-status="waiting"');
-  expect(html).toContain("Wait for build");
+  expect(html).toContain("Waiting for job");
   expect(html).not.toContain("No background agents.");
 });
 
 test("task purpose and owned activity are readable without agent identity or opening a transcript", () => {
   const agents = [session("unnamed-task", { name: "Publish new release", agentName: undefined,
-    state: "waiting", activity: "awaiting",
-    lifecycle: { kind: "waiting", target: "deployment", since: 1 },
-    waitingOnAgents: { kind: "deployment", publicationId: "PUB-test", reason: "Waiting for the Converge release to finish", since: 1 } }),
+    state: "waiting", lifecycle: { kind: "waiting", target: "deployment", since: 1 }, activity: "awaiting",
+    waitingOnAgents: { kind: "deployment", publicationId: "PUB-test", since: 1 } }),
     session("named-task", { name: "Fix account routing", agentName: "Renian", state: "running", lifecycle: { kind: "working", phase: "waiting_on_tool", since: 1, detail: "Running read" }, activity: "waiting_on_tool", activeTools: ["functions.read"] })];
   const html = renderToStaticMarkup(<AgentsDirectory directory={{ state: "ready", sessions: agents }} onRefresh={() => {}} onOpen={() => {}} />);
   expect(html).toContain("Publish new release");

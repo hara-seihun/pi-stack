@@ -11,7 +11,8 @@ function requiresObject(schema) {
 
 function parameterFields(schema, fields) {
   for (const [name, property] of Object.entries(schema.properties ?? {})) {
-    if (!Object.hasOwn(fields, name)) fields[name] = property.description === undefined ? {} : { description: property.description };
+    const variants = fields[name] ??= [];
+    if (!variants.some(variant => JSON.stringify(variant) === JSON.stringify(property))) variants.push(property);
   }
   for (const keyword of ["anyOf", "oneOf", "allOf"]) {
     for (const branch of schema[keyword] ?? []) parameterFields(branch, fields);
@@ -23,10 +24,13 @@ export function anthropicToolSchema(parameters) {
   if (!["anyOf", "oneOf", "allOf"].some(keyword => Object.hasOwn(parameters, keyword))) {
     return parameters.type === "object" ? parameters : { ...parameters, type: "object" };
   }
-  const properties = {};
-  parameterFields(parameters, properties);
-  // Anthropic forbids root combinators. Double negation moves the unchanged
-  // contract below the root without weakening closed or permissive branches.
+  const fields = Object.create(null);
+  parameterFields(parameters, fields);
+  const properties = Object.fromEntries(Object.entries(fields).map(([name, variants]) => [
+    name, variants.length === 1 ? variants[0] : { anyOf: variants },
+  ]));
+  // Root properties carry the real types used by the provider's argument encoder.
+  // Operation-specific requirements and exclusions remain in the nested contract.
   const wire = { type: "object", properties, not: { not: parameters } };
   for (const keyword of ["$defs", "definitions", "$id", "$schema", "title", "description"]) {
     if (Object.hasOwn(parameters, keyword)) wire[keyword] = parameters[keyword];

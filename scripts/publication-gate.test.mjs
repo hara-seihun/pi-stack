@@ -34,6 +34,25 @@ test("only a bounded, checked pre-host integration may resume after a proven reb
 
 // Each pass performs dozens of durable writes and subprocesses alongside other check jobs.
 const fixtureTimeoutMs = 15_000;
+const publicationPath = fileURLToPath(new URL("../deploy/publication", import.meta.url));
+const deployPath = fileURLToPath(new URL("../deploy", import.meta.url));
+const retainWorktree = `*'worktree add'*) mkdir -p "$7"; cp -r '${deployPath}' "$7/deploy";;`;
+
+function mockHostWorkers(root) {
+  writeFileSync(join(root, "bin/systemctl"), `#!${process.execPath}
+const { appendFileSync } = require('node:fs');
+const { spawnSync } = require('node:child_process');
+const args = process.argv.slice(2);
+appendFileSync(process.env.TRACE + '/systemctl', args.join(' ') + '\\n');
+if (args.includes('show')) process.stdout.write('inactive\\n');
+const unit = args.find(value => value.startsWith('pi-stack-publication-host@'));
+if (args.includes('start') && unit) {
+  const instance = unit.slice('pi-stack-publication-host@'.length, -'.service'.length);
+  const result = spawnSync(process.execPath, [${JSON.stringify(publicationPath)}, 'host-run', instance], { stdio: 'inherit', timeout: ${fixtureTimeoutMs} });
+  process.exit(result.status ?? 1);
+}
+`, { mode: 0o700 });
+}
 
 test("main movement returns before deployment and the next worker pass reruns checks", t => {
   const root = mkdtempSync(join(tmpdir(), "publication-main-moved-"));
@@ -50,6 +69,7 @@ test("main movement returns before deployment and the next worker pass reruns ch
   writeFileSync(join(root, "bin/git"), `#!/bin/sh
 printf '%s\\n' "$*" >> "$TRACE/git"
 case "$*" in
+  ${retainWorktree}
   *push*) echo 'unexpected push' >&2; exit 99;;
   *'remote get-url origin'*) echo https://github.com/hara-seihun/pi-stack.git;;
   *'fetch --quiet --no-tags origin +refs/heads/main:refs/remotes/origin/main'*)
@@ -69,6 +89,7 @@ exit 99
 `;
   writeFileSync(join(root, "bin/bash"), hostStub, { mode: 0o700 });
   writeFileSync(join(root, "bin/ssh"), hostStub, { mode: 0o700 });
+  mockHostWorkers(root);
   const env = { ...process.env, PATH: `${join(root, "bin")}:${process.env.PATH}`, TRACE: root,
     PI_STACK_PUBLICATION_STATE: root, PI_STACK_PUBLICATION_CONFIG: publicationConfig(root), PI_STACK_PUBLICATION_REPOSITORY: join(root, "canonical"), PI_STACK_PUBLICATION_ALERT_INBOX: join(root, "inbox") };
   function processOne(value) {
@@ -97,7 +118,7 @@ exit 99
   assert.equal(checked.mainMovements.length, 1);
 });
 
-for (const mainState of ["base", "pushed", "moved", "same-boot", "unrecorded-boot"]) test(`reboot recovery reconciles interrupted integration with ${mainState} main custody`, t => {
+for (const mainState of ["base", "pushed", "moved", "same-boot", "unrecorded-boot"]) test(`checked worker recovery reconciles interrupted integration with ${mainState} main custody`, t => {
   const root = mkdtempSync(join(tmpdir(), "publication-reboot-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   for (const path of ["requests", "bin", "repository/.git"]) mkdirSync(join(root, path), { recursive: true });
@@ -109,10 +130,12 @@ for (const mainState of ["base", "pushed", "moved", "same-boot", "unrecorded-boo
   if (mainState === "same-boot") request.workerBootId = currentBootId;
   if (mainState === "unrecorded-boot") delete request.workerBootId;
   writeFileSync(receipt, JSON.stringify(request));
+  writeFileSync(join(root, 'owner-code.json'), JSON.stringify({ version: 1, sourceSha: request.integrationSha }));
   writeFileSync(join(root, "main"), mainState === "pushed" ? request.integrationSha : mainState === "moved" ? "d".repeat(40) : request.baseSha);
   writeFileSync(join(root, "bin/git"), `#!/bin/sh
 printf '%s\\n' "$*" >> "$TRACE/git"
 case "$*" in
+  ${retainWorktree}
   *'remote get-url origin'*) echo https://github.com/hara-seihun/pi-stack.git;;
   *'rev-parse refs/remotes/origin/main'*) cat "$TRACE/main";;
   *'rev-parse refs/pi-stack-publication/'*) echo ${request.sourceSha};;
@@ -125,7 +148,7 @@ esac
   const hostStub = '#!/bin/sh\nprintf "%s\\n" "$*" >> "$TRACE/hosts"\ncat >> "$TRACE/host-scripts"\nexit 75\n';
   for (const command of ["bash", "ssh"]) writeFileSync(join(root, "bin", command), hostStub, { mode: 0o700 });
   writeFileSync(join(root, "bin/npm"), '#!/bin/sh\necho unexpected-check > "$TRACE/npm"\nexit 99\n', { mode: 0o700 });
-  writeFileSync(join(root, "bin/systemctl"), '#!/bin/sh\nprintf "%s\\n" "$*" >> "$TRACE/systemctl"\n', { mode: 0o700 });
+  mockHostWorkers(root);
   const env = { ...process.env, PATH: `${join(root, "bin")}:${process.env.PATH}`, TRACE: root,
     PI_STACK_PUBLICATION_STATE: root, PI_STACK_PUBLICATION_CONFIG: publicationConfig(root),
     PI_STACK_PUBLICATION_ALERT_INBOX: join(root, "inbox") };
@@ -147,17 +170,12 @@ esac
   assert.equal(result.status, 0, result.error?.message ?? result.stderr);
   const recovered = JSON.parse(readFileSync(receipt, "utf8"));
   assert.equal(recovered.attempt, 1, "recovery keeps the existing publication attempt");
-  if (["same-boot", "unrecorded-boot"].includes(mainState)) {
-    assert.equal(recovered.status, "failed");
-    assert.match(recovered.failure.message, /worker interrupted/);
-    assert.equal(recovered.workerRestarts, undefined);
-    assert.equal(existsSync(join(root, "hosts")), false);
-    return;
-  }
   assert.equal(recovered.status, "queued", JSON.stringify(recovered.failure));
+  assert.equal(recovered.finalProof, undefined, "host worker launch cannot stand in for completed host proofs");
   assert.deepEqual(recovered.failures, []);
   assert.equal(recovered.workerBootId, currentBootId);
-  assert.deepEqual(recovered.workerRestarts, [{ at: recovered.workerRestarts[0].at, fromBootId: previousBootId,
+  assert.deepEqual(recovered.workerRestarts, [{ at: recovered.workerRestarts[0].at,
+    ...(request.workerBootId ? { fromBootId: request.workerBootId } : {}),
     toBootId: currentBootId, attempt: 1, step: request.step, progress: request.progress }]);
   const commands = readFileSync(join(root, "git"), "utf8");
   assert.equal(existsSync(join(root, "npm")), false);
@@ -171,8 +189,14 @@ esac
     assert.equal(recovered.integrationSha, request.integrationSha);
     assert.deepEqual(recovered.checks, request.checks);
     assert.ok(recovered.integratedAt);
-    assert.equal(commands.split("\\n").filter(line => line.includes("push")).length, mainState === "base" ? 1 : 0);
-    assert.ok(recovered.hosts);
+    assert.equal(commands.split("\n").filter(line => line.includes("push")).length, mainState === "pushed" ? 0 : 1);
+    assert.ok(existsSync(join(root, "integrations", request.integrationSha, "deploy/publication")));
+    for (const hostId of ["gmktec", "converge"]) {
+      assert.equal(recovered.hosts[hostId].status, "waiting");
+      assert.equal(recovered.hostDelivery[hostId].state, "waiting");
+      assert.match(readFileSync(join(root, "systemctl"), "utf8"),
+        new RegExp(`start --no-block pi-stack-publication-host@${requestId}--${request.integrationSha}--${hostId}\\.service`));
+    }
     for (const reservation of Object.values(recovered.reservations)) assert.equal(reservation.state, "released");
   }
 });
@@ -199,9 +223,10 @@ case "$*" in
 esac
 `, { mode: 0o700 });
   writeFileSync(join(root, "bin/npm"), '#!/bin/sh\necho "(fail) integration fixture rejects wrong core" >&2\necho "Expected: 201" >&2\necho "Received: 409" >&2\nexit 1\n', { mode: 0o700 });
+  mockHostWorkers(root);
   const result = spawnSync(process.execPath, [fileURLToPath(new URL("../deploy/publication", import.meta.url)), "drain"], {
     encoding: "utf8", timeout: fixtureTimeoutMs,
-    env: { ...process.env, PATH: `${join(root, "bin")}:${process.env.PATH}`, PI_STACK_PUBLICATION_STATE: root, PI_STACK_PUBLICATION_CONFIG: publicationConfig(root), PI_STACK_PUBLICATION_REPOSITORY: join(root, "canonical"), PI_STACK_PUBLICATION_ALERT_INBOX: join(root, "inbox") },
+    env: { ...process.env, PATH: `${join(root, "bin")}:${process.env.PATH}`, TRACE: root, PI_STACK_PUBLICATION_STATE: root, PI_STACK_PUBLICATION_CONFIG: publicationConfig(root), PI_STACK_PUBLICATION_REPOSITORY: join(root, "canonical"), PI_STACK_PUBLICATION_ALERT_INBOX: join(root, "inbox") },
   });
   assert.equal(result.status, 0, result.stderr);
   const failed = JSON.parse(readFileSync(receipt, "utf8"));

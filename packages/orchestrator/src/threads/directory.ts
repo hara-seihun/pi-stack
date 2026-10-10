@@ -1,4 +1,5 @@
 import { archivedAcrossOwners } from "./archived.js";
+import { combineManagerWork, validateManagerWorkSummary, type ManagerWorkSummary } from "./manager-watchdog.js";
 import type { ArchivedThreadsQuery, ArchivedThreadsResult } from "./contracts.js";
 import { validateInspectOptions, validateThreadAwait } from "./contracts.js";
 import type { ManagerQuestionCustodyRequest, ManagerQuestionCustodyReceipt, ManagerQuestionsRequest, ManagerQuestionsResponse, AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, QuestionEvents, QuestionState, ThreadQuestion, AwaitThreads, ThreadAwaitResult, Result, ThreadApi, ThreadControl, ThreadHistory, ThreadInspection, InspectOptions, ThreadSettlements, PiCommand, ThreadList, ThreadMessage, ThreadPage, ThreadRead, SendThread, SpawnThread, Thread } from "./contracts.js";
@@ -70,6 +71,16 @@ export class ThreadDirectory implements ThreadApi {
     if (this.managerOwner) return this.managerOwner.api.managerNotificationPolicy();
     const person = this.owners.find(owner => owner.id === "person");
     return (person ?? this.owners[0]!).api.managerNotificationPolicy();
+  }
+  async managerWorkSummary(): Promise<Result<ManagerWorkSummary>> {
+    const summaries = await Promise.all(this.owners.map(owner => owner.api.managerWorkSummary()));
+    const values: ManagerWorkSummary[] = [];
+    for (const summary of summaries) {
+      if (!summary.ok) return summary;
+      if (!validateManagerWorkSummary(summary.value)) return { ok: false, error: { code: "unavailable", message: "Thread owner returned an invalid manager work summary" } };
+      values.push(summary.value);
+    }
+    return { ok: true, value: combineManagerWork(values) };
   }
   async questionOrigin(threadId: string): Promise<Result<Pick<Thread, "id" | "title" | "agentName">>> {
     const owner = await this.owner(threadId);

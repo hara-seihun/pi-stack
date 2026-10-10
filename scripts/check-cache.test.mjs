@@ -21,7 +21,7 @@ function fixture() {
 const job = ['mail send boundary', 'python3', ['-B', 'tools/mail-send/test_send.py']];
 
 test('every shipping check declares inputs or an output-producing stage', () => {
-  for (const [name] of checkJobs) assert.ok(['run', 'memo'].includes(checkPolicy(name).kind), name);
+  for (const job of checkJobs) assert.ok(['run', 'memo'].includes(checkPolicy(job[0], job).kind), job[0]);
   assert.throws(() => checkPolicy('new unregistered check'), /No declared/);
 });
 
@@ -84,7 +84,7 @@ test('failed or mutated stages cannot manufacture pass receipts; corrupt receipt
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('output stages always run; cached prerequisites still obey the graph', async () => {
+test('revision reconciliation always runs; cached prerequisites still obey the graph', async () => {
   const root = fixture();
   const exit = process.exitCode;
   try {

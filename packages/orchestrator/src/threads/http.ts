@@ -12,7 +12,7 @@ export interface ThreadClientOptions { signal?: AbortSignal; timeoutMs?: number;
 export type ThreadAdmission = (operation: string, input: Record<string, any>) => Promise<AdmissionResult>;
 type ThreadFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
-const operations = ["attention", "attentionEvents", "agentWait", "wakeSchedule", "watch", "ask", "questions", "managerQuestions", "managerThread", "managerNotificationPolicy", "questionOrigin", "managerQuestionCustody", "pendingQuestions", "questionState", "questionEvents", "answer", "spawn", "send", "list", "read", "control", "inspect", "command", "settlements", "await", "archived"] as const;
+const operations = ["attention", "attentionEvents", "agentWait", "wakeSchedule", "watch", "ask", "questions", "managerQuestions", "managerThread", "managerNotificationPolicy", "managerWorkSummary", "questionOrigin", "managerQuestionCustody", "pendingQuestions", "questionState", "questionEvents", "answer", "spawn", "send", "list", "read", "control", "inspect", "command", "settlements", "await", "archived"] as const;
 type Operation = typeof operations[number];
 const failure = (message: string): Result<never> => ({ ok: false, error: { code: "unavailable", message } });
 
@@ -35,6 +35,7 @@ export async function threadHttp(api: ThreadApi, request: Request, prefix = "/v1
   }
   try {
     const fields = input as Record<string, any>;
+    if (operation === "managerWorkSummary" && Object.keys(fields).length) return Response.json({ ok: false, error: { code: "invalid_request", message: "Work summary requires empty input" } }, { status: 400 });
     const inspection = operation === "inspect" ? validateInspectOptions(Object.fromEntries(Object.entries(fields).filter(([key]) => key !== "threadId"))) : undefined;
     if (inspection && !inspection.ok) return Response.json(inspection, { status: 400 });
     const declaredDeadline = Number(request.headers.get(deadlineHeader));
@@ -52,6 +53,7 @@ export async function threadHttp(api: ThreadApi, request: Request, prefix = "/v1
         : operation === "questions" ? api.questions(fields.threadId)
         : operation === "managerThread" ? api.managerThread()
         : operation === "managerNotificationPolicy" ? api.managerNotificationPolicy()
+        : operation === "managerWorkSummary" ? api.managerWorkSummary()
         : operation === "questionOrigin" ? api.questionOrigin(fields.threadId)
         : operation === "questionState" ? api.questionState(fields.threadId, fields.questionId)
         : operation === "command" ? api.command(fields.threadId, fields.command)
@@ -128,6 +130,7 @@ export function createThreadClient(baseUrl: string, fetcher: ThreadFetch = fetch
     managerQuestions: input => call("managerQuestions", input),
     managerThread: () => call("managerThread", {}),
     managerNotificationPolicy: () => call("managerNotificationPolicy", {}),
+    managerWorkSummary: () => call("managerWorkSummary", {}),
     questionOrigin: threadId => call("questionOrigin", { threadId }),
     managerQuestionCustody: input => call("managerQuestionCustody", input),
     questionState: (threadId, questionId) => call("questionState", { threadId, questionId }),
