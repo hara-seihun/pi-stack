@@ -33,6 +33,7 @@ const shipping = {
   'Claude reset collector': ['tools/claude-reset'],
   'runtime dependency closure': ['deploy/runtime', 'packages/runtime', 'packages/orchestrator', 'packages/kenan-memory', 'packages/kenan-root'],
   'One Kenan deployment': ['deploy', 'config', 'scripts/one-kenan-deploy.test.py'],
+  'One Kenan activation': ['deploy/one-kenan-activate', 'deploy/host-plan.mjs', 'deploy/source-scopes.mjs'],
   'prompt availability': ['deploy/prompt-availability', 'scripts/prompt-availability.test.py'],
   'Meet recognition protocol': ['apps/meet-recognition'],
   'action journal publication': ['deploy'],
@@ -62,7 +63,7 @@ export function checkPolicy(name, job) {
   if (['orchestrator shared RPC', 'orchestrator tool schemas'].includes(name)) return { kind: 'run', reason: 'idempotent dependency/generated-input reconciliation' };
   if (name.startsWith('publication ')) {
     const suite = name.slice('publication '.length);
-    if (!['config', 'transport', 'roots', 'core', 'gate', 'bundle', 'source', 'progress', 'proof', 'telephone', 'continuation', 'host lanes'].includes(suite)) throw new Error(`No declared check inputs for ${name}`);
+    if (!['config', 'transport', 'roots', 'core', 'gate', 'bundle', 'source', 'progress', 'proof', 'telephone', 'continuation', 'preflight', 'host lanes'].includes(suite)) throw new Error(`No declared check inputs for ${name}`);
     return { kind: 'memo', inputs: suite === 'continuation' ? ['deploy/publication-continuation.mjs', 'deploy/publication-timings.mjs'] : suite === 'host lanes' ? ['deploy/publication-hosts.mjs'] : ['deploy', 'config', 'scripts/publication-fixture.mjs', 'apps/meet-recognition'], completeScope: true };
   }
   if (name.startsWith('orchestrator test: ') || name.startsWith('remote test: ') || name.startsWith('runtime test: ') || name.startsWith('memory test: ') || name.startsWith('root test: ')) {

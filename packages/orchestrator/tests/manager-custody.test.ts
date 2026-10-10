@@ -232,7 +232,7 @@ it.each(["thread-wake:g:0", "manager-questions:child:call", "manager-custody:chi
 it("defers due manager heartbeats during person activity and emits distinct notification wakes after fifteen minutes", async () => {
   let now = 1_000_000; vi.spyOn(Date, "now").mockImplementation(() => now);
   const { service, root } = await setup();
-  unwrap(service.importMessage({ id: "person", threadId: "manager", text: "Hello", state: "done", createdAt: now }));
+  unwrap(service.importMessage({ id: "person", threadId: "manager", humanActivity: true, text: "Hello", state: "done", createdAt: now }));
   unwrap(await service.wakeSchedule({ action: "set", requestId: "heartbeat", threadId: "manager", cadenceMs: 4 * 60 * 60_000, reason: "Manager heartbeat", nextDueAt: now }));
   await service.close();
   const restored = fixture(root, { admit: async () => ({ ok: false, error: { code: "unavailable", message: "Test capacity wait" } }) }).service;

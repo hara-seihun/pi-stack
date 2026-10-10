@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { copyFileSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
@@ -27,7 +27,7 @@ entrypoint with the host's pi-stack-release command, not pi install npm.`);
 const runtime = realpathSync(process.env.PI_STACK_RUNTIME_DEST ?? "/srv/pi/runtime");
 const host = realpathSync(values["worker-release"] ?? runtime);
 const sdk = realpathSync(join(host, "node_modules/@earendil-works/pi-coding-agent/dist/index.js"));
-const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager } = await import(pathToFileURL(sdk).href);
+const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } = await import(pathToFileURL(sdk).href);
 const selected = createRequire(join(runtime, "package.json"));
 const browserPackage = selected.resolve("agent-browser/package.json");
 const bin = realpathSync(join(dirname(dirname(browserPackage)), ".bin"));
@@ -109,13 +109,25 @@ let accepted = false;
 let browserAttempted = !!values["session-file"];
 try {
   const agentDir = join(homedir(), ".pi/agent");
-  const resourceLoader = new DefaultResourceLoader({ cwd: directory, agentDir });
+  let settingsManager;
+  if (process.env.PI_STACK_DOCTOR_BINDINGS) {
+    const bindings = JSON.parse(readFileSync(process.env.PI_STACK_DOCTOR_BINDINGS, 'utf8'));
+    assert.equal(bindings.protocol, 'pi-doctor-bindings-v1');
+    assert.equal(bindings.phase, 'browser');
+    assert.equal(bindings.runtime, runtime);
+    assert.equal(bindings.home, homedir());
+    const settingsBytes = bindings.settingsSha256 === null ? null : readFileSync(join(agentDir, 'settings.json'));
+    assert.equal(settingsBytes === null ? null : createHash('sha256').update(settingsBytes).digest('hex'), bindings.settingsSha256, 'normal settings changed before browser proof');
+    assert.ok(Array.isArray(bindings.packages));
+    settingsManager = SettingsManager.inMemory({ ...(settingsBytes === null ? {} : JSON.parse(settingsBytes)), packages: bindings.packages });
+  }
+  const resourceLoader = new DefaultResourceLoader({ cwd: directory, agentDir, settingsManager });
   await resourceLoader.reload({ resolveProjectTrust: async () => true });
   const modelRuntime = await ModelRuntime.create({ authPath: join(directory, "auth.json"), modelsPath: join(directory, "models.json"), allowModelNetwork: false });
   const model = modelRuntime.getModel("openai-codex", "gpt-6-luna");
   assert.ok(model, "browser doctor requires its explicit offline catalog model; no inference is dispatched");
   const opened = managed = await createManagedAgentSession(() => createAgentSession({
-    cwd: directory, agentDir, resourceLoader, modelRuntime, model, thinkingLevel: "off", tools: ["agent_browser"],
+    cwd: directory, agentDir, resourceLoader, settingsManager, modelRuntime, model, thinkingLevel: "off", tools: ["agent_browser"],
     sessionManager: SessionManager.open(sessionFile, undefined, directory),
   }), { cwd: directory });
   session = opened.session;

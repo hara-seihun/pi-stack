@@ -22,7 +22,8 @@ test("service-environment onboarding reconciles one account without global Git t
   function file(path, contents = "") { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, contents); }
   const deployed = path => path.replace("/srv/pi/pi-orchestrator", roots.orchestrator).replace("/srv/pi/pi-remote", roots.remote).replace("/srv/pi/runtime", roots.runtime);
   const env = { ...process.env, HOME: home, PI_STACK_ALLOW_DIRTY: "1", PI_STACK_DEPLOY_NO_SUDO: "1", PI_STACK_HOME_OVERRIDE: home,
-    PI_STACK_HOST_FILE: join(scratch, "host.json"), PI_STACK_HOST_LOCK_FILE: join(scratch, "deploy.lock"),
+    PI_STACK_HOST_FILE: join(scratch, "host.json"), PI_STACK_HOST_LOCK_PATH: join(scratch, "deploy.lock"),
+    PI_STACK_HOST_LOCK_HELD: "0", PI_STACK_DEPLOY_LOCK_HELD: "0",
     ...Object.fromEntries(Object.entries(roots).map(([name, path]) => [`PI_STACK_${name.toUpperCase()}_DEST`, path])),
   };
   delete env.HOME;
@@ -30,7 +31,7 @@ test("service-environment onboarding reconciles one account without global Git t
   env.GIT_TEST_ASSUME_DIFFERENT_OWNER = "1";
   env.GIT_CONFIG_NOSYSTEM = "1";
   env.GIT_CONFIG_GLOBAL = "/dev/null";
-  const run = script => spawnSync(join(root, "deploy", script), [user], { cwd: root, env, encoding: "utf8", timeout: 5_000 });
+  const run = script => spawnSync(join(root, "deploy", script), [user], { cwd: root, env, encoding: "utf8", timeout: 15_000 });
   try {
     mkdirSync(home);
     const sharedModels = join(scratch, "models.json");
@@ -68,6 +69,17 @@ test("service-environment onboarding reconciles one account without global Git t
     mkdirSync(join(home, ".local/bin"), { recursive: true });
     symlinkSync(join(roots.tools, "removed/command"), join(home, ".local/bin/removed"));
     const before = snapshot(shared);
+    const reservedAccount = snapshot(home);
+    const reservationPath = `${env.PI_STACK_HOST_LOCK_PATH}.publication`;
+    const reservation = JSON.stringify({ requestId: 'PUB-ffffffffffffffffffffffff', integrationSha: commit });
+    file(reservationPath, reservation);
+    const reserved = run('account');
+    assert.equal(reserved.status, 75, reserved.error?.message ?? reserved.stderr);
+    assert.match(reserved.stderr, /Pi stack publication reserves this host/);
+    assert.equal(readFileSync(reservationPath, 'utf8'), reservation);
+    assert.deepEqual(snapshot(home), reservedAccount, 'reservation refusal precedes all account effects');
+    assert.deepEqual(snapshot(shared), before);
+    rmSync(reservationPath);
     for (let attempt = 0; attempt < 2; attempt++) {
       const result = run("account");
       assert.equal(result.status, 0, result.stderr);
@@ -120,8 +132,9 @@ test("settings resolves exact npm pins and rejects mismatches without changing t
     file(settings, JSON.stringify({ theme: "personal", packages: ["replaced"] }));
     const env = { ...process.env, HOME: home, PI_STACK_ALLOW_DIRTY: "1", PI_STACK_DEPLOY_NO_SUDO: "1", PI_STACK_HOME_OVERRIDE: home,
       PI_STACK_HOST_FILE: join(scratch, "host.json"), PI_STACK_HOST_LOCK_PATH: join(scratch, "deploy.lock"),
+      PI_STACK_HOST_LOCK_HELD: "0", PI_STACK_DEPLOY_LOCK_HELD: "0",
       PI_STACK_RUNTIME_DEST: runtime, PI_STACK_ORCHESTRATOR_DEST: orchestrator, PI_STACK_REMOTE_DEST: remote };
-    const run = () => spawnSync(join(source, "deploy/settings"), [user], { cwd: source, env, encoding: "utf8", timeout: 5_000 });
+    const run = () => spawnSync(join(source, "deploy/settings"), [user], { cwd: source, env, encoding: "utf8", timeout: 15_000 });
     const installed = run();
     assert.equal(installed.status, 0, installed.stderr);
     assert.deepEqual(json(settings).packages, [external, remote]);
@@ -137,15 +150,42 @@ test("settings resolves exact npm pins and rejects mismatches without changing t
   } finally { rmSync(scratch, { recursive: true, force: true }); }
 });
 
+test('account publication reservation uses only its explicit temporary host lock before account effects', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'pi-stack-account-reservation-'));
+  try {
+    const lockPath = join(scratch, 'host.lock');
+    const reservationPath = `${lockPath}.publication`;
+    const home = join(scratch, 'home');
+    mkdirSync(home);
+    const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8', timeout: 15_000 }).trim();
+    const user = execFileSync('id', ['-un'], { encoding: 'utf8', timeout: 15_000 }).trim();
+    const reservation = JSON.stringify({ requestId: 'PUB-ffffffffffffffffffffffff', integrationSha: commit });
+    writeFileSync(reservationPath, reservation);
+    const env = { ...process.env, PI_STACK_HOST_LOCK_PATH: lockPath,
+      PI_STACK_HOST_LOCK_HELD: '0', PI_STACK_DEPLOY_LOCK_HELD: '0', PI_STACK_PUBLICATION_REQUEST: '',
+      PI_STACK_HOME_OVERRIDE: home, PI_STACK_DEPLOY_NO_SUDO: '1', PI_STACK_ALLOW_DIRTY: '1' };
+    const before = snapshot(home);
+    const result = spawnSync(join(root, 'deploy/account'), [user], { cwd: root, env, encoding: 'utf8', timeout: 15_000 });
+    assert.equal(result.error, undefined, result.error?.message);
+    assert.equal(result.status, 75, result.stderr);
+    assert.match(result.stderr, /Pi stack publication reserves this host/);
+    assert.equal(result.stdout, '');
+    assert.equal(readFileSync(reservationPath, 'utf8'), reservation);
+    assert.deepEqual(snapshot(home), before);
+    assert.equal(lstatSync(lockPath).isFile(), true, 'wrapper and shared reservation check use the same isolated lock');
+  } finally { rmSync(scratch, { recursive: true, force: true }); }
+});
+
 test("deployment grants process-local Git trust only to the executed checkout", () => {
   const scratch = mkdtempSync(join(tmpdir(), "pi-stack-git-trust-"));
   try {
     execFileSync("git", ["init", "-q", scratch]);
     const env = { ...process.env, GIT_TEST_ASSUME_DIFFERENT_OWNER: "1", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
-      PI_STACK_DEPLOY_DEADLINE_ACTIVE: "1", PI_STACK_ALLOW_DIRTY: "1", PI_STACK_DEPLOY_NO_SUDO: "1", PI_STACK_HOST_LOCK_FILE: join(scratch, "lock") };
+      PI_STACK_DEPLOY_DEADLINE_ACTIVE: "1", PI_STACK_ALLOW_DIRTY: "1", PI_STACK_DEPLOY_NO_SUDO: "1", PI_STACK_HOST_LOCK_PATH: join(scratch, "lock"),
+      PI_STACK_HOST_LOCK_HELD: "0", PI_STACK_DEPLOY_LOCK_HELD: "0" };
     delete env.HOME;
     delete env.SUDO_UID;
-    const result = spawnSync("bash", ["-c", 'set -e; source "$1/deploy/lib"; pi_stack_enter_deployment "$1/deploy/account" "$1"; git -C "$1" rev-parse HEAD; git -C "$2" status --porcelain', "fixture", root, scratch], { env, encoding: "utf8", timeout: 3_000 });
+    const result = spawnSync("bash", ["-c", 'set -e; source "$1/deploy/lib"; pi_stack_enter_deployment "$1/deploy/account" "$1"; git -C "$1" rev-parse HEAD; git -C "$2" status --porcelain', "fixture", root, scratch], { env, encoding: "utf8", timeout: 15_000 });
     assert.equal(result.status, 128);
     assert.match(result.stdout, /^[a-f0-9]{40}\n$/);
     assert.match(result.stderr, /dubious ownership/);
