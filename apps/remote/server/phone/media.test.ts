@@ -23,7 +23,7 @@ async function browser(options: { takeoverFails?: boolean; deferTakeover?: boole
     location: { origin: 'http://localhost:8799', hash: '#test-token', pathname: '/media', search: '', href: 'http://localhost:8799/media#test-token', protocol: 'http:' },
     history: { replaceState() {} }, window: { addEventListener() {} }, navigator: { mediaDevices: devices },
     URL, Response, AbortController, crypto: { randomUUID: () => 'test-event' },
-    setTimeout: () => 1, clearTimeout() {}, requestAnimationFrame: () => 1, cancelAnimationFrame() {},
+    setTimeout: () => 1, clearTimeout() {}, setInterval: () => 1, clearInterval() {}, requestAnimationFrame: () => 1, cancelAnimationFrame() {},
     fetch: async (url: string, init: any) => {
       assert.equal(init.headers.Authorization, 'Bearer test-token');
       requests.push({ url, body: JSON.parse(init.body) });
@@ -39,10 +39,11 @@ async function browser(options: { takeoverFails?: boolean; deferTakeover?: boole
     },
     AudioContext: class {
       state = 'running'; destination = {};
-      createMediaStreamDestination() { return { stream: { getTracks: () => [{ stop() {} }], getAudioTracks: () => [{ contentHint: '', stop() {} }] } }; }
+      sampleRate = 48000;
+      createMediaStreamDestination() { const track = { ...originalTrack, id: 'gated-output', contentHint: '' }; return { stream: { getTracks: () => [track], getAudioTracks: () => [track] } }; }
       createGain() { return { gain: { value: 1 }, connect() {}, disconnect() {} }; }
       createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
-      createAnalyser() { return { fftSize: 8, connect() {}, disconnect() {}, getFloatTimeDomainData(data: Float32Array) { data.fill(0.1); } }; }
+      createAnalyser() { return { fftSize: 8, frequencyBinCount: 1024, connect() {}, disconnect() {}, getFloatTimeDomainData(data: Float32Array) { data.fill(0.1); }, getFloatFrequencyData(data: Float32Array) { data.fill(-60); } }; }
       async resume() {}
       async close() { this.state = 'closed'; }
     },
@@ -125,6 +126,10 @@ test('voice ready precedes dial, opening is gated by successful permanent takeov
   assert.equal(state.clones[0].stopped, true);
   assert.equal(state.clones[1].stopped, false);
   assert.equal(state.originalTrack.stopped, false);
+  vm.runInContext('observeOutput()', state.context);
+  assert.equal(state.sends.some(value => value.type === 'audio-proof'), false, 'Opening audio stays muted during the greeting');
+  assert.equal(vm.runInContext('outputGate.gain.value', state.context), 0);
+  state.control({ type: 'playout', enabled: true });
   vm.runInContext('observeOutput()', state.context);
   assert.equal(state.sends.at(-1).type, 'audio-proof');
   state.control({ type: 'close' });

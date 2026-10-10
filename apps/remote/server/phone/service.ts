@@ -10,6 +10,7 @@ import { providerSelection, loadProvider } from "./provider";
 import { silentReply, silentBegin } from "./retell-transport";
 import type { RetellFailure } from "./retell-error";
 import { contactGuard } from "./contact-guard";
+import { CallProgress, type CallProgressEffect } from "./call-progress";
 import { ActionClient, type ActionTicket } from "kenan-memory/actions";
 import { phoneIntent, reservePhoneAction, settlePhoneAction } from "./action-admission";
 
@@ -49,6 +50,7 @@ type Call = { id: string; brief: CallBrief; token: string; actionTicket?: Action
   dialState: "none" | "dispatching" | "accepted" | "uncertain" | "rejected"; timer: ReturnType<typeof setTimeout>;
   ready: Promise<void>; resolveReady: () => void; rejectReady: (e: Error) => void; audio: Promise<void>; resolveAudio: () => void;
   outputBytes: number; usageSeconds: number; offerPending: boolean; transportGranted: boolean; transportNotified: boolean; participantId?: string;
+  progress?: CallProgress; progressTimer?: ReturnType<typeof setInterval>;
   abort: AbortController; transcript: CallFragment[]; seen: Set<string>; delegations: Set<string>; queue: Promise<void>; finishing?: Promise<void> };
 const active = new Map<string, Call>();
 const log = (id: string, type: string, payload: unknown) => db.query("INSERT INTO events(call_id,at,type,payload) VALUES(?,?,?,?)").run(id, Date.now(), type, JSON.stringify(payload));
@@ -80,10 +82,23 @@ async function cleanup(row: Row) {
   if (failures.length) db.query("UPDATE calls SET cleanup=0,error=? WHERE id=?").run(failures.join("; "), row.id);
   else db.query("UPDATE calls SET cleanup=1 WHERE id=?").run(row.id);
 }
-function send(call: Call, event: unknown) {
+function control(call: Call, message: unknown) {
   if (call.finishing || !call.media) return;
-  try { if (call.media.send(JSON.stringify({ type: "live-event", event })) === 0) void finish(call, "failed", "Live control backpressure"); }
+  try { if (call.media.send(JSON.stringify(message)) === 0) void finish(call, "failed", "Live control backpressure"); }
   catch { void finish(call, "failed", "Live control disconnected"); }
+}
+function send(call: Call, event: unknown) { control(call, { type: "live-event", event }); }
+function progressEffects(call: Call, effects: CallProgressEffect[]) {
+  for (const effect of effects) {
+    if (call.finishing) return;
+    log(call.id, "call-progress", effect);
+    if (effect.type === "end") { void finish(call, effect.reason === "Telephone audio activity unavailable" ? "failed" : "completed", effect.reason); return; }
+    control(call, { type: "playout", enabled: effect.type === "opening" });
+    if (effect.type === "hold") send(call, { type: "session.instructions.append", event_id: randomUUID(), delegation_id: null, content: "A voicemail greeting is still playing. Stay silent and listen until the application signals that recording is ready." });
+    else send(call, { type: "session.instructions.append", event_id: randomUUID(), delegation_id: null, content: effect.voicemail
+      ? "The voicemail greeting has ended; recording is ready. Leave one brief message: the approved opening and reason for calling, with an approved callback detail if supplied. No questions, repeated message, or invitation to answer. Then stop speaking; the application will hang up after your audio finishes."
+      : "The telephone connection is live and the recipient's opening has ended. Deliver the approved opening once, then listen and converse within the brief." });
+  }
 }
 function settleAction(call: Call) {
   if (!call.actionTicket) {
@@ -105,7 +120,7 @@ function settleAction(call: Call) {
 async function finish(call: Call, status: string, reason: string) {
   if (call.finishing) return call.finishing;
   call.finishing = Promise.resolve().then(async () => {
-    clearTimeout(call.timer); call.abort.abort();
+    clearTimeout(call.timer); clearInterval(call.progressTimer); call.abort.abort();
     db.query("UPDATE calls SET status=?,ended_at=?,error=? WHERE id=?").run(status, Date.now(), reason, call.id);
     log(call.id, "ended", { status, reason });
     settleAction(call);
@@ -209,8 +224,15 @@ const websocket = {
     if (m.type === "ready") { call.resolveReady(); return; }
     if (m.type === "transport-ready") {
       if (!call.participantId || !call.transportGranted) { void finish(call, "failed", "Unconfirmed telephone takeover"); return; }
+      if (call.progress) return;
       db.query("UPDATE calls SET status='connected' WHERE id=?").run(call.id);
-      send(call, { type: "session.instructions.append", event_id: randomUUID(), delegation_id: null, content: "The telephone connection is now live. Deliver the approved opening and listen." }); return;
+      call.progress = new CallProgress(Date.now());
+      call.progressTimer = setInterval(() => progressEffects(call, call.progress!.tick(Date.now())), 250);
+      send(call, { type: "session.instructions.append", event_id: randomUUID(), delegation_id: null, content: "The telephone audio is connected. Listen silently to identify the answerer; this is not permission to deliver the opening yet. Do not speak over a greeting, recording instructions, or a beep. The application will signal when to speak." }); return;
+    }
+    if (m.type === "audio-activity") {
+      if (!call.progress || typeof m.input !== "boolean" || typeof m.output !== "boolean" || typeof m.tone !== "boolean" || (m.tone && !m.input)) { void finish(call, "failed", "Invalid telephone audio activity"); return; }
+      progressEffects(call, call.progress.audio({ input: m.input, output: m.output, tone: m.tone }, Date.now())); return;
     }
     if (m.type === "audio-proof" && Number.isSafeInteger(m.bytes) && m.bytes > 0) { call.outputBytes += m.bytes; call.resolveAudio(); return; }
     if (m.type === "transport-status") {
@@ -228,6 +250,7 @@ const websocket = {
     if (["session.input_transcript.delta", "session.output_transcript.delta"].includes(e.type) && typeof e.delta === "string" && e.delta.length <= 4000) {
       call.transcript.push({ role: e.type === "session.input_transcript.delta" ? "callee" : "kenan", text: e.delta });
       log(call.id, e.type, e);
+      if (e.type === "session.input_transcript.delta") progressEffects(call, call.progress?.transcript(e.delta) ?? []);
       if (call.transcript.length > 2000 || Buffer.byteLength(JSON.stringify(call.transcript)) > 128_000) void finish(call, "completed", "Conversation length bound reached");
     } else if (e.type === "session.delegation.created") {
       const id = e.delegation?.id;
