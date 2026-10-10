@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/store.js";
 import { ProviderController } from "../src/provider-controller.js";
+import { verifyFreshBrokerAdmission } from "../src/core/fresh-broker-transports.js";
 import { CompletionService } from "../src/completion.js";
 import { loadBrokerConfig } from "../src/model-broker.js";
 import { createCoreProvider, parseCoreProviderConfig, type CoreProviderConfig } from "../src/core/provider.js";
@@ -15,6 +16,7 @@ import { brokerUsageAcrossStores, WeeklyAllowances } from "../src/broker-usage.j
 import type { PermissionPolicy, Principal } from "../src/permissions.js";
 
 vi.mock("../src/core/broker-transports.js", async importOriginal => ({ ...await importOriginal<typeof import("../src/core/broker-transports.js")>(), verifyBrokerDrainReceipt: vi.fn(() => ({ ok: true, value: undefined })), verifyLiveBrokerIdentity: vi.fn(async () => ({ ok: true, value: undefined })) }));
+vi.mock("../src/core/fresh-broker-transports.js", async original => ({ ...await original<typeof import("../src/core/fresh-broker-transports.js")>(), verifyFreshBrokerAdmission: vi.fn(() => ({ ok: true, value: undefined })) }));
 vi.mock("../src/model-broker.js", async importOriginal => ({ ...await importOriginal<typeof import("../src/model-broker.js")>(), loadBrokerConfig: vi.fn() }));
 const roots: string[] = [];
 afterEach(() => { vi.restoreAllMocks(); vi.clearAllMocks(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -35,7 +37,7 @@ function fixture() {
   };
   const brokerConfig = { ledgerPath: store.path, authPath: join(root, "auth.json"), listeners: [{ principal: "kenan", port: 19100, accounts: ["codex"], models: ["openai-codex/gpt-6-luna"], maxInFlight: 5 }], grantOwner: "core" };
   vi.mocked(loadBrokerConfig).mockReturnValue(brokerConfig);
-  const config: Extract<CoreProviderConfig, { kind: "configured" }> = { kind: "configured", primaryConfigPath: join(root, "broker.json"), configPaths: [join(root, "broker.json")], grantFootprints: [{ configPath: join(root, "broker.json"), ledgerOwnerIds: ["current", "fleet"] }], ownerRoutes: [], adoptionReceiptPath: receipt("provider", store.path), uid: process.getuid!(), gid: process.getgid!(), home: root, agentDir: root, availabilityPath: join(root, "models.json"), releasePath: root, meterMaxAgeMs: 60_000, autoReset: false, resource: { ...resource, subjects: [...resource.subjects] }, peopleUsageResource: { ...peopleResource, subjects: [...peopleResource.subjects] }, ownerPrincipal: "kenan", retainedListeners: { kind: "disabled" }, retainedLedgers: [{ id: "fleet", ownerPrincipal: "kenan", databasePath: retained.path, adoptionReceiptPath: receipt("fleet", retained.path), uid: process.getuid!(), gid: process.getgid!(), home: root, authPath: brokerConfig.authPath, agentDir: root, meterMaxAgeMs: 30_000, autoReset: false }], completionAliases: [{ principal: "kenan", requestId: "public-id", storedRequestId: "unchanged-old-id", ownerId: "fleet" }] };
+  const config: Extract<CoreProviderConfig, { kind: "configured" }> = { kind: "configured", primaryConfigPath: join(root, "broker.json"), configPaths: [join(root, "broker.json")], grantFootprints: [{ configPath: join(root, "broker.json"), ledgerOwnerIds: ["current", "fleet"] }], ownerRoutes: [], adoptionReceiptPath: receipt("provider", store.path), uid: process.getuid!(), gid: process.getgid!(), home: root, agentDir: root, availabilityPath: join(root, "models.json"), releasePath: root, meterMaxAgeMs: 60_000, autoReset: false, resource: { ...resource, subjects: [...resource.subjects] }, peopleUsageResource: { ...peopleResource, subjects: [...peopleResource.subjects] }, ownerPrincipal: "kenan", retainedListeners: { kind: "disabled" }, freshListeners: [], retainedLedgers: [{ id: "fleet", ownerPrincipal: "kenan", databasePath: retained.path, adoptionReceiptPath: receipt("fleet", retained.path), uid: process.getuid!(), gid: process.getgid!(), home: root, authPath: brokerConfig.authPath, agentDir: root, meterMaxAgeMs: 30_000, autoReset: false }], completionAliases: [{ principal: "kenan", requestId: "public-id", storedRequestId: "unchanged-old-id", ownerId: "fleet" }] };
   store.close(); retained.close();
   return { config, brokerConfig, root, runId: submitted.value.runId };
 }
@@ -112,6 +114,7 @@ test("provider registry requires explicit retained descriptors and exact alias i
   const { config } = fixture();
   expect(parseCoreProviderConfig(config, policy, principal).ok).toBe(true);
   expect(parseCoreProviderConfig({ ...config, retainedLedgers: undefined }, policy, principal).ok).toBe(false);
+  expect(parseCoreProviderConfig({ ...config, freshListeners: undefined }, policy, principal).ok).toBe(false);
   expect(parseCoreProviderConfig({ ...config, completionAliases: undefined }, policy, principal).ok).toBe(false);
   expect(parseCoreProviderConfig({ ...config, completionAliases: [...config.completionAliases, ...config.completionAliases] }, policy, principal).ok).toBe(false);
   expect(parseCoreProviderConfig({ ...config, completionAliases: [{ ...config.completionAliases[0], ownerId: "undeclared" }] }, policy, principal).ok).toBe(false);
@@ -195,6 +198,40 @@ test("retained listeners keep immutable routes in the core and recheck host iden
     expect((await fetch(url)).status).toBe(403);
     expect(verifyLiveBrokerIdentity).toHaveBeenCalledTimes(3);
   } finally { await opened.value.close(); }
+});
+
+test("fresh personal listeners use the shared core without borrowing retained drain or another person's endpoint", async () => {
+  const { config, brokerConfig } = fixture();
+  const reservation = createServer(); await new Promise<void>(resolve => reservation.listen(0, "127.0.0.1", resolve));
+  const address = reservation.address(); if (!address || typeof address === "string") throw Error("No fresh fixture port");
+  await new Promise<void>(resolve => reservation.close(() => resolve()));
+  const actor = { kind: "person", id: "alice", person: "alice" } as const, path = join(config.agentDir, "alice-broker.json");
+  const personalConfig = { ...brokerConfig, grantOwner: "alice-personal", listeners: [{ ...brokerConfig.listeners[0]!, principal: actor.id, port: address.port }] };
+  config.configPaths.push(path); config.grantFootprints.push({ configPath: path, ledgerOwnerIds: ["current"] });
+  config.freshListeners.push({ configPath: path, admissionReceiptPath: join(config.agentDir, "alice-admission.json"), binding: { principalId: actor.id, uid: 1002, authorizedUids: [0, 1002], port: address.port, family: "inet", table: "people", inputChain: "input", outputChain: "output" } });
+  vi.mocked(loadBrokerConfig).mockImplementation(source => source === path ? personalConfig : brokerConfig);
+  const admittedPolicy: PermissionPolicy = { ...policy, grants: [...policy.grants, { ...policy.grants[1]!, id: "alice-use", principal: actor.id, actions: ["use"] }] };
+  const opened = createCoreProvider(config, admittedPolicy, [principal, actor]);
+  expect(opened.ok).toBe(true); if (!opened.ok) return;
+  try {
+    expect(await opened.value.startTransports()).toMatchObject({ ok: true });
+    expect(verifyFreshBrokerAdmission).toHaveBeenCalledTimes(2);
+    expect(verifyBrokerDrainReceipt).not.toHaveBeenCalled();
+    expect(verifyLiveBrokerIdentity).toHaveBeenCalledWith(config.freshListeners[0]!.binding);
+    const response = await fetch(`http://127.0.0.1:${address.port}/v1/usage`); expect(response.status).toBe(200);
+    admittedPolicy.grants = admittedPolicy.grants.filter(g => g.id !== "alice-use");
+    expect((await fetch(`http://127.0.0.1:${address.port}/v1/usage`)).status).toBe(403);
+    expect(opened.value.imageAccounts.store.brokerGrant("alice")).toEqual({ accounts: ["codex"], models: ["openai-codex/gpt-6-luna"] });
+    expect(opened.value.imageAccounts.store.control("broker-grant-owner:alice")).toBe("alice-personal");
+  } finally { await opened.value.close(); }
+});
+
+test("invalid fresh admission rejects before acquiring a ledger or publishing grants", () => {
+  const { config, brokerConfig } = fixture();
+  config.freshListeners = [{ configPath: config.primaryConfigPath, admissionReceiptPath: "/invalid", binding: { principalId: "kenan", uid: 1000, authorizedUids: [0, 1000], port: 19100, family: "inet", table: "people", inputChain: "input", outputChain: "output" } }];
+  vi.mocked(verifyFreshBrokerAdmission).mockReturnValueOnce({ ok: false, error: { code: "ownership-conflict", message: "No template registration" } });
+  expect(createCoreProvider(config, policy, [principal])).toMatchObject({ ok: false, error: { code: "ownership-conflict" } });
+  expect(existsSync(`${brokerConfig.ledgerPath}.core-owner.lock`)).toBe(false);
 });
 
 test("an undrained old broker refuses adoption before acquiring or changing a ledger", () => {

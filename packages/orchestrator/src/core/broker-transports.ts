@@ -15,6 +15,14 @@ export interface RetainedBrokerBinding {
   outputChain: string;
   inputChain: string;
 }
+export function isBrokerListenerBinding(value: unknown): value is RetainedBrokerBinding {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const b = value as RetainedBrokerBinding;
+  return typeof b.principalId === "string" && !!b.principalId && Number.isSafeInteger(b.port) && b.port >= 1024 && b.port <= 65535
+    && Number.isSafeInteger(b.uid) && b.uid >= 0 && Array.isArray(b.authorizedUids) && b.authorizedUids.length > 0 && b.authorizedUids.includes(b.uid)
+    && new Set(b.authorizedUids).size === b.authorizedUids.length && b.authorizedUids.every(uid => Number.isSafeInteger(uid) && uid >= 0)
+    && b.family === "inet" && [b.table, b.outputChain, b.inputChain].every(name => typeof name === "string" && /^[A-Za-z_][A-Za-z0-9_-]*$/.test(name));
+}
 export type RetainedBrokerListeners = { kind: "disabled" } | { kind: "uid-bound"; adoptionReceiptPath: string; admissionDeltaPaths: string[]; bindings: RetainedBrokerBinding[] };
 export interface BrokerAdmissionDelta {
   version: 1;
@@ -92,7 +100,7 @@ export const brokerBindingsSha256 = (bindings: readonly RetainedBrokerBinding[])
 const absolute = (value: unknown): value is string => typeof value === "string" && value.startsWith("/") && !value.includes("\0");
 const nonempty = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0;
 const hash = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
-function rootEvidence(path: string): string {
+export function readRootBrokerEvidence(path: string): string {
   if (!absolute(path)) throw Error("Admission evidence must use an absolute path");
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
@@ -101,9 +109,27 @@ function rootEvidence(path: string): string {
     return readFileSync(fd, "utf8");
   } finally { closeSync(fd); }
 }
+export type BrokerEnrollmentRegistration = BrokerAdmissionDelta["registration"];
+export function verifyBrokerEnrollmentRegistration(r: BrokerEnrollmentRegistration): CoreResult<{ template: Record<string, any>; plan: Record<string, any>; admittedAt: number }> {
+  try {
+    if (!record(r) || !nonempty(r.registrationId) || !nonempty(r.requestId) || !nonempty(r.principalId) || !Number.isSafeInteger(r.uid) || r.uid < 0 || !hash(r.templateSha256)) throw Error("Invalid enrollment registration descriptor");
+    const admittedAt = Date.parse(r.admittedAt);
+    if (!Number.isFinite(admittedAt) || admittedAt > Date.now()) throw Error("Invalid enrollment admission time");
+    const templateBytes = readRootBrokerEvidence(r.templatePath), template = JSON.parse(templateBytes);
+    if (sha256(templateBytes) !== r.templateSha256 || template.version !== 1 || template.principal?.kind !== "person" || template.principal?.id !== "{{principalId}}"
+      || template.principal?.person !== "{{user}}" || template.scope?.custody?.uid !== "{{uid}}") throw Error("Enrollment requires its exact root-owned personal template");
+    const plan = JSON.parse(readRootBrokerEvidence(r.planPath));
+    if (plan.version !== 1 || !["prepared", "adopted"].includes(plan.state) || plan.registration?.id !== r.registrationId || plan.requestId !== r.requestId || plan.registration?.requestId !== r.requestId
+      || plan.registration?.scope?.principalId !== r.principalId || plan.registration?.scope?.custody?.uid !== r.uid || plan.user !== r.principalId
+      || plan.additions?.principal?.kind !== "person" || plan.additions?.principal?.id !== r.principalId || plan.additions?.principal?.person !== plan.user
+      || plan.registration?.creatorPrincipalId !== template.creatorPrincipalId || plan.templateHash !== sha256(completionCanonical(template)) || !hash(plan.identityHash)
+      || r.registrationId !== `oidc-account-${plan.identityHash}`) throw Error("Enrollment provenance differs from its root-owned issuer/subject plan");
+    return { ok: true, value: { template, plan, admittedAt } };
+  } catch (cause) { return { ok: false, error: { code: "ownership-conflict", message: `Broker enrollment evidence is invalid: ${cause instanceof Error ? cause.message : String(cause)}` } }; }
+}
 export function verifyBrokerDrainReceipt(config: Extract<RetainedBrokerListeners, { kind: "uid-bound" }>, ledgerPath: string): CoreResult<void> {
   try {
-    const receipt = JSON.parse(rootEvidence(config.adoptionReceiptPath)), ledger = statSync(ledgerPath, { bigint: true });
+    const receipt = JSON.parse(readRootBrokerEvidence(config.adoptionReceiptPath)), ledger = statSync(ledgerPath, { bigint: true });
     const drainedAt = Date.parse(receipt.previousOwner?.drainedAt);
     if (receipt.version !== 1 || receipt.state !== "drained" || receipt.ledgerPath !== ledgerPath
       || receipt.databaseIdentity?.dev !== String(ledger.dev) || receipt.databaseIdentity?.ino !== String(ledger.ino)
@@ -113,24 +139,15 @@ export function verifyBrokerDrainReceipt(config: Extract<RetainedBrokerListeners
     let current: RetainedBrokerBinding[] = receipt.bindings, admittedAfter = drainedAt;
     const registrations = new Set<string>();
     for (const path of config.admissionDeltaPaths) {
-      const delta: BrokerAdmissionDelta = JSON.parse(rootEvidence(path));
+      const delta: BrokerAdmissionDelta = JSON.parse(readRootBrokerEvidence(path));
       const r = delta.registration;
       if (delta.version !== 1 || !hash(delta.priorBindingsSha256) || delta.priorBindingsSha256 !== brokerBindingsSha256(current)
         || !Array.isArray(delta.nextBindings) || !hash(delta.nextBindingsSha256) || delta.nextBindingsSha256 !== brokerBindingsSha256(delta.nextBindings)
         || !record(r) || !nonempty(r.registrationId) || !nonempty(r.requestId) || !nonempty(r.principalId) || !Number.isSafeInteger(r.uid) || r.uid < 0 || !hash(r.templateSha256)
         || registrations.has(r.registrationId)) throw Error("Admission delta does not bind its exact prior/next policy and unique registration");
-      const admittedAt = Date.parse(r.admittedAt);
-      if (!Number.isFinite(admittedAt) || admittedAt < admittedAfter || admittedAt > Date.now()) throw Error("Admission delta time is outside its ordered ownership chain");
-      const templateBytes = rootEvidence(r.templatePath), template = JSON.parse(templateBytes), admission = template.nativeModelAdmission;
-      if (sha256(templateBytes) !== r.templateSha256 || template.version !== 1 || !record(admission) || admission.kind !== "existing"
-        || template.principal?.kind !== "person" || template.principal?.id !== "{{principalId}}" || template.principal?.person !== "{{user}}" || template.scope?.custody?.uid !== "{{uid}}") throw Error("Admission requires its exact root-owned existing-listener enrollment template");
-      const plan = JSON.parse(rootEvidence(r.planPath));
-      // The registration producer verifies issuer/subject and materializes this plan.
-      if (plan.version !== 1 || !["prepared", "adopted"].includes(plan.state) || plan.registration?.id !== r.registrationId || plan.requestId !== r.requestId || plan.registration?.requestId !== r.requestId
-        || plan.registration?.scope?.principalId !== r.principalId || plan.registration?.scope?.custody?.uid !== r.uid || plan.user !== r.principalId
-        || plan.additions?.principal?.kind !== "person" || plan.additions?.principal?.id !== r.principalId || plan.additions?.principal?.person !== plan.user
-        || !same(plan.additions?.nativeModelAdmission, admission) || plan.registration?.creatorPrincipalId !== template.creatorPrincipalId
-        || plan.templateHash !== sha256(completionCanonical(template)) || !hash(plan.identityHash) || r.registrationId !== `oidc-account-${plan.identityHash}`) throw Error("Admission registration provenance differs from its root-owned plan");
+      const registration = verifyBrokerEnrollmentRegistration(r); if (!registration.ok) return registration;
+      const { template, plan, admittedAt } = registration.value, admission = template.nativeModelAdmission;
+      if (admittedAt < admittedAfter || !record(admission) || admission.kind !== "existing" || !same(plan.additions?.nativeModelAdmission, admission)) throw Error("Admission requires its ordered exact existing-listener template and plan");
       let changed = 0;
       if (current.length !== delta.nextBindings.length) throw Error("Enrollment cannot create or remove an original transport");
       for (const [i, prior] of current.entries()) {

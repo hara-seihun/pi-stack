@@ -13,7 +13,8 @@ import { providerHttp, type ProviderThreadStatus } from "../provider-http.js";
 import { ModelAvailabilityStore } from "../threads/model-availability.js";
 import { authorize, type PermissionPolicy, type Principal, type Resource } from "../permissions.js";
 import type { CoreResult } from "./config.js";
-import { verifyBrokerDrainReceipt, verifyLiveBrokerIdentity, type RetainedBrokerListeners } from "./broker-transports.js";
+import { isBrokerListenerBinding, verifyBrokerDrainReceipt, verifyLiveBrokerIdentity, type RetainedBrokerListeners } from "./broker-transports.js";
+import { verifyFreshBrokerAdmission, type FreshBrokerListener } from "./fresh-broker-transports.js";
 import { personUsageAcrossStores } from "../person-usage.js";
 import type { BudgetClass } from "../domain.js";
 
@@ -48,6 +49,7 @@ export type CoreProviderConfig = { kind: "disabled" } | {
   peopleUsageResource: Resource;
   ownerPrincipal: string;
   retainedListeners: RetainedBrokerListeners;
+  freshListeners: FreshBrokerListener[];
   retainedLedgers: CoreRetainedProviderLedger[];
   completionAliases: CoreCompletionAlias[];
   ownerRoutes: CoreProviderOwnerRoute[];
@@ -74,16 +76,17 @@ export function parseCoreProviderConfig(value: unknown, policy: PermissionPolicy
     || ![v.adoptionReceiptPath, v.agentDir, v.availabilityPath, v.releasePath, v.home].every(absolute)
     || !Number.isSafeInteger(v.uid) || v.uid < 0 || !Number.isSafeInteger(v.gid) || v.gid < 0 || !policyPair(v)
     || typeof v.ownerPrincipal !== "string" || !v.ownerPrincipal || !record(v.retainedListeners)
-    || !Array.isArray(v.retainedLedgers) || !Array.isArray(v.completionAliases) || !Array.isArray(v.ownerRoutes) || !Array.isArray(v.grantFootprints)) return invalid("Core provider requires explicit original configs, custody, per-controller meter policy, grant footprints and owner routes");
+    || !Array.isArray(v.retainedLedgers) || !Array.isArray(v.completionAliases) || !Array.isArray(v.ownerRoutes) || !Array.isArray(v.grantFootprints) || !Array.isArray(v.freshListeners)) return invalid("Core provider requires explicit original configs, custody, per-controller meter policy, grant footprints and owner routes");
   if (!(v.retainedListeners.kind === "disabled" || v.retainedListeners.kind === "uid-bound" && absolute(v.retainedListeners.adoptionReceiptPath) && ids(v.retainedListeners.admissionDeltaPaths) && v.retainedListeners.admissionDeltaPaths.length <= 256 && v.retainedListeners.admissionDeltaPaths.every(absolute) && Array.isArray(v.retainedListeners.bindings) && v.retainedListeners.bindings.length)) return invalid("Disable retained transports explicitly or declare exact UID-bound listeners, an immutable drain receipt and explicit admission delta paths (empty when none)");
-  if (v.retainedListeners.kind === "uid-bound") {
-    const ports = new Set<number>();
-    for (const b of v.retainedListeners.bindings) {
-      if (!record(b) || typeof b.principalId !== "string" || !b.principalId || !Number.isSafeInteger(b.port) || b.port < 1024 || b.port > 65535 || ports.has(b.port)
-        || !Number.isSafeInteger(b.uid) || b.uid < 0 || !Array.isArray(b.authorizedUids) || !b.authorizedUids.length || !b.authorizedUids.includes(b.uid) || new Set(b.authorizedUids).size !== b.authorizedUids.length || b.authorizedUids.some(uid => !Number.isSafeInteger(uid) || uid < 0)
-        || b.family !== "inet" || ![b.table, b.outputChain, b.inputChain].every(name => typeof name === "string" && /^[A-Za-z_][A-Za-z0-9_-]*$/.test(name))) return invalid("Retained listeners require exact unique ports, principals and host UID gates");
-      ports.add(b.port);
-    }
+  const transportPorts = new Set<number>(), freshPaths = new Set<string>(), freshPrincipals = new Set<string>();
+  if (v.retainedListeners.kind === "uid-bound") for (const b of v.retainedListeners.bindings) {
+    if (!isBrokerListenerBinding(b) || transportPorts.has(b.port)) return invalid("Retained listeners require exact unique ports, principals and host UID gates");
+    transportPorts.add(b.port);
+  }
+  for (const fresh of v.freshListeners) {
+    if (!record(fresh) || !absolute(fresh.configPath) || !v.configPaths.includes(fresh.configPath) || !absolute(fresh.admissionReceiptPath) || !isBrokerListenerBinding(fresh.binding)
+      || transportPorts.has(fresh.binding.port) || freshPaths.has(fresh.configPath) || freshPrincipals.has(fresh.binding.principalId)) return invalid("Fresh listeners require their distinct personal config, prior-owner-none admission and exact host UID binding");
+    transportPorts.add(fresh.binding.port); freshPaths.add(fresh.configPath); freshPrincipals.add(fresh.binding.principalId);
   }
   const ownerIds = new Set(["current"]), paths = new Set<string>();
   for (const o of v.retainedLedgers) {
@@ -124,6 +127,11 @@ export function createCoreProvider(config: Extract<CoreProviderConfig, {kind: "c
     const primaryConfig = originals.find(b => b.path === config.primaryConfigPath)!.config;
     if (originals.some(b => identity(b.config.ledgerPath) !== identity(primaryConfig.ledgerPath) || b.config.authPath !== primaryConfig.authPath && identity(b.config.authPath) !== identity(primaryConfig.authPath))) throw Error("Original brokers must share exact provider ledger and OAuth custody");
     if (config.retainedListeners.kind === "uid-bound") { const r = verifyBrokerDrainReceipt(config.retainedListeners, primaryConfig.ledgerPath); if (!r.ok) return r; }
+    for (const fresh of config.freshListeners) {
+      const source = originals.find(b => b.path === fresh.configPath); if (!source) throw Error("Fresh transport source is undeclared");
+      if (originals.some(b => b.path !== source.path && b.config.listeners.some(l => l.principal === fresh.binding.principalId))) throw Error("Fresh personal listener cannot reuse an existing principal's endpoint");
+      const proof = verifyFreshBrokerAdmission(fresh, source.config, source.footprint); if (!proof.ok) return proof;
+    }
     if ([config.ownerPrincipal, ...config.retainedLedgers.map(o => o.ownerPrincipal), ...originals.flatMap(b => b.config.listeners.map(l => l.principal)), ...config.ownerRoutes.flatMap(r => r.callerPrincipals)].some(id => !registered(id))) return { ok: false, error: { code: "invalid-config", message: "Provider callers and original owners must be registered core principals" } };
     const listeners = originals.flatMap(b => b.config.listeners);
     if (new Set(listeners.map(l => l.port)).size !== listeners.length) throw Error("Original broker ports collide");
@@ -193,12 +201,14 @@ export function createCoreProvider(config: Extract<CoreProviderConfig, {kind: "c
       },
       startTransports() {
         if (!starting) starting = (async (): Promise<CoreResult<void>> => {
-          const retained = config.retainedListeners; if (retained.kind === "disabled") return { ok: true, value: undefined };
-          const drained = verifyBrokerDrainReceipt(retained, primaryConfig.ledgerPath); if (!drained.ok) return drained;
-          for (const binding of retained.bindings) { const proof = await verifyLiveBrokerIdentity(binding); if (!proof.ok) return proof; }
+          const retained = config.retainedListeners;
+          if (retained.kind === "uid-bound") { const drained = verifyBrokerDrainReceipt(retained, primaryConfig.ledgerPath); if (!drained.ok) return drained; }
+          for (const fresh of config.freshListeners) { const source = brokers.find(b => b.path === fresh.configPath)!; const proof = verifyFreshBrokerAdmission(fresh, source.config, source.footprint); if (!proof.ok) return proof; }
+          const declaredBindings = [...(retained.kind === "uid-bound" ? retained.bindings : []), ...config.freshListeners.map(f => f.binding)];
+          for (const binding of declaredBindings) { const proof = await verifyLiveBrokerIdentity(binding); if (!proof.ok) return proof; }
           try {
             for (const b of brokers) {
-              const bindings = retained.bindings.filter(binding => b.config.listeners.some(l => l.port === binding.port && l.principal === binding.principalId));
+              const bindings = declaredBindings.filter(binding => b.config.listeners.some(l => l.port === binding.port && l.principal === binding.principalId));
               if (!bindings.length) continue;
               await b.broker.listen(bindings.map(binding => binding.principalId), async id => { const binding = bindings.find(binding => binding.principalId === id)!; const proof = await verifyLiveBrokerIdentity(binding); return proof.ok ? { ok: true } : { ok: false, status: 503, message: proof.error.message }; });
             }

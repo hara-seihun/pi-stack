@@ -33,6 +33,16 @@ Existing UID-bound loopback broker listeners retain their original grants during
 
 No adoption step copies databases, replaces run IDs, reinitializes an unavailable partition, resets provider claims or retries uncertain effects. Core serves the same attempt receipts and native session history. [Completion custody](completions.md) defines the trusted alias registry and historical-settings replay contract.
 
+## Fresh personal listeners
+
+A new OIDC person receives their own principal, distinct loopback port and original enrollment account/model ceiling. Core owns the listener alongside the existing shared provider Store/controller; enrollment does not create a per-person engine or borrow an existing person's endpoint.
+
+Configured provider `freshListeners` is explicit (empty before any new admission). Each entry is `{configPath, admissionReceiptPath, binding}`; its config path must also appear in `configPaths` with `grantFootprints` exactly `ledgerOwnerIds: ["current"]`. The source has one personal listener and an explicit original publication owner. No other source may contain the fresh principal, and all ports remain unique.
+
+[`FreshBrokerAdmissionReceipt`](../src/core/fresh-broker-transports.ts) records `version: 1`, `kind: "fresh-listener"`, `priorOwner: {kind: "none"}`, exact config path/raw-byte SHA256, full binding, full grant footprint and the root-owned registration provenance below. The immutable enrollment template has `nativeModelAdmission.kind: "fresh"`, exact personal principal/UID/port/config-path placeholders, full shared-ledger `brokerConfig`, full host `binding` and exact publication footprint. Its concrete account aliases/models/request limit are original company enrollment policy, not selected from another person's grant. The rendered registration plan must match every field, and the admitted source's bytes and parsed configuration must agree.
+
+Fresh admission is separate from old-stream drain evidence. Registration proof precedes Store adoption/publication; current nft UID/input proof precedes listener startup and every request, and unified model use permission remains required. A conflicting live port is an error, not authority to kill its owner. Updating the source later requires its explicit owning admission evidence; startup does not reinterpret a changed source as the original birth configuration.
+
 ## Enrollment evidence
 
 A UID-bound transport declares `admissionDeltaPaths: []` when no later account has been admitted. Later enrollment appends a finite ordered chain of root-owned delta paths; it never replaces the original drained-stream receipt. [`BrokerAdmissionDelta`](../src/core/broker-transports.ts) defines the record:
