@@ -50,6 +50,32 @@ test("mono keeps the shared composer and message view, suppresses live wake work
   expect(render({ mono: { ...mono, hintSeen: true } })).not.toContain('class="mono-hint"');
 });
 
+test("mono hides orchestration controls and status details but keeps the shared composer", () => {
+  const mono = { hintSeen: true, saving: false, onClassic() {}, onHintSeen() {} };
+  const waiting: Session = { ...session, hasChildren: true, state: "waiting", activity: "awaiting",
+    waitingOnAgents: { kind: "agents", threadIds: ["worker"], after: {}, reason: "Internal dependency", since: 1 },
+    queuedMessages: [{ id: "queued", text: "Internal routed input", delivery: "steer", state: "queued", canSteer: true, canHardSteer: true, canCancel: true, createdAt: "2026-10-09T23:00:00Z" }] };
+  const before = JSON.stringify(waiting);
+  const html = render({ mono, session: waiting, ancestors: [session], prompt: "New instruction" });
+  expect(html).toContain('id="prompt"');
+  expect(html).toContain('aria-label="Working"');
+  expect(html).not.toContain("Internal dependency");
+  expect(html).not.toContain("Thread details");
+  expect(html).not.toContain('class="header-chip"');
+  expect(html).not.toContain('aria-label="Launched by"');
+  expect(html).not.toContain("Change delivery");
+  expect(html).not.toContain('data-glyph="waiting"');
+  expect(JSON.stringify(waiting)).toBe(before);
+  const classic = render({ session: waiting, ancestors: [session], prompt: "New instruction" });
+  expect(classic).toContain("Thread details");
+  expect(classic).toContain('class="header-chip"');
+  expect(classic).toContain('aria-label="Launched by"');
+  expect(classic).toContain('data-glyph="waiting"');
+  const active = render({ mono, session: { ...session, state: "running", activity: "waiting_on_tool", activeTools: ["thread_spawn"] }, prompt: "New instruction" });
+  expect(active).not.toContain("Change delivery");
+  expect(active).not.toContain("thread spawn");
+});
+
 test("cached idle transcript stays visible while the header updates, then idle returns when ready", () => {
   const updating = render({ syncing: true });
   expect(header(updating)).toContain('class="conversation-syncing" role="status" aria-label="Updating"');

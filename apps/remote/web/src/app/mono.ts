@@ -1,4 +1,6 @@
-import type { Bootstrap, TranscriptItemHead } from "../types";
+import type { Bootstrap, ContextEntry, TranscriptItemHead } from "../types";
+import { agentMessagePresentation } from "pi-orchestrator/message-format";
+import { assertNever } from "../../../shared/explicit-state";
 import { routeThreadId, type Route } from "./routes";
 
 export type ManagerPreference = NonNullable<Bootstrap["manager"]>;
@@ -13,6 +15,15 @@ export function managerNavigation(previous: ManagerPreference | null, next: Mana
   return null;
 }
 
+export function monoMessage(entry: Pick<ContextEntry, "kind" | "agentSender" | "text">): boolean {
+  switch (entry.kind) {
+    case "assistant": return true;
+    case "user": return !entry.agentSender && (entry.text === undefined || !agentMessagePresentation(entry.text));
+    case "system": case "tool": case "thinking": case "toolCall": case "notice": return false;
+  }
+  return assertNever(entry.kind, "Mono message");
+}
+
 export function monoTranscript(heads: readonly TranscriptItemHead[]): TranscriptItemHead[] {
-  return heads.filter(head => head.monoVisibility !== "hidden");
+  return heads.filter(head => head.monoVisibility !== "hidden" && monoMessage(head));
 }
