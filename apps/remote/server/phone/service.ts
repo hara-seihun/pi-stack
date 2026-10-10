@@ -8,6 +8,7 @@ import { callBrief, instructions, type CallBrief } from "./policy";
 import { sameToken, type CallFragment } from "./dispatcher";
 import { providerSelection, loadProvider } from "./provider";
 import { silentReply, silentBegin } from "./retell-transport";
+import type { RetellFailure } from "./retell-error";
 import { contactGuard } from "./contact-guard";
 import { ActionClient, type ActionTicket } from "kenan-memory/actions";
 import { phoneIntent, reservePhoneAction, settlePhoneAction } from "./action-admission";
@@ -31,7 +32,7 @@ if (typeof owner !== "string" || !owner || !Number.isInteger(localPort) || !Numb
 const actions = new ActionClient(dispatcherBase, adminToken);
 const db = new Database(join(state, "calls.sqlite3"));
 db.exec(`PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS calls(id TEXT PRIMARY KEY,provider_id TEXT,voice_id TEXT,status TEXT NOT NULL,brief TEXT NOT NULL,started_at INTEGER NOT NULL,ended_at INTEGER,error TEXT,cleanup INTEGER NOT NULL DEFAULT 0); CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,call_id TEXT NOT NULL,at INTEGER NOT NULL,type TEXT NOT NULL,payload TEXT NOT NULL);`);
-for (const [name, type] of [["provider_kind", "TEXT"], ["dial_state", "TEXT NOT NULL DEFAULT 'none'"], ["provider_snapshot", "TEXT"], ["accepted_at", "INTEGER"], ["action_id", "TEXT"], ["action_ticket", "TEXT"], ["request_id", "TEXT"], ["dispatcher_closed", "INTEGER NOT NULL DEFAULT 0"]]) {
+for (const [name, type] of [["provider_kind", "TEXT"], ["dial_state", "TEXT NOT NULL DEFAULT 'none'"], ["provider_snapshot", "TEXT"], ["provider_error", "TEXT"], ["accepted_at", "INTEGER"], ["action_id", "TEXT"], ["action_ticket", "TEXT"], ["request_id", "TEXT"], ["dispatcher_closed", "INTEGER NOT NULL DEFAULT 0"]]) {
   if (!(db.query("PRAGMA table_info(calls)").all() as { name: string }[]).some(c => c.name === name)) db.exec(`ALTER TABLE calls ADD COLUMN ${name} ${type}`);
 }
 db.exec("CREATE UNIQUE INDEX IF NOT EXISTS call_approved_request ON calls(request_id) WHERE request_id IS NOT NULL");
@@ -51,6 +52,11 @@ type Call = { id: string; brief: CallBrief; token: string; actionTicket?: Action
   abort: AbortController; transcript: CallFragment[]; seen: Set<string>; delegations: Set<string>; queue: Promise<void>; finishing?: Promise<void> };
 const active = new Map<string, Call>();
 const log = (id: string, type: string, payload: unknown) => db.query("INSERT INTO events(call_id,at,type,payload) VALUES(?,?,?,?)").run(id, Date.now(), type, JSON.stringify(payload));
+function retainProviderError(id: string, operation: string, failure: RetellFailure) {
+  if (!failure.providerError) return;
+  db.query("UPDATE calls SET provider_error=? WHERE id=?").run(JSON.stringify(failure.providerError), id);
+  log(id, "provider-error", { operation, error: failure.error, providerError: failure.providerError });
+}
 async function request(base: string, path: string, method: string, body: unknown, authenticated = false) {
   try {
     const response = await fetch(`${base}${path}`, { method, headers: { "content-type": "application/json", ...(authenticated ? { authorization: `Bearer ${adminToken}` } : {}) }, body: JSON.stringify(body), signal: AbortSignal.timeout(25_000) });
@@ -64,8 +70,9 @@ const voiceIdentity = (id: string) => ({ owner, threadId: `phone:${id}` });
 function snapshot(call: Call): Row { return { id: call.id, provider_id: call.providerId ?? null, voice_id: call.voiceId ?? null, provider_kind: "retell-takeover", dial_state: call.dialState, dispatcher_closed: 0 }; }
 async function cleanup(row: Row) {
   const phone = row.provider_id
-    ? ["retell", "retell-takeover"].includes(row.provider_kind ?? "") ? await provider.client.hangup(row.provider_id) : { ok: false, error: "Retired provider cleanup requires its account owner" }
-    : ["dispatching", "uncertain"].includes(row.dial_state) ? { ok: false, error: "Dial acceptance unknown; provider duration cap applies; never redial" } : { ok: true };
+    ? ["retell", "retell-takeover"].includes(row.provider_kind ?? "") ? await provider.client.hangup(row.provider_id) : { ok: false as const, error: "Retired provider cleanup requires its account owner" }
+    : ["dispatching", "uncertain"].includes(row.dial_state) ? { ok: false as const, error: "Dial acceptance unknown; provider duration cap applies; never redial" } : { ok: true as const };
+  if (!phone.ok) retainProviderError(row.id, "hangup", phone);
   const spoken = row.voice_id ? await voice(`/sessions/${encodeURIComponent(row.voice_id)}`, "DELETE", voiceIdentity(row.id)) : { ok: true };
   const managed = row.dispatcher_closed === 1 ? { ok: true } : await dispatch(row.id, "close", {});
   if (managed.ok) db.query("UPDATE calls SET dispatcher_closed=1 WHERE id=?").run(row.id);
@@ -153,6 +160,7 @@ async function start(call: Call, shouldDial: boolean) {
     const warning = journalWarning(actionJournal.finish(ticket, result.ok ? "confirmed" : "unconfirmed", result.ok ? "PSTN dial accepted; not proof of delivery" : result.error));
     if (warning) log(call.id, "journal-outcome-pending", { error: warning });
     if (!result.ok) {
+      retainProviderError(call.id, "dial", result);
       call.dialState = result.uncertain ? "uncertain" : "rejected";
       db.query("UPDATE calls SET dial_state=? WHERE id=?").run(call.dialState, call.id);
       await finish(call, "failed", result.error); return;
@@ -289,7 +297,7 @@ const local = Bun.serve<SocketData>({ hostname: "127.0.0.1", port: localPort, ma
     if (url.pathname === "/media/transport") {
       if (call.participantId) return error("Monitor grant already issued", 409);
       const result = await provider.client.listen(call.providerId);
-      if (!result.ok) return error(result.error, 409);
+      if (!result.ok) { retainProviderError(call.id, "listen", result); return json(result, 409); }
       call.participantId = result.value.participant_id;
       if (call.finishing) return error("Call ended", 410);
       return json({ callId: call.providerId, accessToken: result.value.access_token, participantId: call.participantId, transport: result.value.transport, url: result.value.url, iceServers: result.value.ice_servers });
@@ -298,7 +306,7 @@ const local = Bun.serve<SocketData>({ hostname: "127.0.0.1", port: localPort, ma
       if (!call.participantId || body.participantId !== call.participantId || body.callId !== call.providerId || Object.keys(body).length !== 2) return error("Owned monitor participant required", 403);
       if (call.transportGranted) return json({ takenOver: true });
       const result = await provider.client.takeOver(call.providerId, call.participantId);
-      if (!result.ok) return error(result.error, 502);
+      if (!result.ok) { retainProviderError(call.id, "takeover", result); return json(result, 502); }
       call.transportGranted = true; log(call.id, "transport-takeover", { providerId: call.providerId });
       return json({ takenOver: true });
     }
@@ -353,7 +361,7 @@ const poll = setInterval(() => { for (const call of active.values()) {
   if (!call.providerId || call.finishing || syncing.has(call.id)) continue;
   syncing.add(call.id);
   void provider.client.get(call.providerId).then(result => {
-    if (!result.ok) { void finish(call, "failed", "Provider state unavailable"); return; }
+    if (!result.ok) { retainProviderError(call.id, "get", result); void finish(call, "failed", result.error); return; }
     db.query("UPDATE calls SET provider_snapshot=? WHERE id=?").run(JSON.stringify(result.value), call.id);
     if (result.value.call_status === "ongoing" && !call.transportNotified && !call.finishing) {
       call.transportNotified = true;

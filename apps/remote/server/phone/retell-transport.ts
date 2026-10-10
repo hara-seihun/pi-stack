@@ -1,14 +1,15 @@
 import { readFileSync, statSync } from "node:fs";
 import { timingSafeEqual } from "node:crypto";
 import { callBrief, type CallBrief, type Result } from "./policy";
+import { retellProviderError, type RetellFailure, type RetellResult } from "./retell-error";
 
 export type RetellSettings = { apiKey: string; agentId: string; agentVersion: number; callerId: string; silentUrl: string };
-export type DialResult = { ok: true; value: { uuid: string } } | { ok: false; error: string; uncertain: boolean };
+export type DialResult = { ok: true; value: { uuid: string } } | (RetellFailure & { uncertain: boolean });
 export type RetellStatus = "queued" | "unanswered" | "in-progress" | "completed" | "failed";
 export type RetellSnapshot = { call_id: string; call_status: "registered" | "not_connected" | "ongoing" | "ended" | "error"; status: RetellStatus; disconnection_reason?: string; duration_ms?: number };
 export type IceServer = { urls: string | string[]; username?: string; credential?: string };
 export type ListenSession = { access_token: string; participant_id: string; transport: "livekit" | "gateway"; url?: string; ice_servers?: IceServer[] };
-type RequestResult = { ok: true; value: unknown } | { ok: false; error: string; uncertain: boolean };
+type RequestResult = { ok: true; value: unknown } | (RetellFailure & { uncertain: boolean });
 const statuses = { registered: "queued", not_connected: "unanswered", ongoing: "in-progress", ended: "completed", error: "failed" } as const;
 const record = (x: unknown): x is Record<string, unknown> => !!x && typeof x === "object" && !Array.isArray(x);
 const boundedId = (x: unknown): x is string => typeof x === "string" && /^[A-Za-z0-9_-]{1,200}$/.test(x);
@@ -76,12 +77,15 @@ export class RetellTakeover {
   private async request(path: string, method: "GET" | "POST", body?: unknown, lifecycle?: AbortSignal): Promise<RequestResult> {
     try {
       const response = await fetch(`https://api.retellai.com${path}`, { method, headers: { authorization: `Bearer ${this.settings.apiKey}`, "content-type": "application/json", "X-Retell-Client-JS-SDK-Version": "3.0.2" }, body: body === undefined ? undefined : JSON.stringify(body), signal: lifecycle ? AbortSignal.any([lifecycle, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000), redirect: "error" });
-      if (!response.ok) return { ok: false, error: `Retell HTTP ${response.status}`, uncertain: response.status >= 500 || response.status === 408 };
+      if (!response.ok) {
+        const providerError = await retellProviderError(response, [this.settings.apiKey, this.settings.silentUrl, this.settings.silentUrl.split("/").at(-1)!]);
+        return { ok: false, error: `Retell HTTP ${response.status}${providerError.message ? `: ${providerError.message}` : ""}`, providerError, uncertain: response.status >= 500 || response.status === 408 };
+      }
       const text = await response.text();
       return { ok: true, value: text === "" ? null : JSON.parse(text) };
     } catch { return { ok: false, error: "Retell request outcome unknown", uncertain: true }; }
   }
-  async verify(): Promise<Result<{ agentId: string; agentVersion: number; callerId: string }>> {
+  async verify(): Promise<RetellResult<{ agentId: string; agentVersion: number; callerId: string }>> {
     const s = this.settings;
     const [agent, number] = await Promise.all([this.request(`/get-agent/${encodeURIComponent(s.agentId)}?version=${s.agentVersion}`, "GET"), this.request(`/get-phone-number/${encodeURIComponent(s.callerId)}`, "GET")]);
     if (!agent.ok) return agent;
@@ -104,7 +108,7 @@ export class RetellTakeover {
     if (!record(result.value) || !boundedId(result.value.call_id)) return { ok: false, error: "Retell accepted dial without a call ID; outcome unknown", uncertain: true };
     return { ok: true, value: { uuid: result.value.call_id } };
   }
-  async get(id: string): Promise<Result<RetellSnapshot>> {
+  async get(id: string): Promise<RetellResult<RetellSnapshot>> {
     if (!boundedId(id)) return { ok: false, error: "A bounded Retell call ID is required" };
     const result = await this.request(`/v2/get-call/${encodeURIComponent(id)}`, "GET");
     if (!result.ok) return result;
@@ -113,7 +117,7 @@ export class RetellTakeover {
     const call_status = c.call_status as RetellSnapshot["call_status"];
     return { ok: true, value: { call_id: id, call_status, status: statuses[call_status], ...(c.disconnection_reason === undefined ? {} : { disconnection_reason: c.disconnection_reason as string }), ...(c.duration_ms === undefined ? {} : { duration_ms: c.duration_ms as number }) } };
   }
-  async hangup(id: string): Promise<Result<unknown>> {
+  async hangup(id: string): Promise<RetellResult<unknown>> {
     if (!boundedId(id)) return { ok: false, error: "A bounded Retell call ID is required" };
     const result = await this.request(`/v2/stop-call/${encodeURIComponent(id)}`, "POST");
     if (result.ok) return { ok: true, value: { stopped: true } };
@@ -122,7 +126,7 @@ export class RetellTakeover {
     if (current.ok && retellTerminal(current.value.status)) return { ok: true, value: { stopped: true } };
     return result;
   }
-  async listen(id: string): Promise<Result<ListenSession>> {
+  async listen(id: string): Promise<RetellResult<ListenSession>> {
     if (!boundedId(id)) return { ok: false, error: "A bounded Retell call ID is required" };
     const result = await this.request(`/v2/listen-live-call/${encodeURIComponent(id)}`, "POST", {});
     if (!result.ok) return result;
@@ -135,7 +139,7 @@ export class RetellTakeover {
     if (c.ice_servers !== undefined && (!Array.isArray(c.ice_servers) || c.ice_servers.some(s => !record(s) || !(typeof s.urls === "string" || (Array.isArray(s.urls) && s.urls.length > 0 && s.urls.every(u => typeof u === "string"))) || (s.username !== undefined && typeof s.username !== "string") || (s.credential !== undefined && typeof s.credential !== "string")))) return { ok: false, error: "Invalid Retell ICE server configuration" };
     return { ok: true, value: { access_token: c.access_token, participant_id: c.participant_id, transport: c.transport, ...(c.url === undefined ? {} : { url: c.url as string }), ...(c.ice_servers === undefined ? {} : { ice_servers: c.ice_servers as IceServer[] }) } };
   }
-  async takeOver(id: string, participantId: string): Promise<Result<unknown>> {
+  async takeOver(id: string, participantId: string): Promise<RetellResult<unknown>> {
     if (!boundedId(id) || !boundedId(participantId)) return { ok: false, error: "A bounded Retell call and participant ID are required" };
     return this.request(`/v2/take-over-live-call/${encodeURIComponent(id)}`, "POST", { participant_id: participantId });
   }

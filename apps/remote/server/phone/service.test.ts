@@ -15,7 +15,7 @@ async function eventually<T>(read: () => Promise<T | undefined>) {
   throw new Error("Synthetic service condition did not settle");
 }
 const port = () => { const s = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() }); const p = s.port; s.stop(true); return p; };
-async function fixture(mode: "uncertain" | "cancel" | "connected", retained?: { brief: typeof brief; seed: (actions: ActionStore) => void }) {
+async function fixture(mode: "uncertain" | "rejected" | "cancel" | "connected", retained?: { brief: typeof brief; seed: (actions: ActionStore) => void }) {
   const root = mkdtempSync(join(tmpdir(), "phone-takeover-")), localPort = port(), publicPort = port();
   const token = "a".repeat(64), admin = "owner-capability".repeat(4);
   const requests: { path: string; body: any }[] = [];
@@ -40,7 +40,10 @@ async function fixture(mode: "uncertain" | "cancel" | "connected", retained?: { 
     requests.push({ path, body });
     if (path === "/get-agent/agent_synthetic") { if (mode === "cancel") await gate; return Response.json({ ...silentAgent(settings), agent_id: settings.agentId, version: 0, is_published: true }); }
     if (path.startsWith("/get-phone-number/")) return Response.json({ phone_number: settings.callerId, phone_number_type: "retell-twilio" });
-    if (path === "/v2/create-phone-call") return mode === "uncertain" ? Response.json({}, { status: 500 }) : Response.json({ call_id: "call_synthetic" });
+    if (path === "/v2/create-phone-call") {
+      if (mode === "uncertain" || mode === "rejected") return Response.json({ message: `Duration rejected; ${settings.apiKey}; ${token}`, code: "INVALID_DURATION", access_token: "synthetic-monitor" }, { status: mode === "uncertain" ? 500 : 400 });
+      return Response.json({ call_id: "call_synthetic" });
+    }
     if (path === "/v2/get-call/call_synthetic") return Response.json({ call_id: "call_synthetic", call_status: "ongoing" });
     if (path === "/v2/listen-live-call/call_synthetic") return Response.json({ access_token: "synthetic-monitor", participant_id: "participant_synthetic", transport: "livekit", url: "wss://room.example" });
     if (path.endsWith("/approved")) return Response.json({ accepted: true });
@@ -175,6 +178,28 @@ test("POST calls refuses accepted-contact cooldown even with caller-authored fol
     expect(f.requests.filter(r => r.path === "/v2/create-phone-call")).toHaveLength(1);
   } finally { await f.close(); }
 });
+for (const mode of ["rejected", "uncertain"] as const) test(`encrypted call record retains sanitized ${mode} provider diagnostics without changing the action fence`, async () => {
+  const f = await fixture(mode);
+  try {
+    const first = await (await f.request("/calls", "POST", brief)).json();
+    const row = await eventually(async () => {
+      const value = await (await f.request(`/calls/${first.id}`)).json();
+      return value.call.ended_at !== null && value.call.dial_state === mode ? value : undefined;
+    });
+    expect(JSON.parse(row.call.provider_error)).toMatchObject({ status: mode === "rejected" ? 400 : 500, code: "INVALID_DURATION", body: { state: "captured", format: "json" } });
+    expect(row.events).toContainEqual(expect.objectContaining({ type: "provider-error" }));
+    expect(JSON.stringify(row)).not.toContain("synthetic-provider-secret");
+    expect(JSON.stringify(row)).not.toContain(f.token);
+    expect(JSON.stringify(row)).not.toContain("synthetic-monitor");
+    expect(JSON.stringify(row)).toContain("Duration rejected");
+    const retry = await (await f.request("/calls", "POST", brief)).json();
+    expect(retry).toMatchObject({ id: first.id, replayed: false });
+    expect(f.requests.filter(r => r.path === "/v2/create-phone-call")).toHaveLength(1);
+    const action = f.actions.inspect(row.call.action_id);
+    expect(action).toMatchObject({ ok: true, value: { state: mode === "rejected" ? "failed-before-effect" : "uncertain" } });
+  } finally { await f.close(); }
+});
+
 test("uncertain irreversible dial is retained and an approved identity is never replayed", async () => {
   const f = await fixture("uncertain");
   try {

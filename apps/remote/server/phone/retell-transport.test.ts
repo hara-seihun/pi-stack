@@ -84,8 +84,29 @@ test("no create retry after rejection, uncertain network, malformed response or 
   });
   for (const [state, uncertain] of [["reject", false], ["network", true], ["malformed", true], ["server", true], ["hosted", false], ["number", false]] as const) {
     mode = state; const before = creates, result = await client.dial(brief, "local_call_123", new AbortController().signal, () => ({ ok: true }));
-    assert.equal(result.ok, false); if (!result.ok) { assert.equal(result.uncertain, uncertain); assert.ok(!result.error.includes("private")); }
+    assert.equal(result.ok, false); if (!result.ok) { assert.equal(result.uncertain, uncertain); if (state === "network") assert.ok(!result.error.includes("private")); else if (["reject", "server"].includes(state)) assert.match(result.error, /private diagnostic/); }
     assert.equal(creates - before, ["hosted", "number"].includes(state) ? 0 : 1);
+  }
+});
+
+test("HTTP rejection diagnostics never change dispatch uncertainty, including broken error-body reads", async t => {
+  const { client, agent } = fixture(t); let status = 400, brokenBody = false, creates = 0;
+  t.mock.method(globalThis, "fetch", async (url: string) => {
+    if (url.includes("get-agent")) return Response.json(agent);
+    if (url.includes("get-phone-number")) return Response.json({ phone_number: creds.RETELL_FROM_NUMBER, phone_number_type: "retell-twilio" });
+    creates++;
+    return brokenBody ? new Response(new ReadableStream({ start(c) { c.error(new Error(creds.RETELL_API_KEY)); } }), { status }) : Response.json({ message: "Duration rejected", code: "INVALID_DURATION", echo: `${creds.RETELL_API_KEY} ${token}` }, { status });
+  });
+  for (status of [400, 408, 429, 500]) for (brokenBody of [false, true]) {
+    const before = creates, result = await client.dial(brief, "local_call_123", new AbortController().signal, () => ({ ok: true }));
+    assert.equal(creates, before + 1); assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.uncertain, status >= 500 || status === 408);
+      assert.equal(result.providerError?.status, status);
+      assert.equal(result.providerError?.body.state, brokenBody ? "unavailable" : "captured");
+      if (!brokenBody) { assert.match(result.error, /Duration rejected/); assert.equal(result.providerError?.code, "INVALID_DURATION"); }
+      for (const secret of [creds.RETELL_API_KEY, token]) assert.ok(!JSON.stringify(result).includes(secret));
+    }
   }
 });
 
