@@ -32,6 +32,15 @@ export type WatchCheckOutcome =
   | { status: "missing" }
   | { status: "complete"; at: number }
   | { status: "failed"; at: number; error: string };
+/** The recorded check for a reconciled outcome; an open check has none yet. */
+function endedCheck(threadId: string, outcome: WatchCheckOutcome): Result<WatchCheck | null> {
+  if (outcome.status === "open") return good(null);
+  if (outcome.status === "missing") return good({ threadId, status: "failed", at: Date.now(), error: "Check thread no longer exists" });
+  if (outcome.status === "complete") return good({ threadId, status: "complete", at: outcome.at });
+  if (outcome.status === "failed") return good({ threadId, status: "failed", at: outcome.at, error: outcome.error });
+  const unknown: never = outcome;
+  return bad("unavailable", `Unknown watch check outcome ${JSON.stringify(unknown)}`);
+}
 type StoredWatchItem = WatchItem & { lastThreadId?: string };
 export type WatchFields = Pick<WatchItem, "what" | "why" | "how" | "cadenceMs" | "nextDueAt" | "destination">;
 export type WatchRequest = { threadId: string } & (
@@ -155,13 +164,9 @@ export class WatchList implements WatchApi {
     for (const threadId of scheduled) {
       const outcome = this.options.checkOutcome(threadId);
       if (!outcome.ok) return outcome;
-      switch (outcome.value.status) {
-        case "open": break;
-        case "missing": ended.set(threadId, { threadId, status: "failed", at: Date.now(), error: "Check thread no longer exists" }); break;
-        case "complete": ended.set(threadId, { threadId, status: "complete", at: outcome.value.at }); break;
-        case "failed": ended.set(threadId, { threadId, status: "failed", at: outcome.value.at, error: outcome.value.error }); break;
-        default: { const unknown: never = outcome.value; return bad("unavailable", `Unknown watch check outcome ${JSON.stringify(unknown)}`); }
-      }
+      const ending = endedCheck(threadId, outcome.value);
+      if (!ending.ok) return ending;
+      if (ending.value) ended.set(threadId, ending.value);
     }
     if (!ended.size) return good(undefined);
     this.db.exec("BEGIN IMMEDIATE");
