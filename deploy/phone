@@ -28,10 +28,8 @@ case ${1:---activate} in
     pi_stack_as_root test -s "$candidate"
     pi_stack_as_root bun "$root/apps/remote/server/phone/config-check.ts" "$candidate"
     configuration prepare >/dev/null
-    if systemctl is-active --quiet pi-stack-phone.service; then
-      status=$(PI_STACK_PHONE_CONFIG="$canonical" bun "$root/apps/remote/server/pi-call" status) || { echo 'Phone census unavailable' >&2; exit 75; }
-      [[ $(jq -r '.activeCalls' <<<"$status") == 0 ]] || { echo 'Live telephone calls; defer deployment' >&2; exit 75; }
-    fi
+    status=$(PI_STACK_PHONE_CONFIG="$canonical" bash "$root/deploy/phone-census" "$root/apps/remote/server/pi-call") || exit 66
+    [[ $(jq -r '.activeCalls' <<<"$status") == 0 ]] || { echo 'Live telephone calls; defer deployment' >&2; exit 75; }
     ;;
   --activate|--restore)
     bindings=$(systemctl show pi-stack-phone.service -p BindsTo --value)

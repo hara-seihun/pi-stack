@@ -15,7 +15,7 @@ const publication = process.env.PI_PUBLICATION_TEST_COMMAND ?? new URL("../deplo
 const id = "PUB-0123456789abcdef01234567";
 
 for (const waitingHost of hostIds) {
-  for (const kind of ["live-meeting", "native-source", "native-history", "host-lock"]) {
+  for (const kind of ["live-meeting", "live-telephone", "native-source", "native-history", "host-lock"]) {
     test(`${kind} on ${waitingHost} does not hold its peer; restart retries only the pending host`, () => {
       const request = {};
       const calls = [];
@@ -145,6 +145,12 @@ if (name === "ssh") {
     event("matched-app-web-proof");
     const android = world().hosts[host].android;
     json({ revision: android, web: { revision: android } });
+  } else if (script.includes('Phone census unavailable') && script.includes('activeCalls')) {
+    event("telephone-probe");
+    const mode = world().hosts[host].mode;
+    if (mode === "phone-census-error") { process.stderr.write("Phone census unavailable\n"); process.exit(66); }
+    if (mode === "phone-census-invalid") process.stdout.write('{"activeCalls":null}\n');
+    else json({ activeCalls: mode === "live-telephone" ? 1 : 0 });
   } else if (script.includes('meetingCensus') && script.includes('rooms')) {
     event("meeting-probe");
     if (world().hosts[host].mode === "live-meeting") process.stdout.write("fixture-room:1\n");
@@ -186,6 +192,7 @@ if (name === "ssh") {
     process.exit(75);
   }
   if (mode === "host-lock") { process.stderr.write("another Pi stack deployment owns /fixture/deploy.lock\n"); process.exit(75); }
+  if (mode === "live-telephone") { process.stderr.write("Live telephone calls; defer deployment\n"); process.exit(75); }
   event("prepare", { revision: args[0], serving: state.hosts[host].selected });
   event("host-native-history-advance", { revision: args[0], custody });
   if (mode === "native-history") {
@@ -437,7 +444,7 @@ test("preserved native history retains its original candidate for one evidenced 
 });
 
 describe("publication owner host delivery", { concurrency: 8 }, () => {
-for (const waitingHost of hostIds) for (const mode of ["live-meeting", "native-source", "native-history", "host-lock"]) {
+for (const waitingHost of hostIds) for (const mode of ["live-meeting", "live-telephone", "native-source", "native-history", "host-lock"]) {
   test(`owner releases both reservations while ${waitingHost} waits for ${mode}; old completion cannot downgrade a newer peer`, async t => {
     const f = fixture(t, waitingHost, mode);
     const readyHost = hostIds.find(host => host !== waitingHost);
@@ -471,6 +478,16 @@ for (const waitingHost of hostIds) for (const mode of ["live-meeting", "native-s
       assert.deepEqual(f.events().slice(beforeProbe).map(event => [event.host, event.action]), [[waitingHost, "native-history---probe"]]);
       assert.equal(probed.hosts[waitingHost].waiting.probeFailingSince, undefined, "truthful busy is not probe failure");
     }
+    if (mode === "live-telephone") {
+      assert.equal(hostWaitKind(first.hosts[waitingHost].waiting), "waiting-for-live-telephone-calls");
+      assert.equal(progressBudgetExhausted({ ...first, waiting: { kind: mode }, attempt: 1000, blockedSince: "2020-01-01T00:00:00Z" }), false);
+      const boundary = f.events().length;
+      const probed = await f.run("refreshHostWaits");
+      assert.equal(probed.hosts[waitingHost].ready, false);
+      assert.equal(probed.hosts[waitingHost].waiting.probe.activeCalls, 1);
+      assert.deepEqual(f.events().slice(boundary).map(event => [event.host, event.action]), [[waitingHost, "telephone-probe"]]);
+      assert.equal(probed.attempt, first.attempt);
+    }
     for (const host of hostIds) {
       assert.equal(first.reservations[host].state, "released");
       assert.equal(existsSync(join(f.root, `${host}.lock.publication`)), false);
@@ -482,7 +499,7 @@ for (const waitingHost of hostIds) for (const mode of ["live-meeting", "native-s
       value.hosts[readyHost].selected = f.newer;
       value.hosts[readyHost].android = f.newer;
     });
-    if (mode === "native-history") {
+    if (["native-history", "live-telephone"].includes(mode)) {
       const resumed = await f.run("refreshHostWaits");
       assert.equal(resumed.hosts[waitingHost].ready, true);
     }
@@ -499,6 +516,21 @@ for (const waitingHost of hostIds) for (const mode of ["live-meeting", "native-s
     assert.equal(JSON.parse(readFileSync(completed.finalProof.path, "utf8"))[readyHost].integrationSha, f.revision);
   });
 }
+
+for (const mode of ["phone-census-error", "phone-census-invalid"]) test(`telephone ${mode} becomes an explicit readiness failure without another deployment`, async t => {
+  const f = fixture(t, "gmktec", "live-telephone");
+  const waiting = await f.run();
+  assert.equal(waiting.hosts.gmktec.waiting.kind, "live-telephone");
+  f.update(value => { value.hosts.gmktec.mode = mode; });
+  const boundary = f.events().length;
+  const failed = await f.run("refreshHostWaits");
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.hosts.gmktec.failure.reason, "readiness-probe-failed");
+  assert.match(failed.hosts.gmktec.failure.waiting.probe.error, /Phone census unavailable/);
+  assert.equal(failed.hosts.converge.status, "passed");
+  assert.equal(failed.attempt, waiting.attempt);
+  assert.ok(f.events().slice(boundary).every(event => event.action !== "deploy" && event.action !== "prepare"));
+});
 
 for (const host of hostIds) for (const noise of ["trailing", "interleaved"]) test(`large ${noise} native history status on ${host} cannot turn pending custody into rollback`, async t => {
   const f = fixture(t, host, "native-history");

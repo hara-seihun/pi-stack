@@ -6,16 +6,17 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { phoneConfiguration } from '../deploy/phone-configuration.mjs';
 
-function activate(state, bindings = "pi-remote@alex.service", restartStatus = 0, discoveryStatus = 0, phoneState = "inactive") {
+function activate(state, bindings = "pi-remote@alex.service", restartStatus = 0, discoveryStatus = 0, phoneState = "inactive", action = "--activate", census = '{"activeCalls":0}') {
   const root = mkdtempSync(join(tmpdir(), "pi-phone-activate-"));
   try {
     mkdirSync(join(root, "deploy"));
     mkdirSync(join(root, "bin"));
-    for (const file of ["phone", "phone-configuration.mjs", "lib", "release-checkout"]) copyFileSync(new URL(`../deploy/${file}`, import.meta.url), join(root, "deploy", file));
+    for (const file of ["phone", "phone-census", "phone-configuration.mjs", "lib", "release-checkout"]) copyFileSync(new URL(`../deploy/${file}`, import.meta.url), join(root, "deploy", file));
     assert.equal(spawnSync("git", ["init", "--quiet", root]).status, 0);
     assert.equal(spawnSync("git", ["-C", root, "-c", "user.name=Phone fixture", "-c", "user.email=fixture@example.invalid", "commit", "--quiet", "--allow-empty", "-m", "Phone fixture"]).status, 0);
-    const host = join(root, 'host.json');
+    const host = join(root, 'host.json'), canonical = join(root, 'phone.json');
     writeFileSync(host, '{}');
+    writeFileSync(canonical, '{}');
     const trace = join(root, "trace");
     writeFileSync(trace, "");
     writeFileSync(join(root, "bin/systemctl"), `#!/bin/sh
@@ -37,11 +38,19 @@ case "$1" in
 esac
 `, { mode: 0o755 });
     writeFileSync(join(root, "bin/sudo"), '#!/bin/sh\n[ "$1" = -n ] || exit 99\nshift\nexec "$@"\n', { mode: 0o755 });
-    const result = spawnSync("bash", [join(root, "deploy/phone"), "--activate"], {
+    writeFileSync(join(root, "bin/bun"), `#!/bin/sh
+case "$1" in
+  */config-check.ts) exit 0;;
+  */pi-call) printf '%s\\n' "$TEST_CENSUS";;
+  *) exit 99;;
+esac
+`, { mode: 0o755 });
+    const result = spawnSync("bash", [join(root, "deploy/phone"), action], {
       encoding: "utf8",
       env: { ...process.env, PATH: `${root}/bin:${process.env.PATH}`, TEST_STATE: state,
         TEST_BINDINGS: bindings, TEST_RESTART_STATUS: String(restartStatus),
         TEST_DISCOVERY_STATUS: String(discoveryStatus), TEST_PHONE_STATE: phoneState, TEST_TRACE: trace,
+        TEST_CENSUS: census, PI_STACK_PHONE_CONFIG: canonical,
         PI_STACK_DEPLOY_DEADLINE_ACTIVE: "1", PI_STACK_HOST_FILE: host, PI_STACK_HOST_LOCK_HELD: "1",
         PI_STACK_DEPLOY_LOCK_HELD: "1", PI_STACK_GIT_CHECKOUT: root,
         PI_STACK_HOST_LOCK_PATH: join(root, "host.lock") },
@@ -49,6 +58,19 @@ esac
     return { ...result, trace: readFileSync(trace, "utf8") };
   } finally { rmSync(root, { recursive: true, force: true }); }
 }
+
+test("Phone check admits idle and marks only genuine live calls as a deployment deferral", () => {
+  const check = census => activate("active", "pi-remote@alex.service", 0, 0, "active", "--check", census);
+  const idle = check('{"activeCalls":0}');
+  assert.equal(idle.status, 0, idle.stderr);
+  const live = check('{"activeCalls":1}');
+  assert.equal(live.status, 75, live.stderr);
+  assert.match(live.stderr, /^Live telephone calls; defer deployment$/m);
+  const invalid = check('{"activeCalls":null}');
+  assert.equal(invalid.status, 66, invalid.stderr);
+  assert.match(invalid.stderr, /Phone census unavailable/);
+  for (const result of [idle, live, invalid]) assert.doesNotMatch(result.trace, /^(reset-failed|stop|restart|start) /m);
+});
 
 test("locked owner stops an inactive phone without resetting an unloaded unit", () => {
   const result = activate("inactive");

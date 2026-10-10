@@ -1,6 +1,7 @@
 export function hostWaitKind(wait) {
   switch (wait.kind) {
     case "live-meeting": return "waiting-for-live-meetings";
+    case "live-telephone": return "waiting-for-live-telephone-calls";
     case "native-source": return "waiting-for-native-source";
     case "native-history": return "waiting-for-native-history";
     case "native-history-custody": return "waiting-for-native-history-custody";
