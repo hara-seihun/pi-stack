@@ -10,7 +10,6 @@ Pi Stack runs persistent agents through [Pi](https://github.com/badlogic/pi-mono
 - [`apps/remote`](apps/remote/README.md) contains the Pi Remote supervisor, shared client, and context mirror extension. [Per-person VS Code](docs/editor.md) owns Files editing, isolated origins and provisioning.
 - [`apps/kenan`](apps/kenan/README.md) packages the shared client for Android.
 - [Feature use](docs/feature-usage.md) records own-person metadata for actual feature actions and observed availability.
-- [Public application delegation](docs/public-application-delegation.md) owns the fixed isolated public-only deployment profile, source/installed identities and remaining private-app extraction.
 - [`skills`](skills/README.md) contains the shared first-party skills loaded by interactive and fleet agents.
 - [`tools`](tools/README.md) contains commands whose contracts depend on Pi or its session format.
 
