@@ -54,6 +54,7 @@ for (const [name, path] of [["SDK", sdk], ["bundled", bundle]]) test(`${name}: A
   for (const [index, tool] of tools.entries()) {
     const wire = requests[0].tools[index].input_schema;
     assert.equal(wire.type, "object");
+    for (const keyword of ["anyOf", "oneOf", "allOf"]) assert.equal(Object.hasOwn(wire, keyword), false, `${tool.name}: Anthropic forbids root ${keyword}`);
     assert.deepEqual(wire, JSON.parse(JSON.stringify(anthropicToolSchema(tool.parameters))));
     const originalValidator = Compile(tool.parameters), wireValidator = Compile(wire);
     for (const sample of samples) assert.equal(wireValidator.Check(sample), originalValidator.Check(sample));
@@ -62,9 +63,21 @@ for (const [name, path] of [["SDK", sdk], ["bundled", bundle]]) test(`${name}: A
   assert.equal(readFileSync(path, "utf8"), original, "installed provider remains untouched");
 });
 
-test("root object normalization keeps oneOf, intersections and arbitrary constraints intact", () => {
-  const oneOf = { oneOf: union.anyOf };
-  assert.deepEqual(anthropicToolSchema(oneOf), { ...oneOf, type: "object" });
+test("root object normalization nests combinators without changing accepted inputs", () => {
+  for (const parameters of [
+    { oneOf: union.anyOf },
+    { type: "object", anyOf: union.anyOf },
+    { allOf: [union, { not: { required: ["forbidden"] } }] },
+    { type: "object", properties: {}, additionalProperties: false, anyOf: [{ required: ["action"] }] },
+    { type: "object", $defs: { action: { const: "cancel" } }, anyOf: [{ properties: { action: { $ref: "#/$defs/action" } }, required: ["action"] }] },
+  ]) {
+    const wire = anthropicToolSchema(parameters);
+    for (const keyword of ["anyOf", "oneOf", "allOf"]) assert.equal(Object.hasOwn(wire, keyword), false);
+    assert.deepEqual(wire.not.not, parameters);
+    for (const sample of [...samples, { action: "cancel", forbidden: true }]) {
+      assert.equal(Compile(wire).Check(sample), Compile(parameters).Check(sample), JSON.stringify(sample));
+    }
+  }
   const object = { type: "object", properties: {}, additionalProperties: false, minProperties: 0 };
   assert.equal(anthropicToolSchema(object), object);
   assert.throws(() => anthropicToolSchema({ anyOf: [{ type: "object" }, { type: "string" }] }), /must describe an object/);

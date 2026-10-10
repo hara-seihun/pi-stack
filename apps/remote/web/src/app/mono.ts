@@ -25,5 +25,5 @@ export function monoMessage(entry: Pick<ContextEntry, "kind" | "agentSender" | "
 }
 
 export function monoTranscript(heads: readonly TranscriptItemHead[]): TranscriptItemHead[] {
-  return heads.filter(head => head.monoVisibility !== "hidden" && monoMessage(head));
+  return heads.filter(head => head.kind !== "assistant" || head.monoVisibility !== "hidden");
 }

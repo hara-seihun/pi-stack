@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { displayAssistantMessage, displayContextMessage } from "./context-display";
+import { displayContextMessage } from "./context-display";
 import { deriveTranscriptItems } from "./transcript-items";
 
 test("native thinking/tools remain visible without provider continuation metadata or mutation", () => {
@@ -15,15 +15,20 @@ test("native thinking/tools remain visible without provider continuation metadat
   expect(message.responseId).toBe("opaque");
 });
 
-test("empty successful replies receive a display acknowledgement; failure and thinking/tool-only replies do not", () => {
-  const blank = { role: "assistant", content: [{ type: "text", text: " \n" }], stopReason: "stop" };
-  expect(displayContextMessage(blank)).toEqual({ role: "assistant", content: [{ type: "text", text: "👍" }] });
-  for (const message of [
-    { ...blank, stopReason: "aborted", errorMessage: "Request aborted" },
-    { ...blank, content: [{ type: "thinking", thinking: "Still considering" }] },
-    { ...blank, content: [{ type: "toolCall", id: "call", name: "read", arguments: {} }] },
-  ]) expect(displayAssistantMessage(message)).toBe(message);
-  expect(blank.content[0].text).toBe(" \n");
+test("empty replies add no assistant items while authored replies and work remain intact", () => {
+  const messages = [
+    { role: "assistant", content: [], stopReason: "stop" },
+    { role: "assistant", content: [{ type: "text", text: " \n" }, { type: "text", text: "" }], stopReason: "stop" },
+    { role: "assistant", content: " \n", stopReason: "stop" },
+    { role: "assistant", content: [{ type: "thinking", thinking: "Still considering" }, { type: "text", text: "" }] },
+    { role: "assistant", content: [{ type: "toolCall", id: "call", name: "read", arguments: {} }, { type: "text", text: " " }] },
+    { role: "assistant", content: [{ type: "text", text: "👍" }, { type: "text", text: " Authored reply " }] },
+  ];
+  const before = structuredClone(messages);
+  const items = deriveTranscriptItems({ messages: messages.map(message => displayContextMessage(message)) });
+  expect(items.map(item => item.head.kind)).toEqual(["system", "thinking", "toolCall", "assistant", "assistant"]);
+  expect(items.slice(-2).map(item => "text" in item.head && item.head.text)).toEqual(["👍", " Authored reply "]);
+  expect(messages).toEqual(before);
 });
 
 test("signed Anthropic narration projects as an assistant reply after tools and before a durable wait", () => {

@@ -1,21 +1,10 @@
-import { Component, useLayoutEffect, useRef, useState, type ReactNode, type RefObject, type SyntheticEvent } from "react";
+import { useLayoutEffect, useMemo, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
 import { drawingImage } from "./drawing-drafts";
-import { isReadingEarlier, ReadingAnchor, type ReadingSnapshot } from "./scroll-position";
+import { ReadingAnchor } from "./scroll-position";
+import { ScrollPositionBoundary, ScrollPositionContext } from "./scroll-boundary";
 import type { ChatDrawing } from "./chat-drawing";
 
-type ScrollContentProps = { active: boolean; transcript: ReactNode; scrollback: RefObject<HTMLDivElement | null>; anchor: ReadingAnchor };
-
-class ScrollContent extends Component<ScrollContentProps> {
-  getSnapshotBeforeUpdate(): ReadingSnapshot | null {
-    return this.props.active ? this.props.anchor.beforeUpdate(this.props.scrollback.current) : null;
-  }
-
-  componentDidUpdate(_previous: Readonly<ScrollContentProps>, _state: Readonly<{}>, snapshot: ReadingSnapshot | null) {
-    if (this.props.active) this.props.anchor.afterUpdate(this.props.scrollback.current, snapshot);
-  }
-
-  render() { return <div className="scroll-content">{this.props.transcript}</div>; }
-}
+export const SCROLL_GESTURE_IDLE_MS = 180;
 
 export function ConversationView({ active, label, drawing, editImages = true, transcript, children, newerAvailable = false, onJumpLatest }: {
   active: boolean;
@@ -30,20 +19,63 @@ export function ConversationView({ active, label, drawing, editImages = true, tr
   const scrollback = useRef<HTMLDivElement>(null);
   const anchor = useRef<ReadingAnchor | null>(null);
   anchor.current ??= new ReadingAnchor();
+  const owner = useMemo(() => ({ active, scroller: scrollback, anchor: anchor.current! }), [active]);
   const [away, setAway] = useState(false);
+  const gesture = useRef<(() => void) | null>(null);
   useLayoutEffect(() => {
     const scroller = scrollback.current;
-    if (!scroller) return;
-    anchor.current?.setReading(scroller, active && away);
-    if (active && !away) scroller.scrollTop = 0;
-  }, [active]);
-  useLayoutEffect(() => {
-    const scroller = scrollback.current;
-    if (!scroller) return;
-    const observer = new ResizeObserver(() => anchor.current?.afterResize(scroller));
+    if (!scroller || !active) return;
+    const position = owner.anchor;
+    let idle: ReturnType<typeof setTimeout> | null = null;
+    const pointers = new Set<number>();
+    let touching = false;
+    const settle = () => {
+      if (idle !== null) clearTimeout(idle);
+      idle = setTimeout(() => {
+        idle = null;
+        if (pointers.size || touching) return;
+        setAway(position.endInteraction(scroller));
+      }, SCROLL_GESTURE_IDLE_MS);
+    };
+    const begin = () => { position.beginInteraction(scroller); settle(); };
+    gesture.current = begin;
+    const pointerDown = (event: PointerEvent) => { pointers.add(event.pointerId); begin(); };
+    const pointerEnd = (event: PointerEvent) => { if (pointers.delete(event.pointerId)) settle(); };
+    const touchStart = () => { touching = true; begin(); };
+    const touchEnd = (event: TouchEvent) => { if (!touching) return; touching = event.touches.length > 0; settle(); };
+    const releaseContacts = () => { pointers.clear(); touching = false; settle(); };
+    const key = (event: KeyboardEvent) => {
+      if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) begin();
+    };
+    scroller.addEventListener("wheel", begin, { passive: true });
+    scroller.addEventListener("pointerdown", pointerDown, { passive: true });
+    scroller.addEventListener("touchstart", touchStart, { passive: true });
+    scroller.addEventListener("keydown", key);
+    window.addEventListener("pointerup", pointerEnd, { passive: true });
+    window.addEventListener("pointercancel", pointerEnd, { passive: true });
+    window.addEventListener("touchend", touchEnd, { passive: true });
+    window.addEventListener("touchcancel", touchEnd, { passive: true });
+    window.addEventListener("blur", releaseContacts);
+    position.afterResize(scroller);
+    const observer = new ResizeObserver(() => position.afterResize(scroller));
+    observer.observe(scroller);
     observer.observe(scroller.querySelector(".scroll-content")!);
-    return () => observer.disconnect();
-  }, []);
+    return () => {
+      if (idle !== null) clearTimeout(idle);
+      gesture.current = null;
+      position.pause(scroller);
+      observer.disconnect();
+      scroller.removeEventListener("wheel", begin);
+      scroller.removeEventListener("pointerdown", pointerDown);
+      scroller.removeEventListener("touchstart", touchStart);
+      scroller.removeEventListener("keydown", key);
+      window.removeEventListener("pointerup", pointerEnd);
+      window.removeEventListener("pointercancel", pointerEnd);
+      window.removeEventListener("touchend", touchEnd);
+      window.removeEventListener("touchcancel", touchEnd);
+      window.removeEventListener("blur", releaseContacts);
+    };
+  }, [owner]);
   const editImage = (event: SyntheticEvent) => {
     if (!editImages || !active) return;
     const image = drawingImage(event.target);
@@ -54,21 +86,20 @@ export function ConversationView({ active, label, drawing, editImages = true, tr
   };
   const jump = () => {
     if (newerAvailable) onJumpLatest?.();
-    if (scrollback.current) {
-      anchor.current?.setReading(scrollback.current, false);
-      scrollback.current.scrollTop = 0;
-    }
+    if (scrollback.current) owner.anchor.jumpLatest(scrollback.current);
     setAway(false);
   };
   return <section hidden={!active} className={`conversation${drawing.isOpen ? " is-drawing" : ""}`} aria-label={label}>
     <div className="scrollback-frame">
     <div className={`scrollback${away ? " is-reading" : ""}`} ref={scrollback} onScroll={event => {
       if (!active) return;
-      const reading = isReadingEarlier(event.currentTarget.scrollTop);
-      anchor.current?.setReading(event.currentTarget, reading);
-      setAway(reading);
+      const result = owner.anchor.onScroll(event.currentTarget);
+      if (!result.programmatic) gesture.current?.();
+      setAway(result.reading);
     }} onClickCapture={editImage} onKeyDownCapture={event => { if (event.key === "Enter" || event.key === " ") editImage(event); }}>
-      <ScrollContent active={active} transcript={transcript} scrollback={scrollback} anchor={anchor.current} />
+      <ScrollPositionContext.Provider value={owner}>
+        <ScrollPositionBoundary owner={owner}><div className="scroll-content">{transcript}</div></ScrollPositionBoundary>
+      </ScrollPositionContext.Provider>
     </div>
     {(away || newerAvailable) && !drawing.isOpen && <button type="button" className="jump-latest" aria-label="Jump to latest" onClick={jump}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14m-6-6 6 6 6-6" /></svg></button>}
     </div>

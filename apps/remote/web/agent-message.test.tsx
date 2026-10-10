@@ -45,7 +45,7 @@ test("new incoming agent words retain immutable sender routes in toggle-controll
   expect(JSON.stringify(context)).toBe(native);
 });
 
-test("mono hides routed inputs, sends and spawns while classic retains their disclosures", () => {
+test("mono groups routed inputs, sends and spawns without exposing them in collapsed summaries", () => {
   const incoming = presentAgentMessage(entry(text));
   const outgoing: ContextEntry = { kind: "toolCall", key: "send", signature: "send", toolCall: { name: "thread_send", arguments: { threadId: sender, text: "Internal send" } } };
   const spawn: ContextEntry = { kind: "toolCall", key: "spawn", signature: "spawn", toolCall: { name: "thread_spawn", arguments: { message: "Internal assignment" } } };
@@ -61,6 +61,8 @@ test("mono hides routed inputs, sends and spawns while classic retains their dis
     expect(mono).not.toContain("agent-message-step");
     expect(mono).not.toContain("thread-chip");
     expect(mono).not.toContain("message-metrics");
+    expect(mono.match(/class="work-card(?: running)?"/g)).toHaveLength(1);
+    expect(mono).toContain('class="work-card-header" aria-expanded="false"');
     const classic = render(false);
     expect(classic).toContain("agent-route incoming");
     expect(classic).toContain("agent-route outgoing");

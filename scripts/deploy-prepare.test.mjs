@@ -391,7 +391,7 @@ test("preparation still refuses dirty source", () => {
   } finally { f.close(); }
 });
 
-test("runtime dependency cache tracks compaction recovery and both Kenan packages", () => {
+test("runtime dependency cache tracks its build recipe, package exports, compaction recovery and both Kenan packages", () => {
   const f = fixture();
   try {
     const runtime = readFileSync(join(root, "deploy/runtime"), "utf8");
@@ -399,6 +399,8 @@ test("runtime dependency cache tracks compaction recovery and both Kenan package
     assert.ok(hashScript.startsWith("dependency_hash=$("));
     const inputs = [...hashScript.matchAll(/^\s+sha256sum (.+)\n/gm)].flatMap(match => match[1].split(" "));
     const changedInputs = [
+      "deploy/runtime",
+      "packages/orchestrator/package.json",
       "packages/runtime/extensions/codex-compaction/retry.mjs",
       ...["kenan-memory", "kenan-root"].flatMap(name => [
         `packages/${name}/src/nested/fixture.ts`,
@@ -446,7 +448,7 @@ for (const signal of ["TERM", "INT", "HUP", "failure"]) {
       for (const name of ["package.json", "package-lock.json", "vendor/pi/package.tgz"]) writeFileSync(join(f.repo, name), "{}\n");
       const runtimeSource = readFileSync(join(root, "deploy/runtime"), "utf8");
       const hashInputs = [...runtimeSource.matchAll(/^\s+sha256sum (.+)\n/gm)].flatMap(match => match[1].split(" "));
-      for (const name of hashInputs.filter((name) => name !== "package.json" && name !== "package-lock.json")) {
+      for (const name of hashInputs.filter((name) => name !== "package.json" && name !== "package-lock.json" && name !== "deploy/runtime")) {
         mkdirSync(dirname(join(f.repo, name)), { recursive: true });
         writeFileSync(join(f.repo, name), "\n");
       }

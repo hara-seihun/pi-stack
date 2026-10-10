@@ -7,6 +7,8 @@ export type {
 /** One rendered row of the model context, derived from a transcript item. */
 export interface ContextEntry {
   agentSender?: { threadId: string; name?: string };
+  /** Quiet native records remain available in classic, but never appear in mono. */
+  monoVisibility?: "hidden" | "visible";
   key: string;
   signature: string;
   kind: import("../../server/protocol").TranscriptItemKind;

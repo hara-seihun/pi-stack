@@ -111,14 +111,14 @@ test("publication partitions deployment checks without dropping or repeating con
 
 test("publication fixture files run exactly once as separately bounded jobs", async () => {
   const suites = checkJobs.filter(([name]) => name.startsWith("publication "));
-  const expected = ["config", "transport", "roots", "", "gate", "bundle", "source", "progress", "proof"]
+  const expected = ["config", "transport", "roots", "", "gate", "bundle", "source", "progress", "proof", "hosts"]
     .map(suite => `scripts/publication${suite ? `-${suite}` : ""}.test.mjs`);
   assert.deepEqual(suites.flatMap(([, , args]) => args.filter(arg => arg.endsWith(".test.mjs"))), expected);
   assert.ok(suites.every(job => job[3].timeoutMs === 55_000));
   const root = mkdtempSync(join(tmpdir(), "pi-publication-check-plan-"));
   try {
     for (const file of expected) writeFileSync(join(root, file.split("/").at(-1)),
-      `import test from 'node:test'; test('fixture', () => console.log(${JSON.stringify(`CONTRACT:${file}`)}));`);
+      `import test from 'node:test'; test('fixture live-telephone', () => console.log(${JSON.stringify(`CONTRACT:${file}`)}));`);
     let output = "";
     const results = await runJobs(suites.map(([name, command, args, options]) => [name, command,
       args.map(arg => arg.endsWith(".test.mjs") ? join(root, arg.split("/").at(-1)) : arg), options]), {

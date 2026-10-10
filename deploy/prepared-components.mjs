@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync, mkdirSync, openSync, writeFileSync, fsyncSync, closeSync, renameSync } from 'node:fs';
+import { lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync, mkdirSync, openSync, writeFileSync, fsyncSync, closeSync, existsSync, linkSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -28,15 +28,23 @@ export function preparedComponents(releases, commit, action) {
     const directory = resolve(releases, '.prepared');
     const receipt = join(directory, `${commit}.json`);
     const value = { protocol: 'prepared-components-v1', commit, artifacts };
-    if (action === 'verify') {
-      if (JSON.stringify(JSON.parse(readFileSync(receipt, 'utf8'))) !== JSON.stringify(value)) return { ok: false, error: { code: 'prepared-artifact-changed', receipt } };
+    const matchesReceipt = () => JSON.stringify(JSON.parse(readFileSync(receipt, 'utf8'))) === JSON.stringify(value);
+    const changed = { ok: false, error: { code: 'prepared-artifact-changed', receipt } };
+    if (action === 'verify' || existsSync(receipt)) {
+      if (!matchesReceipt()) return changed;
     } else {
       mkdirSync(directory, { recursive: true, mode: 0o755 });
       const temporary = `${receipt}.${process.pid}.tmp`;
       const fd = openSync(temporary, 'wx', 0o644);
-      try { writeFileSync(fd, JSON.stringify(value) + '\n'); fsyncSync(fd); } finally { closeSync(fd); }
-      renameSync(temporary, receipt);
-      const dir = openSync(directory, 'r'); try { fsyncSync(dir); } finally { closeSync(dir); }
+      try {
+        try { writeFileSync(fd, JSON.stringify(value) + '\n'); fsyncSync(fd); } finally { closeSync(fd); }
+        try { linkSync(temporary, receipt); }
+        catch (error) {
+          if (error.code !== 'EEXIST') throw error;
+          if (!matchesReceipt()) return changed;
+        }
+        const dir = openSync(directory, 'r'); try { fsyncSync(dir); } finally { closeSync(dir); }
+      } finally { unlinkSync(temporary); }
     }
     return { ok: true, value: { ...value, receipt } };
   } catch (error) { return { ok: false, error: { code: 'prepared-artifact-unavailable', message: String(error) } }; }
