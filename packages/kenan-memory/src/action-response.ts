@@ -12,7 +12,7 @@ export function validActionRecord(value: unknown): value is ActionRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const row = value as Record<string, unknown>;
   const evidence = row.evidence as Record<string, unknown> | null;
-  return nonempty(row.id) && nonempty(row.owner) && nonempty(row.intentKey) && nonempty(row.transport)
+  return nonempty(row.id) && nonempty(row.owner) && (row.submittingThreadId === null || nonempty(row.submittingThreadId)) && nonempty(row.intentKey) && nonempty(row.transport)
     && Array.isArray(row.recipients) && row.recipients.length > 0 && row.recipients.every(nonempty)
     && ["accepted", "inflight", "succeeded", "failed-before-effect", "uncertain", "held"].includes(String(row.state))
     && integer(row.revision) && row.revision > 0 && integer(row.createdAt) && integer(row.updatedAt) && typeof row.resolved === "boolean"
@@ -25,7 +25,7 @@ export function validActionResponse(operation: string, value: unknown): value is
   if (result.ok === false) return ["invalid-input", "payload-conflict", "not-found", "fenced", "unavailable"].includes(result.error) && typeof result.message === "string" && (result.action === undefined || validActionRecord(result.action));
   if (result.ok !== true || !("value" in result)) return false;
   switch (operation) {
-    case "submit": case "followup": return !!result.value && ["created", "existing", "recipient-held"].includes(result.value.disposition) && validActionRecord(result.value.action);
+    case "submit": case "followup": return !!result.value && ["created", "existing"].includes(result.value.disposition) && validActionRecord(result.value.action);
     case "inspect": case "finish": case "reconcile": case "recover": case "retry": return validActionRecord(result.value);
     case "list": return Array.isArray(result.value) && result.value.every(validActionRecord);
     case "claim": return !!result.value && nonempty(result.value.id) && nonempty(result.value.token) && integer(result.value.revision) && result.value.revision > 0;

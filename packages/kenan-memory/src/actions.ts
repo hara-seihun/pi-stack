@@ -8,14 +8,15 @@ export { ActionClient } from "./action-client.js";
 
 export type ActionState = "accepted" | "inflight" | "succeeded" | "failed-before-effect" | "uncertain" | "held";
 export type ActionEvidence = { kind: "provider-receipt" | "provider-rejection" | "operator-observation"; reference: string; detail: string };
-export type ActionInput = { intentKey: string; recipients: string[]; transport: string; payload: unknown; requestId: string; threadId: string };
-export type ActionRecord = { id: string; owner: string; intentKey: string; recipients: string[]; transport: string; payload: unknown; state: ActionState; revision: number; result: unknown; evidence: ActionEvidence | null; resolved: boolean; createdAt: number; updatedAt: number };
+export type ActionInput = { intentKey: string; recipients: string[]; transport: string; payload: unknown; requestId: string; threadId: string; authenticatedThreadId?: string | null };
+export type ActionRecord = { id: string; owner: string; submittingThreadId: string | null; intentKey: string; recipients: string[]; transport: string; payload: unknown; state: ActionState; revision: number; result: unknown; evidence: ActionEvidence | null; resolved: boolean; createdAt: number; updatedAt: number };
 export type ActionTicket = { id: string; token: string; revision: number };
-export type ActionSubmission = { action: ActionRecord; disposition: "created" | "existing" | "recipient-held" };
+export type ActionSubmission = { action: ActionRecord; disposition: "created" | "existing" };
 export type ActionResult<T> = { ok: true; value: T } | { ok: false; error: "invalid-input" | "payload-conflict" | "not-found" | "fenced" | "unavailable"; message: string; action?: ActionRecord };
-type Row = { id: string; owner: string; intent_key: string; recipients: string; transport: string; payload: string; digest: string; state: ActionState; revision: number; token: string | null; result: string; evidence: string | null; resolved: number; created_at: number; updated_at: number };
+type Row = { id: string; owner: string; submitting_thread_id: string | null; intent_key: string; recipients: string; transport: string; payload: string; digest: string; state: ActionState; revision: number; token: string | null; result: string; evidence: string | null; resolved: number; created_at: number; updated_at: number };
 const fail = (error: Exclude<ActionResult<never>, { ok: true }>['error'], message: string, action?: ActionRecord): ActionResult<never> => ({ ok: false, error, message, ...(action ? { action } : {}) });
 const good = <T>(value: T): ActionResult<T> => ({ ok: true, value });
+const priorRefusal = (row: Row, recipient: string, error: "fenced" | "payload-conflict" = "fenced"): ActionResult<never> => fail(error, `blocked by unresolved prior action ${row.id} to ${recipient}; resolve-purpose it to continue${row.state === "succeeded" ? "" : "; an active or uncertain effect must first be settled with provider evidence"}`, record(row));
 const text = (v: unknown): v is string => typeof v === "string" && v.trim().length > 0 && v.length <= 1000;
 function stable(v: unknown): string {
   if (v === null || typeof v === "boolean" || typeof v === "string" || typeof v === "number" && Number.isFinite(v)) return JSON.stringify(v);
@@ -32,7 +33,7 @@ export function canonicalRecipient(input: string): string {
   return raw.normalize("NFKC");
 }
 function record(row: Row): ActionRecord {
-  return { id: row.id, owner: row.owner, intentKey: row.intent_key, recipients: JSON.parse(row.recipients), transport: row.transport, payload: JSON.parse(row.payload), state: row.state, revision: row.revision, result: JSON.parse(row.result), evidence: row.evidence ? JSON.parse(row.evidence) : null, resolved: row.resolved === 1, createdAt: row.created_at, updatedAt: row.updated_at };
+  return { id: row.id, owner: row.owner, submittingThreadId: row.submitting_thread_id, intentKey: row.intent_key, recipients: JSON.parse(row.recipients), transport: row.transport, payload: JSON.parse(row.payload), state: row.state, revision: row.revision, result: JSON.parse(row.result), evidence: row.evidence ? JSON.parse(row.evidence) : null, resolved: row.resolved === 1, createdAt: row.created_at, updatedAt: row.updated_at };
 }
 function evidenceValid(v: ActionEvidence): boolean {
   return !!v && ["provider-receipt", "provider-rejection", "operator-observation"].includes(v.kind) && text(v.reference) && text(v.detail);
@@ -56,6 +57,11 @@ export class ActionStore {
       CREATE TABLE IF NOT EXISTS external_contact_slots(owner TEXT NOT NULL,recipient TEXT NOT NULL,action_id TEXT NOT NULL,PRIMARY KEY(owner,recipient));
       CREATE TABLE IF NOT EXISTS external_contact_holds(owner TEXT NOT NULL,recipient TEXT NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(owner,recipient));
       CREATE TABLE IF NOT EXISTS external_action_events(seq INTEGER PRIMARY KEY,owner TEXT NOT NULL,action_id TEXT NOT NULL,at INTEGER NOT NULL,event TEXT NOT NULL,actor TEXT NOT NULL,evidence TEXT NOT NULL);`);
+    const columns = this.db.query("PRAGMA table_info(external_actions)").all() as { name: string }[];
+    if (!columns.some(column => column.name === "submitting_thread_id")) this.db.transaction(() => {
+      const current = this.db.query("PRAGMA table_info(external_actions)").all() as { name: string }[];
+      if (!current.some(column => column.name === "submitting_thread_id")) this.db.exec("ALTER TABLE external_actions ADD COLUMN submitting_thread_id TEXT");
+    }).immediate();
   }
   close(): void { this.db.close(); }
   private run<T>(fn: () => ActionResult<T>): ActionResult<T> {
@@ -95,7 +101,7 @@ export class ActionStore {
   inspect(id: string): ActionResult<ActionRecord> { return this.run(() => { const row = this.row(id); return row ? good(record(row)) : fail("not-found", "Action not found in this owner"); }); }
   list(): ActionResult<ActionRecord[]> { return this.run(() => good((this.db.query("SELECT * FROM external_actions WHERE owner=? ORDER BY created_at DESC LIMIT 100").all(this.owner) as Row[]).map(record))); }
   submit(input: ActionInput): ActionResult<ActionSubmission> {
-    if (!input || !text(input.intentKey) || !text(input.transport) || !text(input.requestId) || !text(input.threadId) || !Array.isArray(input.recipients) || input.recipients.length < 1 || input.recipients.length > 100 || !input.recipients.every(text)) return fail("invalid-input", "Explicit intent, transport, recipients, request and thread identities required");
+    if (!input || !text(input.intentKey) || !text(input.transport) || !text(input.requestId) || !text(input.threadId) || input.authenticatedThreadId !== undefined && input.authenticatedThreadId !== null && !text(input.authenticatedThreadId) || !Array.isArray(input.recipients) || input.recipients.length < 1 || input.recipients.length > 100 || !input.recipients.every(text)) return fail("invalid-input", "Explicit intent, transport, recipients, request and thread identities required");
     let payload: string;
     try { payload = stable(input.payload); } catch { return fail("invalid-input", "Payload must be finite JSON"); }
     if (payload.length > 2_000_000) return fail("invalid-input", "Action payload too large");
@@ -110,7 +116,7 @@ export class ActionStore {
       });
       if (existing) {
         const existingRecipients = [...new Set((JSON.parse(existing.recipients) as string[]).flatMap(recipient => this.aliases(recipient)))].sort();
-        if (existing.digest !== digest || existing.intent_key !== key || JSON.stringify(existingRecipients) !== encoded) return fail("payload-conflict", "Existing intent/request has a different payload; inspect it, do not invent a retry identity", record(existing));
+        if (existing.digest !== digest || existing.intent_key !== key || JSON.stringify(existingRecipients) !== encoded) return existing.resolved ? fail("payload-conflict", "Existing intent/request has a different payload; inspect it, do not invent a retry identity", record(existing)) : priorRefusal(existing, existingRecipients[0]!, "payload-conflict");
         this.db.query("INSERT OR IGNORE INTO external_action_requests VALUES(?,?,?)").run(this.owner, input.requestId, existing.id);
         return good({ action: record(existing), disposition: "existing" });
       }
@@ -120,17 +126,17 @@ export class ActionStore {
           const prior = this.row(slot.action_id)!;
           if (prior.intent_key === key) {
             const known = [...new Set((JSON.parse(prior.recipients) as string[]).flatMap(identity => this.aliases(identity)))].sort();
-            if (prior.digest !== digest || JSON.stringify(known) !== encoded) return fail("payload-conflict", "Canonical contact intent has a different payload or recipient set", record(prior));
+            if (prior.digest !== digest || JSON.stringify(known) !== encoded) return priorRefusal(prior, recipient, "payload-conflict");
             this.db.query("INSERT OR IGNORE INTO external_action_requests VALUES(?,?,?)").run(this.owner, input.requestId, prior.id);
             return good({ action: record(prior), disposition: "existing" });
           }
           this.event(prior.id, "duplicate-contact-fenced", input.threadId, { requestId: input.requestId, intentKey: key, transport: input.transport });
-          return good({ action: record(prior), disposition: "recipient-held" });
+          return priorRefusal(prior, recipient);
         }
       }
       const id = randomUUID(), now = Date.now();
       const hold = recipients.map(recipient => this.db.query("SELECT reason FROM external_contact_holds WHERE owner=? AND recipient=?").get(this.owner, recipient) as { reason: string } | null).find(Boolean);
-      this.db.query("INSERT INTO external_actions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(id, this.owner, key, encoded, input.transport, payload, digest, hold ? "held" : "accepted", 1, null, "null", null, 0, now, now);
+      this.db.query("INSERT INTO external_actions(id,owner,intent_key,recipients,transport,payload,digest,state,revision,token,result,evidence,resolved,created_at,updated_at,submitting_thread_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(id, this.owner, key, encoded, input.transport, payload, digest, hold ? "held" : "accepted", 1, null, "null", null, 0, now, now, input.authenticatedThreadId ?? null);
       this.db.query("INSERT INTO external_action_requests VALUES(?,?,?)").run(this.owner, input.requestId, id);
       for (const recipient of recipients) this.db.query("INSERT INTO external_contact_slots VALUES(?,?,?)").run(this.owner, recipient, id);
       this.event(id, hold ? "held" : "submitted", input.threadId, { requestId: input.requestId, reason: hold?.reason ?? null });
@@ -254,7 +260,7 @@ export class ActionStore {
       if (JSON.stringify(recipients) !== JSON.stringify(priorRecipients)) return fail("invalid-input", "Followup must address the same recipient set");
       for (const recipient of recipients) {
         const slot = this.db.query("SELECT action_id FROM external_contact_slots WHERE owner=? AND recipient=?").get(this.owner, recipient) as { action_id: string } | null;
-        if (slot && slot.action_id !== priorId) return good({ action: record(this.row(slot.action_id)!), disposition: "recipient-held" });
+        if (slot && slot.action_id !== priorId) return priorRefusal(this.row(slot.action_id)!, recipient);
         if (this.db.query("SELECT 1 FROM external_contact_holds WHERE owner=? AND recipient=?").get(this.owner, recipient)) return fail("fenced", "Recipient hold still applies", record(prior));
       }
       // A savepoint makes releasing the old slot and reserving the new action indivisible.

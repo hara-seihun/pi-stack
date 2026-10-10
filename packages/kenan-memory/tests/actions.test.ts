@@ -23,6 +23,7 @@ test("malformed authority success cannot grant a dispatch or partially populated
   expect(validActionResponse("dispatch", { ok: true, value: null })).toBe(true);
   const s = store(); const action = value(s.submit(input())).action;
   expect(validActionResponse("inspect", { ok: true, value: action })).toBe(true);
+  expect(validActionResponse("submit", { ok: true, value: { disposition: "recipient-held", action } })).toBe(false);
   expect(validActionResponse("inspect", { ok: true, value: { ...action, state: "unknown" } })).toBe(false);
 });
 
@@ -40,10 +41,10 @@ test("same business intent across workers/new UUIDs returns one result and rejec
 
 test("rephrasing or switching transport cannot reset unresolved recipient contact", () => {
   const s = store(); const first = value(s.submit(input())).action;
-  const changed = value(s.submit(input({ intentKey: "please ask a different way", transport: "signal", payload: { body: "Rephrase" } })));
-  expect(changed).toMatchObject({ disposition: "recipient-held", action: { id: first.id } });
+  const changed = s.submit(input({ intentKey: "please ask a different way", transport: "signal", payload: { body: "Rephrase" } }));
+  expect(changed).toMatchObject({ ok: false, error: "fenced", action: { id: first.id } });
   const ticket = value(s.claim(first.id, "a")); value(s.dispatch(ticket)); value(s.finish(ticket, "succeeded", null, receipt));
-  expect(value(s.submit(input({ intentKey: "new UUID purpose" }))).disposition).toBe("recipient-held");
+  expect(s.submit(input({ intentKey: "new UUID purpose" }))).toMatchObject({ ok: false, error: "fenced" });
 });
 
 test("crash after provider effect before receipt stays fenced across restart and only affirmative reconciliation changes it", () => {
@@ -58,7 +59,7 @@ test("crash after provider effect before receipt stays fenced across restart and
   expect(unknown.state).toBe("uncertain"); expect(s.finish(ticket, "succeeded", null, receipt)).toMatchObject({ ok: false, error: "fenced" });
   expect(restarted.reconcile(action.id, unknown.revision, "no-effect-confirmed", observation, "operator")).toMatchObject({ ok: false, error: "invalid-input" });
   const known = value(restarted.reconcile(action.id, unknown.revision, "effect-confirmed", receipt, "operator"));
-  expect(known.state).toBe("succeeded"); expect(value(restarted.submit(input({ intentKey: "retry-differently" }))).disposition).toBe("recipient-held");
+  expect(known.state).toBe("succeeded"); expect(restarted.submit(input({ intentKey: "retry-differently" }))).toMatchObject({ ok: false, error: "fenced" });
 });
 
 test("no-effect proof permits explicit fenced retry; uncertainty never does", () => {
@@ -120,7 +121,7 @@ test("late verified Signal/phone aliases propagate prior effects and holds acros
   const s = store();
   const prior = value(s.submit(input({ recipients: ["signal:synthetic-aci"], transport: "signal.send" }))).action;
   value(s.linkRecipients(["signal:synthetic-aci", "+12025550123"], "verified-backend"));
-  expect(value(s.submit(input({ intentKey: "different phone purpose" }))).disposition).toBe("recipient-held");
+  expect(s.submit(input({ intentKey: "different phone purpose" }))).toMatchObject({ ok: false, error: "fenced" });
   expect(value(s.submit(input({ recipients: ["+12025550123"], transport: "signal.send" }))).action.id).toBe(prior.id);
   value(s.holdRecipient("+12025550123", "Verified hold", "operator"));
   expect(s.claim(prior.id, "worker")).toMatchObject({ ok: false, error: "fenced" });
@@ -149,9 +150,45 @@ test("aliases discovering two unresolved effects hold both instead of silently m
   expect(value(s.list())).toHaveLength(2);
 });
 
+test("delivered receipts are replayable only for the exact canonical request across all transports", () => {
+  for (const transport of ["email.send", "signal", "telephone", "browser"]) {
+    const s = store();
+    const request = input({ transport, recipients: ["recipient@example.test"], authenticatedThreadId: "sender-thread" });
+    const prior = value(s.submit(request)).action;
+    const ticket = value(s.claim(prior.id, "sender-thread")); value(s.dispatch(ticket));
+    const delivered = value(s.finish(ticket, "succeeded", { providerId: "fixture-delivered" }, receipt));
+    for (const changes of [{ intentKey: "new conversation step" }, { payload: { body: "new message" } }]) {
+      const attempted = { ...request, ...changes, requestId: crypto.randomUUID() };
+      const refused = s.submit(attempted);
+      expect(refused).toMatchObject({ ok: false, action: { id: prior.id, state: "succeeded", revision: delivered.revision } });
+      if (refused.ok) throw new Error("New content was mistaken for delivery");
+      expect(refused.message).toContain(`blocked by unresolved prior action ${prior.id} to mailto:recipient@example.test; resolve-purpose it to continue`);
+      expect(s.db.query("SELECT 1 FROM external_action_requests WHERE request_id=?").get(attempted.requestId)).toBeNull();
+      expect(validActionResponse("submit", refused)).toBe(true);
+    }
+    const retry = value(s.submit({ ...request, requestId: crypto.randomUUID(), authenticatedThreadId: "other-thread" }));
+    expect(retry).toMatchObject({ disposition: "existing", action: { id: prior.id, submittingThreadId: "sender-thread", result: { providerId: "fixture-delivered" } } });
+    expect(value(s.list())).toHaveLength(1);
+    expect(s.db.query("SELECT count(*) AS count FROM external_action_dispatches").get()).toEqual({ count: 1 });
+  }
+});
+
+test("ownership is explicitly authenticated on creation and migration never promotes old actor text", () => {
+  const path = root(), s = store(path);
+  const old = value(s.submit(input({ threadId: "spoofed-owner" }))).action;
+  expect(old.submittingThreadId).toBeNull();
+  s.db.exec("ALTER TABLE external_actions DROP COLUMN submitting_thread_id");
+  const reopened = store(path);
+  expect(value(reopened.inspect(old.id)).submittingThreadId).toBeNull();
+  expect(value(reopened.submit(input({ authenticatedThreadId: "retry-worker" }))).action.submittingThreadId).toBeNull();
+  const fresh = value(reopened.submit(input({ recipients: ["other@example.test"], authenticatedThreadId: "real-owner", threadId: "spoofed-owner" }))).action;
+  expect(fresh.submittingThreadId).toBe("real-owner");
+  expect(reopened.submit(input({ authenticatedThreadId: "" }))).toMatchObject({ ok: false, error: "invalid-input" });
+});
+
 test("twelve independent processes atomically claim one synthetic effect", async () => {
   const path = root(), effects = join(path, "effects.txt"), module = resolve(import.meta.dir, "../src/actions.ts");
-  const code = `import {ActionStore} from ${JSON.stringify(module)}; import {appendFileSync} from 'node:fs'; const s=new ActionStore(${JSON.stringify(path)},'synthetic'); const r=s.submit({...${JSON.stringify(input())},requestId:crypto.randomUUID()}); if(r.ok && r.value.disposition!=='recipient-held'){const t=s.claim(r.value.action.id,'worker:'+process.pid); if(t.ok){const d=s.dispatch(t.value); if(d.ok)appendFileSync(${JSON.stringify(effects)},'effect\\n');}} s.close();`;
+  const code = `import {ActionStore} from ${JSON.stringify(module)}; import {appendFileSync} from 'node:fs'; const s=new ActionStore(${JSON.stringify(path)},'synthetic'); const r=s.submit({...${JSON.stringify(input())},requestId:crypto.randomUUID()}); if(r.ok){const t=s.claim(r.value.action.id,'worker:'+process.pid); if(t.ok){const d=s.dispatch(t.value); if(d.ok)appendFileSync(${JSON.stringify(effects)},'effect\\n');}} s.close();`;
   const workers = Array.from({ length: 12 }, () => Bun.spawn([process.execPath, "--eval", code], { stdout: "pipe", stderr: "pipe" }));
   const exits = await Promise.all(workers.map(async worker => { const exit = await worker.exited; const stderr = await new Response(worker.stderr).text(); expect(stderr).toBe(""); return exit; }));
   expect(exits).toEqual(Array(12).fill(0)); expect(readFileSync(effects, "utf8")).toBe("effect\n");
