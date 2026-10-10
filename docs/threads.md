@@ -241,7 +241,7 @@ retention without losing durable terminal results.
 
 ## The person's manager
 
-[Mono view and manager custody](../apps/remote/docs/mono.md) owns the optional forever conversation. The person's supervisor creates one full-context thread lazily on first use, marked `metadata.manager:true`, and preserves it from archival. It uses the ordinary tools and durable own-thread wake. Questions from other own-person threads pass through manager custody before becoming human-visible; unhandled holds expire after two hours. The watch-list scheduler remains independent.
+[Mono view and manager custody](../apps/remote/docs/mono.md) owns the optional forever conversation. The person's supervisor creates one full-context thread lazily on first use, marked `metadata.manager:true`, and preserves it from archival. It uses the ordinary tools and the native conditional five-minute inactivity watchdog. The canonical thread controller owns its durable due intent; watchdog-only activity and future schedules do not count as active managed work. Questions from other own-person threads pass through manager custody before becoming human-visible; unhandled holds expire after two hours. The watch-list scheduler remains independent.
 
 ## Questions and attention
 

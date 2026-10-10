@@ -3,8 +3,6 @@ import { watchSettings, type Result, type SpawnThread, type Thread, type ThreadA
 import type { ManagerView } from "./protocol";
 import type { ThreadDestination } from "./thread-model-defaults";
 
-export const MANAGER_HEARTBEAT_MS = 4 * 60 * 60_000;
-
 export function managerDestination(destinations: readonly ThreadDestination[], configured: string | undefined): Result<ThreadDestination> {
   const full = destinations.filter(destination => !destination.raw && !destination.sandbox);
   const id = configured === undefined ? (full.find(destination => destination.id === "personal") ?? full.find(destination => destination.id === "home") ?? full[0])?.id : configured;
@@ -31,7 +29,7 @@ type ManagerRow = { view: "classic" | "mono"; thread_id: string | null; hint_see
 
 export class Manager {
   private queue: Promise<unknown> = Promise.resolve();
-  constructor(private db: Database, private threads: Pick<ThreadApi, "spawn" | "wakeSchedule">,
+  constructor(private db: Database, private threads: Pick<ThreadApi, "spawn">,
     private placement: () => Result<Pick<SpawnThread, "cwd" | "metadata">>, private settings: ThreadSettings,
     private changed: () => void) {
     db.exec(`CREATE TABLE IF NOT EXISTS manager_view (
@@ -81,9 +79,6 @@ export class Manager {
     if (!created.ok) return created;
     const thread = created.value;
     if (thread.id !== id) this.db.query("UPDATE manager_view SET thread_id=? WHERE singleton=1").run(thread.id);
-    const wake = await this.threads.wakeSchedule({ action: "set", threadId: thread.id, requestId: `manager-heartbeat:${thread.id}`,
-      reason: "Managing Kenan heartbeat: consider the person's current needs and held questions; speak only when there is something useful to say.", cadenceMs: MANAGER_HEARTBEAT_MS });
-    if (!wake.ok) return wake;
     this.db.query("UPDATE manager_view SET initialized=1 WHERE singleton=1").run();
     this.changed();
     return { ok: true, value: thread };

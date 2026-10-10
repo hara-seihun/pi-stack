@@ -1,10 +1,10 @@
 import type { Database } from "bun:sqlite";
-import type { ThreadApi, ManagerNotificationPolicy } from "pi-orchestrator/api";
+import { validateManagerWorkSummary, type ThreadApi, type ManagerNotificationPolicy } from "pi-orchestrator/api";
 
 export async function managerRelay(req: Request, owner: {
   db: Database; environmentId: string; authorizedRouter: boolean;
   threads: Pick<ThreadApi, "managerNotificationPolicy" | "send">;
-  directory: Pick<ThreadApi, "questionOrigin" | "managerQuestionCustody">;
+  directory: Pick<ThreadApi, "questionOrigin" | "managerQuestionCustody" | "managerWorkSummary">;
   manager: ManagerNotificationPolicy | null;
 }): Promise<Response> {
   const failure = (message: string, status: number) => Response.json({ ok: false, error: { code: "unavailable", message } }, { status });
@@ -13,6 +13,13 @@ export async function managerRelay(req: Request, owner: {
   if (req.method !== "POST") return failure("Use POST", 405);
   if (operation === "managerNotificationPolicy") return owner.manager ? Response.json(await owner.threads.managerNotificationPolicy()) : failure("This is not the canonical manager owner", 409);
   const input = await req.json().catch(() => null);
+  if (operation === "managerWorkSummary") {
+    if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).length !== 0) return failure("Work summary requires an empty object", 400);
+    const result = await owner.directory.managerWorkSummary();
+    if (!result.ok) return Response.json(result);
+    return validateManagerWorkSummary(result.value) ? Response.json({ ok: true, value: result.value })
+      : failure("Thread directory returned an invalid work summary", 503);
+  }
   if (operation === "questionOrigin") {
     if (!input || typeof input.threadId !== "string" || Object.keys(input).some(key => key !== "threadId")) return failure("Question origin requires one thread identity", 400);
     return Response.json(await owner.directory.questionOrigin(input.threadId));

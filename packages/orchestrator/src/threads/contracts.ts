@@ -413,6 +413,7 @@ export interface ThreadApi {
   watch(input: import("./watch-list.js").WatchRequest): Promise<Result<import("./watch-list.js").WatchResponse>>;
   managerThread(): Promise<Result<Thread | null>>;
   managerNotificationPolicy(): Promise<Result<ManagerNotificationPolicy>>;
+  managerWorkSummary(): Promise<Result<import("./manager-watchdog.js").ManagerWorkSummary>>;
   questionOrigin(threadId: string): Promise<Result<Pick<Thread, "id" | "title" | "agentName">>>;
   managerQuestionCustody(input: ManagerQuestionCustodyRequest): Promise<Result<ManagerQuestionCustodyReceipt>>;
   managerQuestions(input: ManagerQuestionsRequest): Promise<Result<ManagerQuestionsResponse>>;

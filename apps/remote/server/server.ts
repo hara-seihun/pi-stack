@@ -393,6 +393,15 @@ manager = MANAGER_DESTINATION ? new Manager(db, threads, () => {
     workspaceId: MANAGER_DESTINATION.workspaceId, profileId: MANAGER_DESTINATION.id, contextFiles: selected.value,
   } } } : { ok: false, error: { code: "invalid_request", message: selected.error } };
 }, unwrap(managerSettings(process.env.PI_REMOTE_MANAGER_MODEL)), () => { signalSync(); void refreshThreadNotifications(); void pushNotifications(); }) : null;
+if (manager) {
+  const workObserver = managerRelayClient();
+  threads.setManagerWatchdog(async () => {
+    const managerThreadId = manager!.snapshot().managerThreadId;
+    if (managerThreadId === null) return { ok: true, value: { managerThreadId, activeWork: false, lastHumanMessageAt: null } };
+    const summary = await workObserver.managerWorkSummary();
+    return summary.ok ? { ok: true, value: { ...summary.value, managerThreadId } } : summary;
+  }, message => { observeError(db, "manager-watchdog", message); });
+}
 const peerThreads = new Map<string, Thread>();
 let peerArchivedTotal = 0;
 const peerChildren = new Map<string, boolean>();
