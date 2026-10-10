@@ -111,21 +111,30 @@ test("publication partitions deployment checks without dropping or repeating con
 
 test("publication fixture files run exactly once as separately bounded jobs", async () => {
   const suites = checkJobs.filter(([name]) => name.startsWith("publication "));
-  const expected = ["config", "transport", "roots", "", "gate", "bundle", "source", "progress", "proof"]
+  const expected = ["config", "transport", "roots", "", "gate", "bundle", "source", "progress", "proof", "hosts"]
     .map(suite => `scripts/publication${suite ? `-${suite}` : ""}.test.mjs`);
   assert.deepEqual(suites.flatMap(([, , args]) => args.filter(arg => arg.endsWith(".test.mjs"))), expected);
   assert.ok(suites.every(job => job[3].timeoutMs === 55_000));
   const root = mkdtempSync(join(tmpdir(), "pi-publication-check-plan-"));
   try {
-    for (const file of expected) writeFileSync(join(root, file.split("/").at(-1)),
-      `import test from 'node:test'; test('fixture', () => console.log(${JSON.stringify(`CONTRACT:${file}`)}));`);
+    for (const file of expected) {
+      const telephone = file === "scripts/publication-hosts.test.mjs";
+      const names = telephone ? ["live-telephone fixture", "telephone phone-census fixture"] : ["fixture"];
+      writeFileSync(join(root, file.split("/").at(-1)),
+        `import test from 'node:test';\n${names.map(name =>
+          `test(${JSON.stringify(name)}, () => console.log(${JSON.stringify(`CONTRACT:${file}:${name}`)}));`).join("\n")}\n` +
+        (telephone ? "test('native boundary fixture', () => console.log('UNSELECTED_CONTRACT'));\n" : ""));
+    }
     let output = "";
     const results = await runJobs(suites.map(([name, command, args, options]) => [name, command,
       args.map(arg => arg.endsWith(".test.mjs") ? join(root, arg.split("/").at(-1)) : arg), options]), {
       concurrency: 2, write(text) { output += text; },
     });
     assert.deepEqual(results.map(result => result.code), suites.map(() => 0), output);
-    assert.deepEqual([...output.matchAll(/CONTRACT:([^\n\r]+)/g)].map(match => match[1]).sort(), expected.sort(), output);
+    const contracts = expected.flatMap(file => (file === "scripts/publication-hosts.test.mjs"
+      ? ["live-telephone fixture", "telephone phone-census fixture"] : ["fixture"]).map(name => `${file}:${name}`));
+    assert.deepEqual([...output.matchAll(/CONTRACT:([^\n\r]+)/g)].map(match => match[1]).sort(), contracts.sort(), output);
+    assert.doesNotMatch(output, /UNSELECTED_CONTRACT/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
