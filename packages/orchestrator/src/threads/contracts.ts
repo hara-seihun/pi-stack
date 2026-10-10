@@ -1,6 +1,7 @@
 export const THREAD_EXECUTION_CONTRACT = "unified-threads-v1";
 import type { ThreadCreator } from "./caller.js";
 import type { ExecutionActivitySnapshot } from "./execution-activity.js";
+import type { ThreadLifecycle } from "./lifecycle.js";
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: ThreadError };
 export type ThreadError = { code: "not_found" | "invalid_request" | "conflict" | "no_pending_messages" | "unavailable" | "cancellation_failed" | "oversized"; message: string; retryable?: boolean; retryAt?: number; requestId?: string };
@@ -39,6 +40,8 @@ export interface Thread {
   /** Actual accepted execution or next queued work; settings above are future preferences. */
   effectiveSettings?: ThreadSettings;
   admission: Admission;
+  /** Owner-derived observation. state below is scheduler custody, not UI activity. */
+  lifecycle: ThreadLifecycle;
   state: ThreadState;
   held: boolean;
   revision: number;
@@ -400,6 +403,8 @@ export interface ThreadAttentionReceipt {
   accepted: true; seq: number; threadId: string; summary: string; foreground: boolean; time: number;
 }
 export interface ThreadAttentionEvents { cursor: number; items: ThreadAttentionReceipt[] }
+export type ManagerNotificationPolicy = { view: "classic" } | { view: "mono"; managerThreadId: string };
+
 export interface ThreadApi {
   attention(input: ThreadAttentionRequest): Promise<Result<ThreadAttentionReceipt>>;
   attentionEvents(after?: number, limit?: number): Result<ThreadAttentionEvents> | Promise<Result<ThreadAttentionEvents>>;
@@ -407,6 +412,8 @@ export interface ThreadApi {
   wakeSchedule(input: ThreadWakeRequest): Promise<Result<ThreadWakeSchedule | null>>;
   watch(input: import("./watch-list.js").WatchRequest): Promise<Result<import("./watch-list.js").WatchResponse>>;
   managerThread(): Promise<Result<Thread | null>>;
+  managerNotificationPolicy(): Promise<Result<ManagerNotificationPolicy>>;
+  questionOrigin(threadId: string): Promise<Result<Pick<Thread, "id" | "title" | "agentName">>>;
   managerQuestionCustody(input: ManagerQuestionCustodyRequest): Promise<Result<ManagerQuestionCustodyReceipt>>;
   managerQuestions(input: ManagerQuestionsRequest): Promise<Result<ManagerQuestionsResponse>>;
   ask(input: AskThreadQuestions): Promise<Result<QuestionsReceipt>>;

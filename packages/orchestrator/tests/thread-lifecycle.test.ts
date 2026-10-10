@@ -3,12 +3,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ThreadService } from "../src/threads/service.js";
+import type { OpenPiSession } from "../src/threads/contracts.js";
 import { deriveThreadLifecycle, lifecycleControl, type LifecycleObservation } from "../src/threads/lifecycle.js";
 const idle: LifecycleObservation = { archived: false, cancelling: false, execution: null, pending: null, delay: null, dependency: null, subscriptions: [], error: null, updatedAt: 10 };
 describe("owner lifecycle controls follow custody, not scheduler flags or future timers", () => {
   it("actual owner snapshots distinguish a future wake from a durable wait across restart", async () => {
     const root = mkdtempSync(join(tmpdir(), "thread-lifecycle-"));
-    const options = { databasePath: join(root, "threads.sqlite"), sessionsDir: root, capacity: { mode: "unmanaged" as const } };
+    const options = { databasePath: join(root, "threads.sqlite"), sessionsDir: root, capacity: { mode: "unmanaged" as const }, openSession: (async () => { throw new Error("No native session in lifecycle observation tests"); }) as OpenPiSession };
     let service = new ThreadService(options);
     try {
       expect(service.importThread({ id: "quiet", title: "Quiet", cwd: root, sessionFile: join(root, "quiet.jsonl"), settings: { model: "sol", thinkingLevel: "high", speed: "standard" }, metadata: { foreground: true } }).ok).toBe(true);

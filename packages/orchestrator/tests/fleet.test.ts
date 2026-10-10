@@ -6,7 +6,7 @@ import type { Thread } from "../src/threads/contracts.js";
 
 const thread: Thread = { id: "thread", parentId: null, title: "work", cwd: "/tmp", sessionFile: "/tmp/thread.jsonl",
   settings: { model: "openai-codex/gpt-6-astra", thinkingLevel: "high", speed: "standard" }, admission: "force",
-  state: "running", held: false, revision: 1, createdAt: 1, updatedAt: 1, pendingMessages: 1 };
+  lifecycle: { kind: "idle" }, state: "running", held: false, revision: 1, createdAt: 1, updatedAt: 1, pendingMessages: 1 };
 
 it("leases executions without creating fleet runs or pacing background admission", async () => {
   const store = Store.open(":memory:");

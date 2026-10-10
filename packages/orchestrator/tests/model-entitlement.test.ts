@@ -10,7 +10,7 @@ import type { Thread } from "../src/threads/contracts.js";
 const refusal = (model: string) => `{"detail":"The '${model}' model is not supported when using Codex with a ChatGPT account."}`;
 const thread: Thread = { id: "worker", parentId: "root", title: "work", cwd: "/tmp", sessionFile: "/tmp/worker.jsonl",
   settings: { model: "openai-codex/gpt-6.1-sol", thinkingLevel: "high", speed: "standard" }, admission: "force",
-  state: "running", held: false, revision: 1, createdAt: 1, updatedAt: 1, pendingMessages: 1 };
+  lifecycle: { kind: "idle" }, state: "running", held: false, revision: 1, createdAt: 1, updatedAt: 1, pendingMessages: 1 };
 const auth = { has: () => true } as never;
 
 it("classifies an account entitlement refusal as model configuration that reroutes accepted work at once, never capacity or credential", () => {

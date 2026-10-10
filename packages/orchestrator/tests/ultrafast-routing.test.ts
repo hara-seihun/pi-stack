@@ -29,7 +29,7 @@ const unsupported = "openai-codex-1", entitled = "openai-codex-2";
 const thread: Thread = {
   id: "ultrafast-thread", parentId: null, title: "work", cwd: "/tmp", sessionFile: "/tmp/ultrafast-thread.jsonl",
   settings: { model: "openai-codex/gpt-6-astra", thinkingLevel: "high", speed: "ultrafast" }, admission: "force",
-  state: "running", held: false, revision: 1, createdAt: 1, updatedAt: 1, pendingMessages: 1,
+  lifecycle: { kind: "idle" }, state: "running", held: false, revision: 1, createdAt: 1, updatedAt: 1, pendingMessages: 1,
 };
 
 function fixture(model = astra) {

@@ -53,7 +53,7 @@ it("accounts fleet completions once while shared interactive sessions and provid
   const config = loadConfig("/missing"), fleet = new Fleet(store, config);
   const thread: Thread = { id: "fleet-thread", parentId: null, title: "work", cwd: "/tmp", sessionFile: "/tmp/fleet.jsonl",
     settings: { model: "openai-codex/gpt-6-astra", thinkingLevel: "high", speed: "standard" }, admission: "force",
-    state: "running", held: false, revision: 1, createdAt: 1, updatedAt: 1, pendingMessages: 1 };
+    lifecycle: { kind: "idle" }, state: "running", held: false, revision: 1, createdAt: 1, updatedAt: 1, pendingMessages: 1 };
   const register = () => {
     const handlers = new Map<string, (...args: any[]) => any>();
     usageLogger({ on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler) } as never);

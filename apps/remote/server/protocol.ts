@@ -3,7 +3,7 @@
 // imports the same file, so a field renamed on one side fails to compile on
 // the other instead of silently reading undefined at runtime.
 
-import type { AgentWait, ThreadWakeSchedule, ExecutionPhase, ThreadState, Delivery as ThreadDelivery } from "pi-orchestrator/api";
+import type { AgentWait, ThreadWakeSchedule, ExecutionPhase, ThreadState, ThreadLifecycle, Delivery as ThreadDelivery } from "pi-orchestrator/api";
 import type { ReconcileFrame } from "../shared/reconcile.js";
 export type ChatId = `ai:${string}` | `room:${string}`;
 export type FileBrowserEntry = { name: string; path: string; kind: "directory" | "file" | "other" };
@@ -26,7 +26,7 @@ export interface EnvironmentEndpoint {
 export type Activity = "idle" | "awaiting" | "status_error" | ExecutionPhase;
 
 export interface IdleNotification { seq: number; sessionId: string; name: string; time: string; kind?: "idle" | "question" | "attention"; body?: string }
-export interface IdleNotificationFeed { cursor: number; notifications: IdleNotification[] }
+export interface IdleNotificationFeed { cursor: number; notifications: IdleNotification[]; policy?: import("pi-orchestrator/api").ManagerNotificationPolicy }
 export type HistoryNotification = IdleNotification & { questionId?: string } &
   ({ status: "needs-you" | "history" } | { status: "unavailable"; error: string });
 export interface NotificationHistory { notifications: HistoryNotification[]; before: number | null }
@@ -84,6 +84,7 @@ export interface Session {
   cwd: string;
   workspaceName: string;
   environment: string;
+  lifecycle: ThreadLifecycle;
   state: ThreadState;
   /** Halted with cancellation confirmed, holding its pending messages. */
   held: boolean;
@@ -103,6 +104,7 @@ export interface Session {
   lastUserMessageAt?: string;
   revision: number;
   idleUnread: boolean;
+  humanAttention?: boolean;
   /** Full rows only for the stream's subscribed session; other rows carry an empty list. */
   queuedMessages: QueuedMessage[];
   archivedAt: string | null;

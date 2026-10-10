@@ -11,6 +11,7 @@ export {
   type PlanMetric,
 } from "./catalog.js";
 export { DELEGATION_POLICY } from "./delegation-policy.js";
+export { anthropicSignatureChannel, projectAnthropicNarrationMessage } from "pi-orchestrator/anthropic-narration";
 export { getRandomName } from "./nebulani-names.js";
 export { loadConfig, orchestratorUrl } from "./config.js";
 export { configuredAgentCapacity, configuredAgentCapacitySettings, configuredAgentCapacityStatus, createAgentCapacityClient, GLOBAL_AGENT_LIMIT, AGENT_CAPACITY_AUTHORITY, AGENT_CAPACITY_CLIENT_CONFIG } from "./agent-capacity.js";
@@ -25,12 +26,14 @@ export type { Result, ThreadError, Delivery, ThinkingLevel, Speed, Admission, Th
   ThreadSettings, SettingsOverrides, Thread, ThreadMessage, ThreadQuestion, PendingQuestions, PendingQuestionsQuery, QuestionThread, QuestionInput, AskThreadQuestions, AnswerThreadQuestion, QuestionsReceipt, QuestionReceipt, QuestionEvents, QuestionState, SpawnThread, SendThread, ThreadList, ThreadPage, ArchivedThreadsQuery, ArchivedThreadsResult,
   ThreadRead, ThreadHistory, ThreadInspection, ThreadSettlement, ThreadSettlements, AwaitThreads, ThreadAwaitResult, ThreadControl, ThreadApi, PiEvent, PiCommand, PiSession, PiSessionOptions, OpenPiSession, PiRunnerReference, AttachPiSession } from "./threads/contracts.js";
 export { THREAD_STATES, isThreadState, resolveDelivery, validateThreadAwait, THREAD_AWAIT_TIMEOUT_MS } from "./threads/contracts.js";
+export type { ThreadLifecycle } from "./threads/lifecycle.js";
+export { deriveThreadLifecycle, lifecycleControl } from "./threads/lifecycle.js";
 export { configuredPersonSpawnModel } from "./threads/person-spawn-model.js";
 export { ThreadService } from "./threads/service.js";
 export { createManagedAgentSession, type NativeSessionOptions, type ManagedSession } from "./threads/native-session.js";
 export { recoverNativeSessionOwners, nativeOwnerAbsent, type NativeOwnerRecord, type NativeOwnerAbsence } from "./threads/native-owner-recovery.js";
 export { validateWaitDependency } from "./threads/contracts.js";
-export type { AgentWait, AgentWaitRequest, WaitDependency, WaitKind, ThreadWakeSchedule, ThreadWakeRequest, ThreadAttentionRequest, ThreadAttentionReceipt, ThreadAttentionEvents } from "./threads/contracts.js";
+export type { ManagerNotificationPolicy, AgentWait, AgentWaitRequest, WaitDependency, WaitKind, ThreadWakeSchedule, ThreadWakeRequest, ThreadAttentionRequest, ThreadAttentionReceipt, ThreadAttentionEvents } from "./threads/contracts.js";
 export { createExecutionActivity, executionActivitySnapshot, executionWaitActivity, observeExecutionActivity, restoreExecutionActivity, settleExecutionActivity, type ExecutionActivity, type ExecutionActivitySnapshot, type ExecutionPhase } from "./threads/execution-activity.js";
 export { parseRuntimeEvent, requireRuntimeEvent, requireAssistantStopReason, assertNever, RUNTIME_EVENT_TYPES, type RuntimeEvent, type RuntimeEventType } from "./threads/runtime-events.js";
 export { ModelAvailabilityStore, modelAvailabilityPath, modelAvailabilityKey } from "./threads/model-availability.js";

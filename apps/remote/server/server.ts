@@ -51,7 +51,7 @@ import {
   type PersonalUsage,
   readBrokerUsage,
 } from "pi-orchestrator/api";
-import { createLiveProjection, settleLiveProjection, restoreLiveProjection, threadActivity, projectThreadActivity, type LiveProjection } from "./live-projection";
+import { createLiveProjection, settleLiveProjection, restoreLiveProjection, projectThreadActivity, type LiveProjection } from "./live-projection";
 import { InlineImages } from "./inline-images";
 import { planCards } from "./catalog-presentation";
 import { updateThreadSettings } from "./thread-settings";
@@ -104,6 +104,9 @@ import { FeatureUsage } from "./feature-usage";
 import { createHash } from "node:crypto";
 import { parseFeatureEvent, type Feature, type FeatureActor } from "../shared/feature-usage";
 import { idleNotifications, notificationHistory, resolveNotificationQuestions } from "./notifications";
+import { notificationUnread, humanQuestions } from "./notification-policy";
+import { managerRelay } from "./manager-relay";
+import { managerRelayClient as createManagerRelayClient } from "./manager-relay-client";
 import { listPersons, publicPerson } from "./persons";
 import { ownEnvironment } from "./environments";
 import { API_CORS_HEADERS } from "./cors";
@@ -285,7 +288,34 @@ const runner = createSharedPiSessionOpener({ dataDir: DATA });
 // Thread capabilities and caller checks: a thread's parent and creator are verified, never taken from the request.
 const capability = threadCapability();
 const callers = callerResolver({ capability, host: hostIdentityConfig() });
+const MANAGER_ENVIRONMENT_ID = process.env.PI_REMOTE_MANAGER_ENVIRONMENT ?? ENVIRONMENT_ID;
+if (!/^[a-z][a-z0-9-]{0,31}$/.test(MANAGER_ENVIRONMENT_ID)) throw new Error("PI_REMOTE_MANAGER_ENVIRONMENT must be an environment ID");
+function managerRelayClient(environmentId?: string) {
+  return createManagerRelayClient(`http://127.0.0.1:${process.env.PI_REMOTE_ROUTER_PORT ?? "8788"}/v1/agent-manager`, environmentId);
+}
+const managerOwner = MANAGER_ENVIRONMENT_ID !== ENVIRONMENT_ID ? managerRelayClient() : null;
+let manager: Manager | null = null;
+let remoteNotificationPolicy: import("pi-orchestrator/api").ManagerNotificationPolicy | null = null;
+function currentNotificationPolicy(): import("pi-orchestrator/api").ManagerNotificationPolicy | null {
+  if (!manager) return remoteNotificationPolicy;
+  const snapshot = manager.snapshot();
+  return snapshot.view === "classic" ? { view: "classic" } : { view: "mono", managerThreadId: snapshot.managerThreadId };
+}
+let notificationPolicyRefresh: Promise<import("pi-orchestrator/api").Result<import("pi-orchestrator/api").ManagerNotificationPolicy>> | null = null;
+async function loadNotificationPolicy(): Promise<import("pi-orchestrator/api").Result<import("pi-orchestrator/api").ManagerNotificationPolicy>> {
+  if (manager) return { ok: true, value: currentNotificationPolicy()! };
+  if (!managerOwner) return { ok: false, error: { code: "unavailable", message: "Canonical manager notification owner is unavailable" } };
+  if (notificationPolicyRefresh) return notificationPolicyRefresh;
+  notificationPolicyRefresh = managerOwner.managerNotificationPolicy().then(result => {
+    const next = result.ok ? result.value : null;
+    if (JSON.stringify(remoteNotificationPolicy) !== JSON.stringify(next)) { remoteNotificationPolicy = next; signalSync(); }
+    return result;
+  }).finally(() => { notificationPolicyRefresh = null; });
+  return notificationPolicyRefresh;
+}
 const threads = new ThreadService({
+  managerNotificationPolicy: loadNotificationPolicy,
+  ...(managerOwner ? { routeManagerQuestionCustody: input => managerOwner.managerQuestionCustody(input) } : {}),
   capability,
   capacity: configuredAgentCapacity(),
   spawnDefaultModel: () => configuredPersonSpawnModel(),
@@ -315,7 +345,10 @@ const fleetUrl = process.env.PI_REMOTE_ROOMS_RUNTIME === "1" ? null : configured
 const fleet = fleetUrl ? createThreadClient(`${fleetUrl}/v1/thread-owner`) : null;
 /** Assigned once the phone broker exists; thread events can arrive earlier. */
 let phoneOverlay: PhoneOverlay | null = null;
-const directory = new ThreadDirectory({ id: "person", api: threads }, fleet ? [{ id: "fleet", api: fleet }] : []);
+const directory = new ThreadDirectory({ id: "person", api: threads }, fleet ? [{ id: "fleet", api: fleet }] : [], managerOwner ? { id: "manager", api: managerOwner } : undefined, id => {
+  const route = db.query("SELECT value FROM metadata WHERE key=?").get(`manager-origin:${id}`) as { value: string } | null;
+  return route ? { id: `question-origin:${route.value}`, api: managerRelayClient(route.value) } : null;
+});
 threads.setDirectory(directory, (parent, input) => {
   // Encrypted-folder sessions must retain their mount namespace and transcript custody.
   const privatePath = (path: string) => resolve(path) === resolve(PRIVATE_DIR) || resolve(path).startsWith(`${resolve(PRIVATE_DIR)}/`);
@@ -349,11 +382,9 @@ const watchList = new WatchList({
   onError: error => { observeError(db, "watch-list", error); if (error) console.error("Watch list check failed:", error); },
 });
 threads.setWatchList(watchList);
-const MANAGER_ENVIRONMENT_ID = process.env.PI_REMOTE_MANAGER_ENVIRONMENT ?? ENVIRONMENT_ID;
-if (!/^[a-z][a-z0-9-]{0,31}$/.test(MANAGER_ENVIRONMENT_ID)) throw new Error("PI_REMOTE_MANAGER_ENVIRONMENT must be an environment ID");
 const MANAGER_DESTINATION = MANAGER_ENVIRONMENT_ID === ENVIRONMENT_ID
   ? unwrap(managerDestination([...THREAD_DESTINATIONS.values()], process.env.PI_REMOTE_MANAGER_DESTINATION)) : null;
-const manager = MANAGER_DESTINATION ? new Manager(db, threads, () => {
+manager = MANAGER_DESTINATION ? new Manager(db, threads, () => {
   const admitted = workspaceAdmission.resolve(MANAGER_DESTINATION.workspaceId);
   if (!admitted.ok) return { ok: false, error: { code: "unavailable", message: admitted.error.message } };
   const sources = destinationContextSources(MANAGER_DESTINATION);
@@ -361,7 +392,7 @@ const manager = MANAGER_DESTINATION ? new Manager(db, threads, () => {
   return selected.ok ? { ok: true, value: { cwd: admitted.value.cwd, metadata: {
     workspaceId: MANAGER_DESTINATION.workspaceId, profileId: MANAGER_DESTINATION.id, contextFiles: selected.value,
   } } } : { ok: false, error: { code: "invalid_request", message: selected.error } };
-}, unwrap(managerSettings(process.env.PI_REMOTE_MANAGER_MODEL)), () => signalSync()) : null;
+}, unwrap(managerSettings(process.env.PI_REMOTE_MANAGER_MODEL)), () => { signalSync(); void refreshThreadNotifications(); void pushNotifications(); }) : null;
 const peerThreads = new Map<string, Thread>();
 let peerArchivedTotal = 0;
 const peerChildren = new Map<string, boolean>();
@@ -394,7 +425,9 @@ function refreshThreadNotifications(cause: "read" | "change" = "change"): Promis
       try {
         do {
           notificationRefreshAgain.delete(owner.id);
-          await projectThreadNotifications(db, owner.id, owner.api, directory, () => { signalSync(); pushNotifications(); });
+          const policy = await directory.managerNotificationPolicy();
+          if (!policy.ok) throw new Error(policy.error.message);
+          await projectThreadNotifications(db, owner.id, owner.api, directory, () => { signalSync(); pushNotifications(); }, policy.value);
         } while (notificationRefreshAgain.has(owner.id));
         notificationFeedback(owner.id, null);
         if (notificationErrors.delete(owner.id)) signalSync();
@@ -993,12 +1026,13 @@ function publicSession(row: any,
     model: (row.effectiveSettings ?? row.settings).model, name: row.name, color: row.color, cwd: row.cwd,
     workspaceName: workspaces.get(row.workspace_id)?.name ?? row.cwd,
     environment: ENVIRONMENT_ID, state: row.state, held: Boolean(row.held),
-    ...projectThreadActivity(row.state, live, row.executionActivity, row.metadata, Boolean(row.held)),
+    ...projectThreadActivity(row),
     provider: canonicalModelProvider(String(row.current_provider)).replace(/^openai-codex$/, "openai"),
     createdAt: row.created_at, updatedAt: row.updated_at,
     ...(row.lastUserMessageAt !== undefined ? { lastUserMessageAt: new Date(row.lastUserMessageAt).toISOString() } : {}),
     revision: row.revision,
-    idleUnread: Boolean(row.idle_unread),
+    idleUnread: notificationUnread(db, currentNotificationPolicy(), row.id, Boolean(row.idle_unread)),
+    humanAttention: currentNotificationPolicy()?.view === "classic" || notificationUnread(db, currentNotificationPolicy(), row.id, Boolean(row.idle_unread)),
     queuedMessages: queued ? queuedMessagesFor(row.id) : [], archivedAt: row.archived_at,
   };
 }
@@ -1068,10 +1102,17 @@ function sendImages(stream: ClientStream): void {
   stream.publish({ type: "images", sessionId, snapshot: inlineImages.snapshot(sessionId) });
 }
 
-function readSessionQuestions(id: string) {
-  return threads.get(id) ? threads.questions(id) : peerThreads.has(id) && fleet ? fleet.questions(id) : directory.questions(id);
+async function readSessionQuestions(id: string) {
+  const policy = await loadNotificationPolicy();
+  if (!policy.ok) return policy;
+  const result = await (threads.get(id) ? threads.questions(id) : peerThreads.has(id) && fleet ? fleet.questions(id) : directory.questions(id));
+  return result.ok ? { ok: true as const, value: humanQuestions(db, policy.value, result.value) } : result;
 }
-const questionFeed = new QuestionFeed(readSessionQuestions);
+const questionFeed = new QuestionFeed(readSessionQuestions, resource => {
+  const policy = currentNotificationPolicy();
+  const questions = humanQuestions(db, policy, resource.questions);
+  return policy?.view !== "classic" && questions.length === 0 ? { state: "ready", questions: [] } : { ...resource, questions };
+});
 async function sendQuestions(stream: ClientStream): Promise<void> {
   const sessionId = stream.subscription.session;
   if (!sessionId || !sessionRow.get(sessionId)) return;
@@ -1088,14 +1129,16 @@ function sendEvents(stream: ClientStream): void {
   stream.send({ type: "events", sessionId, events });
 }
 
-function pushNotifications(target?: ClientStream): void {
+async function pushNotifications(target?: ClientStream): Promise<void> {
+  const policy = await loadNotificationPolicy();
+  if (!policy.ok) return;
   for (const stream of target ? [target] : [...streams.values()]) {
     let cursor = stream.subscription.notificationsAfter;
     if (cursor === undefined) continue;
     for (let page = 0; page < 16; page++) {
-      const feed = idleNotifications(db, cursor, notificationThread);
+      const feed = idleNotifications(db, cursor, notificationThread, currentNotificationPolicy());
       stream.subscription.notificationsAfter = feed.cursor;
-      if (page === 0 && target || feed.cursor !== cursor || feed.notifications.length) stream.send({ type: "notifications", feed });
+      if (page === 0 && target || feed.cursor !== cursor || feed.notifications.length) stream.send({ type: "notifications", feed: { ...feed, policy: policy.value } });
       if (cursor === null || cursor === feed.cursor) break;
       cursor = feed.cursor;
     }
@@ -1639,7 +1682,7 @@ const meetingRuntime = await MeetGateway.connect(db, {
   // Ephemeral meeting workers are archived and held when they finish; the room must not show that as "Stopped".
   const finished = Boolean(row.archived_at) && row.state === "idle";
   return { state: row.state, held: Boolean(row.held) && !finished, finished,
-    ...projectThreadActivity(row.state, runtime, row.executionActivity, row.metadata, Boolean(row.held)),
+    ...projectThreadActivity(row),
     waitingOnAgents: row.waitingOnAgents,
     tools: row.executionActivity?.activeTools ?? [...(runtime?.activeTools.values() ?? [])], output: runtime?.liveText ?? "" };
   }),
@@ -1785,7 +1828,7 @@ const server = Bun.serve<SocketData>({
           return { messages, paging: { revision: page.source.revision, total: page.total, start, end,
             hasOlder: start > 0, nextBefore: start > 0 ? start : null }, ...(failure ? { error: failure } : {}),
             live: liveProjections.get(id)?.liveText ?? "", thinking: liveProjections.get(id)?.liveThinking ?? "",
-            execution: projectThreadActivity(current.state, liveProjections.get(id), current.executionActivity, current.metadata, Boolean(current.held)), questions };
+            execution: projectThreadActivity(current), questions };
         },
         stop: async id => { unwrap(await directory.control({ threadId: id, action: "cancel" })); },
         answer: async (id, questionId, sender, body) => {
@@ -1797,10 +1840,16 @@ const server = Bun.serve<SocketData>({
           if (!answered.ok && !previous) db.query("DELETE FROM metadata WHERE key=?").run(key);
           unwrap(answered);
         },
-        notify: (id, receiptId, title, body, time) => {
+        notify: async (id, receiptId, title, body, time) => {
+          const policy = unwrap(await loadNotificationPolicy());
           const target = `room:${id}`;
-          db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)").run(`room-link:${target}`, "1");
-          recordIdleNotification(db, receiptId, { id: target, title }, time, { kind: "idle", body });
+          if (policy.view === "mono") {
+            unwrap(await directory.send({ threadId: policy.managerThreadId, senderId: target, requestId: `manager-notice:room:${receiptId}`,
+              source: "notification", delivery: "steer", text: `Room update from ${title} (${target}): ${body}` }));
+          } else {
+            db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)").run(`room-link:${target}`, "1");
+            recordIdleNotification(db, receiptId, { id: target, title }, time, { kind: "idle", body });
+          }
           signalSync();
         },
       });
@@ -1850,7 +1899,14 @@ const server = Bun.serve<SocketData>({
         watchList.watch({ action: "list", threadId: "needs-you-projection" }).catch(cause => ({ ok: false as const, error: { code: "unavailable" as const, message: cause instanceof Error ? cause.message : String(cause) } })),
         client.request<LifePolicyView>({ operation: "policy-read", target: { scope: "self" }, includeHistory: false }),
       ]);
-      return json(projectNeedsYou(life, pending, watch, policy, Date.now()));
+      const projection = projectNeedsYou(life, pending, watch, policy, Date.now());
+      const notificationPolicy = await loadNotificationPolicy();
+      if (!notificationPolicy.ok) return threadError(notificationPolicy.error);
+      if (notificationPolicy.value.view === "mono") {
+        const visible = new Set(humanQuestions(db, notificationPolicy.value, pending.questions).map(question => question.id));
+        projection.items = projection.items.filter(item => item.kind === "question" && item.location?.questionId && visible.has(item.location.questionId));
+      }
+      return json(projection);
     }
     if (url.pathname === "/v1/calendar" || url.pathname.startsWith("/v1/calendar/")) {
       const feed = url.pathname.startsWith("/v1/calendar/feed/");
@@ -1906,6 +1962,11 @@ const server = Bun.serve<SocketData>({
     if (speechResponse) {
       if (speechResponse.ok && API.speechUtterances.match(req.method, url.pathname)) trackFeature("speech", humanCaller() ? "human" : "agent");
       return speechResponse;
+    }
+    if (url.pathname.startsWith("/v1/manager-relay/")) {
+      const resolved = callers.resolve(caller);
+      return managerRelay(req, { db, environmentId: ENVIRONMENT_ID, threads, directory, manager: manager?.snapshot() ?? null,
+        authorizedRouter: !("error" in resolved) && resolved.kind === "person" });
     }
     const ownedThreadResponse = await threadHttp(threads, req, "/v1/thread-owner", admissionFor(callers, caller));
     if (ownedThreadResponse) return ownedThreadResponse;
@@ -2218,12 +2279,13 @@ const server = Bun.serve<SocketData>({
       const after = url.searchParams.has("after") ? Number(url.searchParams.get("after")) : null;
       if (after !== null && (!Number.isSafeInteger(after) || after < 0)) return error("Invalid notification cursor");
       await refreshThreadNotifications("read");
+      if (currentNotificationPolicy() === null) return error("Canonical manager notification policy is unavailable", 503);
       if (url.searchParams.get("history") === "1") {
         const before = url.searchParams.has("before") ? Number(url.searchParams.get("before")) : null;
         if (before !== null && (!Number.isSafeInteger(before) || before <= 0)) return error("Invalid history cursor");
-        return json(await resolveNotificationQuestions(notificationHistory(db, before, notificationThread), readSessionQuestions));
+        return json(await resolveNotificationQuestions(notificationHistory(db, before, notificationThread, 100, currentNotificationPolicy()), readSessionQuestions));
       }
-      return json({ environmentId: ENVIRONMENT_ID, ...idleNotifications(db, after, notificationThread) });
+      return json({ environmentId: ENVIRONMENT_ID, ...idleNotifications(db, after, notificationThread, currentNotificationPolicy()), policy: currentNotificationPolicy() });
     }
     if (API.workspaces.match(req.method, url.pathname)) {
       return json({ workspaces: [...workspaces.values()] });

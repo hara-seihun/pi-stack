@@ -1691,6 +1691,29 @@ async function settle(session: FakePiSession, service: ThreadService, threadId: 
 }
 
 describe("ThreadService", () => {
+  it("accepts signed narration as an ephemeral worker final result without leaking continuation signatures", async () => {
+    const { service, directory, sessions } = fixture();
+    const root = value(await service.spawn({ requestId: "narration-root", cwd: directory }));
+    const child = value(await service.spawn({ requestId: "narration-child", parentId: root.id, cwd: directory, message: "Finish", ephemeral: true }));
+    value(await service.control({ threadId: root.id, action: "stop", descendants: false }));
+    value(await service.start());
+    await waitFor(() => sessions.some(session => session.options.threadId === child.id && session.isStreaming));
+    const native = sessions.find(session => session.options.threadId === child.id)!;
+    const field = (number: number, bytes: Buffer): Buffer => Buffer.concat([Buffer.from([number * 8 + 2, bytes.length]), bytes]);
+    const signature = field(2, field(1, field(8, Buffer.from("narration")))).toString("base64");
+    const finalMessage = { role: "assistant", api: "anthropic-messages", stopReason: "stop", timestamp: 2,
+      content: [{ type: "thinking", thinking: "Finished result", thinkingSignature: signature }] };
+    writeFileSync(child.sessionFile, JSON.stringify({ type: "message", id: "result", parentId: null, message: finalMessage }) + "\n");
+    native.settleMessage(finalMessage);
+    await waitFor(() => service.get(child.id)?.metadata?.archived === true);
+    expect(service.latestSettlement(child.id)?.outcome).toBe("complete");
+    expect(service.get(child.id)?.metadata?.incompleteResult).toBeUndefined();
+    const page = value(await service.read({ threadId: child.id }));
+    expect((page.entries[0]?.message as { content?: unknown } | undefined)?.content).toEqual([{ type: "text", text: "Finished result" }]);
+    expect(JSON.stringify(page)).not.toContain("Signature");
+    expect(service.latestSettlement(child.id)?.finalMessage).toEqual(finalMessage);
+  });
+
   it.each([null, { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "" }] }])("retains an ephemeral owner after an incomplete native result: %j", async finalMessage => {
     const f = fixture();
     const { directory } = f;

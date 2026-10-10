@@ -24,7 +24,8 @@ import { inputReceipts } from "./pi-input-receipts.js";
 import type { InputStatus } from "./pi-input-status.js";
 import { measureJsonBytes } from "./json-size.js";
 import { MetadataCache } from "./metadata-cache.js";
-import { formatThreadMessage, serializeThreadNotification } from "./message-format.js";
+import { finalText, formatThreadMessage, serializeThreadNotification } from "./message-format.js";
+import { projectAnthropicNarrationMessage } from "pi-orchestrator/anthropic-narration";
 import { readMessageDeliveryTimezone } from "./message-delivery.js";
 import { RAW_ARGUMENT, SANDBOX_ARGUMENT, SANDBOX_POLICY_ARGUMENT, sandboxPolicy, validSandboxBoundary } from "./pi-raw.js";
 import { isThreadModeName, threadMode } from "./modes.js";
@@ -33,6 +34,7 @@ import { isThreadState, resolveDelivery, validateInspectOptions, validateThreadA
 import { parseRunnerWaitDependency } from "./wait-contract.js";
 import { BACKGROUND_ATTENTION_POLICY } from "./attention-policy.js";
 import { createExecutionActivity, executionActivitySnapshot, executionWaitActivity, observeExecutionActivity, restoreExecutionActivity, settleExecutionActivity, type ExecutionActivity, type ExecutionPhase } from "./execution-activity.js";
+import { deriveThreadLifecycle } from "./lifecycle.js";
 import type { AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, QuestionEvents, QuestionState, ThreadQuestion, AttachPiSession, AwaitThreads, Delivery, OpenPiSession, PiCommand, PiEvent, PiSession, Result, SendThread, SpawnThread, Thread, ThreadApi, ThreadAwaitResult, ThreadControl, ThreadError, ThreadHistory, ThreadInspection, InspectOptions, ThreadList, ThreadMessage, ThreadPage, ThreadRead, ThreadSettings, ThreadSettlement, ThreadSettlements, WorkOutcome } from "./contracts.js";
 
 import type { PendingQuestions, PendingQuestionsQuery, ManagerQuestionsRequest, ManagerQuestionsResponse, HeldThreadQuestion, ManagerQuestionCustodyRequest, ManagerQuestionCustodyReceipt } from "./contracts.js";
@@ -80,6 +82,8 @@ export interface ThreadServiceOptions {
   prepareMessage?: (thread: Thread, message: ThreadMessage) => Promise<Result<{ text: string; images?: unknown[] }>>;
   retireIdleSession?: (thread: Thread) => boolean;
   onChange?: (thread: Thread) => void;
+  managerNotificationPolicy?: () => Result<import("./contracts.js").ManagerNotificationPolicy> | Promise<Result<import("./contracts.js").ManagerNotificationPolicy>>;
+  routeManagerQuestionCustody?: (input: ManagerQuestionCustodyRequest) => Promise<Result<ManagerQuestionCustodyReceipt>>;
   /** Issues each session's PI_THREAD_TOKEN, which its tools present to thread owners. */
   capability?: ThreadCapability;
 }
@@ -166,7 +170,7 @@ export class ThreadService implements ThreadApi {
   private started = false;
   private closed = false;
   private suspended = false;
-  private directory?: ThreadApi;
+  private directory?: ThreadApi & { owners?: readonly { id: string; api: ThreadApi }[] };
   private watchList?: import("./watch-list.js").WatchApi;
   setWatchList(watchList: import("./watch-list.js").WatchApi): void { this.watchList = watchList; }
   async watch(input: import("./watch-list.js").WatchRequest): Promise<Result<import("./watch-list.js").WatchResponse>> {
@@ -314,7 +318,17 @@ export class ThreadService implements ThreadApi {
         activitySince: row.queued_at ?? row.active_execution_at ?? row.updated_at,
         activityDetail: fallback === "queued" ? "Waiting for execution dispatch" : fallback === "recovering" ? "Reattaching the retained execution" : "Awaiting cancellation confirmation" }),
         activeTools: projection?.live.tools.map((tool: Json) => String(tool.toolName)) ?? [] };
-    return { executionActivity, ...(metadata.agentWait ? { waitingOnAgents: metadata.agentWait } : {}), ...(row.wake_data ? { wakeSchedule: { ...JSON.parse(row.wake_data), ...(row.wake_landed_at ? { lastLandedAt: row.wake_landed_at } : {}), deferredReason: metadata.archived ? "archived" : row.held ? "stopped" : row.state === "running" ? "busy" : undefined } } : {}), id: row.id, parentId: row.parent_id, role: "agent", agentName: metadata.agentName, dependencies: metadata.peerDependencies ?? [], title: row.title, cwd: row.cwd, sessionFile: row.session_file,
+    const deferred = executionActivity?.activity === "waiting_for_capacity" || executionActivity?.activity === "waiting_to_retry";
+    const executionSince = row.active_execution_at ?? (this.runtimes.get(row.id)?.busy ? row.updated_at : null);
+    const lifecycle = deriveThreadLifecycle({
+      archived: metadata.archived === true, cancelling: !!row.held,
+      execution: executionSince === null ? null : { since: executionSince, activity: executionActivity ?? {} },
+      pending: pending ? { since: row.queued_at ?? row.updated_at } : null,
+      delay: deferred ? { target: executionActivity!.activity === "waiting_for_capacity" ? "capacity" : "retry", since: executionActivity!.activitySince ?? row.updated_at, reason: executionActivity!.activityDetail?.trim() || (executionActivity!.activity === "waiting_for_capacity" ? "Waiting for capacity" : "Waiting to retry") } : null,
+      dependency: metadata.agentWait ?? null, subscriptions: metadata.peerDependencies ?? [],
+      error: typeof metadata.executionError === "string" ? metadata.executionError : null, updatedAt: row.updated_at,
+    });
+    return { lifecycle, executionActivity, ...(metadata.agentWait ? { waitingOnAgents: metadata.agentWait } : {}), ...(row.wake_data ? { wakeSchedule: { ...JSON.parse(row.wake_data), ...(row.wake_landed_at ? { lastLandedAt: row.wake_landed_at } : {}), deferredReason: metadata.archived ? "archived" : row.held ? "stopped" : row.state === "running" ? "busy" : undefined } } : {}), id: row.id, parentId: row.parent_id, role: "agent", agentName: metadata.agentName, dependencies: metadata.peerDependencies ?? [], title: row.title, cwd: row.cwd, sessionFile: row.session_file,
       settings: JSON.parse(row.settings), effectiveSettings: this.effectiveSettings(row.id), admission: row.admission, state: row.state === "idle" && !row.held && !metadata.archived && (metadata.agentWait || metadata.peerDependencies?.length) ? "waiting" : row.state, held: !!row.held, revision: row.revision,
       createdAt: row.created_at, updatedAt: row.updated_at, ...(row.last_user_message_at !== null ? { lastUserMessageAt: row.last_user_message_at } : {}), pendingMessages: pending, metadata };
   }
@@ -1335,6 +1349,19 @@ export class ThreadService implements ThreadApi {
     return row ? this.get(row.id) ?? undefined : undefined;
   }
   async managerThread(): Promise<Result<Thread | null>> { return good(this.manager() ?? null); }
+  async questionOrigin(threadId: string): Promise<Result<Pick<Thread, "id" | "title" | "agentName">>> {
+    const origin = this.get(threadId);
+    return origin ? good({ id: origin.id, title: origin.title, agentName: origin.agentName }) : bad("not_found", "Question origin is not accessible to this account");
+  }
+  private notificationPolicy: import("./contracts.js").ManagerNotificationPolicy | null = null;
+  async managerNotificationPolicy(): Promise<Result<import("./contracts.js").ManagerNotificationPolicy>> {
+    const person = this.directory?.owners?.find(owner => owner.id === "person" && owner.api !== this);
+    const result = this.options.managerNotificationPolicy ? await this.options.managerNotificationPolicy()
+      : person ? await person.api.managerNotificationPolicy() : good({ view: "classic" as const });
+    this.notificationPolicy = result.ok ? result.value : null;
+    if (this.notificationPolicy?.view === "mono") this.sql("UPDATE thread_question_route SET state='held' WHERE state='released' AND question_id IN (SELECT id FROM thread_question WHERE accepted_at IS NULL)").run();
+    return result;
+  }
   private queueQuestionCustody(input: ManagerQuestionCustodyRequest): void {
     this.sql("INSERT OR IGNORE INTO thread_question_custody_outbox(request_id,data) VALUES(?,?)").run(input.requestId, JSON.stringify(input));
     if (this.custodyRouting) this.custodyQueued = true;
@@ -1357,6 +1384,7 @@ export class ThreadService implements ThreadApi {
     }
   }
   async managerQuestionCustody(input: ManagerQuestionCustodyRequest): Promise<Result<ManagerQuestionCustodyReceipt>> {
+    if (input?.threadId && !this.get(input.threadId) && this.options.routeManagerQuestionCustody) return this.options.routeManagerQuestionCustody(input);
     if (!input || typeof input.threadId !== "string" || !input.threadId.trim()) return bad("invalid_request", "Custody requires its destination thread");
     const prior = this.request(input.requestId, input, "question-custody"); if (!prior.ok) return prior;
     if (prior.value) return good({ accepted: true });
@@ -1372,8 +1400,7 @@ export class ThreadService implements ThreadApi {
             || new Set(q.suggestions.map(s => s.id)).size !== q.suggestions.length || q.recommendedSuggestionId !== undefined && !q.suggestions.some(s => s.id === q.recommendedSuggestionId)))
           return bad("invalid_request", "Custody requires valid original questions and their exact deadline");
         if (!this.directory) return bad("unavailable", "Question origin directory is unavailable");
-        const origin = await this.directory.list({ id: input.originThreadId, limit: 1 }); if (!origin.ok) return origin;
-        if (!origin.value.threads.length) return bad("not_found", "Question origin is not accessible to this person");
+        const origin = await this.directory.questionOrigin(input.originThreadId); if (!origin.ok) return origin;
         const accepted = this.request(input.requestId, input, "question-custody"); if (!accepted.ok) return accepted;
         if (accepted.value) return good({ accepted: true });
         this.transaction(() => {
@@ -1384,7 +1411,7 @@ export class ThreadService implements ThreadApi {
           }
           const receipt = `manager-custody:${input.requestId}`;
           this.insertMessage(receipt, { requestId: receipt, threadId: manager.id, senderId: input.originThreadId, source: "notification", delivery: "steer",
-            text: `New held questions from ${origin.value.threads[0]!.title}. Use manager_questions_list to answer or forward one rewritten question. Unhandled questions become visible at the original two-hour deadline.` }, manager.settings, false, origin.value.threads[0]!.agentName);
+            text: `New held questions from ${origin.value.title}. Use manager_questions_list to answer or forward one rewritten question. Unhandled questions become visible at the original two-hour deadline.` }, manager.settings, false, origin.value.agentName);
           this.sql("UPDATE thread SET state='running' WHERE id=?").run(manager.id);
           this.recordRequest(input.requestId, input, "question-custody", manager.id);
         });
@@ -1430,6 +1457,8 @@ export class ThreadService implements ThreadApi {
     if (!this.sql("SELECT 1 FROM thread_question_unresolved LIMIT 1").get()) return;
     this.questionResolutionRunning = true;
     try {
+      const policy = await this.managerNotificationPolicy();
+      if (!policy.ok) { this.sql("UPDATE thread_question_unresolved SET error=?").run(policy.error.message); return; }
       const found = await this.directory.managerThread();
       if (this.closed || this.suspended) return;
       this.releaseExpiredQuestions();
@@ -1464,6 +1493,8 @@ export class ThreadService implements ThreadApi {
     } finally { this.questionResolutionRunning = false; }
   }
   private releaseExpiredQuestions(): void {
+    const hasOwner = this.options.managerNotificationPolicy || this.directory?.owners?.some(owner => owner.id === "person" && owner.api !== this);
+    if (hasOwner && this.notificationPolicy?.view !== "classic") return;
     const unresolved = this.sql(`SELECT u.question_id,q.thread_id FROM thread_question_unresolved u JOIN thread_question q ON q.id=u.question_id WHERE u.deadline_at<=?`).all(Date.now()) as Json[];
     if (unresolved.length) {
       this.transaction(() => {
@@ -1490,6 +1521,8 @@ export class ThreadService implements ThreadApi {
     if (!input || typeof input.threadId !== "string") return bad("invalid_request", "The manager thread ID is required");
     const manager = this.manager();
     if (!manager || manager.id !== input.threadId) return bad("conflict", "Only this person's manager can handle held questions");
+    const policy = await this.managerNotificationPolicy();
+    if (!policy.ok) return policy;
     this.releaseExpiredQuestions();
     if (input.action === "list") {
       const rows = this.sql(`SELECT q.*,r.manager_id,r.deadline_at,r.state routing,r.forwarded_id,o.thread_id origin_thread_id FROM thread_question_route r JOIN thread_question q ON q.id=r.question_id LEFT JOIN thread_question_origin o ON o.question_id=q.id
@@ -1562,10 +1595,14 @@ export class ThreadService implements ThreadApi {
       if (prior.value) return good({ accepted: true, questionIds: JSON.parse(prior.value) });
       const thread = this.get(input.threadId); if (!thread) return bad("not_found", "Thread not found");
       if (thread.metadata?.archived) return bad("unavailable", "Restore this archived thread before asking questions");
+      const policy = await this.managerNotificationPolicy();
+      if (!policy.ok) return policy;
       const questionIds = input.questions.map(() => randomUUID());
       const manager = this.manager();
-      const unresolved = !manager && this.options.workersOnly === true;
+      const foreignManager = !manager && policy.value.view === "mono" ? policy.value.managerThreadId : null;
+      const unresolved = !manager && !foreignManager && this.options.workersOnly === true;
       const held = manager && manager.id !== thread.id ? manager : undefined;
+      const heldId = held?.id ?? foreignManager;
       this.transaction(() => {
         const now = Date.now();
         input.questions.forEach((question, index) => {
@@ -1574,19 +1611,24 @@ export class ThreadService implements ThreadApi {
           this.sql("INSERT INTO thread_question(id,thread_id,question,suggestions,recommended_id,created_at) VALUES(?,?,?,?,?,?)")
             .run(id, input.threadId, question.question, JSON.stringify(suggestions), question.recommendedSuggestionIndex === undefined ? null : suggestions[question.recommendedSuggestionIndex]!.id, now);
           if (unresolved) this.sql("INSERT INTO thread_question_unresolved(question_id,deadline_at,error) VALUES(?,?,?)").run(id, now + 2 * 60 * 60_000, this.directory ? null : "Person directory is unavailable");
-          else if (held) this.sql("INSERT INTO thread_question_route(question_id,manager_id,deadline_at,state) VALUES(?,?,?,'held')").run(id, held.id, now + 2 * 60 * 60_000);
+          else if (heldId) this.sql("INSERT INTO thread_question_route(question_id,manager_id,deadline_at,state) VALUES(?,?,?,'held')").run(id, heldId, now + 2 * 60 * 60_000);
           else this.sql("INSERT INTO thread_question_event(question_id) VALUES(?)").run(id);
         });
         if (held) {
           const receipt = `manager-questions:${input.requestId}`;
           this.insertMessage(receipt, { requestId: receipt, threadId: held.id, senderId: thread.id, source: "notification", delivery: "steer",
-            text: `New held questions from ${thread.title}. Use manager_questions_list to answer under the person's current policy or forward one rewritten question. Unhandled questions become visible after two hours.` }, held.settings, false, thread.agentName);
+            text: `New held questions from ${thread.title}. Use manager_questions_list to answer under the person's current policy or forward one rewritten question.${policy.value.view === "classic" ? " Unhandled questions become visible after two hours." : " Only your explicit thread_attention notifies the person."}` }, held.settings, false, thread.agentName);
           this.sql("UPDATE thread SET state='running' WHERE id=?").run(held.id);
+        }
+        if (foreignManager) {
+          this.queueQuestionCustody({ action: "receive", threadId: foreignManager, requestId: `custody-ask:${input.requestId}`,
+            originThreadId: thread.id, questions: questionIds.map(id => this.question(this.sql("SELECT * FROM thread_question WHERE id=?").get(id) as Json)), deadlineAt: now + 2 * 60 * 60_000 });
         }
         this.recordRequest(input.requestId, input, "ask", JSON.stringify(questionIds));
       });
       this.changed(input.threadId);
-      if (unresolved) void this.resolveQuestionManagers();
+      if (foreignManager) void this.routeQuestionCustody();
+      else if (unresolved) void this.resolveQuestionManagers();
       else if (held) { this.changed(held.id); this.wake(held.id); }
       return good({ accepted: true, questionIds });
     } catch (error) { return bad("unavailable", errorText(error)); }
@@ -1887,7 +1929,8 @@ export class ThreadService implements ThreadApi {
           entry = read.value;
         }
         if (entry.message?.role === "assistant" && Array.isArray(entry.message.content)) {
-          const content = entry.message.content.filter((block: Json) => block.type !== "thinking").map((block: Json) => {
+          const projectedMessage = projectAnthropicNarrationMessage(entry.message);
+          const content = (projectedMessage.content as Json[]).filter((block: Json) => block.type !== "thinking").map((block: Json) => {
             const { thinkingSignature, textSignature, encrypted_content, encryptedContent, thoughtSignature, ...visible } = block;
             return visible;
           });
@@ -2940,8 +2983,7 @@ export class ThreadService implements ThreadApi {
     const assignmentPending = outcome !== "cancelled" && !!(thread.metadata?.agentWait || thread.dependencies?.length || thread.wakeSchedule
       || this.sql("SELECT 1 FROM thread_question WHERE thread_id=? AND accepted_at IS NULL LIMIT 1").get(id));
     const incompleteResult = outcome === "complete" && !assignmentPending
-      && !(finalMessage?.role === "assistant" && Array.isArray(finalMessage.content)
-        && finalMessage.content.some((part: Json) => part.type === "text" && typeof part.text === "string" && part.text.trim()));
+      && !(finalMessage?.role === "assistant" && finalText(finalMessage)?.trim());
     if (incompleteResult) {
       outcome = "failed";
       error = "Native turn ended without a final result or a durable dependency wait";

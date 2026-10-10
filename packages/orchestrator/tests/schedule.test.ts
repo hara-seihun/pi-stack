@@ -14,7 +14,7 @@ function thread(input: SpawnThread, state: Thread["state"] = "running"): Thread 
   return {
     id: input.id!, parentId: null, title: input.title!, cwd: input.cwd, sessionFile: `/sessions/${input.id}.jsonl`,
     settings: { model: input.settings!.model!, thinkingLevel: input.settings!.thinkingLevel!, speed: input.settings!.speed! },
-    admission: input.admission ?? "force", state, held: false, revision: 1, createdAt: 0, updatedAt: 0,
+    admission: input.admission ?? "force", lifecycle: { kind: "idle" }, state, held: false, revision: 1, createdAt: 0, updatedAt: 0,
     pendingMessages: state === "running" ? 1 : 0, metadata: input.metadata,
   };
 }
