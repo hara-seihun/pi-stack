@@ -12,10 +12,11 @@ Group=root
 WorkingDirectory=/srv/pi/pi-orchestrator
 Environment=PI_CORE_CONFIG=/etc/pi-stack/core.json
 ExecStart=/srv/pi/pi-orchestrator/host/core-runtime launch /srv/pi/pi-orchestrator /etc/pi-stack/core.json
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=2
 KillMode=process
-TimeoutStopSec=90
+TimeoutStopSec=infinity
 
 [Install]
 WantedBy=multi-user.target

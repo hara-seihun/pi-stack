@@ -68,6 +68,11 @@
       "bun": "./src/image-service.ts",
       "default": "./dist/image-service.js"
     },
+    "./core-gateway": {
+      "types": "./src/core/gateway-api.ts",
+      "bun": "./src/core/gateway-api.ts",
+      "default": "./dist/core/gateway-api.js"
+    },
     "./core-native": {
       "types": "./src/core/native-session.ts",
       "bun": "./src/core/native-session.ts",

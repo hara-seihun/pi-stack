@@ -1,5 +1,8 @@
 import importlib.machinery
 import json
+import hashlib
+import os
+import subprocess
 from pathlib import Path
 import sys
 import tempfile
@@ -64,6 +67,26 @@ class Adoption(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'changed during generation'):
                 self.run_transfer(plan, snapshots + [changed])
             self.assertFalse(Path(plan['adoptionReceiptPath']).exists())
+
+    def test_no_prior_capability_initializes_once_without_touching_existing_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); folder = root / 'encrypted'; folder.mkdir()
+            database = folder / 'threads.sqlite3'; database.write_bytes(b'existing database fixture')
+            source = root / 'source.ts'; source.write_text('new ThreadService({databasePath});')
+            plan = {'version': 1, 'scopeId': 'retained-root', 'priorCapability': 'none', 'uid': os.getuid(), 'gid': os.getgid(),
+                    'namespace': {'kind': 'pinned'}, 'keyPath': str(folder / 'thread-capability.key'), 'databasePath': str(database),
+                    'encryptedMountpoint': str(folder), 'receiptPath': str(root / 'receipt.json'),
+                    'sourceProof': {'kind': 'owner-source-no-capability', 'path': str(source), 'sha256': hashlib.sha256(source.read_bytes()).hexdigest()}}
+            execute = lambda namespace, command, uid, gid: subprocess.run(command, check=True, capture_output=True, text=True).stdout
+            with patch.object(adopt, 'trusted', side_effect=lambda path: json.loads(path.read_text())), patch.object(adopt, 'mount_identity'), patch.object(adopt, 'enter', side_effect=execute):
+                first = adopt.initialize_capability(plan)
+                second = adopt.initialize_capability(plan)
+                self.assertEqual(first, second)
+                self.assertEqual(len(Path(plan['keyPath']).read_bytes()), 65)
+                self.assertEqual(database.read_bytes(), b'existing database fixture')
+                Path(plan['keyPath']).write_bytes(b'changed unknown key')
+                with self.assertRaises(subprocess.CalledProcessError):
+                    adopt.initialize_capability(plan)
 
     def test_unregistered_cipher_is_not_an_adoption(self):
         with tempfile.TemporaryDirectory() as directory:

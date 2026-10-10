@@ -1185,7 +1185,7 @@ function nativeSourceProbe(request, target, ensureSource = false) {
 export function nativeMaintenanceSourceProof(repository, candidate, retained) {
   const files = ['deploy/native-history-boundary', 'deploy/native-history-coordinator.mjs', 'deploy/native-history-owner-recovery.mjs', 'deploy/native-history-bridge.mjs',
     'deploy/native-history-closed-owner.mjs', 'deploy/native-history-package-identity.mjs', 'deploy/native-history-root-boundary',
-    'deploy/core-host.mjs', 'deploy/core-runtime', 'deploy/core-adopt', 'deploy/core_namespace.py', 'scripts/migrate-native-history.mjs', 'deploy/prepare', 'deploy/host',
+    'deploy/core-host.mjs', 'deploy/core-runtime', 'deploy/core-custody', 'deploy/core-person-activate', 'deploy/core-plan', 'deploy/core-drain', 'deploy/core-broker-handoff.mjs', 'deploy/core-adopt', 'deploy/core_namespace.py', 'scripts/migrate-native-history.mjs', 'deploy/prepare', 'deploy/host',
     'deploy/runtime', 'deploy/lib', 'deploy/orchestrator', 'deploy/prepared-components.mjs'];
   try {
     const tree = sha => new Map(checked('git', ['-C', repository, 'ls-tree', '-r', '--format=%(objectname) %(path)', sha, '--', ...files])

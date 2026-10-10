@@ -184,10 +184,64 @@ def retain_fuse(plan):
     return {'ok': True, 'retained': 'encrypted-resource-only', 'pid': resource['pid'], 'unit': unit}
 
 
+KEY_INITIALIZATION = r'''
+import hashlib,json,os,secrets,stat,sys
+from pathlib import Path
+p=Path(sys.argv[1]);parent=p.parent;before=parent.stat();database=Path(sys.argv[3])
+if database.parent!=parent or not database.is_file() or database.is_symlink():raise ValueError('existing registered database required')
+if not parent.is_dir() or parent.is_symlink():raise ValueError('existing encrypted database parent required')
+if sys.argv[2]=='create':
+ fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+ try:
+  os.write(fd,(secrets.token_hex(32)+'\n').encode());os.fsync(fd)
+ finally:os.close(fd)
+ d=os.open(parent,os.O_RDONLY|os.O_DIRECTORY)
+ try:os.fsync(d)
+ finally:os.close(d)
+s=p.lstat()
+if not stat.S_ISREG(s.st_mode) or stat.S_IMODE(s.st_mode)!=0o600 or s.st_uid!=os.getuid():raise ValueError('initialized key custody changed')
+after=parent.stat()
+if (before.st_dev,before.st_ino)!=(after.st_dev,after.st_ino):raise ValueError('encrypted database parent changed')
+data=p.read_bytes()
+if len(data)!=65 or any(c not in b'0123456789abcdef' for c in data[:64]) or data[-1:]!=b'\n':raise ValueError('initialized key encoding changed')
+print(json.dumps({'dev':str(s.st_dev),'ino':str(s.st_ino),'sha256':hashlib.sha256(data).hexdigest()}))
+'''
+
+
+def initialize_capability(plan):
+    if plan.get('version') != 1 or plan.get('priorCapability') != 'none' or not isinstance(plan.get('scopeId'), str) or not plan['scopeId']:
+        raise ValueError('explicit proved no-prior-capability scope required')
+    if plan.get('sourceProof', {}).get('kind') != 'owner-source-no-capability':
+        raise ValueError('owning source must explicitly attest no previous capability issuer')
+    source = absolute(plan['sourceProof']['path'])
+    if hashlib.sha256(source.read_bytes()).hexdigest() != plan['sourceProof']['sha256']:
+        raise ValueError('original no-capability source proof changed')
+    if type(plan.get('uid')) is not int or type(plan.get('gid')) is not int or min(plan['uid'], plan['gid']) < 0 or plan['namespace'].get('kind') != 'pinned':
+        raise ValueError('exact original encrypted scope UID/GID and pin required')
+    key, database, mount = (absolute(plan[field]) for field in ('keyPath', 'databasePath', 'encryptedMountpoint'))
+    receipt_path = absolute(plan['receiptPath'])
+    if key.parent != database.parent or not key.is_relative_to(mount) or receipt_path.is_relative_to(mount):
+        raise ValueError('new key must live beside its existing encrypted scope DB; receipt belongs to host custody')
+    mount_identity(plan['namespace'], str(mount))
+    digest = hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    prior = trusted(receipt_path) if receipt_path.exists() else None
+    if prior is not None and (prior.get('protocol') != 'pi-core-initialized-capability-v1' or prior.get('planSha256') != digest):
+        raise ValueError('another capability initialization owns this receipt')
+    identity = json.loads(enter(plan['namespace'], ['/usr/bin/python3', '-c', KEY_INITIALIZATION, str(key), 'inspect' if prior is not None else 'create', str(database)], plan['uid'], plan['gid']))
+    if prior is not None:
+        if prior.get('keyIdentity') != identity:
+            raise ValueError('initialized capability identity changed')
+        return {'ok': True, 'value': prior}
+    receipt = {'version': 1, 'protocol': 'pi-core-initialized-capability-v1', 'scopeId': plan['scopeId'], 'priorCapability': 'none',
+               'keyPath': str(key), 'planSha256': digest, 'keyIdentity': identity, 'sourceProof': plan['sourceProof']}
+    publish(receipt_path, receipt)
+    return {'ok': True, 'value': receipt}
+
+
 def main():
-    actions = {'pin': pin, 'transfer': transfer, 'retain-fuse': retain_fuse}
+    actions = {'pin': pin, 'transfer': transfer, 'retain-fuse': retain_fuse, 'initialize-capability': initialize_capability}
     if os.geteuid() != 0 or len(sys.argv) != 3 or sys.argv[1] not in actions:
-        raise ValueError('usage: root core-adopt pin|retain-fuse|transfer ABSOLUTE_ROOT_PLAN')
+        raise ValueError('usage: root core-adopt pin|retain-fuse|transfer|initialize-capability ABSOLUTE_ROOT_PLAN')
     plan = trusted(absolute(sys.argv[2]))
     print(json.dumps(actions[sys.argv[1]](plan)))
 

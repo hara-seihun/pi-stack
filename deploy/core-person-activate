@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""Fixed post-unlock resource/provision operation; callers supply only registered USER."""
+import copy
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import pwd
+import re
+import signal
+import subprocess
+import sys
+import time
+from importlib.machinery import SourceFileLoader
+from core_namespace import absolute, enter, publish, trusted
+adoption = SourceFileLoader('core_adoption', str(Path(__file__).with_name('core-adopt'))).load_module()
+
+ARTIFACT = Path('/srv/pi/pi-orchestrator')
+CONFIG = Path('/etc/pi-stack/core.json')
+MANIFEST = Path('/etc/pi-stack/core-custody.json')
+RUNTIME = Path('/etc/pi-stack/core-runtime.json')
+STATE = Path('/run/pi-stack/person-activation')
+
+
+def unit_pid(unit, expected_uid=0):
+    result = subprocess.run(['/usr/bin/systemctl', 'show', unit, '--property=MainPID', '--value'], check=True, capture_output=True, text=True, timeout=2)
+    if not re.fullmatch(r'[1-9][0-9]*\n?', result.stdout):
+        raise ValueError('owning service is not running')
+    pid = int(result.stdout)
+    metadata = Path(f'/proc/{pid}').stat()
+    if metadata.st_uid != expected_uid:
+        raise ValueError('owning service has another Unix custodian')
+    return pid
+
+
+def mounted_source(user, registry):
+    deadline = time.monotonic() + 12
+    while True:
+        try:
+            pid = unit_pid(f'pi-remote@{user}.service', pwd.getpwnam(user).pw_uid)
+            fields = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
+            namespace = {'kind': 'process', 'pid': pid, 'startTicks': fields[19],
+                         'mountNamespaceInode': str(Path(f'/proc/{pid}/ns/mnt').stat().st_ino)}
+            if adoption.mount_identity(namespace, registry['unlock']['mountpoint'])['source'] != registry['unlock']['cipherDir']:
+                raise ValueError('owning service mounted another ciphertext')
+            return adoption.pin({'version': 1, 'namespaces': [{'id': f'person-{user}-{fields[19]}', 'namespace': namespace}]})['namespaces'][0]
+        except (OSError, ValueError, subprocess.SubprocessError):
+            if time.monotonic() >= deadline:
+                raise ValueError('registered private mount not ready; unit and key remain owned')
+            time.sleep(0.05)
+
+
+def keeper_prepare(user, identity, registry, source):
+    manifest = trusted(MANIFEST)
+    namespace = trusted(RUNTIME)['namespace']
+    mountpoint = registry['unlock']['mountpoint']
+    prior = next((entry for entry in manifest['generations'] if entry['mountpoint'] == mountpoint), None)
+    if prior is not None:
+        if prior['user'] != user or prior['cipherDir'] != registry['unlock']['cipherDir']:
+            raise ValueError('existing target generation belongs to another registry')
+        receipt = trusted(absolute(prior['mountReceiptPath']))
+        if receipt['namespace'] != namespace or adoption.mount_identity(namespace, mountpoint)['source'] != prior['cipherDir']:
+            raise ValueError('existing prepared target identity changed')
+        return namespace, prior['mountReceiptPath']
+    receipt_path = STATE / f'{user}.mount.json'
+    generation = {'user': user, 'registryPath': f'/var/lib/pi-remote/persons/{user}.json',
+                  'cipherDir': registry['unlock']['cipherDir'], 'mountpoint': mountpoint,
+                  'sourceNamespace': source, 'uid': identity.pw_uid, 'gid': identity.pw_gid,
+                  'keyFile': f'/run/pi-remote-keys/{user}', 'mountReceiptPath': str(receipt_path)}
+    candidate = {**manifest, 'generations': [*manifest['generations'], generation]}
+    publish(MANIFEST, candidate)
+    digest = hashlib.sha256(MANIFEST.read_bytes()).hexdigest()
+    pid = unit_pid('pi-stack-core-custody.service')
+    os.kill(pid, signal.SIGHUP)
+    deadline = time.monotonic() + 15
+    while True:
+        path = Path(str(RUNTIME) + '.reconcile.json')
+        if path.exists():
+            result = trusted(path)
+            if result.get('manifestSha256') == digest:
+                if result.get('ok') is not True:
+                    raise ValueError('resource keeper rejected addition: ' + json.dumps(result.get('error')))
+                receipt = trusted(receipt_path)
+                if receipt['namespace'] != namespace:
+                    raise ValueError('resource addition changed live namespace')
+                return namespace, str(receipt_path)
+        if time.monotonic() >= deadline:
+            raise ValueError('resource addition acknowledgement uncertain; retry same prepared plan')
+        time.sleep(0.05)
+
+
+def host(namespace, operation, argument, request_id=None):
+    command = ['/usr/local/bin/bun', str(ARTIFACT / 'host/core-host.mjs'), operation, str(ARTIFACT), str(CONFIG), str(argument)]
+    if request_id is not None:
+        command.append(request_id)
+    raw = enter(namespace, command, 0, 0, timeout=25)
+    result = json.loads(raw)
+    if result.get('ok') is not True:
+        raise ValueError('host operation refused: ' + json.dumps(result.get('error')))
+    return result['value']
+
+
+def activate(user):
+    identity = pwd.getpwnam(user)
+    folder = Path('/etc/pi-stack/users') / user
+    enrollment_path = folder / 'core-enrollment.json'
+    enrollment = trusted(enrollment_path) if enrollment_path.exists() else None
+    binding_path = folder / 'core-binding.json'
+    binding = enrollment['binding'] if enrollment is not None else trusted(binding_path)
+    if binding.get('user') != user:
+        raise ValueError('binding user differs from fixed operation identity')
+    config_bytes = CONFIG.read_bytes()
+    config = trusted(CONFIG)
+    matches = [scope for scope in config['scopes'] if scope['id'] == binding.get('scopeId')]
+    if len(matches) != 1 or matches[0]['custody']['uid'] != identity.pw_uid:
+        raise ValueError('exact registered account scope/custodian required')
+    scope = matches[0]
+    registry = trusted(Path(f'/var/lib/pi-remote/persons/{user}.json'))
+    if registry.get('user') != user:
+        raise ValueError('folder registry user differs')
+    source = mounted_source(user, registry)
+    fresh = enrollment is not None and enrollment.get('state') in ('prepared', 'adopted')
+    if enrollment is not None and (enrollment.get('version') != 1 or enrollment.get('user') != user or not fresh):
+        raise ValueError('explicit prepared or adopted root enrollment required')
+    if fresh:
+        registered = enrollment['registration']['scope']
+        if any(registered.get(key) != value for key, value in scope.items() if key not in ('availability', 'custody')):
+            raise ValueError('enrollment differs from canonical scope authority, storage or manager')
+    if scope['availability']['kind'] == 'adopt':
+        namespace = trusted(RUNTIME)['namespace']
+        if scope['custody']['namespace'] != namespace or adoption.mount_identity(namespace, registry['unlock']['mountpoint'])['source'] != registry['unlock']['cipherDir']:
+            raise ValueError('already-adopted scope lost its exact prepared registered data view')
+        target_receipt = None
+    else:
+        namespace, target_receipt = keeper_prepare(user, identity, registry, source)
+    next_scope = copy.deepcopy(scope)
+    if scope['availability']['kind'] == 'unavailable':
+        next_scope['availability'] = {'kind': 'adopt'}
+        next_scope['custody']['namespace'] = namespace
+        next_scope['custody']['retainedRunnerNamespace'] = namespace if fresh else source
+        if not fresh:
+            plan = trusted(folder / 'core-activation.json')
+            if plan.get('version') != 1 or plan.get('user') != user or plan.get('scopeId') != scope['id']:
+                raise ValueError('existing scope needs its affirmative registered generation transfer plan')
+            transfer = copy.deepcopy(plan['transfer'])
+            if transfer['scopeId'] != scope['id'] or transfer['user'] != user or transfer['databasePath'] != scope['storage']['databasePath'] or transfer['adoptionReceiptPath'] != scope['storage']['adoptionReceiptPath']:
+                raise ValueError('existing transfer plan differs from declared storage')
+            transfer['target'] = {'uid': identity.pw_uid, 'gid': identity.pw_gid, 'namespace': namespace}
+            transfer['targetMountReceiptPath'] = target_receipt
+            adoption.transfer(transfer)
+            next_scope['custody']['retainedRunnerNamespace'] = transfer['source']['namespace']
+    elif scope['custody']['namespace'] != namespace:
+        raise ValueError('activation cannot replace an already-adopted live generation')
+    if CONFIG.read_bytes() != config_bytes:
+        raise ValueError('canonical configuration changed during preparation; retry same plan')
+    config['scopes'] = [next_scope if item['id'] == scope['id'] else item for item in config['scopes']]
+    # Configuration and registration keep all original authority, managers and stores.
+    publish(CONFIG, config)
+    if fresh:
+        registration = copy.deepcopy(enrollment['registration'])
+        registration['scope'] = next_scope
+        registration_path = folder / 'core-registration.json'
+        publish(registration_path, {'version': 1, 'registration': registration})
+        receipt = host(namespace, 'provision', registration_path, enrollment['requestId'])
+        publish(enrollment_path, {**enrollment, 'state': 'adopted', 'registration': registration, 'provisionReceipt': receipt})
+        publish(binding_path, binding)
+    host(namespace, 'bind-person', binding_path)
+    host(namespace, 'check', CONFIG)
+    pid = unit_pid('pi-stack-core.service')
+    os.kill(pid, signal.SIGHUP)
+    return {'protocol': 'pi-core-person-activation-v1', 'user': user, 'scopeId': scope['id'], 'state': 'prepared'}
+
+
+def main():
+    if os.geteuid() != 0 or len(sys.argv) != 2 or not re.fullmatch(r'[a-z_][a-z0-9_-]{0,31}', sys.argv[1]):
+        raise ValueError('usage: root core-person-activate REGISTERED_USER')
+    STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
+    metadata = STATE.lstat()
+    if not STATE.is_dir() or metadata.st_uid != 0 or metadata.st_mode & 0o077:
+        raise ValueError('activation state must be protected root custody')
+    with (STATE / 'owner.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        print(json.dumps({'ok': True, 'value': activate(sys.argv[1])}))
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        print(json.dumps({'ok': False, 'error': {'code': 'core-person-activation-unavailable', 'message': str(error)}}))
+        sys.exit(75)

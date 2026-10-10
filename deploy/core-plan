@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""Build protected host/resource plans from the owning migration census; no live effects."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+from core_namespace import absolute, namespace_path, publish, trusted
+
+
+def namespace(unit):
+    output = subprocess.run(['/usr/bin/systemctl', 'show', unit, '--property=MainPID', '--value'], capture_output=True, text=True, check=True, timeout=3).stdout.strip()
+    if not output.isdigit() or int(output) < 1:
+        return None
+    pid = int(output)
+    fields = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
+    return {'kind': 'process', 'pid': pid, 'startTicks': fields[19], 'mountNamespaceInode': str(Path(f'/proc/{pid}/ns/mnt').stat().st_ino)}
+
+
+def assemble(directory):
+    original = trusted(directory / 'manifest.json')
+    projection = trusted(directory / 'activation/core-config.projection.json')['config']
+    output = directory / 'host-plans'
+    output.mkdir(mode=0o700, exist_ok=True)
+    (output / 'receipts').mkdir(mode=0o700, exist_ok=True)
+    services = {service['unit']: service for service in original['services']}
+    owners = {}
+    pending = []
+    for unit, service in services.items():
+        actual = namespace(unit)
+        recorded = service['custodyNamespace']
+        if actual is not None and actual != recorded:
+            pending.append({'code': 'SOURCE_CENSUS_CHANGED', 'unit': unit})
+            continue
+        if actual is None:
+            continue
+        identifier = 'owner-' + hashlib.sha256(unit.encode()).hexdigest()[:20]
+        owners[unit] = {'unit': unit, 'id': identifier, 'namespace': actual,
+                        'pinned': {'kind': 'pinned', 'path': f'/run/pi-stack/namespaces/{identifier}', 'mountNamespaceInode': actual['mountNamespaceInode']}}
+    scope_sources = {scope['id']: scope for scope in original['scopes']}
+    scopes = []
+    for scope in projection['scopes']:
+        recorded = scope_sources.get(scope['id'])
+        unit = recorded.get('oldOwnerUnit') if recorded is not None else None
+        evidence = scope['custody']['namespace'].get('retainedEvidence')
+        if unit is None and evidence is not None:
+            exact = [item['unit'] for item in owners.values() if item['namespace'] == evidence]
+            if len(exact) == 1:
+                unit = exact[0]
+        owner = owners.get(unit)
+        if scope['availability']['kind'] == 'unavailable':
+            scopes.append({'scopeId': scope['id'], 'availability': scope['availability']})
+            continue
+        if owner is None:
+            pending.append({'code': 'SCOPE_OWNER_UNRESOLVED', 'scopeId': scope['id']})
+            continue
+        receipt = str(output / 'receipts' / (hashlib.sha256(scope['id'].encode()).hexdigest() + '.json'))
+        key_path = scope['storage']['capabilityKeyPath']
+        if unit == 'pi-kenan-root.service':
+            key_path = str(Path(scope['storage']['databasePath']).parent / 'thread-capability.key')
+            source = Path('/srv/pi/pi-remote/kenan-root/src/managed-session.ts').resolve()
+            root_fields = trusted(directory / 'activation/final-schema/root.fragment.json')
+            initialization = {'version': 1, 'scopeId': scope['id'], 'priorCapability': 'none', 'uid': scope['custody']['uid'], 'gid': scope['custody']['gid'],
+                              'namespace': owner['pinned'], 'keyPath': key_path, 'databasePath': scope['storage']['databasePath'],
+                              'encryptedMountpoint': root_fields['privateDir'], 'sourceProof': {'kind': 'owner-source-no-capability', 'path': str(source), 'sha256': hashlib.sha256(source.read_bytes()).hexdigest()},
+                              'receiptPath': str(output / 'receipts' / ('capability-' + hashlib.sha256(scope['id'].encode()).hexdigest() + '.json'))}
+            publish(output / ('capability-' + hashlib.sha256(scope['id'].encode()).hexdigest() + '.plan.json'), initialization)
+        scopes.append({'scopeId': scope['id'], 'ownerUnit': unit, 'source': owner['pinned'], 'uid': scope['custody']['uid'], 'gid': scope['custody']['gid'],
+                       'databasePath': scope['storage']['databasePath'], 'sessionsDir': scope['storage']['sessionsDir'],
+                       'capabilityKeyPath': key_path, 'adoptionReceiptPath': receipt})
+    pins = {'version': 1, 'namespaces': [{'id': owner['id'], 'namespace': owner['namespace']} for owner in owners.values()]}
+    publish(output / 'pins.json', pins)
+    publish(output / 'scope-adoption.plan.json', {'version': 1, 'kind': 'host-custody-preparation', 'activationPermitted': False, 'scopes': scopes, 'owners': list(owners.values()), 'pending': pending})
+    artifact = Path('/srv/pi/pi-orchestrator').resolve()
+    for unit in ['pi-model-broker.service', 'pi-kenan-broker.service']:
+        owner = owners.get(unit)
+        if owner is None:
+            continue
+        pid = owner['namespace']['pid']
+        arguments = Path(f'/proc/{pid}/cmdline').read_bytes().decode().split('\0')
+        index = arguments.index('model-broker')
+        config_path = absolute(arguments[index + 1])
+        original_config = trusted(config_path)
+        source = artifact / 'dist/model-broker.js'
+        plan = {'version': 1, 'unit': unit, 'pid': pid, 'uid': Path(f'/proc/{pid}').stat().st_uid,
+                'startTicks': owner['namespace']['startTicks'], 'sourcePath': str(source),
+                'sourceSha256': hashlib.sha256(source.read_bytes()).hexdigest(), 'configPath': str(config_path),
+                'ports': [entry['port'] for entry in original_config['listeners']], 'inspectorPort': 9229,
+                'proofPath': str(output / 'receipts' / f'{unit}.streams-proof.json')}
+        publish(output / f'{unit}.handoff.json', plan)
+    generations = []
+    for reference in original['individualRegistries']['remote']:
+        if not isinstance(reference, str) or not re.fullmatch(r'[a-z_][a-z0-9_-]{0,31}', reference):
+            raise ValueError('migration person registry requires its canonical user ID')
+        path = Path('/var/lib/pi-remote/persons') / (reference + '.json')
+        registry = trusted(path)
+        user = registry['user']
+        owner = owners.get(f'pi-remote@{user}.service')
+        if owner is None or not registry.get('unlock'):
+            continue
+        service = services[owner['unit']]
+        generations.append({'user': user, 'registryPath': str(path), **registry['unlock'],
+                            'sourceNamespace': owner['pinned'], 'uid': service['uid'], 'gid': service['gid'],
+                            'keySource': {'kind': 'systemd-credential', 'path': f'/run/credentials/pi-remote@{user}.service/key', 'namespace': owner['pinned']},
+                            'mountReceiptPath': str(output / 'receipts' / f'{user}.mount.json')})
+    resources = {}
+    candidates = []
+    encrypted = [entry['mountpoint'] for entry in generations]
+    common = owners.get('pi-kenan-custody.service')
+    if common is not None:
+        root_mount = '/var/lib/pi-kenan/private'
+        candidates.append({'path': root_mount, 'kind': 'directory', 'namespace': common['pinned']})
+        encrypted.append(root_mount)
+    for scope in scopes:
+        if 'source' not in scope:
+            continue
+        for key in ['databasePath', 'sessionsDir', 'capabilityKeyPath']:
+            path = scope[key]
+            if any(path == folder or path.startswith(folder + '/') for folder in encrypted):
+                continue
+            # Parent directories preserve all current database sidecars and native files.
+            target = str(Path(path).parent) if key != 'sessionsDir' else path
+            entry = {'path': target, 'kind': 'directory', 'namespace': scope['source']}
+            candidates.append(entry)
+    grouped = {}
+    for entry in candidates:
+        grouped.setdefault(entry['namespace']['path'], set()).add(entry['path'])
+    metadata = {}
+    stat_program = "import json,os,sys;from pathlib import Path;result={};\nfor p in json.load(sys.stdin):\n try:\n  s=os.stat(p);result[p]={'dev':str(s.st_dev),'ino':str(s.st_ino),'directory':Path(p).is_dir()}\n except OSError as e:result[p]={'error':e.errno}\nprint(json.dumps(result))"
+    for pin_path, paths in grouped.items():
+        owner = next(item for item in owners.values() if item['pinned']['path'] == pin_path)
+        descriptor = os.open(namespace_path(owner['namespace']), os.O_RDONLY)
+        try:
+            result = subprocess.run(['/usr/bin/nsenter', f'--mount=/proc/self/fd/{descriptor}', '--', '/usr/bin/python3', '-c', stat_program],
+                                    input=json.dumps(sorted(paths)), pass_fds=(descriptor,), check=True, capture_output=True, text=True, timeout=5)
+            metadata[pin_path] = json.loads(result.stdout)
+        finally:
+            os.close(descriptor)
+    for entry in candidates:
+        target = entry['path']
+        observed = metadata[entry['namespace']['path']][target]
+        if 'error' in observed or observed['directory'] is not True:
+            pending.append({'code': 'RESOURCE_SOURCE_UNAVAILABLE', 'path': target, 'errno': observed.get('error'), 'directory': observed.get('directory')})
+            continue
+        prior = resources.get(target)
+        if prior is not None and metadata[prior['namespace']['path']][target] != observed:
+            pending.append({'code': 'RESOURCE_SOURCE_COLLISION', 'path': target})
+        elif prior is None:
+            resources[target] = entry
+    ordered = sorted(resources.values(), key=lambda item: len(item['path']))
+    selected = []
+    for entry in ordered:
+        if any(entry['path'].startswith(parent['path'] + '/') and entry['namespace']['mountNamespaceInode'] == parent['namespace']['mountNamespaceInode'] for parent in selected):
+            continue
+        selected.append(entry)
+    publish(output / 'core-custody.candidate.json', {'version': 1, 'namespaceId': 'core-data', 'resources': selected, 'generations': generations})
+    publish(output / 'scope-adoption.plan.json', {'version': 1, 'kind': 'host-custody-preparation', 'activationPermitted': False, 'scopes': scopes, 'owners': list(owners.values()), 'pending': pending})
+    # This is a plan, not an adopted config or a receipt. Missing private authority
+    # remains with its owning projection; no grant values are copied here.
+    return {'protocol': 'pi-core-host-plan-v1', 'path': str(output), 'namespaceCount': len(owners), 'scopeCount': len(scopes), 'pendingCount': len(pending), 'activationPermitted': False}
+
+
+if __name__ == '__main__':
+    try:
+        if os.geteuid() != 0 or len(sys.argv) != 2:
+            raise ValueError('usage: root core-plan ABSOLUTE_MIGRATION_DIRECTORY')
+        print(json.dumps({'ok': True, 'value': assemble(absolute(sys.argv[1]))}))
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        print(json.dumps({'ok': False, 'error': {'code': 'core-host-plan-unavailable', 'message': str(error)}}))
+        sys.exit(75)

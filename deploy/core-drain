@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""Exact old-owner graceful drain with durable recovery and positive detachment receipts."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+from core_namespace import absolute, enter, publish, trusted
+
+
+def properties(unit):
+    result = subprocess.run(['/usr/bin/systemctl', 'show', unit, '--property=MainPID,ExecMainPID,ExecMainCode,ExecMainStatus,Result,ActiveState,InvocationID'], check=True, capture_output=True, text=True, timeout=3)
+    return dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+
+
+def detached_status(current, prior, kind, retirement):
+    if current.get('InvocationID') not in ('', prior['InvocationID']) or current.get('ActiveState') not in ('inactive', 'failed') or current.get('MainPID') != '0' or current.get('ExecMainPID') != prior['MainPID'] or current.get('ExecMainCode') != '1' or current.get('ExecMainStatus') != '0' or current.get('Result') != 'success':
+        raise ValueError('exact original process has not acknowledged a normal successful exit')
+    if kind == 'fleet' and (retirement is None or retirement.get('state') != 'closed' or any(edge.get('state') != 'closed' for edge in retirement.get('edges', []))):
+        raise ValueError('original fleet retirement has not positively closed every controller edge')
+
+
+def storage_identities(scopes):
+    grouped = {}
+    for scope in scopes:
+        absolute(scope['databasePath'])
+        key = (json.dumps(scope['namespace'], sort_keys=True), scope['uid'], scope['gid'])
+        grouped.setdefault(key, []).append(scope)
+    result = {}
+    code = "import json,os,stat,sys;result={};\nfor p in json.loads(sys.argv[1]):\n s=os.stat(p);assert stat.S_ISREG(s.st_mode);result[p]={'dev':str(s.st_dev),'ino':str(s.st_ino)}\nprint(json.dumps(result))"
+    for (_, uid, gid), group in grouped.items():
+        offset = 0
+        while offset < len(group):
+            batch, size = [], 0
+            while offset < len(group):
+                row = group[offset]
+                if size + len(row['databasePath'].encode()) + 4 > 32000:
+                    if not batch:
+                        raise ValueError('store path exceeds bounded metadata frame')
+                    break
+                batch.append(row); size += len(row['databasePath'].encode()) + 4; offset += 1
+            payload = json.dumps([scope['databasePath'] for scope in batch])
+            values = json.loads(enter(batch[0]['namespace'], ['/usr/bin/python3', '-c', code, payload], uid, gid))
+            for scope in batch:
+                result[scope['scopeId']] = values[scope['databasePath']]
+    return result
+
+
+def drain(path):
+    plan = trusted(path)
+    if plan.get('version') != 1 or plan.get('kind') not in ('fleet', 'remote', 'root', 'memory', 'broker') or not re.fullmatch(r'pi-[a-zA-Z0-9@_.-]+\.service', plan.get('unit', '')):
+        raise ValueError('declared exact old owner kind and unit required')
+    if not isinstance(plan.get('scopes'), list) or not plan['scopes'] or type(plan.get('pid')) is not int or not isinstance(plan.get('startTicks'), str):
+        raise ValueError('original owner identity and exact adopted stores required')
+    state_path = absolute(plan['statePath'])
+    digest = hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    state = trusted(state_path) if state_path.exists() else None
+    if state is not None and state.get('planSha256') != digest:
+        raise ValueError('another drain purpose owns this recovery record')
+    if state is not None and state.get('state') == 'detached':
+        for scope in plan['scopes']:
+            receipt = trusted(absolute(scope['receiptPath']))
+            if receipt.get('scopeId') != scope['scopeId'] or receipt.get('detachmentEvidence', {}).get('planSha256') != digest:
+                raise ValueError('completed detachment receipt changed')
+        return {'protocol': 'pi-core-owner-drain-v1', 'state': 'detached', 'unit': plan['unit'], 'receiptCount': len(plan['scopes'])}
+    current = properties(plan['unit'])
+    if state is None:
+        if current.get('MainPID') != str(plan['pid']) or current.get('ActiveState') != 'active':
+            raise ValueError('original owner is not currently identified by its declared unit')
+        fields = Path(f"/proc/{plan['pid']}/stat").read_text().rsplit(')', 1)[1].split()
+        if fields[19] != plan['startTicks']:
+            raise ValueError('original owner birth changed')
+        source = absolute(plan['sourceProof']['path'])
+        if hashlib.sha256(source.read_bytes()).hexdigest() != plan['sourceProof']['sha256']:
+            raise ValueError('original graceful-detachment source binding changed')
+        if plan['kind'] == 'broker':
+            proof = trusted(absolute(plan['streamsProofPath']))
+            if proof.get('protocol') != 'pi-core-original-broker-drain-v1' or proof.get('pid') != plan['pid'] or proof.get('startTicks') != plan['startTicks'] or proof.get('state') != 'drained' or proof.get('accepted') != 0:
+                raise ValueError('original runtime HTTP callbacks must positively drain before broker SIGTERM')
+        started = datetime.now(timezone.utc).isoformat()
+        state = {'version': 1, 'planSha256': digest, 'previous': current, 'startedAt': started, 'state': 'prepared', 'storageIdentities': storage_identities(plan['scopes'])}
+        publish(state_path, state)
+        # Preserve independent execution/FUSE resources even if a previous unit used
+        # control-group killing. Their explicit resource owner remains separate.
+        directory = Path('/run/systemd/system') / (plan['unit'] + '.d')
+        directory.mkdir(mode=0o755, parents=True, exist_ok=True)
+        metadata = directory.lstat()
+        if not directory.is_dir() or metadata.st_uid != 0 or metadata.st_mode & 0o022:
+            raise ValueError('unit drain directory is not protected root custody')
+        target = directory / '95-core-drain.conf'
+        target.write_text('[Service]\nKillMode=process\nTimeoutStopSec=infinity\nRestart=no\n')
+        os.chmod(target, 0o644)
+        subprocess.run(['/usr/bin/systemctl', 'daemon-reload'], check=True, capture_output=True, timeout=5)
+    if state['state'] == 'prepared':
+        publish(state_path, {**state, 'state': 'stopping'})
+        # systemd owns the stop job; a tool timeout never authorizes another owner.
+        subprocess.run(['/usr/bin/systemctl', 'stop', '--no-block', plan['unit']], check=True, capture_output=True, timeout=3)
+        state = {**state, 'state': 'stopping'}
+    current = properties(plan['unit'])
+    if current.get('MainPID') != '0' or current.get('ActiveState') not in ('inactive', 'failed'):
+        return {'protocol': 'pi-core-owner-drain-v1', 'state': 'pending', 'unit': plan['unit']}
+    retirement = None
+    if plan['kind'] == 'fleet':
+        journal = subprocess.run(['/usr/bin/journalctl', '--no-pager', '--output=json', f"_SYSTEMD_INVOCATION_ID={state['previous']['InvocationID']}", '--since', state['startedAt']], check=True, capture_output=True, text=True, timeout=3).stdout
+        for line in journal.splitlines():
+            row = json.loads(line)
+            try:
+                record = json.loads(row.get('MESSAGE', ''))
+                if record.get('type') == 'fleet-controller-retired':
+                    retirement = record
+            except (ValueError, TypeError):
+                continue
+    detached_status(current, state['previous'], plan['kind'], retirement)
+    timestamp = datetime.now(timezone.utc).isoformat()
+    identities = storage_identities(plan['scopes'])
+    if identities != state['storageIdentities']:
+        raise ValueError('original database generation changed during drain')
+    for scope in plan['scopes']:
+        receipt = {'version': 1, **scope.get('receiptExtras', {}), 'state': 'detached', 'scopeId': scope['scopeId'],
+                   'databasePath': scope['databasePath'], 'sessionsDir': scope['sessionsDir'], 'databaseIdentity': identities[scope['scopeId']],
+                   'previousOwner': {'identity': f"{plan['unit']}:{plan['pid']}:{plan['startTicks']}:{state['previous']['InvocationID']}", 'detachedAt': timestamp},
+                   'detachmentEvidence': {'protocol': 'pi-core-owner-drain-v1', 'planSha256': digest, 'exitCode': 0, 'sourceProof': plan['sourceProof']}}
+        publish(absolute(scope['receiptPath']), receipt)
+    publish(state_path, {**state, 'state': 'detached', 'detachedAt': timestamp})
+    return {'protocol': 'pi-core-owner-drain-v1', 'state': 'detached', 'unit': plan['unit'], 'receiptCount': len(plan['scopes'])}
+
+
+if __name__ == '__main__':
+    try:
+        if os.geteuid() != 0 or len(sys.argv) != 2:
+            raise ValueError('usage: root core-drain ABSOLUTE_ROOT_PLAN')
+        print(json.dumps({'ok': True, 'value': drain(absolute(sys.argv[1]))}))
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        print(json.dumps({'ok': False, 'error': {'code': 'core-owner-drain-unconfirmed', 'message': str(error)}}))
+        sys.exit(75)
