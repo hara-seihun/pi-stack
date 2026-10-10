@@ -50,8 +50,8 @@ test('native WebRTC duplex sends GPT audio to the telephone and only caller audi
     await page.addInitScript(() => {
       const context = new AudioContext({ sampleRate: 48000 });
       type AudioProbe = { low: number; high: number };
-      type TestAudio = { context: AudioContext; ready: boolean; takenOver: boolean; proof: boolean; error: string; callerInput: AudioProbe; telephoneOutput: AudioProbe; requests: string[]; nativeCapture: typeof navigator.mediaDevices.getUserMedia; measure(stream: MediaStream, name: 'callerInput' | 'telephoneOutput'): void };
-      const state: TestAudio = (window as any).testAudio = { context, ready: false, takenOver: false, proof: false, error: '', callerInput: { low: 0, high: 0 }, telephoneOutput: { low: 0, high: 0 }, requests: [], nativeCapture: navigator.mediaDevices.getUserMedia,
+      type TestAudio = { gatedOutput: number | null; context: AudioContext; ready: boolean; takenOver: boolean; proof: boolean; error: string; callerInput: AudioProbe; telephoneOutput: AudioProbe; requests: string[]; nativeCapture: typeof navigator.mediaDevices.getUserMedia; measure(stream: MediaStream, name: 'callerInput' | 'telephoneOutput'): void };
+      const state: TestAudio = (window as any).testAudio = { gatedOutput: null, context, ready: false, takenOver: false, proof: false, error: '', callerInput: { low: 0, high: 0 }, telephoneOutput: { low: 0, high: 0 }, requests: [], nativeCapture: navigator.mediaDevices.getUserMedia,
         measure(stream: MediaStream, name: 'callerInput' | 'telephoneOutput') {
         const playback = new Audio(); playback.volume = 0; playback.srcObject = stream; void playback.play();
         const source = context.createMediaStreamSource(stream);
@@ -75,7 +75,13 @@ test('native WebRTC duplex sends GPT audio to the telephone and only caller audi
           if (typeof value !== 'string') throw new Error('Control websocket must not contain audio');
           const message = JSON.parse(value);
           if (message.type === 'ready') { state.ready = true; setTimeout(() => this.onmessage?.({ data: '{"type":"transport","callId":"synthetic-call"}' }), 0); }
-          if (message.type === 'transport-ready') state.takenOver = true;
+          if (message.type === 'transport-ready') {
+            state.takenOver = true;
+            setTimeout(() => {
+              state.gatedOutput = state.telephoneOutput.high;
+              this.onmessage?.({ data: '{"type":"playout","enabled":true}' });
+            }, 500);
+          }
           if (message.type === 'audio-proof') state.proof = true;
           if (message.type === 'error') state.error = message.error;
         }
@@ -106,12 +112,13 @@ test('native WebRTC duplex sends GPT audio to the telephone and only caller audi
     }, null, { timeout: 10000 });
     const result = await page.evaluate(() => {
       const state = (window as any).testAudio;
-      return { error: state.error, ready: state.ready, takenOver: state.takenOver, proof: state.proof, callerInput: state.callerInput, telephoneOutput: state.telephoneOutput, restored: navigator.mediaDevices.getUserMedia === state.nativeCapture, requests: state.requests };
+      return { gatedOutput: state.gatedOutput, error: state.error, ready: state.ready, takenOver: state.takenOver, proof: state.proof, callerInput: state.callerInput, telephoneOutput: state.telephoneOutput, restored: navigator.mediaDevices.getUserMedia === state.nativeCapture, requests: state.requests };
     });
     assert.equal(result.error, '');
     assert.equal(result.ready, true);
     assert.equal(result.takenOver, true);
     assert.equal(result.proof, true);
+    assert.ok(result.gatedOutput !== null && result.gatedOutput < -60, 'GPT output is physically muted until the greeting gate opens');
     assert.equal(result.restored, true);
     assert.ok(result.callerInput.low > result.callerInput.high + 20, 'Only caller tone returns into GPT microphone');
     assert.ok(result.telephoneOutput.high > result.telephoneOutput.low + 20, 'Only GPT tone is published to the telephone');
