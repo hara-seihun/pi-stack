@@ -117,7 +117,8 @@ import { fleetSessions, streamSessions } from "./stream-sessions";
 import { ClientStream, PING_INTERVAL_MS, readSubscription } from "./stream";
 import { ReconcilePublisher } from "../shared/reconcile";
 import { parsePresentationEvent } from "./pi-event-presentation";
-import { SourceTranscripts, type SourceResult } from "./source-transcripts";
+import { SourceTranscripts } from "./source-transcripts";
+import { refreshTranscriptProjection, sourceValue } from "./transcript-refresh";
 import { MachineActions } from "./machine-actions";
 import { createMessagingService } from "./messaging";
 import { PiReactions, nativeMessageExists, reactToMessage } from "./reactions";
@@ -725,11 +726,6 @@ function signalLiveSync() {
   }, LIVE_SYNC_INTERVAL_MS);
 }
 
-function sourceValue<T>(result: SourceResult<T>): T {
-  if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
-  return result.value;
-}
-
 function invalidateDisplayContext(sessionId: string) {
   signalTranscript(sessionId);
 }
@@ -1174,7 +1170,7 @@ function signalTranscript(sessionId: string): void {
   if (shuttingDown || transcriptTimers.has(sessionId) || !sessionSubscribers(sessionId).length) return;
   transcriptTimers.set(sessionId, setTimeout(() => {
     transcriptTimers.delete(sessionId);
-    void refreshTranscript(sessionId).catch(cause => {
+    void refreshTranscriptProjection(() => refreshTranscript(sessionId), () => signalTranscript(sessionId), cause => {
       for (const stream of sessionSubscribers(sessionId)) stream.send({ type: "error", message: `Could not read transcript: ${cause instanceof Error ? cause.message : String(cause)}` });
     });
   }, TRANSCRIPT_COALESCE_MS));

@@ -91,7 +91,7 @@ Peer listings and inspections are derived caches. They are not another registry 
 
 ## Native history and live output
 
-The interactive view is Pi's durable native conversation history. It preserves thinking, tools, exact message identities and earlier exchanges across compaction. Live deltas are disposable; a persisted native message refreshes transcript heads and clears live output.
+The interactive view is Pi's durable native conversation history. It preserves thinking, tools, exact message identities and earlier exchanges across compaction. Live deltas are disposable; a persisted native message refreshes transcript heads and clears live output. A native revision conflict during a background transcript projection keeps the last acknowledged heads and schedules a fresh coalesced projection; it is not a transport-disconnect event. Other source failures remain explicit.
 
 The per-record display projection strips provider continuation metadata and replaces image bytes with thread-scoped content-addressed URLs. Native entries remain unchanged. Tool-result images load when expanded.
 
