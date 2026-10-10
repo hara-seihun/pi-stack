@@ -8,6 +8,7 @@ import { callBrief, instructions, type CallBrief } from "./policy";
 import { sameToken, type CallFragment } from "./dispatcher";
 import { providerSelection, loadProvider } from "./provider";
 import { silentReply, silentBegin } from "./retell-transport";
+import { contactGuard } from "./contact-guard";
 
 const config = JSON.parse(readFileSync(process.env.PI_STACK_PHONE_CONFIG ?? "/etc/pi-stack/phone.json", "utf8"));
 const state = process.env.PI_STACK_PHONE_STATE;
@@ -27,7 +28,7 @@ const voiceBase = config.voiceUrl, dispatcherBase = config.dispatcherUrl;
 if (typeof owner !== "string" || !owner || !Number.isInteger(localPort) || !Number.isInteger(publicPort) || typeof voiceBase !== "string" || typeof dispatcherBase !== "string") throw new Error("Explicit owner, listener ports, Voice and managed dispatcher URLs are required");
 const db = new Database(join(state, "calls.sqlite3"));
 db.exec(`PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS calls(id TEXT PRIMARY KEY,provider_id TEXT,voice_id TEXT,status TEXT NOT NULL,brief TEXT NOT NULL,started_at INTEGER NOT NULL,ended_at INTEGER,error TEXT,cleanup INTEGER NOT NULL DEFAULT 0); CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,call_id TEXT NOT NULL,at INTEGER NOT NULL,type TEXT NOT NULL,payload TEXT NOT NULL);`);
-for (const [name, type] of [["provider_kind", "TEXT"], ["dial_state", "TEXT NOT NULL DEFAULT 'none'"], ["provider_snapshot", "TEXT"], ["request_id", "TEXT"], ["dispatcher_closed", "INTEGER NOT NULL DEFAULT 0"]]) {
+for (const [name, type] of [["provider_kind", "TEXT"], ["dial_state", "TEXT NOT NULL DEFAULT 'none'"], ["provider_snapshot", "TEXT"], ["accepted_at", "INTEGER"], ["request_id", "TEXT"], ["dispatcher_closed", "INTEGER NOT NULL DEFAULT 0"]]) {
   if (!(db.query("PRAGMA table_info(calls)").all() as { name: string }[]).some(c => c.name === name)) db.exec(`ALTER TABLE calls ADD COLUMN ${name} ${type}`);
 }
 db.exec("CREATE UNIQUE INDEX IF NOT EXISTS call_approved_request ON calls(request_id) WHERE request_id IS NOT NULL");
@@ -128,7 +129,7 @@ async function start(call: Call, shouldDial: boolean) {
       await finish(call, "failed", result.error); return;
     }
     call.providerId = result.value.uuid; call.dialState = "accepted";
-    db.query("UPDATE calls SET provider_id=?,dial_state='accepted',cleanup=0 WHERE id=?").run(call.providerId, call.id);
+    db.query("UPDATE calls SET provider_id=?,dial_state='accepted',accepted_at=?,cleanup=0 WHERE id=?").run(call.providerId, Date.now(), call.id);
     if (call.finishing) { await cleanup(snapshot(call)); return; }
     // The monitor grant is available only after PSTN answers; the provider poll signals it.
   } catch { await finish(call, "failed", "Voice/PSTN startup failed"); }
@@ -246,6 +247,8 @@ const local = Bun.serve<SocketData>({ hostname: "127.0.0.1", port: localPort, ma
     if (previous) return previous.brief === JSON.stringify(brief.value) ? json({ id: previous.id, status: previous.status, replayed: false }) : error("Approved request identity already belongs to another brief", 409);
     if (selected.value === null || config.callingEnabled !== true) return error("Calling disabled until provider/number and silent takeover agent are confirmed", 409);
     if (stopping || active.size >= 2) return error("Phone service busy", 409);
+    const permitted = contactGuard(db, brief.value, config, Date.now());
+    if (!permitted.ok) return json(permitted, permitted.code === "contact-policy-unavailable" ? 503 : 409);
     const call = create(brief.value); void start(call, true); return json({ id: call.id, status: "preparing" }, 202);
   }
   if (url.pathname === "/preflight" && req.method === "POST") {

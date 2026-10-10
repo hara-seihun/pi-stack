@@ -997,6 +997,12 @@ function publishAndroidArtifact(request, logPath, selectedTargets = targets) {
   }
   const installerHash = request.android.installer.sha256;
   for (const target of selectedTargets) {
+    const prior = request.android.hosts[target.id];
+    if ((prior?.web?.revision ?? prior?.revision) === request.integrationSha) {
+      request.android.hosts[target.id] = currentAndroidProof(target, request.integrationSha);
+      writeRequest(request);
+      continue;
+    }
     const remoteDirectory = target.sshHost && join(target.androidTransferRoot, request.requestId);
     const tool = target.sshHost ? join(remoteDirectory, "android-update.js") : installer;
     if (target.sshHost) {

@@ -5,7 +5,7 @@ import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
-import { hostPlan, verifyOwner } from '../deploy/host-plan.mjs';
+import { hostPlan, verifyOwner, acceptOwner, ownerNeedsActivation } from '../deploy/host-plan.mjs';
 import { componentCache } from '../deploy/component-cache.mjs';
 import { preparedComponents } from '../deploy/prepared-components.mjs';
 import { doctorKey, doctorReceipt } from '../deploy/doctor-cache.mjs';
@@ -82,6 +82,37 @@ test('mutable host model changes invalidate the owner plan even without a source
   assert.equal(hostPlan(f.root, source, '', f.plan, f.host).ok, true); accept(f.plan);
   writeFileSync(models, '{"providers":{"new":{}}}');
   assert.ok(Object.values(hostPlan(f.root, source, source, f.plan, f.host).value.owners).every(owner => owner.changed));
+});
+
+test('Root handoff pending retains independent source-bound activation receipts across retries and successors', t => {
+  const f = fixture(t); const previous = f.commit();
+  hostPlan(f.root, previous, '', f.plan, f.host); accept(f.plan);
+  f.put('packages/runtime/patch-anthropic-tool-schema.mjs', 'changed SDK'); const candidate = f.commit();
+  const first = hostPlan(f.root, candidate, previous, f.plan, f.host);
+  assert.equal(first.value.owners.daemons.changed, true); assert.equal(first.value.owners.root.changed, true);
+  const invocationId = 'a'.repeat(32);
+  const proof = { kind: 'activated-units', runningCommit: candidate, units: [{ unit: 'pi-orchestrator@fixture.service', state: 'active', invocationId }] };
+  assert.equal(acceptOwner(f.root, f.plan, candidate, 'daemons', proof).ok, true);
+  const live = () => ({ state: 'active', invocationId });
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const retry = hostPlan(f.root, candidate, candidate, f.plan, f.host);
+    assert.equal(retry.value.configurationChanged, false, 'Root pending is not host configuration mutation');
+    assert.equal(ownerNeedsActivation(f.root, retry.value, 'daemons', live).value.changed, false, 'accepted daemon must not restart on Root retry');
+    assert.equal(retry.value.owners.root.changed, true, 'selected candidate marker cannot prove pending Root activation');
+    assert.equal(retry.value.state, 'prepared', 'partial owner receipts are not complete host acceptance');
+  }
+  f.put('docs/unrelated.md', 'next source'); const next = f.commit();
+  const successor = hostPlan(f.root, next, candidate, f.plan, f.host);
+  assert.equal(ownerNeedsActivation(f.root, successor.value, 'daemons', live).value.changed, false);
+  assert.equal(successor.value.owners.root.changed, true, 'successor retains prior unaccepted owner custody');
+  assert.equal(ownerNeedsActivation(f.root, successor.value, 'daemons', () => ({ state: 'active', invocationId: 'b'.repeat(32) })).value.changed, true, 'another process generation must reacquire proof');
+  assert.equal(ownerNeedsActivation(f.root, successor.value, 'daemons', () => { throw new Error('systemd unavailable'); }).error.code, 'host-owner-proof-unavailable');
+  assert.equal(acceptOwner(f.root, f.plan, next, 'daemons', { ...proof, runningCommit: previous }).error.code, 'host-owner-source-stale');
+  assert.equal(acceptOwner(f.root, f.plan, next, 'daemons', { ...proof, units: [{ ...proof.units[0], invocationId: '' }] }).error.code, 'host-owner-proof-invalid');
+  writeFileSync(f.host, '{"version":1,"packages":[],"changed":true}');
+  const reconfigured = hostPlan(f.root, next, next, f.plan, f.host);
+  assert.equal(reconfigured.value.owners.daemons.changed, true, 'real host changes invalidate activation custody');
+  assert.equal(reconfigured.value.owners.daemons.acceptance, undefined);
 });
 
 test('component reuse changes only source metadata and pins candidate dependencies; changed artifacts cannot be recertified', t => {

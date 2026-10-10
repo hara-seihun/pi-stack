@@ -125,6 +125,22 @@ export function inputGraph(root) {
       info.files.push(`${workspace.directory}/package.json`, ...resolved);
       if (!resolved.length) info.files.push(...area(workspace.directory));
     };
+    function generatedDestination(node) {
+      let child = node;
+      for (let parent = node.parent; parent; child = parent, parent = parent.parent) {
+        if (!ts.isCallExpression(parent) || parent.arguments[0] !== child) continue;
+        const callee = parent.expression.getText(ast);
+        if (['writeFileSync', 'writeFile', 'mkdirSync', 'mkdir', 'rmSync', 'rm', 'chmodSync', 'chmod'].includes(callee)) return true;
+        if (['scripts/deploy-build.test.mjs', 'scripts/deploy-remote.test.mjs'].includes(file) && callee === 'put') return true;
+      }
+      return false;
+    }
+    function readsEnvironment(node) {
+      const parent = node.parent;
+      if (ts.isDeleteExpression(parent)) return false;
+      if (ts.isBinaryExpression(parent) && parent.left === node && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken) return false;
+      return true;
+    }
     function visit(node) {
       if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument) && ts.isStringLiteralLike(node.argument.literal)) addImport(node.argument.literal.text);
       if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier && ts.isStringLiteralLike(node.moduleSpecifier)) addImport(node.moduleSpecifier.text);
@@ -134,12 +150,12 @@ export function inputGraph(root) {
         if (arg && ts.isStringLiteralLike(arg)) addImport(arg.text);
         else if (!(file === 'packages/orchestrator/src/threads/pi-session.ts' && arg?.getText(ast) === 'pathToFileURL(join(sdk, "modes/rpc/shared-rpc-mode.js")).href') && !(file === 'packages/orchestrator/tests/thread-http.test.ts' && /^`\$\{release\}\/threads\/[a-z-]+\.js`$/.test(arg?.getText(ast)))) info.reasons.push(`dynamic import ${file}`);
       }
-      if (ts.isPropertyAccessExpression(node) && node.expression.getText(ast) === 'process.env') info.environment.push(node.name.text);
-      if (ts.isElementAccessExpression(node) && node.expression.getText(ast) === 'process.env') {
+      if (ts.isPropertyAccessExpression(node) && node.expression.getText(ast) === 'process.env' && readsEnvironment(node)) info.environment.push(node.name.text);
+      if (ts.isElementAccessExpression(node) && node.expression.getText(ast) === 'process.env' && readsEnvironment(node)) {
         if (node.argumentExpression && ts.isStringLiteralLike(node.argumentExpression)) info.environment.push(node.argumentExpression.text);
         else info.reasons.push(`dynamic environment ${file}`);
       }
-      if (ts.isStringLiteralLike(node)) {
+      if (ts.isStringLiteralLike(node) && !generatedDestination(node)) {
         const text = node.text;
         if (text.includes('/') && !text.startsWith('/') && !text.includes('://') && !text.includes('\n') && text.split('/').some(part => part && part !== '.' && part !== '..')) {
           const parents = [text];
@@ -179,9 +195,10 @@ export function planCheck(root, job, graph = inputGraph(root)) {
   const closure = graph.closure([...entrypoints, ...(job[3]?.checkInputs ?? []), ...(policy.typeProgram ? policy.inputs : [])]);
   const declared = inputs.flatMap(input => graph.area(input));
   const unknown = !policy.completeScope && closure.reasons.some(reason => !reason.startsWith('dynamic environment '));
+  const unknownEnvironment = !policy.typeProgram && closure.reasons.some(reason => reason.startsWith('dynamic environment '));
   return { ...policy, name: job[0], inputs, files: unknown ? graph.files : [...new Set([...declared, ...closure.files])].sort(),
-    coverage: unknown ? 'full-source-proof' : policy.completeScope ? 'complete-declared-scope' : 'declared-import-closure', reasons: closure.reasons, environment: policy.typeProgram ? [] : closure.environment,
-    fullEnvironment: !policy.typeProgram && closure.reasons.some(reason => reason.startsWith('dynamic environment ')), memoizable: !unknown };
+    coverage: unknown ? 'full-source-proof' : unknownEnvironment ? 'full-environment-proof' : policy.completeScope ? 'complete-declared-scope' : 'declared-import-closure', reasons: closure.reasons, environment: policy.typeProgram ? [] : closure.environment,
+    fullEnvironment: unknownEnvironment, memoizable: !unknown && !unknownEnvironment };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

@@ -143,7 +143,7 @@ export function checkExecutor({ root, directory, versions, execute = runJob }) {
         return { name: job[0], outcome: 'passed', code: 0, signal: null, elapsedMs: performance.now() - started, reused: path, key, coverage: plan.coverage };
       }
     }
-    if (plan.coverage === 'full-source-proof') write(`\n===== ${job[0]}: full source proof (${plan.reasons.join('; ')}) =====\n`);
+    if (['full-source-proof', 'full-environment-proof'].includes(plan.coverage)) write(`\n===== ${job[0]}: ${plan.coverage.replaceAll('-', ' ')} (${plan.reasons.join('; ')}) =====\n`);
     const result = await execute(job, write);
     if (result.outcome === 'passed') {
       refresh();

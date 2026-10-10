@@ -72,6 +72,33 @@ test.each([true, false])("Bob asks Alice, fresh root delivers once across restar
   } finally { manager?.close(); await f.close(); }
 });
 
+test("consent reconciliation already in flight cannot start another executor after dispatch handoff", async () => {
+  const f = await fixture(); let manager: RootConsentManager | undefined;
+  try {
+    let paused = false, judgments = 0;
+    manager = new RootConsentManager(join(f.root, "consent.sqlite"), { enabled: () => true, bridge: f.bridge,
+      memory: async <T>(path: string, body: unknown) => {
+        const result = await f.memory<T>(path, body);
+        if (path === "/v1/root/resume-consent") paused = true;
+        return result;
+      },
+      executor: async () => { judgments++; return { ok: true, value: { reply: "The authorized meeting time.", subjects: ["alice", "bob"] } }; } });
+    const asked = await manager.request(f.admission, "meeting", { subject: "alice", question: "May I share the time with Bob?" });
+    expect(asked.ok).toBe(true);
+    const threads = await f.owners.alice.list(); if (!threads.ok) throw Error("No consent inbox");
+    const threadId = threads.value.threads[0].id;
+    const questions = await f.owners.alice.questions(threadId); if (!questions.ok) throw Error("No question");
+    const questionId = questions.value[0].id;
+    expect(await f.owners.alice.answer({ threadId, questionId, selectedSuggestionIds: [`${questionId}:0`], text: "Only the time." })).toMatchObject({ ok: true });
+    expect(await manager.drain(() => !paused)).toEqual({ pending: 1, delivered: 0, errors: 0 });
+    expect(judgments).toBe(0);
+    expect(await manager.drain(() => !paused)).toEqual({ pending: 1, delivered: 0, errors: 0 });
+    expect(judgments).toBe(0);
+    expect(await manager.drain(() => true)).toEqual({ pending: 0, delivered: 1, errors: 0 });
+    expect(judgments).toBe(1);
+  } finally { manager?.close(); await f.close(); }
+});
+
 test("root routing keeps the exact authored Markdown decision first with its authenticated consent scope", async () => {
   const f = await fixture(); let manager: RootConsentManager | undefined;
   try {

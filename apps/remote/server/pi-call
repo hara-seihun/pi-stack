@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 const args = process.argv.slice(2);
 if (!args.length || args[0] === "--help") {
-  console.log("Usage: pi-call status | list | preflight | start --brief FILE | show ID | end ID\nBrief JSON: {requestId:UUID,to:E164,contactName?,purpose,shareableFacts:[],opening,maxSeconds:60..1800}. Keep the approved requestId unchanged when inspecting an uncertain submission; an identity is never redialled. Only approved recipient-facing facts enter Voice and managed telephone reasoning.");
+  console.log("Usage: pi-call status | list | preflight | start --brief FILE | show ID | end ID\nBrief JSON: {requestId:UUID,to:E164,contactName?,purpose,shareableFacts:[],opening,maxSeconds:60..1800,followUpOf?:CALL_ID_UUID}. Keep the approved requestId unchanged when inspecting an uncertain submission; an identity is never redialled. followUpOf acknowledges the latest accepted dial to that destination within two hours; it does not alone override the cooldown. The service additionally requires explicit manager/operator reconciliation approval. It never bypasses a recipient hold or the unfinished-call guard. Only approved recipient-facing facts enter Voice and managed telephone reasoning.");
   process.exit(0);
 }
 try {

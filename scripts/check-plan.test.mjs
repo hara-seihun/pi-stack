@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path';
 import { inputGraph, planCheck, testFiles } from './check-plan.mjs';
 import { checkExecutor, checkKey, fingerprintTree } from './check-cache.mjs';
 import { checkJobs } from './test.mjs';
+import { runJob } from './run-jobs.mjs';
 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'pi-check-plan-'));
@@ -122,6 +123,65 @@ test('successful stage receipts acquire custody only after the actual toolchain 
   assert.equal(stable.finalize().state, 'validated');
   assert.ok(existsSync(join(directory, `${stableResult.key}.json`)));
   assert.ok((await stable(job, () => {})).reused);
+});
+
+test('distinct service invocations reuse reset/write-only environment, while a meaningful read still invalidates and fails', async t => {
+  const { root, put } = fixture(t);
+  put('packages/one/tests/environment.mjs', `import assert from 'node:assert/strict';
+for (const key of Object.keys(process.env)) if (key.startsWith('PI_ORCHESTRATOR_')) delete process.env[key];
+process.env.WRITE_ONLY = 'fixed';
+delete process.env.RESET_ONLY;
+assert.equal(process.env.MEANINGFUL, 'correct');\n`);
+  const directory = join(root, 'receipts');
+  let calls = 0;
+  const run = checkExecutor({ root, directory, versions, execute: async (input, write) => { calls++; return runJob(input, write); } });
+  const invocation = (id, pid, meaningful = 'correct') => ['orchestrator test: environment fixture', process.execPath, ['packages/one/tests/environment.mjs'], {
+    cwd: root, checkInputs: ['packages/one/tests/environment.mjs'], checkEnvironment: {}, env: {
+      ...process.env, INVOCATION_ID: id, SYSTEMD_EXEC_PID: pid, MEANINGFUL: meaningful,
+    },
+  }];
+  const first = invocation('d07da92b56df4e35aeee1ac248750c42', '3507137');
+  const second = invocation('bb94a93461d049ef8806a127318fbd68', '2324');
+  const plan = planCheck(root, first);
+  assert.equal(plan.fullEnvironment, false);
+  assert.deepEqual(plan.environment, ['MEANINGFUL']);
+  assert.equal(checkKey(root, first, versions), checkKey(root, second, versions));
+  assert.equal((await run(first, () => {})).outcome, 'passed');
+  assert.ok((await run(second, () => {})).reused);
+  const changed = invocation('bb94a93461d049ef8806a127318fbd68', '2324', 'wrong');
+  assert.notEqual(checkKey(root, second, versions), checkKey(root, changed, versions));
+  assert.equal((await run(changed, () => {})).outcome, 'failed');
+  assert.equal(calls, 2);
+});
+
+test('compound environment updates and unknown computed reads retain their input dependence', async t => {
+  const { root, put } = fixture(t);
+  put('packages/one/tests/contract.test.ts', 'process.env.COUNTER += "suffix"; const name = external(); console.log(process.env[name]);');
+  const plan = planCheck(root, job);
+  assert.ok(plan.environment.includes('COUNTER'));
+  assert.equal(plan.coverage, 'full-environment-proof');
+  assert.equal(plan.memoizable, false);
+  let calls = 0;
+  const run = checkExecutor({ root, directory: join(root, 'receipts'), versions, execute: async ([name]) => { calls++; return { name, outcome: 'passed', code: 0 }; } });
+  await run(job, () => {});
+  await run(job, () => {});
+  assert.equal(calls, 2);
+  assert.equal(run.inspect(job).state, 'requires-cold-proof');
+});
+
+test('synthetic fixture write destinations do not import the coincidentally named real module or its environment', t => {
+  const { root, put } = fixture(t);
+  put('scripts/deploy-build.test.mjs', `import { writeFileSync } from 'node:fs';
+const put = (path, value) => writeFileSync(path, value);
+put('packages/one/src/ambient.ts', 'synthetic source');\n`);
+  put('packages/one/src/ambient.ts', 'const field = external(); console.log(process.env[field]);');
+  const proof = ['orchestrator test: generated destination fixture', 'node', ['scripts/deploy-build.test.mjs'], { checkInputs: ['scripts/deploy-build.test.mjs'] }];
+  const plan = planCheck(root, proof);
+  assert.equal(plan.fullEnvironment, false);
+  assert.ok(!plan.files.includes('packages/one/src/ambient.ts'));
+  put('scripts/deploy-build.test.mjs', `import { readFileSync } from 'node:fs';
+readFileSync('packages/one/src/ambient.ts', 'utf8');\n`);
+  assert.equal(planCheck(root, proof).coverage, 'full-environment-proof');
 });
 
 test('shipping plans cover every test file once and do not hide a second Remote build in npm test', () => {
