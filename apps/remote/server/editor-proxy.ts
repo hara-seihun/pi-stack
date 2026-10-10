@@ -10,7 +10,22 @@ export function editorHeaders(req: Request, person: Person): Headers {
   return headers;
 }
 
-export async function editorResponse(person: Person, req: Request, url: URL, signal: AbortSignal, socket: string): Promise<Response> {
+export function editorFrameHeaders(headers: Headers, parentOrigin: string): void {
+  const parent = new URL(parentOrigin);
+  if (!["http:", "https:"].includes(parent.protocol) || parent.origin !== parentOrigin) throw new Error("Editor grant contains an invalid parent origin");
+  headers.delete("x-frame-options");
+  for (const name of ["content-security-policy", "content-security-policy-report-only"]) {
+    const policy = headers.get(name);
+    if (policy === null && name.endsWith("report-only")) continue;
+    const policies = policy === null ? [""] : policy.split(",");
+    headers.set(name, policies.map(value => [
+      ...value.split(";").map(directive => directive.trim()).filter(directive => directive && directive.split(/\s/, 1)[0]!.toLowerCase() !== "frame-ancestors"),
+      `frame-ancestors 'self' ${parentOrigin}`,
+    ].join("; ")).join(", "));
+  }
+}
+
+export async function editorResponse(person: Person, req: Request, url: URL, signal: AbortSignal, socket: string, parentOrigin: string): Promise<Response> {
   try {
     const body = req.method === "GET" || req.method === "HEAD" ? undefined : req.body;
     const response = await fetch(`http://localhost${url.pathname}${url.search}`, {
@@ -18,6 +33,7 @@ export async function editorResponse(person: Person, req: Request, url: URL, sig
       redirect: "manual", signal: AbortSignal.any([signal, req.signal]), ...(body ? { duplex: "half" } : {}),
     });
     const headers = new Headers(response.headers);
+    editorFrameHeaders(headers, parentOrigin);
     for (const key of STRIPPED) if (key !== "host" && key !== "referer") headers.delete(key);
     headers.delete("set-cookie");
     headers.set("cache-control", "no-store");

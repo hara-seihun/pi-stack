@@ -152,6 +152,7 @@ final class NativeShells {
             title.setText(state.title);
             detail.setText(state.detail);
             status.setVisibility(state == EditorState.READY ? android.view.View.GONE : android.view.View.VISIBLE);
+            close.setVisibility(state == EditorState.READY ? android.view.View.GONE : android.view.View.VISIBLE);
             web.setVisibility(state == EditorState.READY || state == EditorState.OPENING ? android.view.View.VISIBLE : android.view.View.GONE);
             web.setImportantForAccessibility(state == EditorState.READY ? android.view.View.IMPORTANT_FOR_ACCESSIBILITY_AUTO : android.view.View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
         }

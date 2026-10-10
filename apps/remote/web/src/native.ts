@@ -31,6 +31,7 @@ export interface PhoneStatus {
 interface RemoteBridge {
   getState(options?: object): Promise<{ routerUrl: string; accessToken?: string }>;
   syncSession?(options: { user: string; session: string }): Promise<void>;
+  openEditor?(options: { url: string; ticket: string }): Promise<void>;
   phoneStatus?(): Promise<PhoneStatus>;
   phoneConfigure?(options: { enabled: boolean; user: string; environment: string; name?: string }): Promise<void>;
   phoneOverlay?(options: { visible: boolean }): Promise<PhoneStatus>;
@@ -96,6 +97,7 @@ export const remote: RemoteBridge = !nativePlatform
     : {
         getState: (options = {}) => capacitor.nativePromise("KenanRemote", "getState", options),
         syncSession: (options) => capacitor.nativePromise("KenanRemote", "syncSession", options),
+        openEditor: (options) => capacitor.nativePromise("KenanRemote", "openEditor", options),
         phoneStatus: () => capacitor.nativePromise("KenanRemote", "phoneStatus", {}),
         phoneConfigure: (options) => capacitor.nativePromise("KenanRemote", "phoneConfigure", options),
         phoneOverlay: (options) => capacitor.nativePromise("KenanRemote", "phoneOverlay", options),
@@ -427,6 +429,11 @@ function resolveApiUrl(path: string) {
 window.KenanRemote = {
   enabled: true,
   getState,
+  ...(nativePlatform ? { openEditor: async (options: { url: string; ticket: string }) => {
+    if (!remote.openEditor) throw new Error("This Android shell cannot open the editor; update the app");
+    await nativeSessionReady();
+    await remote.openEditor(options);
+  } } : {}),
   select: async ({ id, user }) => {
     if (user !== auth.user) throw new Error("Choose and unlock this person before selecting an environment");
     const endpoints = await loadEnvironments();

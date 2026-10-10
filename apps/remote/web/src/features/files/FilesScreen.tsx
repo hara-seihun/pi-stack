@@ -71,7 +71,7 @@ export function FilesScreen({ selectedPath, onSelect, shortcuts, onAttach, onEdi
     const result = await openPersonEditor(target, kind);
     setOpening(false);
     if (!result.ok) setError(result.error);
-    else setEditor(result.value);
+    else if (result.presentation === "frame") setEditor(result.value);
   }
   if (editor) return <EditorFrame launch={editor} />;
   const entry = selection.kind === "ready" ? selection.entry : null;

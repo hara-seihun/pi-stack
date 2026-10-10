@@ -328,7 +328,7 @@ async function editorRoute(person: Person, req: Request, url: URL, server: Bun.S
   if (!await unitActive(person)) { sessions.revoke(person.user); return deny("Your folder is locked", 423); }
   const websocket = req.headers.get("upgrade")?.toLowerCase() === "websocket";
   if ((websocket || !["GET", "HEAD"].includes(req.method)) && !editorOriginAllowed(req, person)) return deny("Editor origin does not match", 403);
-  if (!websocket) return editorResponse(person, req, url, identity.signal, editorSocket(person.user));
+  if (!websocket) return editorResponse(person, req, url, identity.signal, editorSocket(person.user), identity.parentOrigin);
   const protocols = (req.headers.get("sec-websocket-protocol") ?? "").split(",").map(value => value.trim()).filter(Boolean);
   const headers = new Headers({ host: new URL(person.editor!.origin).host, origin: person.editor!.origin });
   const upstream = await openUpstream(`ws+unix://${editorSocket(person.user)}:${url.pathname}${url.search}`, protocols, person.user, identity.signal, undefined, headers);
@@ -565,7 +565,7 @@ async function route(req: Request, url: URL, peer?: { uid: number }): Promise<Re
         await systemctl("stop", `pi-editor@${person.user}.service`);
         return locked(person.user);
       }
-      const handoff = editors.issue(person, identity.session!, body.path, body.kind);
+      const handoff = editors.issue(person, identity.session!, body.path, body.kind, req, login?.settings.publicUrl ?? null);
       return handoff.ok ? Response.json(handoff) : Response.json({ error: handoff.error, code: "editor_session_ended" }, { status: 423 });
     });
   }

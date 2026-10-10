@@ -49,6 +49,7 @@ interface Window {
   KenanRemote?: {
     enabled: boolean;
     getState(): Promise<any>;
+    openEditor?(options: { url: string; ticket: string }): Promise<void>;
     select(options: { id: string; user: string }): Promise<any>;
     resolveApiUrl(path: string): string;
   };

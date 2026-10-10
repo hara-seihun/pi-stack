@@ -16,7 +16,9 @@ export function editorLaunch(value: unknown): EditorResult {
   } catch { return { ok: false, error: "Invalid editor origin" }; }
 }
 
-export async function openPersonEditor(path: string | null, kind: "file" | "directory"): Promise<EditorResult> {
+type EditorOpenResult = { ok: true; presentation: "frame"; value: EditorLaunch } | { ok: true; presentation: "native" } | { ok: false; error: string };
+
+export async function openPersonEditor(path: string | null, kind: "file" | "directory"): Promise<EditorOpenResult> {
   const identity = { user: window.PiRemotePerson.get(), session: window.PiRemotePerson.session() };
   try {
     const [config, environment] = await Promise.all([api("GET", API.editorInfo.path()), window.KenanRemote?.getState()]);
@@ -24,7 +26,12 @@ export async function openPersonEditor(path: string | null, kind: "file" | "dire
     const parsed = editorLaunch(await api(API.editor.method, API.editor.path(), { path, kind }));
     if (!parsed.ok) return parsed;
     if (identity.user !== window.PiRemotePerson.get() || identity.session !== window.PiRemotePerson.session()) return { ok: false, error: "Your session changed before the editor opened" };
+    if (window.KenanRemote?.openEditor) {
+      await window.KenanRemote.openEditor(parsed.value);
+      recordFeatureUsage("editor");
+      return { ok: true, presentation: "native" };
+    }
     recordFeatureUsage("editor");
-    return parsed;
+    return { ...parsed, presentation: "frame" };
   } catch (cause) { return { ok: false, error: cause instanceof Error ? cause.message : "Could not open your editor" }; }
 }
