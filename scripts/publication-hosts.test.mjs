@@ -602,6 +602,20 @@ for (const mode of ["history-probe-error", "history-unmarked-busy"]) test(`${mod
     assert.deepEqual(recovered.nativeHistoryRecoveries.at(-1).hosts, ["gmktec"]);
     assert.deepEqual(recovered.failure, failed.failure);
     assert.deepEqual(JSON.parse(readFileSync(repair.path, "utf8")), repair);
+    writeFileSync(repair.path, JSON.stringify({ ...repair, outcome: { status: 'infrastructure-fixed', evidence: join(f.root, 'focused-proof.json') } }));
+    const retry = await f.run('_retry');
+    assert.equal(retry.status, 'queued');
+    assert.equal(retry.integrationSha, f.revision);
+    assert.deepEqual(retry.hosts.converge, completedPeer, 'evidenced retry does not erase a successful peer');
+    const afterRecovery = f.events().length;
+    const published = await f.run();
+    assert.equal(published.status, 'published', JSON.stringify(published.failure));
+    assert.deepEqual(published.hosts.converge, completedPeer);
+    assert.equal(readFileSync(completedPeer.proof, 'utf8'), proof);
+    assert.ok(f.events().slice(afterRecovery).every(event => event.host === 'gmktec'), 'only the repaired host may acquire new custody');
+    assert.equal(published.hosts.gmktec.integrationSha, f.revision);
+    assert.ok(published.nativeHistoryRecoveries.some(receipt => receipt.status === 'failed' && /restoration refused/.test(receipt.error)));
+    assert.ok(published.nativeHistoryRecoveries.some(receipt => receipt.status === 'restored' && receipt.hosts.includes('gmktec')));
   }
 });
 

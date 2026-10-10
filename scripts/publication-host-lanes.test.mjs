@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { hostLaneInputPath, hostLaneLockPath, hostWaitKind, mergeHostLanes, readHostLane, rollForwardHosts, runHostLane, runHostLaneRecovery, reconcileHostLaneObservation } from "../deploy/publication-hosts.mjs";
+import { hostLaneInputPath, hostLaneLockPath, hostWaitKind, mergeHostLanes, readHostLane, rollForwardHosts, runHostLane, runHostLaneRecovery, reconcileHostLaneObservation, resetHostLaneForRepair } from "../deploy/publication-hosts.mjs";
 
 const targets = [{ id: "kenan-server" }, { id: "converge" }];
 const requestId = "PUB-0123456789abcdef01234567";
@@ -285,6 +285,84 @@ test('native recovery receipts are additive across hosts, stable across checkpoi
   }
   mergeHostLanes(request, h.laneRoot, targets);
   assert.equal(request.nativeHistoryRecoveries.length, 3, 'read/restart does not append another copy');
+});
+
+for (const custodyState of ['released', 'resume-required']) test(`evidenced unchanged-integration retry retains ${custodyState} custody, recovery history and passed peer`, t => {
+  const h = harness(t);
+  const request = initial();
+  request.failure = { at: '2026-01-01T00:00:00Z', attempt: 1, reason: 'activation failed' };
+  let checkpoint;
+  rollForwardHosts(request, targets, { ...h.operations, active: () => false, launch(target, inputPath) {
+    runHostLane(inputPath, { bind(local, save) { checkpoint = save; }, recover() {}, deliver(local) {
+      if (target.id === 'converge') return { status: 'passed', integrationSha };
+      local.nativeHistory = { hosts: { [target.id]: { state: custodyState, integrationSha } } };
+      checkpoint(local);
+      return { status: 'failed', failure: { message: 'activation failed' } };
+    } });
+    return { ok: true };
+  } });
+  request.status = 'failed';
+  const peer = structuredClone(request.hosts.converge);
+  const inputPath = hostLaneInputPath(h.laneRoot, requestId, integrationSha, targets[0].id);
+  runHostLaneRecovery(inputPath, { bind(local, save) { checkpoint = save; }, recover(local) {
+    (local.nativeHistoryRecoveries ??= []).push({ at: '2026-01-02T00:00:00Z', status: 'restored', hosts: [targets[0].id] });
+    checkpoint(local);
+  } });
+  mergeHostLanes(request, h.laneRoot, targets);
+  const revision = request.hostDelivery[targets[0].id].revision;
+  const repair = { id: 'repair-1', failure: request.failure, outcome: { status: 'infrastructure-fixed', evidence: '/proof.json' } };
+  assert.equal(resetHostLaneForRepair(inputPath, request, { ...repair, explicitStop: true }, revision).error.kind, 'host-retry-invalid-evidence');
+  assert.equal(resetHostLaneForRepair(inputPath, request, { ...repair, failure: { ...request.failure, attempt: 2 } }, revision).error.kind, 'host-retry-invalid-evidence');
+  assert.equal(resetHostLaneForRepair(inputPath, request, repair, revision - 1).error.kind, 'host-retry-conflict');
+  assert.equal(resetHostLaneForRepair(hostLaneInputPath(h.laneRoot, requestId, integrationSha, targets[1].id), request, repair,
+    request.hostDelivery.converge.revision).error.kind, 'host-retry-not-failed');
+  const reset = resetHostLaneForRepair(inputPath, request, repair, revision);
+  assert.equal(reset.ok, true);
+  assert.equal(reset.changed, true);
+  assert.notEqual(reset.inputPath, inputPath);
+  assert.deepEqual(resetHostLaneForRepair(inputPath, request, repair, revision), { ...reset, changed: false });
+  const queued = readHostLane(h.laneRoot, requestId, integrationSha, targets[0].id);
+  assert.equal(queued.state, 'queued');
+  assert.equal(queued.history.at(-1).outcome.failure.message, 'activation failed');
+  assert.equal(queued.history.at(-1).nativeHistoryRecoveries.length, 1);
+  assert.equal(queued.repairReset.evidence, '/proof.json');
+  request.status = 'queued';
+  const launched = [];
+  assert.deepEqual(rollForwardHosts(request, targets, { ...h.operations, active: () => false, launch(target, newInputPath) {
+    launched.push(target.id);
+    runHostLane(newInputPath, { bind(local, save) { checkpoint = save; }, recover() { assert.fail('Settled retry does not repeat recovery'); }, deliver(local) {
+      assert.equal(local.nativeHistory.hosts[target.id].state, custodyState);
+      assert.equal(local.nativeHistoryRecoveries.length, 1);
+      local.nativeHistory.hosts[target.id].state = 'released';
+      checkpoint(local);
+      return { status: 'passed', integrationSha };
+    } });
+    return { ok: true };
+  } }), { status: 'passed' });
+  assert.deepEqual(launched, [targets[0].id]);
+  assert.deepEqual(request.hosts.converge, peer);
+  assert.equal(request.nativeHistoryRecoveries.length, 1, 'reset token does not duplicate prior recovery receipt');
+});
+
+for (const custodyState of ['repair-required', 'restore-required', 'resume-required']) test(`retry refuses unresolved ${custodyState} custody and cannot invent clearance`, t => {
+  const h = harness(t);
+  const request = initial();
+  request.failure = { at: '2026-01-01T00:00:00Z', attempt: 1 };
+  rollForwardHosts(request, [targets[0]], { ...h.operations, active: () => false, launch(target, inputPath) {
+    runHostLane(inputPath, { bind() {}, recover() {}, deliver(local) {
+      local.nativeHistory = { hosts: { [target.id]: { state: custodyState, integrationSha: 'b'.repeat(40) } } };
+      return { status: 'failed', failure: { message: 'activation failed' } };
+    } });
+    return { ok: true };
+  } });
+  request.status = 'failed';
+  const inputPath = hostLaneInputPath(h.laneRoot, requestId, integrationSha, targets[0].id);
+  const revision = request.hostDelivery[targets[0].id].revision;
+  const repair = { id: 'repair-1', failure: request.failure, outcome: { status: 'infrastructure-fixed', evidence: '/proof.json' } };
+  assert.equal(resetHostLaneForRepair(inputPath, request, repair, revision).error.kind, 'host-retry-custody-held');
+  request.nativeHistory.hosts[targets[0].id].state = 'released';
+  assert.equal(resetHostLaneForRepair(inputPath, request, repair, revision).error.kind, 'host-retry-custody-held', 'central state cannot clear retained journal custody');
+  assert.equal(readHostLane(h.laneRoot, requestId, integrationSha, targets[0].id).state, 'failed');
 });
 
 test('settled readiness observation retains causal failure and custody with a revision fence', t => {

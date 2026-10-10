@@ -11,6 +11,7 @@ export function hostWaitKind(wait) {
     case "native-history-custody": return "waiting-for-native-history-custody";
     case "host-lock": return "waiting-for-host-deployment-lock";
     case "host-delivery": return "waiting-for-host-delivery";
+    case "executor-handoff": return "waiting-for-executor-handoff";
     case "thread-contract": return "waiting-for-thread-execution-contract";
     default: throw new Error(`Unknown host wait: ${wait.kind}`);
   }
@@ -148,7 +149,7 @@ export function mergeHostLanes(request, root, targets) {
   return request;
 }
 
-function queueLane(request, root, hostId, previousLane) {
+function queueLane(request, root, hostId, previousLane, repairReset) {
   const token = randomUUID();
   const inputPath = join(directory(root, request.requestId, request.integrationSha, hostId), `input-${token}.json`);
   const local = isolate(request, hostId);
@@ -156,11 +157,13 @@ function queueLane(request, root, hostId, previousLane) {
   const lane = { version: 1, requestId: request.requestId, integrationSha: request.integrationSha, hostId,
     token, inputPath, revision: (previousLane?.revision ?? 0) + 1,
     state: "queued", queuedAt: at, updatedAt: at, fields: capture(local, hostId),
+    ...(repairReset ? { repairReset } : {}), nativeHistoryRecoveries: clone(previousLane?.nativeHistoryRecoveries ?? []),
     step: local.step ?? null, progress: local.progress ?? null, timings: {}, worker: null,
     history: previousLane ? [...previousLane.history, { token: previousLane.token, state: previousLane.state,
       outcome: previousLane.outcome ?? null, inputPath: previousLane.inputPath, updatedAt: previousLane.updatedAt,
       fields: previousLane.fields, timings: previousLane.timings, recoveries: previousLane.recoveries ?? [],
-      nativeHistoryRecoveries: previousLane.nativeHistoryRecoveries ?? [] }] : [],
+      nativeHistoryRecoveries: previousLane.nativeHistoryRecoveries ?? [], observations: previousLane.observations ?? [],
+      repairReset: previousLane.repairReset ?? null }] : [],
   };
   atomicWrite(inputPath, { version: 1, token, root, request: local, hostId });
   atomicWrite(journalPath(root, request.requestId, request.integrationSha, hostId), lane);
@@ -220,6 +223,51 @@ export function rollForwardHosts(request, targets, operations) {
   return summarize(request, targets);
 }
 
+export function resetHostLaneForRepair(inputPath, request, repair, expectedRevision) {
+  const input = read(inputPath);
+  if (input.version !== 1 || request.requestId !== input.request.requestId || request.integrationSha !== input.request.integrationSha) {
+    return { ok: false, error: { kind: "host-retry-identity-conflict" } };
+  }
+  const { root, hostId } = input;
+  const lane = readHostLane(root, request.requestId, request.integrationSha, hostId);
+  if (!lane) return { ok: false, error: { kind: "host-retry-missing-lane" } };
+  if (repair?.explicitStop || request.failure?.reason === "cancelled" || request.status !== "failed"
+    || typeof repair?.id !== "string" || !repair.id.trim()
+    || repair.outcome?.status !== "infrastructure-fixed" || typeof repair.outcome.evidence !== "string" || !repair.outcome.evidence.trim()
+    || typeof request.failure?.at !== "string" || !Number.isSafeInteger(request.failure?.attempt)
+    || repair.failure?.at !== request.failure.at || repair.failure?.attempt !== request.failure.attempt) {
+    return { ok: false, error: { kind: "host-retry-invalid-evidence" } };
+  }
+  if (lane.repairReset?.repairId === repair.id) {
+    return { ok: true, inputPath: lane.inputPath, revision: lane.revision, changed: false };
+  }
+  if (lane.token !== input.token || lane.inputPath !== inputPath || lane.revision !== expectedRevision) {
+    return { ok: false, error: { kind: "host-retry-conflict", revision: lane.revision } };
+  }
+  if (lane.state !== "failed") return { ok: false, error: { kind: "host-retry-not-failed", state: lane.state } };
+  if (JSON.stringify(request.hosts?.[hostId]) !== JSON.stringify(lane.outcome)) {
+    return { ok: false, error: { kind: "host-retry-outcome-conflict" } };
+  }
+  const custodyPaths = [["reservations"], ["nativeHistory", "hosts"], ["bootstrap", "hosts"], ["maintenance", "hosts"]];
+  for (const path of custodyPaths) {
+    const custody = container(request, path)?.[hostId];
+    const retainedIndex = ownedPaths.findIndex(owned => JSON.stringify(owned) === JSON.stringify(path));
+    const retained = lane.fields[retainedIndex];
+    const forwardOnly = path[0] === "nativeHistory" && lane.recovery?.status !== "running";
+    const validCustody = value => ["restored", "released"].includes(value.state)
+      || forwardOnly && value.state === "resume-required" && value.integrationSha === request.integrationSha;
+    if ((custody && !validCustody(custody)) || retained.present && !validCustody(retained.value)) {
+      return { ok: false, error: { kind: "host-retry-custody-held", hostId, path: path.join(".") } };
+    }
+  }
+  const repaired = clone(request);
+  repaired.status = "queued";
+  delete repaired.hosts[hostId];
+  const next = queueLane(repaired, root, hostId, lane, { repairId: repair.id, failureAt: request.failure.at,
+    failedAttempt: request.failure.attempt, evidence: repair.outcome.evidence, at: now() });
+  return { ok: true, inputPath: next.inputPath, revision: next.revision, changed: true };
+}
+
 // The coordinator observes a settled lane while holding its host flock. No source receipt
 // write substitutes for this target journal transition.
 export function reconcileHostLaneObservation(inputPath, request, expectedRevision) {
@@ -260,20 +308,34 @@ function workerContext(inputPath, operations) {
   apply(local, hostId, lane.fields);
   if (lane.timings) local.stageTimings = clone(lane.timings);
   const priorRecoveryCount = snapshot.nativeHistoryRecoveries?.length ?? 0;
-  if (lane.nativeHistoryRecoveries?.length) local.nativeHistoryRecoveries = [
-    ...(local.nativeHistoryRecoveries ?? []), ...clone(lane.nativeHistoryRecoveries),
-  ];
+  if (lane.nativeHistoryRecoveries?.length) {
+    local.nativeHistoryRecoveries ??= [];
+    for (const receipt of lane.nativeHistoryRecoveries) {
+      const index = local.nativeHistoryRecoveries.findIndex(item => item.laneRecoveryId === receipt.laneRecoveryId);
+      if (index === -1) local.nativeHistoryRecoveries.push(clone(receipt));
+      else local.nativeHistoryRecoveries[index] = clone(receipt);
+    }
+  }
   const path = journalPath(root, snapshot.requestId, snapshot.integrationSha, hostId);
   const context = { lane, local, hostId };
+  function recoveryReceipts(request) {
+    const retained = new Map((context.lane.nativeHistoryRecoveries ?? []).map(item => [item.laneRecoveryId, clone(item)]));
+    for (const [index, receipt] of (request.nativeHistoryRecoveries ?? []).entries()) {
+      if (receipt.laneRecoveryId && receipt.laneHostId === hostId) retained.set(receipt.laneRecoveryId, clone(receipt));
+      else if (!receipt.laneRecoveryId && index >= priorRecoveryCount) {
+        const value = { ...clone(receipt), laneHostId: hostId, laneRecoveryId: `${token}:${index - priorRecoveryCount}` };
+        retained.set(value.laneRecoveryId, value);
+      }
+    }
+    return [...retained.values()];
+  }
   context.checkpoint = request => {
     const current = readHostLane(root, lane.requestId, lane.integrationSha, hostId);
     if (request.requestId !== lane.requestId || request.integrationSha !== lane.integrationSha) throw new Error("Host worker changed its immutable integration identity");
     if (current.token !== token || current.revision !== context.lane.revision) throw new Error("Host lane checkpoint lost custody");
     context.lane = { ...context.lane, revision: context.lane.revision + 1, updatedAt: now(), fields: capture(request, hostId),
       step: request.step ?? null, progress: request.progress ?? null, timings: clone(request.stageTimings ?? {}),
-      nativeHistoryRecoveries: (request.nativeHistoryRecoveries ?? []).slice(priorRecoveryCount).map((receipt, index) => ({
-        ...clone(receipt), laneHostId: hostId, laneRecoveryId: `${token}:${index}`,
-      })) };
+      nativeHistoryRecoveries: recoveryReceipts(request) };
     atomicWrite(path, context.lane);
   };
   operations.bind(local, context.checkpoint);
