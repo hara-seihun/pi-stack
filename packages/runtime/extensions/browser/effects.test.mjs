@@ -110,11 +110,49 @@ test("loopback dispatch crosses canonical authority once; retries, rephrasing, c
   const retry = await tool.execute("new-uuid", input);
   assert.equal(retry.details.externalAction.dispatched, false);
   const rephrased = await tool.execute("new-purpose", { ...input, externalAction: { ...declaration, intentKey: "fixture:reworded-purpose" } });
-  assert.equal(rephrased.details.externalAction.dispatched, false);
+  assert.equal(rephrased.isError, true);
+  assert.equal(rephrased.details.actionResult.error, "fenced");
+  assert.equal(rephrased.details.actionResult.action.id, retry.details.externalAction.id);
   const conflict = await tool.execute("new-payload", { ...input, args: ["click", "#different-send"] });
   assert.equal(conflict.details.actionResult.error, "payload-conflict");
   assert.equal(nativeCalls, 1);
   assert.equal(await count(url), baseline + 1);
+}));
+
+test("prior succeeded action dedups exact retry and refuses changed intent or payload without native/provider invocation", { timeout: 15000 }, async () => fixture(async url => {
+  let nativeCalls = 0;
+  const { tool } = toolFor(url, async () => {
+    nativeCalls++;
+    await fetch(`${url}/effect`, { method: "POST" });
+    return { content: [], details: { resultCategory: "success" } };
+  });
+  const input = { args: ["click", "#send"], externalAction: declaration };
+  const first = await tool.execute("first", input);
+  const action = first.details.actionResult.value;
+  const authority = new ActionHttpClient({ PI_REMOTE_SERVER_URL: url });
+  const confirmed = await authority.reconcile(action.id, action.revision, "effect-confirmed", {
+    kind: "provider-receipt", reference: "fixture:effect-one", detail: "Synthetic loopback counter accepted exactly one effect.",
+  }, "fixture-thread");
+  assert.equal(confirmed.ok, true, JSON.stringify(confirmed));
+  assert.equal(confirmed.value.state, "succeeded");
+  const retry = await tool.execute("exact-retry", input);
+  assert.equal(retry.isError, false);
+  assert.equal(retry.details.actionResult.value.disposition, "existing");
+  assert.deepEqual(retry.details.externalAction, { id: action.id, state: "succeeded", dispatched: false });
+  for (const changed of [
+    { ...input, externalAction: { ...declaration, intentKey: "fixture:changed-purpose" } },
+    { ...input, args: ["click", "#different-send"], externalAction: { ...declaration, intentKey: "fixture:changed-purpose-and-payload" } },
+    { ...input, args: ["click", "#different-send"] },
+  ]) {
+    const refused = await tool.execute("changed-request", changed);
+    assert.equal(refused.isError, true);
+    assert.equal(refused.details.resultCategory, "failure");
+    assert.equal(refused.details.actionResult.error, changed.externalAction.intentKey === declaration.intentKey ? "payload-conflict" : "fenced");
+    assert.equal(refused.details.actionResult.action.id, action.id);
+    assert.equal(refused.details.actionResult.action.state, "succeeded");
+  }
+  assert.equal(nativeCalls, 1);
+  assert.equal(await count(url), 1);
 }));
 
 test("post-effect exception retains uncertainty without replay", { timeout: 15000 }, async () => fixture(async url => {
@@ -204,8 +242,22 @@ test("actual native browser declared click produces one synthetic HTTP effect an
     assert.notEqual(result.isError, true, JSON.stringify(result));
     await tool.execute("settle", { args: ["wait", "--text", "sent"] });
     assert.equal(await count(url), 1);
-    await tool.execute("replacement-uuid", input);
-    await tool.execute("reworded", { ...input, externalAction: { ...declaration, intentKey: "reworded" } });
+    const action = result.details.actionResult.value;
+    const authority = new ActionHttpClient({ PI_REMOTE_SERVER_URL: url });
+    const confirmed = await authority.reconcile(action.id, action.revision, "effect-confirmed", {
+      kind: "provider-receipt", reference: "fixture:native-effect-one", detail: "Synthetic loopback counter accepted exactly one native browser effect.",
+    }, "native-fixture-thread");
+    assert.equal(confirmed.ok, true, JSON.stringify(confirmed));
+    const retry = await tool.execute("replacement-uuid", input);
+    assert.equal(retry.isError, false);
+    assert.equal(retry.details.externalAction.dispatched, false);
+    const rephrased = await tool.execute("reworded", { ...input, externalAction: { ...declaration, intentKey: "reworded" } });
+    assert.equal(rephrased.isError, true);
+    assert.equal(rephrased.details.actionResult.error, "fenced");
+    assert.equal(rephrased.details.actionResult.action.id, action.id);
+    const conflict = await tool.execute("changed-payload", { ...input, semanticAction: { action: "click", selector: "#send" } });
+    assert.equal(conflict.isError, true);
+    assert.equal(conflict.details.actionResult.error, "payload-conflict");
     assert.equal(await count(url), 1);
     const script = await tool.execute("script", { script: "await browser({args:['chat','synthetic']});" });
     assert.equal(script.details.scriptSteps[0].ok, false);

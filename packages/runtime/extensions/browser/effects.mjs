@@ -87,11 +87,11 @@ export function installBrowserEffectFence(tool, { loadContract, createAuthority,
       });
       if (!submitted.ok) return refusal(submitted.error, submitted.message, submitted.action);
       action = submitted.value.action;
-      if (submitted.value.disposition === "recipient-held" || action.state !== "accepted") {
+      if (action.state !== "accepted") {
         return {
           content: [{ type: "text", text: `Existing canonical browser action ${action.id}: ${action.state}. No native dispatch; inspect/reconcile its evidence, do not reset the retry identity.` }],
           details: { actionResult: submitted, externalAction: { id: action.id, state: action.state, dispatched: false } },
-          isError: submitted.value.disposition === "recipient-held" || action.state !== "succeeded",
+          isError: action.state !== "succeeded",
         };
       }
       const claimed = await authority.claim(action.id, actor);
