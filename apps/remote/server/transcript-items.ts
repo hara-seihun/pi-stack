@@ -1,7 +1,7 @@
 // Transcript items are the delivery form of Pi's model context. The supervisor
 // derives them from the display projection (`context-display.ts`), so the
-// assistant 👍 substitution, the restored streamed thinking and the running
-// tool overlay are already in place and nothing is added here.
+// restored streamed thinking and the running tool overlay are already in
+// place and nothing is added here.
 //
 // One item is one slice of the context: the system prompt, one tool schema,
 // one user message, one assistant content block, one thinking block, or one
@@ -249,7 +249,8 @@ function visitTranscriptItems(context: any, accept: (item: DerivedItem) => void,
             lazy("thinking", `thinking:${identity}:${blockIndex}`, "Thinking", String(block.thinking), stamp);
           }
         } else if (block?.type === "text" || block?.type === "image") {
-          inline("assistant", `assistant:${identity}:${blockIndex}`, AGENT_NAME, contentMarkdown([block]), stamp);
+          const text = contentMarkdown([block]);
+          if (text.trim()) inline("assistant", `assistant:${identity}:${blockIndex}`, AGENT_NAME, text, stamp);
         } else {
           inline("notice", `unsupported:assistant:${identity}:${blockIndex}`, "Unsupported context block", contentMarkdown([block]), stamp);
         }
@@ -273,7 +274,7 @@ function visitTranscriptItems(context: any, accept: (item: DerivedItem) => void,
       } else inline("user", `user:${identity}`, "User", text, stamp);
     }
     else if (role === "assistant") {
-      inline("assistant", `assistant:${identity}`, AGENT_NAME, text, stamp);
+      if (text.trim()) inline("assistant", `assistant:${identity}`, AGENT_NAME, text, stamp);
       attachResponseMetrics(message, itemsBefore);
     }
     else if (role === "toolResult") {

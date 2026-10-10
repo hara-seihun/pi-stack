@@ -167,17 +167,17 @@ test("a failed page leaves the prior generation intact without partially committ
   expect(db.query("SELECT * FROM transcript_locators").all()).toEqual(original);
 });
 
-test("successful empty assistant projection agrees with source counts including collapsed blank text", async () => {
+test("empty assistant projection agrees with native zero-item counts and retains reasoning", async () => {
   const source = fixture([
-    { seq: 0, count: 1, entryId: "empty", message: { role: "assistant", stopReason: "stop", content: [] }, results: [] },
-    { seq: 1, count: 2, entryId: "blank", message: { role: "assistant", stopReason: "stop", content: [
+    { seq: 0, count: 0, entryId: "empty", message: { role: "assistant", stopReason: "stop", content: [] }, results: [] },
+    { seq: 0, count: 1, entryId: "blank", message: { role: "assistant", stopReason: "stop", content: [
       { type: "thinking", thinking: "reason" }, { type: "text", text: " " }, { type: "text", text: "" },
     ] }, results: [] },
   ]);
   const transcripts = new SourceTranscripts(database(), source.read, project, imageUrl);
   const page = value(await transcripts.page("s", undefined, 3));
-  expect(page.items.map(item => [item.seq, item.kind])).toEqual([[0, "assistant"], [1, "thinking"], [2, "assistant"]]);
-  expect(page.items.filter(item => item.kind === "assistant").map(item => "text" in item && item.text)).toEqual(["👍", "👍"]);
+  expect(page.items.map(item => [item.seq, item.kind])).toEqual([[0, "thinking"]]);
+  expect(page.items.filter(item => item.kind === "assistant")).toEqual([]);
 });
 
 test("typed source failures and malformed display counts remain errors, not empty success windows", async () => {

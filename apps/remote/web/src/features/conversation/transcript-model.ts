@@ -27,10 +27,14 @@ export type TranscriptItem =
       summary: WorkSummary;
     };
 
+export function emptyAssistantEntry(entry: ContextEntry): boolean {
+  return entry.kind === "assistant" && !entry.text?.trim();
+}
+
 export function visibleKind(entry: ContextEntry, mono = false): "user" | "assistant" | "outgoing" | undefined {
   switch (entry.kind) {
     case "user": return !mono || entry.monoVisibility !== "hidden" && monoMessage(entry) ? "user" : undefined;
-    case "assistant": return "assistant";
+    case "assistant": return mono && entry.monoVisibility === "hidden" ? undefined : "assistant";
     case "toolCall": return !mono && outgoingAgentMessage(entry) ? "outgoing" : undefined;
     case "system": case "tool": case "thinking": case "notice": return undefined;
   }
@@ -151,6 +155,7 @@ export function buildStableTranscript(entries: ContextEntry[], mono = false): Tr
   };
 
   for (const entry of entries) {
+    if (emptyAssistantEntry(entry)) continue;
     const kind = visibleKind(entry, mono);
     if (!mono) {
       if (kind) {

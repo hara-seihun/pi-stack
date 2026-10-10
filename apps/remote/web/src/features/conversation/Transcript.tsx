@@ -13,7 +13,7 @@ import { AGENT_NAME } from "../../../../server/agent-identity";
 import { useItemBody } from "./item-bodies";
 import { completeMessageEntry, loadMessageEntry } from "./message-body";
 import { ThreadChips, threadIdsOf } from "./thread-chips";
-import { appendLiveThinking, buildStableTranscript, visibleKind, type TranscriptItem } from "./transcript-model";
+import { appendLiveThinking, buildStableTranscript, emptyAssistantEntry, visibleKind, type TranscriptItem } from "./transcript-model";
 import { VirtualTranscript } from "./VirtualTranscript";
 import { useVisualClock } from "../status/visual-clock";
 import { useVisibleHeads } from "./visible-heads";
@@ -126,6 +126,7 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, autoCollapse
     onEdit(full.value);
   };
   const route = sender ? <AgentRoute direction="incoming" from={{ kind: "peer", threadId: sender.threadId, name: presented.label ?? null }} to={{ kind: "self", threadId: sessionId }} /> : undefined;
+  if (emptyAssistantEntry(presented)) return null;
   const content = <><ChatMessage
     kind={entry.kind}
     label={entry.kind === "assistant" ? AGENT_NAME : presented.label || entry.kind}
@@ -425,7 +426,7 @@ export function Transcript({ entries, liveThinking, thinkingActive, autoCollapse
       return next;
     });
   }, []);
-  const retainedEntries = useMemo(() => mono ? entries.filter(entry => entry.monoVisibility !== "hidden") : entries, [entries, mono]);
+  const retainedEntries = useMemo(() => entries.filter(entry => !emptyAssistantEntry(entry)), [entries]);
   const stable = useMemo(() => buildStableTranscript(retainedEntries, mono), [retainedEntries, mono]);
   const grouped = useMemo(() => appendLiveThinking(stable, liveThinking, thinkingActive, mono), [stable, liveThinking, thinkingActive, mono]);
   const items = useMemo<RenderedTranscriptItem[]>(() => {
