@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 
+export async function settleBrowserProofs(probes) {
+  const results = await Promise.allSettled(probes.map(probe => Promise.resolve().then(probe)));
+  const failed = results.filter(proof => proof.status === 'rejected');
+  if (failed.length) throw new AggregateError(failed.map(proof => proof.reason), 'native browser proof failed');
+}
+
 // Keep the isolated-script contract, but batch the recurring linear checks. Each
 // wrapper call otherwise repeats session-policy and page probes before its CLI.
 export async function probeBrowser(tool, { url, title, visibleTextCheck, frameValue, screenshotPath, downloadPath, downloadContent, record = () => {} }) {

@@ -27,11 +27,11 @@ const fail = (error: string, status = 400) => Response.json({ error }, { status 
 export function publicRoomSnapshot(thread: OwnedRoomThread, source: RoomHistory): RoomSnapshot {
   if (!readRoomPaging(source.paging) || source.messages.length !== source.paging.end - source.paging.start) throw new RoomHistoryError(503, "Room owner returned an invalid history page");
   const metadata = roomMetadata(thread.metadata?.room)!;
-  const execution = projectThreadActivity(thread);
+  const { state, ...execution } = projectThreadActivity(thread);
   const error = source.error ?? execution.executionError;
   let activity: RoomActivity;
   try {
-    validateThreadObservation({ state: thread.state, ...execution });
+    validateThreadObservation({ state, ...execution });
     activity = { ...execution, held: thread.held ?? false,
       ...(thread.metadata?.agentWait ? { waitingOnAgents: thread.metadata.agentWait as Thread["waitingOnAgents"] } : {}),
       ...(error ? { error } : {}) };
@@ -44,7 +44,7 @@ export function publicRoomSnapshot(thread: OwnedRoomThread, source: RoomHistory)
     activity = { activity: "status_error", activityDetail: "Room owner did not report a supported execution phase", activeTools: execution.activeTools ?? [],
       held: thread.held ?? false, error: error ?? "Room owner did not report a supported execution phase" };
   }
-  const room: Room = { ...metadata, title: thread.title, state: thread.state, ...activity };
+  const room: Room = { ...metadata, title: thread.title, state, ...activity };
   const messages: RoomSnapshot["messages"] = [];
   const work: NonNullable<RoomSnapshot["work"]> = [];
   for (const [index, value] of source.messages.entries()) {

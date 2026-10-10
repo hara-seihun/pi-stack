@@ -1,6 +1,8 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { isBuiltin } from 'node:module';
 import { existsSync, readFileSync, realpathSync, statSync, lstatSync, readdirSync, mkdirSync, writeFileSync, renameSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { hostname, release, arch, platform } from 'node:os';
 import { pathToFileURL } from 'node:url';
 export function doctorDigest(directory, cache) {
@@ -45,6 +47,56 @@ export function doctorDigest(directory, cache) {
   return sha256;
 }
 
+export function configuredExtensionKey(target, cache, nonce) {
+  const manifestPath = join(target, 'package.json');
+  if (!existsSync(manifestPath)) return doctorDigest(target, cache);
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  // Remote also ships the host controller, web, phone and Root. Only its Pi
+  // extension entrypoints belong to the disposable browser session.
+  if (manifest.name !== 'pi-remote') return doctorDigest(target, cache);
+  const entries = manifest.pi?.extensions;
+  if (!Array.isArray(entries) || !entries.length || entries.some(entry => typeof entry !== 'string' || !entry.startsWith('./'))) return doctorDigest(target, cache) + nonce;
+  const hash = createHash('sha256').update(JSON.stringify(['pi-remote-extension-closure-v1', manifest.type, entries]));
+  const visited = new Set();
+  function file(base) {
+    const stem = base.replace(/\.(?:js|mjs|cjs)$/, '');
+    const path = [base, `${stem}.ts`, `${stem}.mts`, `${base}.ts`, `${base}.js`, `${base}.mjs`, join(base, 'index.ts'), join(base, 'index.js')].find(path => existsSync(path) && statSync(path).isFile());
+    if (!path) throw new Error('extension import cannot be resolved');
+    return realpathSync(path);
+  }
+  function visit(path) {
+    if (visited.has(path)) return;
+    visited.add(path);
+    const source = readFileSync(path, 'utf8');
+    const parsed = JSON.parse(execFileSync('bun', ['-e', `const input = JSON.parse(await Bun.stdin.text()); const t = new Bun.Transpiler({loader: input.loader}); const js = t.transformSync(input.source); console.log(JSON.stringify({js, imports: t.scanImports(js)}));`], {
+      input: JSON.stringify({ source, loader: /\.(ts|mts)$/.test(path) ? 'ts' : 'js' }), encoding: 'utf8', timeout: 5000, maxBuffer: 4 * 1024 * 1024,
+    }));
+    if (/\b(?:import|require|readFile(?:Sync)?|createRequire|glob(?:Sync)?|fetch|eval|Function)\s*\(|\bimport\.meta\b|\bnew\s+URL\s*\(/.test(parsed.js)) throw new Error('extension has unknown dynamic inputs');
+    hash.update(relative(target, path)).update(source);
+    for (const entry of parsed.imports) {
+      if (entry.kind !== 'import-statement') throw new Error('extension has an unknown import kind');
+      if (entry.path.startsWith('.')) visit(file(resolve(dirname(path), entry.path)));
+      else if (isBuiltin(entry.path)) {
+        if (/^(?:node:)?(?:fs|module|vm|child_process|worker_threads)(?:\/|$)/.test(entry.path)) throw new Error('extension has unknown filesystem or executable inputs');
+      } else {
+        const name = entry.path.startsWith('@') ? entry.path.split('/').slice(0, 2).join('/') : entry.path.split('/')[0];
+        if (!['@earendil-works/pi-coding-agent', '@earendil-works/pi-ai', '@earendil-works/pi-tui'].includes(name)) throw new Error('extension has an undeclared external executable dependency');
+        let directory = dirname(path), packageRoot;
+        while (true) {
+          const candidate = join(directory, 'node_modules', name);
+          if (existsSync(join(candidate, 'package.json'))) { packageRoot = realpathSync(candidate); break; }
+          const parent = dirname(directory); if (parent === directory) throw new Error('extension dependency has no package root'); directory = parent;
+        }
+        hash.update(entry.path).update(doctorDigest(packageRoot, cache));
+      }
+    }
+  }
+  try { for (const entry of entries) visit(file(resolve(target, entry))); return hash.digest('hex'); }
+  catch (error) {
+    if (process.env.PI_STACK_DOCTOR_DIAGNOSTICS === '1') console.error(`doctor extension closure cold: ${error.message}`);
+    return doctorDigest(target, cache) + nonce;
+  }
+}
 export function captureDoctorBindings(phase, runtime, home, control) {
   if (!['browser', 'model'].includes(phase)) throw new Error('doctor phase is required');
   const path = join(home, '.pi/agent/settings.json');
@@ -58,13 +110,13 @@ export function captureDoctorBindings(phase, runtime, home, control) {
     return typeof entry === 'string' ? target : { ...entry, source: target };
   });
   return { protocol: 'pi-doctor-bindings-v1', phase, runtime: realpathSync(runtime), home: resolve(home), control: realpathSync(control),
-    settingsSha256: bytes === null ? null : createHash('sha256').update(bytes).digest('hex'), packages };
+    settingsSha256: bytes === null ? null : createHash('sha256').update(bytes).digest('hex'), packages, nonce: randomUUID() };
 }
 export function doctorKey(phase, runtime, home, control, bindings = captureDoctorBindings(phase, runtime, home, control)) {
-  if (bindings.protocol !== 'pi-doctor-bindings-v1' || bindings.phase !== phase || bindings.home !== resolve(home) || bindings.control !== realpathSync(control) || !Array.isArray(bindings.packages)) throw new Error('invalid doctor input bindings');
+  if (bindings.protocol !== 'pi-doctor-bindings-v1' || bindings.phase !== phase || bindings.home !== resolve(home) || bindings.control !== realpathSync(control) || !Array.isArray(bindings.packages) || typeof bindings.nonce !== 'string' || !bindings.nonce) throw new Error('invalid doctor input bindings');
   runtime = bindings.runtime;
   if (realpathSync(runtime) !== runtime) throw new Error('doctor runtime binding must remain immutable');
-  const hash = createHash('sha256').update(JSON.stringify(['pi-doctor-cache-v3', phase, hostname(), release(), arch(), platform(), process.version, home]));
+  const hash = createHash('sha256').update(JSON.stringify(['pi-doctor-cache-v4', phase, hostname(), release(), arch(), platform(), process.version, home]));
   hash.update(readFileSync(new URL('./doctor-cache.mjs', import.meta.url)));
   hash.update(readFileSync(join(control, 'deploy/runtime-doctors')));
   const closure = realpathSync(join(runtime, 'node_modules'));
@@ -97,7 +149,7 @@ export function doctorKey(phase, runtime, home, control, bindings = captureDocto
     if (typeof target !== 'string') throw new Error('doctor bound package source is required');
     if (/^(npm:|git:|https?:)/.test(target)) continue;
     if (realpathSync(target) !== target) throw new Error('doctor package binding must remain immutable');
-    hash.update(doctorDigest(target, cache));
+    hash.update(configuredExtensionKey(target, cache, bindings.nonce));
   }
   for (const directory of [join(home, '.cache/ms-playwright'), join(home, '.cache/agent-browser'), process.env.PLAYWRIGHT_BROWSERS_PATH].filter(Boolean)) {
     hash.update(directory);

@@ -6,6 +6,8 @@ export const policy = Object.freeze({
   betweenStepsMs: 90_000,
   blockedRetryMs: 30_000,
   blockedLimitMs: 300_000,
+  integrationRecheckLimitMs: 300_000,
+  maxIntegrationRechecks: 3,
   // A meeting census that keeps failing for this long is a broken probe, not a long meeting.
   meetingProbeFailureLimitMs: 2 * 60 * 60_000,
   maxAttempts: 3,
@@ -62,6 +64,19 @@ export function queueStallReason(request, observation, now = Date.now()) {
 }
 
 export function progressBudgetExhausted(request, now = Date.now()) {
+  if (request.status === 'queued' && request.step === 'main-moved-recheck-required') {
+    const repairedAt = request.continuedRepair ? Date.parse(request.continuedRepair.at) : -Infinity;
+    const movements = (request.mainMovements ?? []).filter(movement => Date.parse(movement.at) >= repairedAt);
+    const latest = movements.at(-1);
+    const valid = Number.isFinite(repairedAt) || repairedAt === -Infinity;
+    if (!valid || !latest || latest.attempt !== request.attempt || latest.checks?.status !== 'passed'
+      || !/^[a-f0-9]{40}$/.test(latest.integrationSha ?? '')
+      || latest.ref !== `refs/pi-stack-publication/${request.requestId}/integrations/${latest.integrationSha}`
+      || !/^[a-f0-9]{40}$/.test(latest.remoteMain ?? '')) return true;
+    const elapsed = now - Date.parse(movements[0].at);
+    return !Number.isFinite(elapsed) || elapsed < 0 || elapsed > policy.integrationRecheckLimitMs
+      || movements.length >= policy.maxIntegrationRechecks;
+  }
   if (["live-meeting", "live-telephone", "native-source", "native-history", "executor-handoff", "hosts"].includes(request.waiting?.kind)) return false;
   return (request.attempt ?? 0) >= (request.attemptLimit ?? policy.maxAttempts)
     || !!request.blockedSince && now - Date.parse(request.blockedSince) > policy.blockedLimitMs;
