@@ -8,6 +8,8 @@ import type { AgentCapacity } from "../agent-capacity.js";
 import { ThreadService } from "./service.js";
 import { installMessageDelivery } from "./message-delivery.js";
 import type { PiEvent, Result, ThreadSettings } from "./contracts.js";
+import { PiExecution } from "./pi-execution.js";
+import { PiInputBatch, parseNativeInputs } from "./pi-input-batch.js";
 export { recoverNativeSessionOwners, nativeOwnerAbsent } from "./native-owner-recovery.js";
 
 export interface NativeSessionOptions {
@@ -54,6 +56,8 @@ export async function createManagedAgentSession<T extends { session: AgentSessio
   let closing: Promise<void> | undefined;
   let disposed = false;
   let nativeDispose: (() => void) | undefined;
+  let inbox: PiInputBatch | undefined;
+  const execution = new PiExecution(() => {}, event => output?.(event));
   const settings: ThreadSettings = { model: "pi/native", thinkingLevel: "off", speed: "standard" };
   const service = new ThreadService({ databasePath, sessionsDir, capacity: options.capacity,
     openSession: async (_options, emit) => {
@@ -63,10 +67,22 @@ export async function createManagedAgentSession<T extends { session: AgentSessio
           const reply = (data: unknown) => emit({ type: "response", command: command.type, id: command.id, success: true, data });
           const session = created?.session;
           switch (command.type) {
-            case "get_state": reply({ sessionFile: session?.sessionFile, isStreaming: session?.isStreaming ?? false,
+            case "get_state": execution.flushCompletions(); reply({ sessionFile: session?.sessionFile, isStreaming: session?.isStreaming ?? false,
               isCompacting: session?.isCompacting ?? false, isBashRunning: session?.isBashRunning ?? false,
-              localTools: active?.pending.size ?? 0, pendingMessageCount: session?.pendingMessageCount ?? 0,
+              nativeProtocolVersion: "batch-operations-v1", localTools: active?.pending.size ?? 0, backgroundOperationCount: execution.activeTools, pendingMessageCount: session?.pendingMessageCount ?? 0,
               lastAssistantMessage: session ? [...session.messages].reverse().find(message => message.role === "assistant") ?? null : null }); return;
+            case "input_batch": {
+              if (!command.id || typeof command.batchId !== "string" || !command.batchId) { emit({ type: "response", command: command.type, id: command.id, success: false, error: "Native batch identity is required" }); return; }
+              const parsed = parseNativeInputs(command.inputs);
+              const result = parsed.ok ? inbox?.accept(parsed.value, { commandId: command.id, batchId: command.batchId }) : parsed;
+              emit({ type: "response", command: command.type, id: command.id, success: result?.ok === true,
+                ...(result?.ok ? { data: { accepted: true } } : { error: result?.error ?? "Native inbox has not initialized" }) }); return;
+            }
+            case "tool_operation": {
+              const result = command.action === "inspect" ? execution.inspect(String(command.operationId)) : command.action === "cancel" ? execution.cancel(String(command.operationId)) : undefined;
+              emit({ type: "response", command: command.type, id: command.id, success: result?.ok === true,
+                ...(result?.ok ? { data: result.value } : { error: result?.error.message ?? "Invalid tool operation action" }) }); return;
+            }
             case "set_session_name": case "set_thinking_level": reply(null); return;
             case "native_operation": {
               const callback = callbacks.get(command.id!);
@@ -82,13 +98,16 @@ export async function createManagedAgentSession<T extends { session: AgentSessio
               return;
             }
             case "abort":
-              if (session) { session.clearQueue(); session.abortCompaction(); session.abortBash(); await session.abort(); }
+              if (session) {
+                session.abortCompaction();
+                if (execution.boundSession === session) await execution.halt(session, 20_000); else await session.abort();
+              }
               if (active) while (active.pending.size) await Promise.allSettled(active.pending);
               reply(null); return;
           }
           emit({ type: "response", command: command.type, id: command.id, success: false, error: `Unsupported native owner command: ${command.type}` });
         },
-        close: async () => { unsubscribe?.(); if (!disposed) { disposed = true; nativeDispose?.(); } },
+        close: async () => { if (execution.activeTools) throw new Error("Native context is still owned by background tool operations"); inbox?.close(); unsubscribe?.(); if (!disposed) { disposed = true; execution.dispose(); nativeDispose?.(); } },
       };
     },
   });
@@ -134,6 +153,12 @@ export async function createManagedAgentSession<T extends { session: AgentSessio
       if (typeof owner[name] !== "function") continue;
       const original = owner[name].bind(owner);
       owner[name] = (...args: unknown[]) => {
+        if (inbox && (name === "prompt" || name === "steer" || name === "followUp") && typeof args[0] === "string") {
+          const input = { workId: randomUUID(), message: args[0], inputOrigin: "human" as const,
+            ...((args[1] as { images?: any[] } | undefined)?.images ? { images: (args[1] as { images: any[] }).images } : {}) };
+          const result = inbox.accept([input]);
+          return result.ok ? Promise.resolve() : Promise.reject(new Error(result.error));
+        }
         // External steering enters the live native queue under its current owner's custody.
         if (active?.active && (name === "steer" || name === "followUp" || name === "prompt" && created?.session.isStreaming)) {
           return scope.run(active, () => nested(active!, () => original(...args)));
@@ -146,7 +171,10 @@ export async function createManagedAgentSession<T extends { session: AgentSessio
     if (closing) return closing;
     closing = (async () => {
       const session = created?.session;
-      if (session) { session.clearQueue(); session.abortCompaction(); session.abortBash(); await session.abort(); }
+      if (session) {
+        session.abortCompaction();
+        if (execution.boundSession === session) await execution.halt(session, 20_000); else await session.abort();
+      }
       if (active) while (active.pending.size) await Promise.allSettled(active.pending);
       // command() owns the release acknowledgement; do not close its database before it returns.
       await commandTail;
@@ -170,21 +198,14 @@ export async function createManagedAgentSession<T extends { session: AgentSessio
       nativeDispose = session.dispose.bind(session);
       unsubscribe = session.subscribe(event => output?.(event as PiEvent));
       bind(session as any, ["prompt", "steer", "followUp", "sendCustomMessage", "sendUserMessage", "compact", "navigateTree", "executeBash", "bindExtensions"]);
+      session.agent.steeringMode = "all";
       bind(session.agent as any, ["prompt", "continue"]);
-      const state = session.agent.state;
-      const descriptor = Object.getOwnPropertyDescriptor(state, "tools");
-      if (!descriptor?.get || !descriptor.set) throw new Error("Pi native tool state no longer exposes its declared accessor");
-      const wrapped = new WeakMap<object, typeof state.tools[number]>();
-      const wrap = (tool: typeof state.tools[number]): typeof tool => {
-        const existing = wrapped.get(tool); if (existing) return existing;
-        const next = { ...tool, execute: (...args: Parameters<typeof tool.execute>) => run(`tool:${tool.name}`, () => tool.execute(...args)) };
-        wrapped.set(tool, next); wrapped.set(next, next); return next;
-      };
-      Object.defineProperty(state, "tools", { ...descriptor, get: () => descriptor.get!.call(state),
-        set: tools => descriptor.set!.call(state, tools.map(wrap)) });
-      state.tools = state.tools;
+      execution.bind(session);
+      session.agent.state.tools = [...session.agent.state.tools.filter(tool => tool.name !== "tool_operation"), execution.inspectionTool()];
+      inbox = new PiInputBatch(session, execution, event => output?.(event), () => {});
       session.dispose = () => close();
     });
+    execution.flushCompletions();
     return { ...created!, threadService: service, threadId, close };
   } catch (error) { await close(); throw error; }
 }

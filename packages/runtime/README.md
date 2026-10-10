@@ -9,7 +9,6 @@ Reusable extensions for [Pi](https://pi.dev). The [stack manifest](../../package
 - [Browser runtime](extensions/browser/README.md) loads the native browser tool with its executable from the same immutable dependency tree.
 - [Codex compaction](extensions/codex-compaction/README.md) stores OpenAI's server-side checkpoints in Pi sessions while keeping Pi's tools and account routing. Stored JSONL remains readable through the [shared session reader](../../tools/read-condensed-session/README.md).
 - [Web search](extensions/web-search/README.md) registers a native `web_search` tool over a host-selected search backend, so every session has web search in its tool list instead of reaching for a skill or a browser. The shipped Exa backend sends requests through the host's governed `exa-api` transport.
-- [Local models](extensions/local-models/README.md) registers the OpenAI-compatible inference engines a host lists in `~/.pi/agent/local-models.json`, starting one that is not running as a transient user unit, and mirrors them into Pi's model catalog.
 
 [Runtime wire dispatch](../../docs/runtime-wire.md) owns the closed SDK/runner/provider event domains and explicit diagnostics for unsupported values. A stored Codex compaction operation with an invalid state is a repair error, never automatically reinterpreted as failed/retryable. The invalid record remains intact; explicit compact may supersede it through its owning operation path.
 
@@ -275,6 +274,16 @@ proof against copied installed source without patching it:
 PI_TEST_RUNTIME_ENTRY=file:///srv/pi/runtime/node_modules/@earendil-works/pi-coding-agent/dist/index.js \
   PI_TEST_BASH_CANCELLATION_PATCH=0 node --test packages/runtime/bash-cancellation.test.mjs
 ```
+
+## Async tool operation custody
+
+Managed sessions use [`PiExecution`](../orchestrator/src/threads/pi-execution.ts) and [`PiInputBatch`](../orchestrator/src/threads/pi-input-batch.ts) around upstream Pi's tools and all-message steering. Input bytes are committed atomically before acceptance. The completed assistant message is the delivery boundary. An admitted input batch releases tool observations without cancelling their operations: each original call returns one final result or an inspectable operation handle. Terminal results for handles enter the ordinary inbox with deterministic completion IDs. Native custom-message content, not a side acknowledgement, proves landing. Admission and result hooks run under raw operation custody, so slow hook I/O can yield with the same operation handle while permission checks still precede effects. Shared RPC owns same-ID no-UI dialog cancellation before observer transport; interactive native UI retains its own decisions.
+
+Retained native generations advertise their capabilities through `get_state`. The current protocol is `batch-operations-v1`. A registered versionless predecessor is a finite draining state: its exact accepted/landed/completed receipts remain authoritative, running model and tool execution finishes untouched, and all new pending identities remain queued. Only a positive idle snapshot permits closing that host and reopening the same transcript with the current generation before the first batch or resume command. If an admitted predecessor tool has no terminal receipt, adoption records an uncertain result instead of replaying the effect. Missing exact receipts is an explicit custody error, not permission to guess or resend.
+
+[`pi-bash-worker.py`](pi-bash-worker.py) runs managed model Bash operations in independent systemd scopes. Scope launch preserves the caller's UID, mount namespace, cwd and environment. The worker records full output and an atomic terminal receipt beside the native session in `SESSION.jsonl.operations/OP-ID/`; the invocation is private and contains captured environment. Scopes have no runner lifecycle binding. Model settlement releases its lease while raw tool custody remains resident; restart observes a live scope or its terminal receipt. Missing admitted executors become `uncertain` and are never replayed. Explicit operation cancel or Stop owns cancellation; message delivery does not.
+
+The Bash patch copies the worker into the immutable SDK and agent-core trees. Native adapter tests cover streaming batch admission, late preparation arrivals, direct-final versus handle/completion selection, resource ordering after yielding, owner-loss replay fencing, and worker descendant cleanup.
 
 ## Session crash durability
 

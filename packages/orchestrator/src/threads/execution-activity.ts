@@ -110,7 +110,8 @@ function activityObservation(state: ExecutionActivity, event: RuntimeEvent): Act
     case "entry_appended": case "session_info_changed": case "thinking_level_changed":
     case "response": case "extension_ui_request": case "extension_error": case "user_bash": case "bash_execution_update":
     case "session_changed":
-    case "command_settled": case "runner_attached": case "thread_message_inserted": return undefined;
+    case "command_settled": case "runner_attached": case "thread_message_inserted":
+    case "tool_operation_result": case "thread_landed": return undefined;
   }
   return assertNever(event);
 }

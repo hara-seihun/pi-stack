@@ -35,7 +35,7 @@ class Native implements PiSession {
     }
     if (command.type === "abort") this.streaming = false;
     this.output({ type: "response", command: command.type, id: command.id, success: true,
-      data: command.type === "get_state" ? { isStreaming: this.streaming, backgroundOperationCount: this.background,
+      data: command.type === "get_state" ? { nativeProtocolVersion: "batch-operations-v1", isStreaming: this.streaming, backgroundOperationCount: this.background,
         sessionFile: this.options.sessionFile, acceptedWorkIds: this.accepted, landedWorkIds: this.landed,
         completedWorkIds: this.completed, lastAssistantMessage: this.lastAssistantMessage } : {} });
   }

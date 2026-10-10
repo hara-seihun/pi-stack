@@ -55,7 +55,7 @@ export function patchBashCancellationCopies(nodeModules) {
   apply(join(core, "harness/utils/shell-output.js"), source => replace(source,
     'result.error.code === "aborted" || context.abortSignal?.aborted',
     'result.error.code === "aborted"'), "../..");
-  for (const base of [coding, core]) for (const name of ["pi-shell-owner.mjs", "pi-shell-owner.py"]) {
+  for (const base of [coding, core]) for (const name of ["pi-shell-owner.mjs", "pi-shell-owner.py", "pi-bash-worker.py"]) {
     pending.set(join(base, name), readFileSync(join(here, name), "utf8"));
   }
   for (const [path, source] of pending) if (readExisting(path) !== source) writeFileSync(path, source);

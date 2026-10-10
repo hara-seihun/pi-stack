@@ -10,7 +10,7 @@ import type { PiEvent, PiSession, PiSessionOptions } from "./contracts.js";
 import { assertNever } from "./runtime-events.js";
 import { requireRunnerChannelRequest, requireRunnerControlRequest } from "./runner-protocol.js";
 
-type Resident = { close(): Promise<void>; id: string; key?: string; active: boolean; used: number; pending: number; priority: boolean };
+type Resident = { close(): Promise<void>; id: string; key?: string; active: boolean; used: number; pending: number; priority: boolean; background: Set<string>; backgroundCount: number };
 const [controlPath] = process.argv.slice(2);
 if (!controlPath) throw new Error("Thread runner requires a control socket");
 const sessions = new Map<string, Resident>();
@@ -33,11 +33,11 @@ function availableSlots(priority = false) {
   return stopping || pressure() ? 0 : Math.max(0, limit - activeCount());
 }
 async function reclaim(reserve = 0, exclude?: Resident) {
-  const idle = [...sessions.values()].filter(session => !session.active && !session.pending && session !== exclude).sort((a, b) => a.used - b.used);
+  const idle = [...sessions.values()].filter(session => !session.active && !session.pending && !session.background.size && !session.backgroundCount && session !== exclude).sort((a, b) => a.used - b.used);
   for (const session of idle) {
     if (sessions.size + reserve <= maxResident && !pressure()) break;
     try { await session.close(); }
-    catch (error) { session.active = true; console.error(`Runner reclamation refused for ${session.id}:`, error); }
+    catch (error) { console.error(`Runner reclamation refused for ${session.id}:`, error); }
     globalThis.gc?.();
   }
 }
@@ -83,7 +83,7 @@ async function open(options: PiSessionOptions & { socketPath: string; priority?:
   let closed = false;
   let adapter: PiSession;
   let ready: Promise<void>;
-  const resident: Resident = { close, id: options.threadId, key: env.PI_THREAD_SESSION_KEY, active: true, used: Date.now(), pending: 0, priority: options.priority !== false };
+  const resident: Resident = { close, id: options.threadId, key: env.PI_THREAD_SESSION_KEY, active: true, used: Date.now(), pending: 0, priority: options.priority !== false, background: new Set(), backgroundCount: 0 };
   const channel = createServer(socket => {
     client?.destroy(); client = socket; socket.setNoDelay(true);
     lines(socket, input => {
@@ -107,6 +107,15 @@ async function open(options: PiSessionOptions & { socketPath: string; priority?:
     socket.on("close", () => { if (client === socket) client = null; });
   });
   function publish(value: PiEvent) {
+    if (value.type === "tool_execution_end") {
+      const details = (value.result as { details?: { operationId?: string; state?: string } } | undefined)?.details;
+      if (details?.operationId && (details.state === "running" || details.state === "accepted")) resident.background.add(details.operationId);
+    }
+    if (value.type === "tool_operation_result") {
+      resident.background.delete(String(value.operationId));
+      resident.backgroundCount = resident.background.size;
+    }
+    if (value.type === "response" && value.command === "get_state" && value.success) resident.backgroundCount = Number((value.data as { backgroundOperationCount?: number })?.backgroundOperationCount ?? 0);
     if (value.type === "response" && value.command === "get_state" && value.success) value = { ...value, data: { ...value.data as object, threadSessionKey: resident.key } };
     if (!closed) output.publish(value);
   }

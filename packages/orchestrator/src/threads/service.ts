@@ -21,6 +21,7 @@ import { threadRole, childRole, canSpawnRole } from "./roles.js";
 import { threadSettingsMetadata } from "./settings-metadata.js";
 import { isTelephoneContext, TELEPHONE_CONTEXT_ARGUMENT } from "./telephone-context.js";
 import { inputReceipts } from "./pi-input-receipts.js";
+import { nativeProtocol } from "./native-protocol.js";
 import type { InputStatus } from "./pi-input-status.js";
 import { measureJsonBytes } from "./json-size.js";
 import { MetadataCache } from "./metadata-cache.js";
@@ -117,7 +118,7 @@ function inputCommandReceipt(value: unknown): [string, string] | undefined {
   } catch { return; }
 }
 interface Runtime {
-  session?: PiSession; epoch: string; executionId?: string; lease?: ThreadAdmission; busy: boolean; backgroundOperationCount?: number; settings?: ThreadSettings; environmentKey?: string; parked?: boolean;
+  session?: PiSession; epoch: string; executionId?: string; lease?: ThreadAdmission; busy: boolean; nativeProtocol?: "current" | "draining"; backgroundOperationCount?: number; settings?: ThreadSettings; environmentKey?: string; parked?: boolean;
   finalMessage?: Json; outcome?: WorkOutcome; broker?: boolean; commandRunning?: string; commandNumber: number; waiters: Map<string, { resolve(value: any): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> | undefined }>;
 }
 const good = <T>(value: T): Result<T> => ({ ok: true, value });
@@ -2475,15 +2476,16 @@ export class ThreadService implements ThreadApi {
     const indexed = indexedThreadHistory(thread.sessionFile);
     if (!indexed.ok) return indexed.error.code === "missing" ? good(inputReceipts([])) : historyFailure(indexed.error);
     const history = indexed.value;
-    const kinds = new Set(["thread_input", "thread_redelivery", "thread_rejected", "thread_landed", "thread_settled", "thread_deferred", "thread_resume"]);
+    const kinds = new Set(["thread_input", "thread_input_batch_accepted", "thread_redelivery", "thread_rejected", "thread_landed", "thread_settled", "thread_deferred", "thread_resume"]);
     const historical = new Map<string, string>();
     let historicalBytes = 0;
     let failure: ThreadError | undefined;
     function* selected(): Generator<Json> {
       for (const descriptor of history.entries) {
         const receipt = descriptor.type === "custom" && descriptor.customType !== undefined && kinds.has(descriptor.customType);
-        const user = descriptor.type === "message" && "role" in descriptor && descriptor.role === "user" && historical.size > 0;
-        if (!receipt && !user) continue;
+        const user = descriptor.type === "message" && "role" in descriptor && descriptor.role === "user";
+        const batchMessage = descriptor.type === "custom_message";
+        if (!receipt && !user && !batchMessage) continue;
         const read = history.read(descriptor);
         if (!read.ok) {
           const failed = historyFailure(read.error);
@@ -2499,8 +2501,13 @@ export class ThreadService implements ThreadApi {
           yield entry;
           continue;
         }
+        if (batchMessage) {
+          if (entry.customType === "thread_input_batch") yield entry;
+          continue;
+        }
         const data = entry.data as Json | undefined;
-        const ids = Array.isArray(data?.workIds) ? data.workIds.filter((id: unknown) => typeof id === "string" && pending.has(id)) : [];
+        const ids = Array.isArray(data?.inputs) ? data.inputs.map((input: Json) => input.workId).filter((id: unknown) => typeof id === "string" && pending.has(id))
+          : Array.isArray(data?.workIds) ? data.workIds.filter((id: unknown) => typeof id === "string" && pending.has(id)) : [];
         if (!data || !(typeof data.workId === "string" && pending.has(data.workId)) && !ids.length) continue;
         if (entry.customType === "thread_input" && !data.receiptVersion && typeof data.workId === "string") {
           const message = typeof data.message === "string" ? data.message : "";
@@ -2543,6 +2550,24 @@ export class ThreadService implements ThreadApi {
     if (this.suspended || this.closed || typeof state.sessionFile !== "string" || !state.sessionFile) return;
     const changed = this.sql("UPDATE thread SET session_file=?,metadata=json_set(metadata,'$.nativeHistoryRequired',json('true')) WHERE id=? AND (session_file!=? OR json_extract(metadata,'$.nativeHistoryRequired') IS NOT 1)").run(state.sessionFile, id, state.sessionFile).changes;
     if (changed) this.changed(id);
+  }
+  private protocolDrain(id: string, runtime: Runtime, state: Json): void {
+    this.sql("UPDATE thread SET metadata=json_set(metadata,'$.nativeProtocolAdoption',json(?)) WHERE id=?").run(JSON.stringify({ state: "draining", acceptedWorkIds: state.acceptedWorkIds, landedWorkIds: state.landedWorkIds, completedWorkIds: state.completedWorkIds }), id);
+    if (runtime.busy) this.phase(id, "recovering", "Retained native generation is finishing its accepted model/tools; pending identities remain queued");
+  }
+  private async replaceDrained(id: string, runtime: Runtime, state: Json): Promise<void> {
+    if (nativeProtocol(state, true) !== "draining" || this.busy(state) || runtime.backgroundOperationCount)
+      throw new RunnerStartupError("Retained native generation has not reached its safe idle boundary");
+    const executionId = runtime.executionId;
+    // get_state crossed old ingress and proved no model/tool/pending native work. The original
+    // execution rows and transcript stay authoritative; close only the now-idle native host.
+    runtime.executionId = undefined; runtime.busy = false;
+    try { await this.retire(id, runtime); }
+    catch (error) { runtime.executionId = executionId; throw error; }
+    if (this.runtimes.get(id) === runtime) { runtime.executionId = executionId; throw new RunnerStartupError("Retained runner retirement did not complete; no new input admitted"); }
+    await runtime.lease?.release(); runtime.lease = undefined;
+    if (executionId) await this.releaseCapacity(id, executionId);
+    this.sql("UPDATE thread SET metadata=json_set(metadata,'$.nativeProtocolAdoption.state','checkpointed') WHERE id=?").run(id);
   }
   private async inputStatus(id: string, runtime: Runtime, command: PiCommand): Promise<InputStatus> {
     if (typeof command.commandId !== "string" || typeof command.workId !== "string") throw new NativeRejection("Input status requires commandId and workId", "invalid_request");
@@ -2659,6 +2684,7 @@ export class ThreadService implements ThreadApi {
       if (session) {
         runtime.session = session;
         const state = await this.rpc(runtime, { type: "get_state" });
+        runtime.nativeProtocol = nativeProtocol(state, true);
         this.adoptReference(id, state);
         runtime.busy = this.busy(state); runtime.finalMessage = state.lastAssistantMessage;
         return runtime;
@@ -2727,7 +2753,7 @@ export class ThreadService implements ThreadApi {
       if (recoveredExecution) await this.releaseUnenteredCapacity(id, recoveredExecution.id);
       throw new AdmissionWait("Opening cancelled");
     }
-    const runtime: Runtime = { epoch: randomUUID(), busy: true, commandNumber: 0, waiters: new Map(), lease: recoveredAdmission, settings, environmentKey: this.environmentKey(thread, extraEnv) };
+    const runtime: Runtime = { epoch: randomUUID(), executionId: recoveredExecution?.id, busy: true, commandNumber: 0, waiters: new Map(), lease: recoveredAdmission, settings, environmentKey: this.environmentKey(thread, extraEnv) };
     const [provider, ...model] = settings.model.split("/");
     const context = thread.metadata?.context;
     if (context !== undefined && (!isRunContext(context) || thread.metadata?.execution === "root-repair")) throw new Error("Invalid recorded isolated execution boundary");
@@ -2758,7 +2784,17 @@ export class ThreadService implements ThreadApi {
       runtime.session = await this.options.openSession({ threadId: id, cwd: thread.cwd, sessionFile: thread.sessionFile,
         args: ["--provider", provider!, "--model", model.join("/"), "--thinking", settings.thinkingLevel, "--name", thread.title, ...(raw ? [RAW_ARGUMENT] : []), ...(telephone ? [TELEPHONE_CONTEXT_ARGUMENT, JSON.stringify(telephone)] : []), ...(context ? ["--orchestrator-context", JSON.stringify(context)] : [])], env, threads: this.directory ?? this },
         event => this.output(id, runtime, event), code => this.exited(id, runtime, code));
-      const state = await this.rpc(runtime, { type: "get_state" }); this.adoptReference(id, state);
+      const state = await this.rpc(runtime, { type: "get_state" });
+      runtime.nativeProtocol = nativeProtocol(state, !!env.PI_THREAD_RUNNER_REFERENCE);
+      this.adoptReference(id, state);
+      runtime.busy = this.busy(state); runtime.finalMessage = state.lastAssistantMessage;
+      if (runtime.nativeProtocol === "draining") {
+        this.protocolDrain(id, runtime, state);
+        if (runtime.busy) return runtime;
+        await this.replaceDrained(id, runtime, state);
+        return this.openOwned(id, settings, !!this.execution(id), extraEnv);
+      }
+      this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.nativeProtocolAdoption') WHERE id=?").run(id);
       this.clearAdmissionWait(id);
       if (env.PI_THREAD_RUNNER_REFERENCE && state.threadSessionKey !== env.PI_THREAD_SESSION_KEY) runtime.environmentKey = undefined;
       runtime.busy = this.busy(state); runtime.finalMessage = state.lastAssistantMessage;
@@ -2943,6 +2979,15 @@ export class ThreadService implements ThreadApi {
     let execution = this.execution(id), runtime = this.runtimes.get(id);
     if (execution && !runtime) runtime = await this.open(id, this.executionSettings(execution), true);
     execution = this.execution(id);
+    if (runtime?.nativeProtocol === "draining") {
+      const state = await this.rpc(runtime, { type: "get_state" });
+      this.adoptReference(id, state); runtime.busy = this.busy(state);
+      this.protocolDrain(id, runtime, state);
+      if (runtime.busy) return; // No new command enters the predecessor's input API.
+      await this.replaceDrained(id, runtime, state);
+      runtime = await this.open(id, execution ? this.executionSettings(execution) : thread.settings, !!execution);
+      execution = this.execution(id);
+    }
     const acknowledgement = this.get(id)?.metadata?.acknowledgementWait as Json | undefined;
     if (acknowledgement && execution?.id === acknowledgement.executionId && runtime) {
       if (Date.now() >= acknowledgement.nextCheckAt) {
@@ -3214,7 +3259,7 @@ export class ThreadService implements ThreadApi {
       if (!runtime.parked) { await runtime.session.setActive?.(false); runtime.parked = true; }
       return;
     }
-    if (!runtime.environmentKey || thread.metadata?.archived || thread.held || completed && this.options.retireIdleSession?.(thread)) { await this.retire(id, runtime); return; }
+    if (runtime.nativeProtocol === "draining" || !runtime.environmentKey || thread.metadata?.archived || thread.held || completed && this.options.retireIdleSession?.(thread)) { await this.retire(id, runtime); return; }
     if (!runtime.parked) { await runtime.session.setActive?.(false); runtime.parked = true; }
   }
   private async retire(id: string, runtime: Runtime): Promise<void> {
