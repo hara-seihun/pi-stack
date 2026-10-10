@@ -41,6 +41,7 @@ function release(root, version) {
   `);
   copyFileSync(new URL("package.json", import.meta.url), join(extension, "package.json"));
   copyFileSync(new URL("index.mjs", import.meta.url), join(extension, "index.mjs"));
+  copyFileSync(new URL("effects.mjs", import.meta.url), join(extension, "effects.mjs"));
   symlinkSync(dependencies, join(path, "node_modules"));
   return path;
 }
