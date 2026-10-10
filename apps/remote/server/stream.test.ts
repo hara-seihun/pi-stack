@@ -98,6 +98,38 @@ test("departed selections and inspection failures cannot acknowledge a fresh vie
   expect(chunks[0]).not.toContain("selection-ready");
 });
 
+test("changing native windows retry a bounded fresh selection without a transport error or lost retained resources", async () => {
+  const { stream, chunks, frames } = recordingStream();
+  stream.declare({ session: "a", selectionId: "selected" });
+  stream.publish({ type: "transcript", sessionId: "a", generation: "retained", total: 7, items: [] });
+  let reads = 0;
+  await stream.synchronizeSelection(async () => {}, () => {
+    if (++reads < 3) throw new Error("conflict: Session kept changing during window reading; refresh the history index");
+    stream.publish({ type: "transcript", sessionId: "a", generation: "retained", total: 8, items: [] });
+    stream.publish({ type: "live", sessionId: "a", text: "still streaming" });
+    stream.publish({ type: "state", sessions: [], archivedTotal: 0, ownerErrors: [] });
+  });
+  expect(reads).toBe(3);
+  expect(chunks.some(chunk => chunk.startsWith("event: error"))).toBe(false);
+  expect(frames()).toHaveLength(4);
+  expect(chunks.at(-1)).toContain("event: selection-ready");
+});
+
+test("persistent source churn ends this finite attempt without acknowledging or clearing the retained view", async () => {
+  const { stream, chunks } = recordingStream();
+  stream.declare({ session: "a", selectionId: "selected" });
+  let reads = 0;
+  await stream.synchronizeSelection(async () => {
+    reads++;
+    throw new Error("stale-source: Session changed during indexing");
+  }, () => { throw new Error("Must not publish unavailable history"); });
+  expect(reads).toBe(3);
+  expect(chunks).toHaveLength(1);
+  expect(chunks[0]).toContain("stale-source");
+  expect(chunks[0]).not.toContain("selection-ready");
+  expect(stream.closed).toBe(false);
+});
+
 test("failed sinks cannot advance the connection", () => {
   const stream = new ClientStream({ write() { throw new Error("closed socket"); }, close() {} });
   stream.publish({ type: "state", sessions: [], archivedTotal: 0, ownerErrors: [] });
