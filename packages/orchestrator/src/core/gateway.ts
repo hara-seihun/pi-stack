@@ -16,7 +16,7 @@ export function parseGatewayConfig(transport: unknown, bindings: unknown, princi
   if (transport.kind !== "unix" || transport.socketDir !== "/run/pi-stack/gateways" || !bindings.length) return invalid();
   const ids = new Set<string>();
   for (const binding of bindings) {
-    if (!object(binding) || binding.purpose !== "core-ingress" || typeof binding.gatewayId !== "string" || !/^[a-zA-Z0-9_.-]+$/.test(binding.gatewayId) || ids.has(binding.gatewayId)
+    if (!object(binding) || binding.purpose !== "core-ingress" || typeof binding.gatewayId !== "string" || !/^[a-zA-Z0-9_.:-]+$/.test(binding.gatewayId) || ids.has(binding.gatewayId)
       || !Number.isSafeInteger(binding.peerUid) || Number(binding.peerUid) < 0 || !principals.some(principal => principal.id === binding.principalId)
       || !Array.isArray(binding.scopeIds) || !binding.scopeIds.length || new Set(binding.scopeIds).size !== binding.scopeIds.length
       || binding.scopeIds.some(id => !scopes.some(scope => scope.id === id && scope.principalId === binding.principalId))

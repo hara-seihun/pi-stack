@@ -30,6 +30,7 @@ test("gateway configuration cannot invent principals, scopes, route authority or
   const principals = [{ kind: "person" as const, id: "alice", person: "alice" }], scopes = [{ id: "alice", principalId: "alice" }];
   const transport = { kind: "unix", socketDir: "/run/pi-stack/gateways" };
   expect(parseGatewayConfig(transport, [binding], principals, scopes).ok).toBe(true);
+  expect(parseGatewayConfig(transport, [{ ...binding, gatewayId: "person:alice" }], principals, scopes).ok).toBe(true);
   expect(parseGatewayConfig(undefined, [], principals, scopes).ok).toBe(false);
   expect(parseGatewayConfig(transport, [{ ...binding, principalId: "forged" }], principals, scopes).ok).toBe(false);
   expect(parseGatewayConfig(transport, [{ ...binding, scopeIds: ["bob"] }], principals, scopes).ok).toBe(false);
