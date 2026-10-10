@@ -130,9 +130,10 @@ it("recovers receipt association when USER appends after the receipt-only snapsh
   expect(next.read(next.messages[0]!)).toMatchObject({ ok: false, error: { code: "stale-source" } });
 });
 
-it("restarts the entire window after append between indexing and reads without mixing revisions", () => {
+it("reads the captured window despite append between indexing and reads without mixing revisions", () => {
   const first = message("a", null, "user", "A"), second = message("b", "a", "assistant", "B");
   const path = source([first]);
+  const captured = index(path).source;
   let attempts = 0;
   let escaped: IndexedThreadHistory | undefined;
   const result = withIndexedThreadHistory(path, undefined, undefined, history => {
@@ -142,9 +143,24 @@ it("restarts the entire window after append between indexing and reads without m
     expect(history.read({ ...history.entries[0]! })).toMatchObject({ ok: false, error: { code: "invalid-descriptor" } });
     return { source: history.source, records: history.entries.map(descriptor => history.read(descriptor)) };
   });
-  expect(attempts).toBe(2);
-  expect(result).toEqual({ ok: true, value: { source: index(path).source, records: [{ ok: true, value: first }, { ok: true, value: second }] } });
+  expect(attempts).toBe(1);
+  expect(result).toEqual({ ok: true, value: { source: captured, records: [{ ok: true, value: first }] } });
+  expect(index(path).entries.map(record => record.id)).toEqual(["a", "b"]);
   expect(escaped!.read(escaped!.entries[0]!)).toMatchObject({ ok: false, error: { code: "invalid-descriptor" } });
+});
+
+it("indexes a fixed byte prefix when the writer appends during parsing", () => {
+  const first = message("a", null, "user", "A"), second = message("b", "a", "assistant", "B");
+  const path = source([first]);
+  const parse = JSON.parse;
+  let appended = false;
+  vi.spyOn(JSON, "parse").mockImplementation((text, reviver) => {
+    if (!appended) { appended = true; appendFileSync(path, JSON.stringify(second) + "\n"); }
+    return parse(text, reviver);
+  });
+  const captured = index(path);
+  expect(captured.entries.map(record => record.id)).toEqual(["a"]);
+  expect(index(path).entries.map(record => record.id)).toEqual(["a", "b"]);
 });
 
 it("rejects replacement and rewritten records instead of retrying them as an append", () => {
@@ -164,15 +180,16 @@ it("rejects replacement and rewritten records instead of retrying them as an app
   }
 });
 
-it("bounds sustained window mutation and returns an explicit conflict source", () => {
+it("does not starve a busy thread when every window appends another message", () => {
   const path = source([message("a", null, "user", "A")]);
   let attempts = 0;
   const result = withIndexedThreadHistory(path, undefined, undefined, history => {
     appendFileSync(path, JSON.stringify(message(`next-${++attempts}`, history.source.leafId, "user", "New")) + "\n");
     return history.read(history.entries[0]!);
   });
-  expect(attempts).toBe(3);
-  expect(result).toMatchObject({ ok: false, error: { code: "stale-source" } });
+  expect(attempts).toBe(1);
+  expect(result).toMatchObject({ ok: true, value: { ok: true, value: { id: "a" } } });
+  expect(index(path).entries.map(record => record.id)).toEqual(["a", "next-1"]);
 });
 
 it("counts signed narration as text while retaining exact source and branch paging identity", () => {
@@ -399,13 +416,28 @@ it("resumes a valid unterminated last record without duplication", () => {
   expect(next.read(next.messages[1]!)).toMatchObject({ ok: true, value: { id: "b" } });
 });
 
+it("resumes an incomplete final JSON and UTF-8 record after a concurrent append", () => {
+  const first = message("a", null, "user", "A");
+  const second = Buffer.from(JSON.stringify(message("b", "a", "user", "λ")) + "\n");
+  const split = second.indexOf(Buffer.from("λ")) + 1;
+  const path = source([first]);
+  appendFileSync(path, second.subarray(0, split));
+  const captured = index(path);
+  expect(captured.entries.map(record => record.id)).toEqual(["a"]);
+  appendFileSync(path, second.subarray(split));
+  const next = index(path);
+  expect(next.source.generation).toBe(captured.source.generation);
+  expect(next.entries.map(record => record.id)).toEqual(["a", "b"]);
+  expect(next.read(next.entries[1]!)).toMatchObject({ ok: true, value: { message: { content: "λ" } } });
+});
+
 it("returns explicit missing, invalid, duplicate, oversized and invalid-branch errors", () => {
   const path = source([]);
   expect(index(path).messages).toEqual([]);
   expect(index(path).source.leafId).toBeNull();
   expect(indexedThreadHistory(path, "missing")).toMatchObject({ ok: false, error: { code: "invalid-branch" } });
   expect(indexedThreadHistory(path + ".missing")).toMatchObject({ ok: false, error: { code: "missing" } });
-  for (const text of ["{\n", "{", '"not an entry"\n', JSON.stringify(message("a", null, "assistant", [{ type: "toolCall" }])) + "\n", JSON.stringify({ type: "custom", id: "receipt", parentId: null, timestamp: {} }) + "\n"]) {
+  for (const text of ["{\n", '"not an entry"\n', JSON.stringify(message("a", null, "assistant", [{ type: "toolCall" }])) + "\n", JSON.stringify({ type: "custom", id: "receipt", parentId: null, timestamp: {} }) + "\n"]) {
     writeFileSync(path, text);
     expect(indexedThreadHistory(path)).toMatchObject({ ok: false, error: { code: "invalid-record", line: 1, offset: 0 } });
   }
