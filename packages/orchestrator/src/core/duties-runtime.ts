@@ -4,11 +4,11 @@ import { WatchList } from "../threads/watch-list.js";
 import type { SpawnThread, ThreadApi } from "../threads/contracts.js";
 import type { ThreadService } from "../threads/service.js";
 import { adoptMarkdownDuties, type MarkdownDutyReceipt } from "./duties.js";
-import { acquireDatabaseOwnership, type ScopeOwnership } from "./ownership.js";
+import { acquireDatabaseOwnership, WATCH_CUSTODY_TABLES, type ScopeOwnership } from "./ownership.js";
 import type { CoreScope } from "./contracts.js";
 import type { CoreResult } from "./config.js";
 
-export const WATCH_CUSTODY_TABLES = ["watch_item", "watch_request", "watch_wake", "watch_delivery", "watch_schedule", "watch_markdown_adoption"] as const;
+export { WATCH_CUSTODY_TABLES } from "./ownership.js";
 export type CoreDutySpec = {
   scopeId: string; path: string;
   watch: { kind: "none" } | { kind: "existing"; databasePath: string; adoptionReceiptPath: string; acceptedSpool: "drain" | "hold" };
@@ -83,7 +83,7 @@ export class CoreDuties {
         const path = owner.runtime.path(spec.path);
         if (spec.watch.kind === "existing") {
           const ownedWatch = acquireDatabaseOwnership({ id: `${spec.scopeId}:watch`, databasePath: spec.watch.databasePath,
-            adoptionReceiptPath: spec.watch.adoptionReceiptPath, uid: scope.custody.uid, requiredTables: WATCH_CUSTODY_TABLES }, logical => owner.runtime.path(logical));
+            adoptionReceiptPath: spec.watch.adoptionReceiptPath, uid: scope.custody.uid, requiredTables: WATCH_CUSTODY_TABLES, owningScopeId: scope.id }, logical => owner.runtime.path(logical));
           if (!ownedWatch.ok) { await this.close(); return ownedWatch; }
           ownership = ownedWatch.value;
           watch = new WatchList({ databasePath: owner.runtime.path(spec.watch.databasePath), existingStore: true,
