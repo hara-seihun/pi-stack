@@ -61,6 +61,7 @@ test("installation renders host-owned paths and target IDs stay explicit", t => 
   assert.equal(readFileSync(unit, "utf8"), "retain host unit\n");
   assert.equal(readFileSync(commandPath, "utf8"), readFileSync(command, "utf8"));
   assert.equal(readFileSync(join(root, "owner", "meeting-census"), "utf8"), readFileSync(new URL("../deploy/meeting-census", import.meta.url), "utf8"));
+  assert.equal(readFileSync(join(root, "owner", "phone-census"), "utf8"), readFileSync(new URL("../deploy/phone-census", import.meta.url), "utf8"));
   config.targets.push({ ...config.targets[0], id: "beta", sshHost: "remote", androidTransferRoot: join(root, "transfer") });
   writeFileSync(configPath, JSON.stringify(config));
   for (const [executable, id] of [["bash", "alpha"], ["ssh", "beta"]]) {
