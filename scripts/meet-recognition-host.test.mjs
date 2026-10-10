@@ -17,6 +17,7 @@ function fixture(t) {
   put('lib', `pi_stack_enter_deployment() { :; }
 pi_stack_check_person_configs() { :; }
 pi_stack_fleet_user() { echo fixture; }
+pi_stack_persons_dir() { echo /fixture/persons; }
 pi_stack_users() { echo fixture; }
 pi_stack_daemon_units() { :; }
 pi_stack_component_releases_root() { printf '%s\\n' "$PI_STACK_RELEASES_ROOT"; }
@@ -52,6 +53,7 @@ fi`);
   exit 91
 }`);
   writeFileSync(join(repo, 'deploy/capacity-ready.mjs'), 'process.exit(0);');
+  writeFileSync(join(repo, 'deploy/voice-routes-ready.mjs'), 'process.exit(0);');
   put('meet-recognition', `if [[ $1 == --select ]]; then
   ln -sfn "$NEW_RECOGNITION" "$PI_STACK_MEET_RECOGNITION_DEST"
   : > "$RECOGNITION_SELECTED"

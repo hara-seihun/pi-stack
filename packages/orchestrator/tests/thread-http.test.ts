@@ -137,10 +137,26 @@ it("deduplicates overlapping spawn retries after asynchronous parent discovery",
 
 it.each([502, 503, 504])("reconnects after HTTP %s with the same spawn identity", async status => {
   const fetcher = vi.fn().mockResolvedValueOnce(new Response("Activating", { status }))
-    .mockResolvedValueOnce(Response.json({ ok: true, value: { id: "child" } }));
+    .mockResolvedValueOnce(Response.json({ ok: true, value: { id: "child", lifecycle: { kind: "idle" } } }));
   expect(await createThreadClient("http://owner", fetcher).spawn({ requestId: "spawn-call", cwd: "/work" })).toMatchObject({ ok: true });
   expect(fetcher.mock.calls[0][1].body).toBe(fetcher.mock.calls[1][1].body);
   expect(fetcher.mock.calls[0][1].headers).toEqual(fetcher.mock.calls[1][1].headers);
+});
+
+it.each(["list", "archived", "inspect", "managerThread", "spawn", "control", "agentWait"] as const)("rejects malformed lifecycle in %s without replay or invented activity", async operation => {
+  const record = { id: "worker", state: "running", lifecycle: { kind: "working", phase: "invented", since: 1 } };
+  const value = operation === "list" ? { threads: [record] } : operation === "archived" ? { kind: "page", threads: [record] }
+    : operation === "inspect" ? { thread: record } : record;
+  const fetcher = vi.fn(async () => Response.json({ ok: true, value }));
+  const api = createThreadClient("http://fleet/v1/thread-owner", fetcher);
+  const result = operation === "list" ? await api.list() : operation === "archived" ? await api.archived({ kind: "count" })
+    : operation === "inspect" ? await api.inspect("worker") : operation === "managerThread" ? await api.managerThread()
+    : operation === "spawn" ? await api.spawn({ requestId: "create", cwd: "/work" })
+    : operation === "agentWait" ? await api.agentWait({ action: "clear", threadId: "worker", requestId: "clear" })
+    : await api.control({ threadId: "worker", action: "stop", descendants: false });
+  expect(result).toMatchObject({ ok: false, error: { code: "unavailable", retryable: false, message: expect.stringContaining("lifecycle") } });
+  if (operation === "spawn" || operation === "agentWait") expect(result).toMatchObject({ error: { requestId: operation === "spawn" ? "create" : "clear", message: expect.stringContaining("Acceptance is unconfirmed") } });
+  expect(fetcher).toHaveBeenCalledTimes(1);
 });
 
 it.each(["command", "control", "missing-identity"])("does not replay %s after a lost response", async operation => {

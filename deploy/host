@@ -422,6 +422,9 @@ if (( recognition )); then
   wait "$recognition_pid" || activation_failed=1
 fi
 if [[ -n ${daemon_activation_pid:-} ]]; then wait "$daemon_activation_pid" || activation_failed=1; fi
+if (( activation_failed == 0 )); then
+  pi_stack_as_root node "$root/deploy/voice-routes-ready.mjs" "$router_base" "$(pi_stack_persons_dir)" "$expected" || activation_failed=1
+fi
 
 fi
 # Then walk the front door the way the clients do. A release that locks a

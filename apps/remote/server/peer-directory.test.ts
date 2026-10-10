@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 import type { Thread, ThreadApi } from "pi-orchestrator/api";
 import { readLivePeers, readPeerAncestors, readPeerSession } from "./peer-directory";
+import { createThreadClient } from "../../../packages/orchestrator/src/threads/http";
+import { projectThreadActivity } from "./live-projection";
 
 function thread(id: string, parentId: string | null = null, archived = false): Thread {
   return { id, parentId, title: id, cwd: "/fixture", sessionFile: "/fixture/native", settings: { model: "sol", thinkingLevel: "high", speed: "standard" },
@@ -19,6 +21,24 @@ function fixture(rows: Thread[]) {
   };
   return { api, calls };
 }
+
+test("a pre-lifecycle fleet generation cannot poison the cache; its replacement with the same revision recovers", async () => {
+  let current = false;
+  const record = thread("worker");
+  const { lifecycle, ...oldRecord } = record;
+  const fetcher = async (url: string | URL | Request) => Response.json({ ok: true, value: String(url).endsWith("/archived")
+    ? { kind: "count", total: 0 } : { threads: [current ? record : oldRecord] } });
+  const api = createThreadClient("http://fleet/v1/thread-owner", fetcher);
+  const known = new Map<string, Thread>();
+  const old = await readLivePeers(api, () => null, known);
+  expect(old).toMatchObject({ ok: false, error: { code: "unavailable", retryable: false, message: expect.stringContaining("lifecycle") } });
+  expect(known.size).toBe(0);
+  current = true;
+  const replacement = await readLivePeers(api, () => null, known);
+  expect(replacement.ok).toBe(true);
+  if (!replacement.ok) throw new Error(replacement.error.message);
+  expect(projectThreadActivity(replacement.value.threads.get("worker")!)).toMatchObject({ activity: "idle", lifecycle });
+});
 
 test("ordinary peer refresh reads live rows and an exact count, never archived bodies", async () => {
   const rows = [...Array.from({ length: 2000 }, (_,i) => thread(`archive-${i}`, null, true)), thread("live")];

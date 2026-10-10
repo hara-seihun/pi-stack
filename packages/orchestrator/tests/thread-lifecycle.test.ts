@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ThreadService } from "../src/threads/service.js";
 import type { OpenPiSession } from "../src/threads/contracts.js";
-import { deriveThreadLifecycle, lifecycleControl, type LifecycleObservation } from "../src/threads/lifecycle.js";
+import { deriveThreadLifecycle, isThreadLifecycle, lifecycleControl, type LifecycleObservation } from "../src/threads/lifecycle.js";
 const idle: LifecycleObservation = { archived: false, cancelling: false, execution: null, pending: null, delay: null, dependency: null, subscriptions: [], error: null, updatedAt: 10 };
 describe("owner lifecycle controls follow custody, not scheduler flags or future timers", () => {
   it("actual owner snapshots distinguish a future wake from a durable wait across restart", async () => {
@@ -22,6 +22,19 @@ describe("owner lifecycle controls follow custody, not scheduler flags or future
       expect((await service.agentWait({ action: "clear", threadId: "quiet", requestId: "clear" })).ok).toBe(true);
       expect(service.get("quiet")?.lifecycle).toEqual({ kind: "idle" });
     } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+  it("the wire boundary accepts owner-derived variants and rejects missing, unknown or incomplete evidence", () => {
+    const observations: LifecycleObservation[] = [idle, { ...idle, archived: true },
+      { ...idle, cancelling: true, execution: { since: 20, activity: { activity: "thinking" } } },
+      { ...idle, execution: { since: 20, activity: { activity: "responding" } } },
+      { ...idle, pending: { since: 20 } }, { ...idle, delay: { target: "retry", since: 20, reason: "Provider retry" } },
+      { ...idle, dependency: { kind: "job", jobId: "job", since: 20 } }, { ...idle, error: "Failed" }];
+    for (const observation of observations) expect(isThreadLifecycle(deriveThreadLifecycle(observation))).toBe(true);
+    for (const value of [undefined, null, [], { kind: "future" }, { kind: "working", phase: "thinking" },
+      { kind: "working", phase: "invented", since: 1 }, { kind: "failed", reason: "Failed" },
+      { kind: "waiting", target: "capacity", since: 1 }, { kind: "waiting", target: "retry", reason: "Retry", since: "1" },
+      { kind: "waiting", target: "job", since: 1, dependency: { kind: "job", jobId: "", since: 1 } }])
+      expect(isThreadLifecycle(value)).toBe(false);
   });
   it("quiet owners and completed cancellation have no stop control", () => {
     for (const source of [idle, { ...idle, cancelling: true }]) {

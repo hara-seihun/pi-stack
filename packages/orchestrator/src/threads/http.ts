@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { setTimeout as delay } from "node:timers/promises";
 import { validateInspectOptions, type Result, type ThreadApi } from "./contracts.js";
 import { THREAD_TOKEN_HEADER, type AdmissionResult } from "./caller.js";
+import { isThreadLifecycle } from "./lifecycle.js";
 
 type ThreadRequestContext = { lifetime: "active" | "finished"; deadline: number; signal: AbortSignal };
 const requestContext = new AsyncLocalStorage<ThreadRequestContext>();
@@ -15,6 +16,24 @@ type ThreadFetch = (input: string | URL | Request, init?: RequestInit) => Promis
 const operations = ["attention", "attentionEvents", "agentWait", "wakeSchedule", "watch", "ask", "questions", "managerQuestions", "managerThread", "managerNotificationPolicy", "questionOrigin", "managerQuestionCustody", "pendingQuestions", "questionState", "questionEvents", "answer", "spawn", "send", "list", "read", "control", "inspect", "command", "settlements", "await", "archived"] as const;
 type Operation = typeof operations[number];
 const failure = (message: string): Result<never> => ({ ok: false, error: { code: "unavailable", message } });
+
+function validOwnerThreads(operation: Operation, value: unknown): boolean {
+  const thread = (value: unknown) => !!value && typeof value === "object"
+    && typeof (value as { id?: unknown }).id === "string" && isThreadLifecycle((value as { lifecycle?: unknown }).lifecycle);
+  const fields = value as { threads?: unknown; thread?: unknown; kind?: unknown } | null;
+  const page = () => Array.isArray(fields?.threads) && fields.threads.every(thread);
+  switch (operation) {
+    case "spawn": case "control": case "agentWait": return thread(value);
+    case "managerThread": return value === null || thread(value);
+    case "list": return page();
+    case "archived": return fields?.kind === "count" || fields?.kind === "page" && page();
+    case "inspect": return thread(fields?.thread);
+    case "attention": case "attentionEvents": case "wakeSchedule": case "watch": case "ask": case "questions":
+    case "managerQuestions": case "managerNotificationPolicy": case "questionOrigin": case "managerQuestionCustody":
+    case "pendingQuestions": case "questionState": case "questionEvents": case "answer": case "send": case "read":
+    case "command": case "settlements": case "await": return true;
+  }
+}
 
 export async function threadHttp(api: ThreadApi, request: Request, prefix = "/v1/threads", admit?: ThreadAdmission): Promise<Response | undefined> {
   const path = new URL(request.url).pathname;
@@ -101,6 +120,9 @@ export function createThreadClient(baseUrl: string, fetcher: ThreadFetch = fetch
             return terminal(failure(`Thread owner returned an invalid response (${response.status}); acceptance is unconfirmed`));
           }
           if (!response.ok) return terminal(value.ok ? failure(`Thread owner returned HTTP ${response.status}`) : value);
+          if (value.ok && !validOwnerThreads(operation, value.value)) {
+            return terminal(failure(`Thread owner returned missing or invalid lifecycle evidence at ${ownerEndpoint}/${operation}.${requestId ? ` Acceptance is unconfirmed for request ${requestId}; reconcile this identity rather than issuing a new instruction.` : ""}`));
+          }
           if (value.ok || !value.error.retryable) return terminal(value);
           lastError = value.error.message;
           retry = true;

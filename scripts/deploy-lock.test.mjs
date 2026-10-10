@@ -339,6 +339,10 @@ if [[ $name != runtime ]]; then pi_stack_select_release "$release" "$destination
       writeFileSync(join(deploy, name), component, { mode: 0o755 });
     }
     writeFileSync(join(deploy, "skills"), component.replace('name=$(basename "$0")', 'name=$(basename "$0")\nprintf "%s\\n" "$*" >> "$SKILLS_TRACE"'));
+    writeFileSync(join(deploy, "voice-routes-ready.mjs"), `import { existsSync } from 'node:fs';
+if (!existsSync(process.env.DAEMON_ACTIVATED)) process.exit(92);
+process.exit(Number(process.env.VOICE_ROUTE_READY_EXIT ?? 0));
+`);
     writeFileSync(join(deploy,"smoke"),"#!/bin/sh\nif [ \"${REQUIRE_ACTIVATION_OVERLAP:-0}\" = 1 ]; then test -f \"$DAEMON_ACTIVATED\" || exit 92; fi\nexit \"${SMOKE_EXIT:-0}\"\n");chmodSync(join(deploy,"smoke"),0o755);
     for (const service of ["voice", "phone"]) {
       const key = service.toUpperCase();
@@ -606,7 +610,7 @@ exit 64
     // A release the clients cannot use goes back to the previous Pi Remote.
     const before=readlinkSync(destinations.PI_STACK_REMOTE_DEST);
     writeFileSync(join(repository,"release"),"broken\n");assert.equal(spawnSync("git",["-C",repository,"add","release"]).status,0);assert.equal(spawnSync("git",["-C",repository,"-c","user.name=test","-c","user.email=test@example.test","commit","-qm","broken"]).status,0);
-    for (const failure of [{ SMOKE_EXIT: "1" }, { DAEMON_RESTART_EXIT: "1" }, { BROWSER_SMOKE_EXIT: "1" }, { MODEL_SMOKE_EXIT: "1" }]) {
+    for (const failure of [{ SMOKE_EXIT: "1" }, { DAEMON_RESTART_EXIT: "1" }, { VOICE_ROUTE_READY_EXIT: "1" }, { BROWSER_SMOKE_EXIT: "1" }, { MODEL_SMOKE_EXIT: "1" }]) {
       rmSync(activationTrace,{force:true});rmSync(env.VOICE_TRACE,{force:true});rmSync(env.PHONE_TRACE,{force:true});
       const broken=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:{...env,...failure}});assert.notEqual(broken.status,0);
       assert.match(broken.stderr,/returning Pi Remote to/);

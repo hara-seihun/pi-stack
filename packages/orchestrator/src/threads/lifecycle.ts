@@ -1,5 +1,5 @@
 import { validateWaitDependency, type AgentWait } from "./contracts.js";
-import type { ExecutionActivitySnapshot, ExecutionPhase } from "./execution-activity.js";
+import { EXECUTION_PHASES, type ExecutionActivitySnapshot, type ExecutionPhase } from "./execution-activity.js";
 
 export type ThreadLifecycle =
   | { kind: "idle" }
@@ -9,6 +9,28 @@ export type ThreadLifecycle =
   | { kind: "waiting"; target: "capacity" | "retry"; reason: string; since: number }
   | { kind: "waiting"; target: "agents" | "job" | "deployment" | "message" | "dispatch"; since: number; dependency?: AgentWait }
   | { kind: "failed"; reason: string; control: "stop" | "cancel_wait" | "none" };
+
+export function isThreadLifecycle(input: unknown): input is ThreadLifecycle {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return false;
+  const value = input as Record<string, unknown>;
+  const since = typeof value.since === "number" && Number.isFinite(value.since);
+  const text = (input: unknown) => typeof input === "string" && !!input.trim();
+  switch (value.kind) {
+    case "idle": case "archived": case "cancelling": return true;
+    case "working": return since && EXECUTION_PHASES.some(phase => phase === value.phase)
+      && (value.detail === undefined || typeof value.detail === "string");
+    case "failed": return text(value.reason) && ["stop", "cancel_wait", "none"].includes(value.control as string);
+    case "waiting": {
+      if (!since) return false;
+      if (value.target === "capacity" || value.target === "retry") return text(value.reason);
+      if (!["agents", "job", "deployment", "message", "dispatch"].includes(value.target as string)) return false;
+      if (value.dependency === undefined) return true;
+      const dependency = value.dependency as AgentWait;
+      return validateWaitDependency(dependency).ok && dependency.kind === value.target && Number.isFinite(dependency.since);
+    }
+    default: return false;
+  }
+}
 
 export type LifecycleObservation = {
   archived: boolean;
