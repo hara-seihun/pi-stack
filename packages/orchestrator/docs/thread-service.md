@@ -51,6 +51,19 @@ The owning core supplies unlocked, permission-scoped owners and a declared priva
 
 `service.exportWakeDuties()` returns original generation, schedule, last occurrence, pending IDs and stop state. `adoptWakeDuty(threadId, markdownReceipt)` records custody before retiring its future timer, leaving accepted messages intact. [`WatchList`](../src/threads/watch-list.ts) is the read-only watch custody/drain adapter: `exportDuties()` retains items, old check IDs, pending spool, request receipts, timing and delivery failures; `adoptDuties(receipt)` records Markdown transfer. `start()` creates no timer. Explicit `tick()` drains only an existing accepted occurrence spool with its original IDs. Stopped owners are not ticked. New watch changes/checks belong to the Markdown owner.
 
+[`core/duties-runtime.ts`](../src/core/duties-runtime.ts) is the executable adoption/drain plugin. Its configuration is explicitly `disabled`, or `configured` with entries:
+
+```ts
+{ scopeId, path: "/declared/private/duties.md", watch:
+  { kind: "none" } // or
+  { kind: "existing", databasePath, adoptionReceiptPath, acceptedSpool: "drain" | "hold" }
+}
+```
+
+`CoreDuties.start()` validates scope/runtime resource paths, obtains detached table custody for an existing watch database, and writes Markdown before retiring future duties. The watch receipt names the exact five source tables plus `watch_markdown_adoption`. Source schema is checked read-only; a missing database/table is never replaced. Disjoint image and watch claims share one physical controller lock through the core ownership broker. Unavailable scopes are untouched.
+
+Main's existing clock calls `tick()`; there is no plugin timer. `hold` retains the original spool. `drain` rechecks the configured principal's dispatch grant, declared workspace and original check/parent stop state before each accepted spawn. Closing the plugin waits for accepted dispatch and releases only its own table claim. Kenaznia's stored `markdownDutiesPath` points at the canonical notes; its digest includes completed workers' final state and tells it to dispatch a fast reader rather than read files itself.
+
 ## Session and receipt lifetime
 
 Construction supplies `databasePath`, `sessionsDir`, native `openSession`/attachment and optional scoped environment, admission and preparation hooks. `start()` enables reconciliation. An execution is active exactly while its `thread_execution.ended_at` is null; a partial unique index admits one per thread. Each execution retains its effective settings and capacity identity.
@@ -71,5 +84,5 @@ Targeted source-only proofs:
 
 ```sh
 cd packages/orchestrator
-node ../../node_modules/vitest/vitest.mjs run tests/roles-lifecycle.test.ts tests/duties-adoption.test.ts --maxWorkers=1
+node ../../node_modules/vitest/vitest.mjs run tests/roles-lifecycle.test.ts tests/duties-adoption.test.ts tests/duties-runtime.test.ts --maxWorkers=1
 ```

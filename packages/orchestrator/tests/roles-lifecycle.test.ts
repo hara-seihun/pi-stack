@@ -70,7 +70,7 @@ describe("thread roles and accepted input custody", () => {
     const kena = unwrap(await service.spawn({ requestId: "kena", parentId: manager.id, cwd: root, title: "Repair a thing" }));
     const kenatia = unwrap(await service.spawn({ requestId: "kenatia", parentId: kena.id, cwd: root, title: "Check the repair" }));
     expect([manager.role, kena.role, kenatia.role]).toEqual(["kenaznia", "kena", "kenatia"]);
-    expect((await service.spawn({ requestId: "forbidden", parentId: kenatia.id, cwd: root })).ok).toBe(false);
+    expect((await service.spawn({ requestId: "forbidden", parentId: kenatia.id, cwd: root, title: "Cannot launch" })).ok).toBe(false);
     expect(unwrap(await service.list()).threads.map(thread => thread.id)).toContain(manager.id);
     expect(unwrap(await service.send({ requestId: "peer", threadId: manager.id, senderId: kenatia.id, text: "Repair complete" })).senderName).toBe("Check the repair");
     expect(kena.agentName).toBeUndefined();
@@ -143,6 +143,27 @@ describe("thread roles and accepted input custody", () => {
     unwrap(await service.send({ requestId: "thread-wake:manager-inactivity:accepted", threadId: manager.id, senderId: manager.id, text: "Accepted digest", source: "notification" }));
     unwrap(await service.send({ requestId: "human", threadId: manager.id, text: "New human input", humanActivity: true }));
     expect(service.pending(manager.id).map(input => input.id)).toContain("thread-wake:manager-inactivity:accepted");
+    db.close();
+  });
+  it("open-work digest gives the manager Markdown pointers and the final state of idle completed workers", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-10-10T20:00:00Z"));
+    const { root, service, natives } = fixture();
+    const manager = unwrap(await service.spawn({ requestId: "manager", cwd: root, title: "Manage", metadata: { manager: true } }));
+    unwrap(service.update(manager.id, { metadata: { markdownDutiesPath: join(root, "duties.md") } }));
+    const worker = unwrap(await service.spawn({ requestId: "work", parentId: manager.id, cwd: root, title: "Open duty", message: "Record next action" }));
+    unwrap(await service.start());
+    await until(() => natives[0]?.accepted.includes("work") === true);
+    natives[0]!.settle(); await until(() => service.get(worker.id)?.state === "idle");
+    service.setManagerWatchdog(async () => ({ ok: true, value: { managerThreadId: manager.id, activeWork: true, lastHumanMessageAt: null } }), () => {});
+    service.reconcile(); await turn(); await turn();
+    vi.setSystemTime(new Date(Date.now() + MANAGER_DIGEST_MS)); service.reconcile();
+    await until(() => service.inputStates(manager.id).some(input => input.id.startsWith("thread-wake:manager-inactivity:")));
+    const db = new DatabaseSync(join(root, "threads.sqlite"));
+    const row = db.prepare("SELECT text FROM thread_work WHERE thread_id=? AND id LIKE 'thread-wake:manager-inactivity:%'").get(manager.id) as { text: string };
+    expect(row.text).toContain(join(root, "duties.md"));
+    expect(row.text).toContain('"finalState":"State written to owning Markdown"');
+    expect(row.text).toContain("Luna-low reader");
+    expect(row.text).toContain("2026-10-10T20:20:00.000Z");
     db.close();
   });
   it("watch adoption preserves the accepted spool and cannot start another worker factory", async () => {

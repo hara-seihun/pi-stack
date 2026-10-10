@@ -9,13 +9,8 @@ export interface AgentMessagePresentation {
   text: string;
 }
 
-/** Agents are addressed by first name; threads named before single names also stored a Nebulani surname. */
-export function agentFirstName(name: string): string {
-  return name.trim().split(/\s+/, 1)[0]!;
-}
-
 export function agentSenderLabel(sender: AgentMessagePresentation["sender"]): string {
-  return sender.name ? agentFirstName(sender.name) : `Agent · ${sender.threadId.slice(0, 8)}`;
+  return sender.name ? sender.name.trim() : `Agent · ${sender.threadId.slice(0, 8)}`;
 }
 
 /** Display-only decoding of the native transport. It grants no agent authority. */

@@ -31,6 +31,8 @@ export interface WatchListOptions {
   intervalMs?: number; settings?: ThreadSettings;
   checkOutcome: (threadId: string) => Result<WatchCheckOutcome>;
   enabled?: boolean;
+  existingStore?: true;
+  occurrenceAdmission?: (input: SpawnThread) => Result<boolean>;
   onError: (error: string | null) => void;
 }
 export interface PendingWatchDecision { threadId: string; question: string }
@@ -64,15 +66,22 @@ export class WatchList implements WatchApi {
   private stopped = false;
   private ticking?: Promise<Result<void>>;
   constructor(private readonly options: WatchListOptions) {
+    if (options.existingStore) {
+      const source = openSqlite(options.databasePath, true);
+      try {
+        const tables = new Set((source.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map(table => table.name));
+        for (const table of ["watch_item", "watch_request", "watch_wake", "watch_delivery", "watch_schedule"]) if (!tables.has(table)) throw new Error(`Existing watch table is unavailable: ${table}`);
+      } finally { source.close(); }
+    }
     this.db = openSqlite(options.databasePath);
-    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
-      CREATE TABLE IF NOT EXISTS watch_item (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;`);
+    if (!options.existingStore) this.db.exec(`CREATE TABLE IF NOT EXISTS watch_item (id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS watch_request (id TEXT PRIMARY KEY, input TEXT NOT NULL, response TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS watch_wake (id TEXT PRIMARY KEY, input TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS watch_delivery (id TEXT PRIMARY KEY, retryAt INTEGER NOT NULL, error TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS watch_schedule (id INTEGER PRIMARY KEY CHECK(id=1), nextWakeAt INTEGER NOT NULL);
-      INSERT OR IGNORE INTO watch_schedule(id,nextWakeAt) VALUES(1,0);
-      CREATE TABLE IF NOT EXISTS watch_markdown_adoption (id INTEGER PRIMARY KEY CHECK(id=1), receipt TEXT NOT NULL);`);
+      INSERT OR IGNORE INTO watch_schedule(id,nextWakeAt) VALUES(1,0);`);
+    this.db.exec("CREATE TABLE IF NOT EXISTS watch_markdown_adoption (id INTEGER PRIMARY KEY CHECK(id=1), receipt TEXT NOT NULL)");
   }
   exportDuties(): WatchDutyExport {
     const items = (this.db.prepare("SELECT body FROM watch_item ORDER BY rowid").all() as { body: string }[]).map(row => JSON.parse(row.body));
@@ -113,6 +122,11 @@ export class WatchList implements WatchApi {
     for (const occurrence of this.exportDuties().pendingOccurrences) {
       if (this.stopped) return good(undefined);
       if (occurrence.delivery !== null && occurrence.delivery.retryAt > now) continue;
+      if (this.options.occurrenceAdmission) {
+        const admitted = this.options.occurrenceAdmission(occurrence.input);
+        if (!admitted.ok) return admitted;
+        if (!admitted.value) continue;
+      }
       const accepted = await this.options.threads.spawn(occurrence.input);
       if (!accepted.ok) return accepted;
       this.db.exec("BEGIN IMMEDIATE");
