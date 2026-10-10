@@ -131,7 +131,7 @@ def validate(proof, plan):
             raise ValueError('old capability owner changed after retirement proof')
         if owner.get('native', {}).get('state') != 'released':
             raise ValueError('native capability retirement is unconfirmed')
-        json.loads(enter(owner['namespace'], ['/usr/bin/python3', '-c', RELEASE, json.dumps({**owner, 'keyPath': plan['keyPath'], 'inspectOnly': True})], plan['uid'], plan['gid'], timeout=30))
+        json.loads(enter(owner['namespace'], ['/usr/bin/python3', '-c', RELEASE, json.dumps({**owner, 'socketDir': owner['native']['socketDir'], 'keyPath': plan['keyPath'], 'inspectOnly': True})], plan['uid'], plan['gid'], timeout=30))
     return proof
 
 

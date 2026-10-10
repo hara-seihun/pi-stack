@@ -68,6 +68,25 @@ class Epoch(unittest.TestCase):
             self.assertEqual(key.stat().st_mode & 0o777, 0o600)
             self.assertEqual(key.parent.stat().st_mode & 0o777, 0o700)
 
+    def test_certified_native_boundary_survives_initializer_revalidation(self):
+        with tempfile.TemporaryDirectory() as root:
+            base = Path(root); database = base/'threads.sqlite3'
+            db = sqlite3.connect(database)
+            db.executescript("CREATE TABLE thread_execution(id,thread_id,ended_at,outcome);CREATE TABLE thread(id,metadata);INSERT INTO thread VALUES('thread','{}');")
+            db.close(); identity = {'dev':str(database.stat().st_dev),'ino':str(database.stat().st_ino)}
+            receipt = base/'detached.json'; receipt.write_text(json.dumps({'scopeId':'owner','state':'detached','databasePath':str(database),'databaseIdentity':identity,'detachmentEvidence':{'protocol':'pi-core-owner-drain-v1','exitCode':0}}))
+            source = base/'native.js'; source.write_text('Cannot close active Pi execution backgroundCommands.size runtime.session.isBashRunning')
+            owner = {'scopeId':'owner','databasePath':str(database),'namespace':{'kind':'host'},'socketDir':str(base),'detachmentReceiptPath':str(receipt)}
+            import hashlib
+            plan = {'version':1,'priorCapability':'absent-after-drain','uid':os.getuid(),'gid':os.getgid(),'keyPath':str(base/'key'),'proofPath':str(base/'proof.json'),'nativeCloseSource':{'path':str(source),'sha256':hashlib.sha256(source.read_bytes()).hexdigest()},'owners':[owner]}
+            def enter(namespace,command,uid,gid,timeout=10):
+                return subprocess.run(command,check=True,capture_output=True,text=True,timeout=timeout).stdout
+            with patch.object(epoch,'trusted',side_effect=lambda p:json.loads(p.read_text())), patch.object(epoch,'enter',side_effect=enter):
+                epoch.certify(plan)
+                proof = json.loads((base/'proof.json').read_text())
+                result = epoch.validate(proof,{**plan,'ownerScopeIds':['owner']})
+                self.assertEqual(result['owners'][0]['native']['socketDir'],str(base))
+
     def test_epoch_identity_and_full_owner_cohort_are_mandatory(self):
         proof = {'version': 1, 'protocol': 'pi-core-capability-epoch-drained-v1', 'state': 'drained', 'uid': 1007, 'gid': 1010, 'priorKeyPath': '/registered/key', 'owners': [{'scopeId': 'person'}]}
         for change in [{'uid': 1008}, {'keyPath': '/elsewhere/key'}, {'ownerScopeIds': ['person','fleet']}]:
