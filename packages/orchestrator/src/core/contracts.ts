@@ -7,6 +7,7 @@ import type { GatewayBinding, GatewayTransportConfig } from "./gateway.js";
 import type { CoreImagesConfig } from "./images.js";
 import type { CoreMemoryConfig } from "./memory.js";
 import type { CoreDutiesConfig } from "./duties-runtime.js";
+import type { CoreManagerRelayConfig } from "./manager-relay.js";
 
 export type CustodyNamespace = { kind: "host" } | {
   kind: "process";
@@ -40,9 +41,11 @@ export type CoreScope = {
   custody: CoreCustody;
   resources: { path: string; kind: "file" | "directory" }[];
   environment: Record<string, string>;
+  callbackGateway: { kind: "none" } | { kind: "remote-callback"; peerUid: number };
   manager: CoreManager;
+  managerRouting: { kind: "none" } | { kind: "configured"; relay: CoreManagerRelayConfig; notices: { notificationOwnerId: string; adoptedCursors: { settlements: number; attention: number; questions: number } } };
 };
-export type CoreCredential = { sha256: string; principalId: string; scopeIds: string[]; purpose: "person" | "service" };
+export type CoreCredential = { sha256: string; principalId: string; scopeIds: string[]; purpose: "person" | "service"; routeCeiling: { kind: "scoped" } | { kind: "root-admin" } };
 export type CoreConfig = {
   version: 1;
   host: "127.0.0.1" | "::1";

@@ -35,7 +35,15 @@ export function parseGatewayConfig(transport: unknown, bindings: unknown, princi
 }
 export function assertGatewayRequest(binding: GatewayBinding, request: Pick<Request, "method" | "url">): CoreResult<void> {
   let path: string;
-  try { path = new URL(request.url).pathname; } catch { return denied("Invalid gateway route"); }
+  try {
+    path = new URL(request.url).pathname;
+    const scoped = /^\/v1\/scopes\/([^/]+)(\/.*)$/.exec(path);
+    if (scoped) {
+      const scope = decodeURIComponent(scoped[1]!);
+      if (!/^[a-zA-Z0-9_.:-]+$/.test(scope) || scope === "." || scope === "..") return denied("Invalid gateway scope identifier");
+      path = `/v1/scopes/${scope}${scoped[2]}`;
+    }
+  } catch { return denied("Invalid gateway route"); }
   return binding.routeCeiling.some(route => route.method === request.method && (route.kind === "exact" ? route.path === path : path.startsWith(route.path)))
     ? { ok: true, value: undefined } : denied("Request exceeds the verified gateway route ceiling");
 }

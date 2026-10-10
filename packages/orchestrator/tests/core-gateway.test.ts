@@ -36,6 +36,13 @@ test("gateway configuration cannot invent principals, scopes, route authority or
   expect(parseGatewayConfig(transport, [{ ...binding, scopeIds: ["bob"] }], principals, scopes).ok).toBe(false);
   expect(parseGatewayConfig(transport, [{ ...binding, routeCeiling: [{ method: "POST", kind: "prefix", path: "/v1/" }] }], principals, scopes).ok).toBe(false);
 });
+test("encoded canonical scope IDs share the declared ceiling without decoding separators", () => {
+  const scoped: GatewayBinding = { ...binding, scopeIds: ["person:alice"], routeCeiling: [{ method: "GET", kind: "exact", path: "/v1/scopes/person:alice/projection" }] };
+  expect(assertGatewayRequest(scoped, new Request("http://core.local/v1/scopes/person%3Aalice/projection")).ok).toBe(true);
+  expect(assertGatewayRequest(scoped, new Request("http://core.local/v1/scopes/person%3aalice/projection")).ok).toBe(true);
+  expect(assertGatewayRequest(scoped, new Request("http://core.local/v1/scopes/person%2Falice/projection")).ok).toBe(false);
+  expect(assertGatewayRequest(scoped, new Request("http://core.local/v1/scopes/person%253Aalice/projection")).ok).toBe(false);
+});
 test("real SO_PEERCRED admits configured peer, ignores forged identity headers, and transfers unread/stream context", async () => {
   const running = await serve(binding, (req, res) => {
     const unread = webRequest(req, "http://core.local", new AbortController().signal, "unread");

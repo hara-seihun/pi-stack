@@ -60,6 +60,11 @@ test("one adopted writer preserves original thread, queue identity and scoped di
     expect(core.authorizeIngress(new Request(`${core.url}/v1/admin/root-sessions`, { headers: { "x-pi-kenan-admin": "root-admin-token" } })).ok).toBe(true);
     expect(core.authorizeIngress(new Request(`${core.url}/v1/memory`, { method: "POST", headers: { "x-pi-kenan-admin": "root-admin-token", authorization: "Bearer alice-token" } })).ok).toBe(false);
     expect(core.authorizeIngress(new Request(`${core.url}/v1/admin/root-sessions/not-a-session/transcript`, { headers: { authorization: "Bearer root-admin-token" } })).ok).toBe(false);
+    const events = await core.request(new Request(`${core.url}/v1/scopes/alice/events`, { headers: { authorization: "Bearer alice-token" } }));
+    const reader = events!.body!.getReader();
+    expect((await reader.read()).done).toBe(false);
+    expect((await core.close()).ok).toBe(true);
+    expect((await reader.read()).done).toBe(true);
   } finally { expect((await core.close()).ok).toBe(true); }
   const reowned = acquireScopeOwnership(f.scope, path => path); expect(reowned.ok).toBe(true); if (reowned.ok) reowned.value.close();
 });

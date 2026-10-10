@@ -48,7 +48,27 @@ export function parseCoreConfig(value: unknown): CoreResult<CoreConfig> {
     }
     if (!Array.isArray(scope.resources) || scope.resources.some(resource => !record(resource) || !absolute(resource.path) || !["file", "directory"].includes(String(resource.kind)))) return invalid(`Scope ${scope.id} needs an explicit resource registry`);
     if (!record(scope.environment) || Object.entries(scope.environment).some(([key, item]) => !/^[A-Z_][A-Z0-9_]*$/.test(key) || typeof item !== "string" || item.includes("\0"))) return invalid(`Scope ${scope.id} has invalid environment`);
+    if (!record(scope.callbackGateway) || !(scope.callbackGateway.kind === "none" || scope.callbackGateway.kind === "remote-callback" && integer(scope.callbackGateway.peerUid))) return invalid(`Scope ${scope.id} requires an explicit callback gateway`);
+    if (scope.environment.PI_REMOTE_SERVER_URL && scope.callbackGateway.kind !== "remote-callback") return invalid(`Scope ${scope.id} requires its declared Remote preparation gateway`);
     if (!record(scope.manager) || !(scope.manager.kind === "none" || scope.manager.kind === "existing" && id(scope.manager.threadId))) return invalid(`Scope ${scope.id} requires an explicit manager identity or none`);
+    if (!record(scope.managerRouting) || !["none", "configured"].includes(String(scope.managerRouting.kind))) return invalid(`Scope ${scope.id} requires explicit manager routing`);
+    if (scope.managerRouting.kind === "configured") {
+      const { relay, notices } = scope.managerRouting;
+      if (!record(relay) || relay.scopeId !== scope.id || typeof relay.environmentId !== "string" || !/^[a-z][a-z0-9-]{0,31}$/.test(relay.environmentId)
+        || !Array.isArray(relay.remoteEnvironments) || !Array.isArray(relay.adoptedOrigins) || !record(notices) || !id(notices.notificationOwnerId)
+        || !record(notices.adoptedCursors) || ![notices.adoptedCursors.settlements, notices.adoptedCursors.attention, notices.adoptedCursors.questions].every(integer)
+        || relay.callbackUrl !== `${scope.environment.PI_REMOTE_SERVER_URL}/v1/core/manager-relay` || scope.callbackGateway.kind !== "remote-callback") return invalid(`Scope ${scope.id} has invalid manager callback or receipt custody`);
+      if (!(relay.canonicalManager === null || record(relay.canonicalManager) && typeof relay.canonicalManager.environmentId === "string" && id(relay.canonicalManager.threadId))) return invalid(`Scope ${scope.id} has invalid canonical manager routing`);
+      const environments = new Set<string>();
+      for (const remote of relay.remoteEnvironments) {
+        if (!record(remote) || typeof remote.id !== "string" || !/^[a-z][a-z0-9-]{0,31}$/.test(remote.id) || remote.id === relay.environmentId || environments.has(remote.id)) return invalid(`Scope ${scope.id} has invalid remote environment`);
+        const resource = authorize(policy.value, { principal: value.principals.find(item => item.id === scope.principalId), resource: remote.resource as CoreScope["resource"], action: "read", now: Date.now() });
+        if (!resource.ok && resource.error.code === "invalid-request") return invalid(resource.error.message);
+        environments.add(remote.id);
+      }
+      if (relay.adoptedOrigins.some(origin => !record(origin) || !id(origin.threadId) || !environments.has(String(origin.environmentId)))) return invalid(`Scope ${scope.id} has unbound adopted question origins`);
+      if (record(relay.canonicalManager) && relay.canonicalManager.environmentId !== relay.environmentId && !environments.has(String(relay.canonicalManager.environmentId))) return invalid(`Scope ${scope.id} has unregistered canonical manager environment`);
+    }
     const principal = value.principals.find(item => item.id === scope.principalId);
     const resourceCheck = authorize(policy.value, { principal, resource: scope.resource as CoreScope["resource"], action: "read", now: Date.now() });
     if (!resourceCheck.ok && resourceCheck.error.code === "invalid-request") return invalid(`Scope ${scope.id}: ${resourceCheck.error.message}`);
@@ -61,6 +81,8 @@ export function parseCoreConfig(value: unknown): CoreResult<CoreConfig> {
   for (const credential of value.credentials) {
     if (!record(credential) || typeof credential.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(credential.sha256) || digests.has(credential.sha256)
       || !principalIds.has(String(credential.principalId)) || !["person", "service"].includes(String(credential.purpose))
+      || !record(credential.routeCeiling) || !["scoped", "root-admin"].includes(String(credential.routeCeiling.kind))
+      || credential.routeCeiling.kind === "root-admin" && credential.purpose !== "service"
       || !Array.isArray(credential.scopeIds) || credential.scopeIds.some(scope => !scopeIds.has(scope))
       || new Set(credential.scopeIds).size !== credential.scopeIds.length) return invalid("Credential digests must bind a registered principal, purpose and explicit scope set");
     digests.add(credential.sha256);
@@ -72,7 +94,8 @@ export function parseCoreConfig(value: unknown): CoreResult<CoreConfig> {
   const callbacks = parseCoreCallbackConfig(value.callbacks, { host: String(value.host), port: Number(value.port) });
   if (!callbacks.ok) return callbacks;
   if (callbacks.value.kind === "retained" && callbacks.value.listeners.some(listener => listener.subsystem === "root" ? root.value.kind === "disabled" : !record(value.memory) || value.memory.kind !== "configured")) return invalid("Retained callbacks require their canonical configured plugin");
-  if (root.value.kind === "configured" && !scopeIds.has(root.value.consultationScopeId)) return invalid("Root consultation scope is unregistered");
+  if (root.value.kind === "configured" && [root.value.consultationScopeId, ...root.value.consultationOwners.map(owner => owner.scopeId)].some(scopeId => !scopeIds.has(scopeId))) return invalid("Root consultation owner is unregistered");
+  for (const credential of value.credentials) if (credential.routeCeiling.kind === "root-admin" && (root.value.kind !== "configured" || credential.scopeIds.some((scopeId: string) => root.value.kind !== "configured" || ![root.value.consultationScopeId, ...root.value.consultationOwners.map(owner => owner.scopeId)].includes(scopeId)))) return invalid("Root admin credential may bind only declared consultation owners");
   const images = parseCoreImagesConfig(value.images);
   if (!images.ok) return images;
   const memory = parseCoreMemoryConfig(value.memory, value.principals);

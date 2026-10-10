@@ -40,6 +40,7 @@ function operationAction(operation: string): PermissionAction {
 export class CoreService {
   private readonly owners = new Map<string, ScopeOwner>();
   private readonly listeners = new Map<string, Set<(event: CoreEvent) => void>>();
+  private readonly closeStreams = new Set<() => void>();
   private readonly db: ReturnType<typeof openSqlite>;
   private readonly cursors = new Map<string, { current: number; ceiling: number }>();
   private state: "new" | "adopted" | "serving" | "draining" | "closed" = "new";
@@ -315,16 +316,18 @@ export class CoreService {
       const stream = new ReadableStream<Uint8Array>({
         start: controller => {
           const send = (event: CoreEvent) => controller.enqueue(new TextEncoder().encode(`${JSON.stringify({ ok: true, value: event })}\n`));
+          let ended = false;
+          const end = () => { if (ended) return; ended = true; remove(); try { controller.close(); } catch {} };
           const listener = (event: CoreEvent) => {
-            if ((controller.desiredSize ?? 0) <= 0) { remove(); controller.close(); return; }
-            try { send(event); } catch { remove(); }
+            if ((controller.desiredSize ?? 0) <= 0) { end(); return; }
+            try { send(event); } catch { end(); }
           };
-          remove = () => { listeners.delete(listener); request.signal.removeEventListener("abort", abort); };
-          const abort = () => { remove(); try { controller.close(); } catch {} };
+          remove = () => { listeners.delete(listener); this.closeStreams.delete(end); request.signal.removeEventListener("abort", end); };
           listeners.add(listener);
-          request.signal.addEventListener("abort", abort, { once: true });
+          this.closeStreams.add(end);
+          request.signal.addEventListener("abort", end, { once: true });
           send({ cursor: this.cursor(scopeId), change: { type: "resync" } });
-          if (request.signal.aborted) abort();
+          if (request.signal.aborted) end();
         },
         cancel: () => remove(),
       }, { highWaterMark: 128 });
@@ -367,6 +370,7 @@ export class CoreService {
   async close(): Promise<CoreResult<void>> {
     if (this.state === "closed") return { ok: true, value: undefined };
     this.state = "draining";
+    for (const close of [...this.closeStreams]) close();
     for (const owner of this.owners.values()) owner.threads.suspend();
     await Promise.all([...this.owners.values()].map(owner => owner.notices?.close()));
     const results = await Promise.all([...this.owners.values()].map(async owner => {
