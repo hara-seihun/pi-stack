@@ -47,6 +47,23 @@ test("remote manager transport preserves request identity and rechecks current r
   db.close();
 });
 
+test("manager reply pull follows only explicit canonical environment and its current read grant", async () => {
+  const db = openSqlite(":memory:"), value = config();
+  value.canonicalManager = { environmentId: "remote", threadId: "manager" };
+  let granted = true, calls = 0;
+  const relay = new CoreManagerRelay(value, db, async (input, init) => {
+    calls++;
+    expect(String(input)).toBe("http://remote.test/v1/core/manager-relay/managerReplies");
+    expect(JSON.parse(String(init?.body))).toEqual({ input: { after: 7, limit: 100 }, environmentId: "remote" });
+    return Response.json({ ok: true, value: { managerThreadId: "manager", cursor: 8, replies: [{ id: "manager-reply:manager:reply", text: "Visible reply", time: 8000, outcome: "complete" }] } });
+  }, (_resource, action) => { expect(action).toBe("read"); return granted ? { ok: true, value: undefined } : { ok: false, error: { code: "unavailable", message: "Read grant revoked" } }; });
+  expect((await relay.managerReplies({ after: 7, limit: 100 })).ok).toBe(true);
+  granted = false;
+  expect((await relay.managerReplies({ after: 7, limit: 100 })).ok).toBe(false);
+  expect(calls).toBe(1);
+  db.close();
+});
+
 test("core routes notices without Remote and retains exact outbox identity across uncertain acknowledgement", async () => {
   const db = openSqlite(":memory:");
   const thread = { id: "origin", title: "Task title" } as Thread;

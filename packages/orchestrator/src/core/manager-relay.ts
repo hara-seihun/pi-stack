@@ -4,6 +4,7 @@ import type { ManagerQuestionCustodyRequest, ManagerQuestionCustodyReceipt, Resu
 import type { ThreadOwner } from "../threads/directory.js";
 import { createThreadClient } from "../threads/http.js";
 type ThreadFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+import type { ManagerReplies, ManagerRepliesInput } from "./manager-replies.js";
 
 export type CoreManagerRelayConfig = {
   scopeId: string;
@@ -19,7 +20,7 @@ const failure = (code: "unavailable" | "conflict" | "invalid_request", message: 
 /** Scope-bound provenance and transport only. Native ThreadService owns questions and receipts. */
 export class CoreManagerRelay {
   private readonly peers = new Map<string, ThreadOwner>();
-  constructor(readonly config: CoreManagerRelayConfig, private readonly db: DatabaseSync, transport: ThreadFetch,
+  constructor(readonly config: CoreManagerRelayConfig, private readonly db: DatabaseSync, private readonly transport: ThreadFetch,
     private readonly authorize: (resource: Resource, action: PermissionAction) => Result<void>) {
     if (!config.scopeId || !/^[a-z][a-z0-9-]{0,31}$/.test(config.environmentId)) throw new Error("Manager relay requires explicit scope/environment identity");
     if (new Set(config.remoteEnvironments.map(row => row.id)).size !== config.remoteEnvironments.length
@@ -46,6 +47,21 @@ export class CoreManagerRelay {
   get managerOwner(): ThreadOwner | undefined {
     const target = this.config.canonicalManager;
     return target && target.environmentId !== this.config.environmentId ? this.peers.get(target.environmentId) : undefined;
+  }
+  async managerReplies(input: ManagerRepliesInput): Promise<Result<ManagerReplies>> {
+    const target = this.config.canonicalManager;
+    if (!target || target.environmentId === this.config.environmentId) return failure("unavailable", "Remote canonical manager is unset");
+    const environment = this.config.remoteEnvironments.find(row => row.id === target.environmentId);
+    if (!environment) return failure("unavailable", "Canonical manager environment is undeclared");
+    const granted = this.authorize(environment.resource, "read");
+    if (!granted.ok) return granted;
+    try {
+      const response = await this.transport(`${this.config.callbackUrl.replace(/\/$/, "")}/managerReplies`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ input, environmentId: environment.id }), signal: AbortSignal.timeout(10_000) });
+      const result = await response.json() as Result<ManagerReplies>;
+      if (!response.ok || typeof result?.ok !== "boolean") return failure("unavailable", `Manager reply transport returned HTTP ${response.status}`);
+      if (result.ok && result.value.managerThreadId !== target.threadId) return failure("conflict", "Reply transport names another manager");
+      return result;
+    } catch (cause) { return failure("unavailable", `Manager replies unavailable: ${cause instanceof Error ? cause.message : String(cause)}`); }
   }
   questionOwner = (threadId: string): ThreadOwner | null => {
     const origin = this.db.prepare("SELECT environment_id FROM core_manager_origin WHERE scope_id=? AND thread_id=?").get(this.config.scopeId, threadId) as { environment_id: string } | undefined;

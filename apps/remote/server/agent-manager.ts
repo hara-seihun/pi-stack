@@ -2,7 +2,7 @@ import { combineManagerWork, validateManagerWorkSummary, type ManagerWorkSummary
 import type { Person } from "./persons";
 import type { EnvironmentEndpoint } from "./environments";
 
-const operations = new Set(["managerNotificationPolicy", "managerWorkSummary", "send", "questionOrigin", "managerQuestionCustody"]);
+const operations = new Set(["managerNotificationPolicy", "managerWorkSummary", "send", "questionOrigin", "managerQuestionCustody", "managerReplies"]);
 const summaryTimeoutMs = 5_000;
 const summaryFailure = (environment: string, reason: string): Result<never> => ({ ok: false,
   error: { code: "unavailable", message: `Environment ${environment} work summary unavailable: ${reason}` } });

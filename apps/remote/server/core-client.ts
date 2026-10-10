@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { ThreadApi, Thread, ThreadInspection, ThreadMessage, ThreadSettlement, PiEvent, Result, BrokerUsage } from "pi-orchestrator/api";
+import type { ThreadApi, Thread, ThreadInspection, ThreadMessage, ThreadSettlement, PiEvent, Result, BrokerUsage, PersonUsageWindow } from "pi-orchestrator/api";
 import type { CoreProjection, CoreEvent } from "../../../packages/orchestrator/src/core/contracts";
+import type { ManagerReplies, ManagerRepliesInput } from "../../../packages/orchestrator/src/core/manager-replies";
 
 type Change = { threadId: string; event?: PiEvent; live?: Record<string, unknown> };
 type Fetch = typeof fetch;
@@ -85,6 +86,28 @@ export class CoreClient {
   live(id: string): Record<string, unknown> { return this.projection?.live[id] ?? { text: "", thinking: "", tools: [] }; }
   managerThreadId(): string | null { return this.projection?.managerThreadId ?? null; }
   subscribe(listener: (change: Change) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
+
+  async managerReplies(input: ManagerRepliesInput): Promise<Result<ManagerReplies>> {
+    try {
+      const response = await this.transport(`${this.base}/thread-owner/managerReplies`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input), signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(15_000)]) });
+      const result = await response.json() as Result<ManagerReplies>;
+      if (!response.ok || typeof result?.ok !== "boolean") return failure(`Core manager replies returned HTTP ${response.status}`);
+      if (!result.ok) return result;
+      const value = result.value;
+      if (value.managerThreadId !== this.managerThreadId() || !Number.isSafeInteger(value.cursor) || value.cursor < 0 || !Array.isArray(value.replies) || value.replies.some(reply => typeof reply.id !== "string" || !reply.id || typeof reply.text !== "string" || !reply.text.trim() || reply.text.length > 2000 || reply.id.length > 256 || !["complete", "failed", "cancelled"].includes(reply.outcome) || !Number.isFinite(reply.time))) return failure("Core returned an invalid manager reply projection");
+      return result;
+    } catch (cause) { return failure(`Core manager replies unavailable: ${String(cause)}`); }
+  }
+
+  async peopleUsage(period: "day" | "week"): Promise<Result<PersonUsageWindow>> {
+    try {
+      const response = await this.transport(`${this.serviceUrl}/v1/providers/people-usage?period=${period}`, { signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(10_000)]) });
+      if (!response.ok) { await response.body?.cancel(); return failure(`Core aggregate usage returned HTTP ${response.status}`); }
+      const value = await response.json() as PersonUsageWindow;
+      if (typeof value?.since !== "string" || typeof value.until !== "string" || !Array.isArray(value.rows) || !Array.isArray(value.subscriptions) || value.rows.some(row => !(row.principal === null || typeof row.principal === "string") || !Number.isFinite(row.tokens) || !Number.isFinite(row.spend) || !Number.isFinite(row.value) || !row.sources?.fleet)) return failure("Core returned invalid aggregate usage");
+      return { ok: true, value };
+    } catch (cause) { return failure(`Core aggregate usage unavailable: ${String(cause)}`); }
+  }
 
   async usage(): Promise<Result<BrokerUsage>> {
     try {

@@ -8,6 +8,24 @@ const config = { url: "http://core.test", token: "fixture-secret", scopeId: "per
 const thread = { id: "retained-thread", revision: 7, metadata: {}, state: "idle" } as unknown as Thread;
 const projection = (): CoreProjection => ({ cursor: 12, threads: [thread], archivedTotal: 31_054, pending: { [thread.id]: [] }, inputs: { [thread.id]: [] }, settlements: {}, live: { [thread.id]: { text: "snapshot", thinking: "", tools: [] } }, managerThreadId: "retained-manager" });
 
+test("aggregate analytics and manager replies use authenticated core endpoints with explicit scope boundaries", async () => {
+  const calls: string[] = [];
+  const client = new CoreClient(config, createThreadClient, (async (input, init) => {
+    const url = String(input); calls.push(url);
+    expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${config.token}`);
+    if (url.includes("/projection")) return Response.json({ ok: true, value: projection() });
+    if (url.includes("/people-usage")) return Response.json({ since: "start", until: "end", subscriptions: [], rows: [] });
+    expect(JSON.parse(String(init?.body))).toEqual({ after: 12, limit: 100 });
+    return Response.json({ ok: true, value: { managerThreadId: "other-manager", cursor: 13, replies: [] } });
+  }) as typeof fetch);
+  await client.refreshProjection();
+  expect((await client.peopleUsage("week")).ok).toBe(true);
+  expect(calls).toContain("http://core.test/v1/providers/people-usage?period=week");
+  expect((await client.managerReplies({ after: 12, limit: 100 })).ok).toBe(false);
+  expect(calls).toContain("http://core.test/v1/scopes/person%2Fone/thread-owner/managerReplies");
+  client.close();
+});
+
 test("unset core configuration is an explicit error, never an invitation to create a local engine", () => {
   expect(coreConfiguration({})).toMatchObject({ ok: false, error: { code: "unavailable" } });
 });

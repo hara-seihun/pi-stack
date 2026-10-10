@@ -4,7 +4,7 @@ import type { ImageContent } from "@earendil-works/pi-ai";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync, watchFile, unwatchFile } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
-import { isHostAdministrator } from "./people-usage";
+import { isHostAdministrator, peopleUsagePeriod } from "./people-usage";
 import { projectThreadNotifications } from "./thread-notifications";
 import { startThreadRefresh } from "./thread-refresh";
 import {
@@ -74,6 +74,7 @@ import { machineActionDefinition, modelAvailabilityDefinition } from "../shared/
 import { settingsError } from "pi-orchestrator/person-settings-contract";
 import { PhoneBroker, phoneCallerAllowed, type PhoneSocketData } from "./phones";
 import { PhoneOverlay } from "./phone-overlay";
+import { PhoneReplies } from "./phone-replies";
 import { PHONE_MAX_FRAME_BYTES } from "./phone-commands";
 import { jsonHttp } from "./json-http";
 import { FeatureUsage } from "./feature-usage";
@@ -283,6 +284,7 @@ function trackFeature(feature: Feature, actor: FeatureActor, id: string = crypto
 }
 const promptAdmissions = new PromptAdmissions(db);
 let phoneOverlay: PhoneOverlay | null = null;
+let phoneReplies: PhoneReplies | null = null;
 const directory = Object.assign(threads, { owners: [{ id: "core", api: threads }] });
 manager = new Manager(db, () => core.managerThreadId(), () => { signalSync(); void refreshThreadNotifications(); void pushNotifications(); });
 function notificationFeedback(owner: string, message: string | null) {
@@ -413,6 +415,15 @@ function refreshPlanUsageIfDue() {
     planUsage = result.value.plans;
     ownUsage = result.value.personal;
     allowance = result.value.allowance;
+    if (HOST_ADMINISTRATOR) {
+      const [day, week] = await Promise.all([core.peopleUsage("day"), core.peopleUsage("week")]);
+      observeError(db, "people-usage", !day.ok ? day.error.message : !week.ok ? week.error.message : null);
+      if (day.ok && week.ok) {
+        const names = new Map(listPersons().map(person => [person.user, person.displayName]));
+        const owner = userInfo().username;
+        peopleUsage = { periods: { day: peopleUsagePeriod(day.value, owner, names), week: peopleUsagePeriod(week.value, owner, names) } };
+      }
+    }
   })().finally(() => { planUsageRefresh = null; });
 }
 
@@ -1463,7 +1474,10 @@ async function insertThread(id: string, name: string, destination: ThreadDestina
 unwrap(await core.refreshProjection());
 beginSupervisorGeneration(db, SUPERVISOR_EPOCH);
 const unsubscribeThreads = threads.subscribe(change => {
-  if (change.event) handlePiEvent(change.threadId, change.event);
+  if (change.event) {
+    handlePiEvent(change.threadId, change.event);
+    if (change.event.type === "thread_settled") void phoneReplies?.reconcile();
+  }
   else {
     ensureThreadView(db, change.threadId);
     if (change.live) restoreLiveProjection(liveFor(change.threadId), change.live);
@@ -1511,6 +1525,8 @@ type SocketData = PhoneSocketData;
 const phones = new PhoneBroker({
   commandUsed: () => { trackFeature("phone", "agent"); },
   overlayMessage: async (device, message) => {
+    const subscription = await phoneReplies!.bind(device.id, device.capabilities.overlayEnabled === true);
+    if (!subscription.ok) return subscription;
     const result = await phoneOverlay!.message(device, message);
     if (result.ok) trackFeature("overlay", "phone", message.id);
     return result;
@@ -1522,6 +1538,9 @@ const phones = new PhoneBroker({
       if (!result.ok) observeError(db, "feature-usage", result.error.message);
     }
     phoneOverlay?.ready(device);
+    void phoneReplies!.bind(device.id, enabled === true).then(result => {
+      observeError(db, "phone-replies", result.ok ? null : result.error.message);
+    }).catch(cause => observeError(db, "phone-replies", String(cause)));
   },
 });
 db.exec("CREATE TABLE IF NOT EXISTS phone_overlay_inputs(device_id TEXT NOT NULL,message_id TEXT NOT NULL,input TEXT NOT NULL,prepared TEXT NOT NULL,PRIMARY KEY(device_id,message_id))");
@@ -1547,6 +1566,16 @@ phoneOverlay = new PhoneOverlay({
     .flatMap(row => { const threadId = core.managerThreadId(); return threadId ? [{ deviceId: row.key.slice("phone-overlay:".length), threadId }] : []; }),
   save: (deviceId, threadId) => { db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)").run(`phone-overlay:${deviceId}`, threadId); },
   log: message => console.warn(message),
+});
+phoneReplies = new PhoneReplies(db, {
+  managerId: () => core.managerThreadId(), read: input => core.managerReplies(input),
+  online: deviceId => phones.online(deviceId),
+  send: async (deviceId, receiptId, text) => {
+    const result = await phones.send(deviceId, "overlay.say", { text, receiptId });
+    if (result.ok && (result.result as any)?.displayed === true && (result.result as any)?.receiptId === receiptId) phoneOverlay!.receiptDisplayed(deviceId);
+    return result;
+  },
+  feedback: message => observeError(db, "phone-replies", message),
 });
 const requestTimings = new RequestTimings();
 const server = Bun.serve<SocketData>({
@@ -1576,7 +1605,7 @@ const server = Bun.serve<SocketData>({
     if (url.pathname.startsWith("/v1/core/manager-relay/") && req.method === "POST") {
       if (req.headers.get("authorization") !== `Bearer ${coreConfig.token}`) return error("Core service authentication required", 403);
       const operation = url.pathname.slice("/v1/core/manager-relay/".length);
-      if (!["managerNotificationPolicy", "managerWorkSummary", "send", "questionOrigin", "managerQuestionCustody"].includes(operation)) return error("Unknown core manager transport operation", 400);
+      if (!["managerNotificationPolicy", "managerWorkSummary", "send", "questionOrigin", "managerQuestionCustody", "managerReplies"].includes(operation)) return error("Unknown core manager transport operation", 400);
       const body = await readBody(req);
       if (!body?.input || typeof body.input !== "object" || Array.isArray(body.input) || Object.keys(body).some(key => key !== "input" && key !== "environmentId")) return error("Expected a manager relay envelope", 400);
       try {
@@ -2470,6 +2499,7 @@ void refreshPeers();
 
 signalSync();
 core.start();
+phoneReplies.start();
 void refreshThreadNotifications();
 
 const stopLedgerSnapshots = startLedgerSnapshots(
@@ -2531,7 +2561,7 @@ const supervisorRelease = new SupervisorRelease({
     core.close();
   },
   detach: async () => ({ ok: true, value: undefined }),
-  closeImages: async () => { await messaging.close(); externalActions?.close(); await closeImageGeneration(); },
+  closeImages: async () => { await phoneReplies!.close(); await messaging.close(); externalActions?.close(); await closeImageGeneration(); },
   stopServer: () => { server.stop(true); },
   closeDatabase: () => db.close(),
   exit: code => process.exit(code),

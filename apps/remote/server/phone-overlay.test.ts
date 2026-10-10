@@ -33,7 +33,7 @@ function host(overrides: Partial<OverlayHost> = {}) {
 }
 
 describe("phone overlay conversation", () => {
-  test("first message briefs the attached conversation, later messages arrive with replies as bubbles", async () => {
+  test("first message briefs the attached conversation; transient events update state but never deliver replies", async () => {
     const h = host(); const overlay = new PhoneOverlay(h.value); overlay.ready(device);
     const first = await overlay.message(device, { id: "m1", text: "what's this button?", context: { package: "com.example", label: "Example" } });
     expect(first).toEqual({ ok: true, threadId: "thread-1" });
@@ -48,10 +48,10 @@ describe("phone overlay conversation", () => {
     overlay.event("thread-1", { type: "thread_settled", outcome: "completed" });
     await tick();
     expect(h.sent).toEqual([["overlay.state", { state: "thinking" }], ["overlay.state", { state: "working" }],
-      ["overlay.say", { text: "That's Settings." }], ["overlay.state", { state: "idle" }]]);
+      ["overlay.state", { state: "idle" }]]);
   });
 
-  test("an archived thread is replaced and a reply to an offline phone waits for reconnect", async () => {
+  test("an archived thread is replaced without replaying transient output to a reconnected phone", async () => {
     const h = host(); h.saved.set("pixel", "old"); h.threads.set("old", { archived: true });
     const overlay = new PhoneOverlay(h.value); overlay.ready(device);
     expect(await overlay.message(device, { id: "m", text: "hi", context: { package: null, label: null } })).toEqual({ ok: true, threadId: "thread-1" });
@@ -59,7 +59,7 @@ describe("phone overlay conversation", () => {
     overlay.event("thread-1", { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "later" }] } });
     overlay.event("old", { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "stale" }] } });
     h.online(); overlay.ready(device); await tick();
-    expect(h.sent.filter(([command]) => command === "overlay.say")).toEqual([["overlay.say", { text: "later" }]]);
+    expect(h.sent.filter(([command]) => command === "overlay.say")).toEqual([]);
   });
 
   test("broker acknowledges overlay messages and rejects malformed ones without dropping the phone", async () => {
@@ -109,7 +109,7 @@ describe("phone overlay conversation", () => {
     expect(requests).toEqual(["overlay:pixel:original-id", "overlay:pixel:original-id"]);
     overlay.event("manager", { type: "message_end", message: { role: "assistant", content: "Reply" } });
     await tick();
-    expect(deliveries.sort()).toEqual(["pixel", "tablet"]);
+    expect(deliveries).toEqual([]); // Canonical receipt fanout, not token events, delivers replies.
   });
 
   test("retrying the first message after binding preserves its original briefing bytes", async () => {
@@ -132,6 +132,8 @@ describe("phone overlay conversation", () => {
     expect(validatePhoneCommand({ command: "overlay.point", args: { x: 1 } }).ok).toBe(false);
     expect(validatePhoneCommand({ command: "overlay.point", args: { x: 1, y: 2, nodeId: "1:0" } }).ok).toBe(false);
     expect(validatePhoneCommand({ command: "overlay.say", args: { text: "x".repeat(2001) } }).ok).toBe(false);
+    expect(validatePhoneCommand({ command: "overlay.say", args: { text: "Reply", receiptId: "manager-reply:manager:execution" } }).ok).toBe(true);
+    expect(validatePhoneCommand({ command: "overlay.say", args: { text: "Reply", receiptId: " " } }).ok).toBe(false);
     const point = parsePhoneArgs(["point", "10", "20", "tap", "here"]);
     expect(point.ok && point.value.kind === "command" && point.value.args).toEqual({ x: 10, y: 20, text: "tap here" });
     const say = parsePhoneArgs(["say", "hello"]);

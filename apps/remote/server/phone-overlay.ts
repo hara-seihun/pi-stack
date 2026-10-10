@@ -53,8 +53,6 @@ export class PhoneOverlay {
   private readonly threadFor = new Map<string, string>();
   private readonly dot = new Map<string, DotState>();
   private readonly enabled = new Set<string>();
-  /** Last unspoken reply per phone, delivered when it reconnects. */
-  private readonly unspoken = new Map<string, string>();
 
   constructor(private readonly host: OverlayHost) {
     for (const { deviceId, threadId } of host.load()) this.bind(deviceId, threadId);
@@ -103,13 +101,7 @@ export class PhoneOverlay {
       if (!this.enabled.has(deviceId)) continue;
       if (event.type === "thread_message_inserted") this.state(deviceId, "thinking");
       else if (event.type === "tool_execution_start") this.state(deviceId, "working");
-      else if (event.type === "message_end" && event.message?.role === "assistant") {
-        const text = spokenText(event.message);
-        if (text) this.say(deviceId, text);
-      } else if (event.type === "thread_settled") {
-        if (event.outcome === "failed") this.say(deviceId, spokenText(event.finalMessage) || "That didn't work; the details are in the managing conversation.");
-        this.state(deviceId, "idle");
-      }
+      else if (event.type === "thread_settled") this.state(deviceId, "idle");
     }
   }
 
@@ -117,24 +109,13 @@ export class PhoneOverlay {
     if (device.capabilities.overlayEnabled !== true) {
       this.enabled.delete(device.id);
       this.dot.delete(device.id);
-      this.unspoken.delete(device.id);
       return;
     }
     this.enabled.add(device.id);
-    const text = this.unspoken.get(device.id);
     this.dot.delete(device.id);
-    if (text) { this.unspoken.delete(device.id); this.say(device.id, text); }
   }
 
-  private say(deviceId: string, text: string): void {
-    if (!this.enabled.has(deviceId)) return;
-    if (!this.host.online(deviceId)) { this.unspoken.set(deviceId, text); return; }
-    void this.host.send(deviceId, "overlay.say", { text }).then(result => {
-      if (result.ok) return;
-      if (result.error.code === "disconnected" && this.enabled.has(deviceId)) this.unspoken.set(deviceId, text);
-      this.host.log(`overlay.say to ${deviceId} failed: ${result.error.code} ${result.error.message}`);
-    });
-  }
+  receiptDisplayed(deviceId: string): void { this.state(deviceId, "idle"); }
 
   private state(deviceId: string, state: DotState): void {
     if (!this.enabled.has(deviceId) || this.dot.get(deviceId) === state || !this.host.online(deviceId)) return;
