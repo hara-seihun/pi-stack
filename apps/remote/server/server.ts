@@ -91,6 +91,7 @@ import { ensureExternalMeetingThread } from "./meet/threads";
 import { liveDevInstructions } from "./skills";
 import { configuredThreadDestinations, defaultThreadDestinations, recentThreadModels, threadModelOptions, type ThreadDestination } from "./thread-model-defaults";
 import { contextFilesPrompt, listContextFiles, selectContextFiles, watchContextFiles, type ContextFileSources } from "./thread-context-files";
+import { reconcileThreadContextSelection, type ThreadContextSelection } from "./manager-context-selection";
 import { API } from "./api";
 import { SettingsService, type OwnedSettingAdapter } from "./settings-store";
 import { machineActionDefinition, modelAvailabilityDefinition } from "../shared/settings";
@@ -389,12 +390,14 @@ manager = MANAGER_DESTINATION ? new Manager(db, threads, () => {
   const admitted = workspaceAdmission.resolve(MANAGER_DESTINATION.workspaceId);
   if (!admitted.ok) return { ok: false, error: { code: "unavailable", message: admitted.error.message } };
   const sources = destinationContextSources(MANAGER_DESTINATION);
-  const selected = selectContextFiles(sources, watchContextFiles(MANAGER_DESTINATION.managerContextFiles, sources?.directory));
-  return selected.ok ? { ok: true, value: { cwd: admitted.value.cwd, metadata: {
-    workspaceId: MANAGER_DESTINATION.workspaceId, profileId: MANAGER_DESTINATION.id, contextFiles: selected.value,
-  } } } : { ok: false, error: { code: "invalid_request", message: selected.error } };
+  const contextFiles = sources ? listContextFiles(sources).map(offer => offer.name) : [];
+  return { ok: true, value: { cwd: admitted.value.cwd, metadata: {
+    workspaceId: MANAGER_DESTINATION.workspaceId, profileId: MANAGER_DESTINATION.id, contextFiles, contextSelection: "all",
+  } } };
 }, unwrap(managerSettings(process.env.PI_REMOTE_MANAGER_MODEL)), () => { signalSync(); void refreshThreadNotifications(); void pushNotifications(); }) : null;
 if (manager) {
+  const existingManager = manager.snapshot().managerThreadId;
+  if (existingManager && threads.get(existingManager)) effectiveThreadContextSelection(existingManager);
   const workObserver = managerRelayClient();
   threads.setManagerWatchdog(async () => {
     const managerThreadId = manager!.snapshot().managerThreadId;
@@ -767,13 +770,21 @@ function meetingInstructions(sessionId: string, audience: "thread" | "voice" = "
   return meetingThreadInstructions(thread.metadata?.liveDispatcher === true ? "root" : "worker");
 }
 
-/** The chosen context files of a thread, whole, for its system prompt. Children do not inherit their parent's choice. */
+function effectiveThreadContextSelection(sessionId: string): ThreadContextSelection {
+  const thread = threads.get(sessionId);
+  if (!thread) throw new Error("Context selection requires an owned thread");
+  const destination = THREAD_DESTINATIONS.get(String(thread.metadata?.profileId ?? ""));
+  if (thread.metadata?.manager === true && !destination) throw new Error("Manager context destination is unavailable");
+  return unwrap(reconcileThreadContextSelection(thread, destinationContextSources(destination), metadata => threads.update(sessionId, { metadata })));
+}
+
+/** Whole current-destination context, reread each turn; workers never inherit the manager's selection. */
 function chosenContextFiles(sessionId: string): string {
   const thread = threads.get(sessionId);
-  const names = thread?.metadata?.contextFiles;
-  if (!Array.isArray(names) || !names.length) return "";
-  const sources = destinationContextSources(THREAD_DESTINATIONS.get(String(thread!.metadata!.profileId ?? "")));
-  return contextFilesPrompt(sources, names.filter((name): name is string => typeof name === "string"));
+  if (!thread) return "";
+  const selection = effectiveThreadContextSelection(sessionId);
+  const sources = destinationContextSources(THREAD_DESTINATIONS.get(String(thread.metadata?.profileId ?? "")));
+  return contextFilesPrompt(sources, selection.files, selection.mode === "all");
 }
 
 function threadInstructions(sessionId: string, audience: "thread" | "voice" = "thread"): string {

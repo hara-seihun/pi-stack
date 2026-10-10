@@ -74,7 +74,7 @@ describe("person manager view", () => {
     expect(managerDestination(destinations, "raw").ok).toBe(false);
     expect(managerDestination(destinations, "missing").ok).toBe(false);
     expect(managerDestination([], undefined).ok).toBe(false);
-    expect(() => configuredThreadDestinations(destinations.map(destination => ({ ...destination, managerContextFiles: ["../PROFILE.md"] })), [])).toThrow("managerContextFiles");
+    expect(() => configuredThreadDestinations(destinations.map(destination => ({ ...destination, watchContextFiles: ["../PROFILE.md"] })), [])).toThrow("watchContextFiles");
     expect(managerSettings("no-such-model").ok).toBe(false);
     expect(parseManagerPatch({ view: "mono", hintSeen: "yes" }).ok).toBe(false);
     expect(parseManagerPatch({ view: "unknown" }).ok).toBe(false);
