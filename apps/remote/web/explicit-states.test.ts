@@ -6,15 +6,17 @@ import { parseRoute } from "./src/app/routes";
 import { queueMessageStatus } from "./src/features/queue/QueueSheet";
 import { AppUpdater } from "./src/app-update-state";
 
-const idle = { state: "idle" as const, activity: "idle" as const, held: false, activeTools: [], idleUnread: false, archivedAt: null };
+const idle = { lifecycle: { kind: "idle" as const }, state: "idle" as const, activity: "idle" as const, held: false, activeTools: [], idleUnread: false, humanAttention: true, archivedAt: null };
 const session = { ...idle, id: "parent", origin: "person", queuedMessages: [] };
 
-test("invalid lifecycle and activity are rejected even when held or archived", () => {
-  for (const patch of [{ state: "future" }, { activity: "running" }, { activity: undefined }]) {
-    expect(() => threadStatus({ ...idle, ...patch, held: true } as any)).toThrow("invalid state");
-    expect(() => validateStreamSnapshot("state", { type: "state", sessions: [{ ...session, ...patch }] })).toThrow("invalid state");
+test("invalid observations are rejected at the stream boundary even when held or archived", () => {
+  for (const patch of [{ state: "future" }, { activity: "running" }, { activity: undefined }, { lifecycle: { kind: "future" } }]) {
+    for (const placement of [{ held: true }, { archivedAt: "2026-01-01", lifecycle: { kind: "archived" } }]) {
+      expect(() => validateStreamSnapshot("state", { type: "state", sessions: [{ ...session, ...placement, ...patch }] })).toThrow("invalid state");
+    }
   }
   expect(() => validateThreadObservation({ state: "idle" })).toThrow("invalid state");
+  expect(() => validateStreamSnapshot("state", { type: "state", sessions: [{ ...session, lifecycle: undefined }] })).toThrow("expected object");
 });
 
 test("durable wait identities stay distinct while human activity is one Waiting state", () => {
@@ -24,27 +26,30 @@ test("durable wait identities stay distinct while human activity is one Waiting 
     { kind: "deployment", publicationId: "PUB", reason: "Release", since: 1000 },
     { kind: "message", fromThreadId: "collaborator", reason: "Reply", since: 1000 },
   ];
-  const statuses = dependencies.map(waitingOnAgents => threadStatus({ ...idle, activity: "awaiting", waitingOnAgents }));
+  const observations = dependencies.map(waitingOnAgents => ({ ...session, activity: "awaiting" as const, waitingOnAgents,
+    lifecycle: { kind: "waiting" as const, target: waitingOnAgents.kind, reason: waitingOnAgents.reason, since: waitingOnAgents.since, dependency: waitingOnAgents } }));
+  const statuses = observations.map(threadStatus);
   expect(new Set(statuses.map(status => status.key))).toEqual(new Set(["waiting"]));
   expect(statuses.map(status => status.title)).toEqual(dependencies.map(wait => wait.reason));
-  const subscription = threadStatus({ ...idle, state: "waiting", activity: "awaiting", activityDetail: "Waiting for agent results" });
-  expect(subscription).toMatchObject({ key: "waiting", label: "Waiting", busy: true, title: "Waiting for agent results" });
-  expect(threadStatus({ ...idle, dependencies: ["not-authoritative-state"] } as any).key).toBe("idle");
-  expect(statuses.every(status => status.busy && !status.attention && attentionRank(status) === 11)).toBe(true);
-  expect(threadStatus(idle).busy).toBe(false);
-  expect(threadStatus({ ...idle, activity: "thinking" })).toMatchObject({ key: "reporting_error", busy: false, attention: true });
-  expect(threadStatus({ ...idle, activity: "awaiting" })).toMatchObject({ key: "reporting_error", busy: false, attention: true });
-  expect(threadStatus({ ...idle, activity: "awaiting", waitingForChildren: true } as any)).toMatchObject({ key: "reporting_error", busy: false, attention: true });
-  for (const waitingOnAgents of dependencies) validateStreamSnapshot("state", { type: "state", sessions: [{ ...session, activity: "awaiting", waitingOnAgents }] });
+  expect(statuses.every(status => !status.busy && !status.attention && attentionRank(status) === 11)).toBe(true);
+  const subscription = threadStatus({ ...idle, lifecycle: { kind: "waiting", target: "agents", reason: "Waiting for agent results", since: 1000 } });
+  expect(subscription).toMatchObject({ key: "waiting", busy: false, title: "Waiting for agent results" });
+  for (const row of observations) validateStreamSnapshot("state", { type: "state", sessions: [row] });
+  for (const patch of [{ activity: "thinking" }, { activity: "awaiting" }, { waitingForChildren: true }, { dependencies: ["child"] }]) {
+    expect(threadStatus({ ...idle, ...patch } as any)).toMatchObject({ key: "idle", busy: false });
+    expect(threadStatus({ ...idle, ...patch, lifecycle: undefined } as any)).toMatchObject({ key: "reporting_error", busy: false, attention: true });
+  }
 });
 
-test("legacy waits preserve evidence as defects, unknown waits cannot become agent dependencies", () => {
+test("legacy wait evidence stays at the boundary while the owner supplies its failure lifecycle", () => {
   const legacy = { reason: "Original evidence", since: 1000, threadIds: [] };
-  expect(threadStatus({ ...idle, activity: "awaiting", waitingOnAgents: legacy } as any)).toMatchObject({ label: "Wait type missing", attention: true });
   expect(() => validateStreamSnapshot("state", { type: "state", sessions: [{ ...session, activity: "awaiting", waitingOnAgents: legacy }] })).toThrow("wait type missing");
-  validateStreamSnapshot("state", { type: "state", sessions: [{ ...session, activity: "status_error", waitingOnAgents: legacy }] });
-  expect(legacy.reason).toBe("Original evidence");
-  expect(() => threadStatus({ ...idle, activity: "awaiting", waitingOnAgents: { ...legacy, kind: "available" } } as any)).toThrow("undescribed state");
+  const defect = { ...session, activity: "status_error", waitingOnAgents: legacy,
+    lifecycle: { kind: "failed" as const, reason: "Invalid owned dependency wait", control: "cancel_wait" as const } };
+  validateStreamSnapshot("state", { type: "state", sessions: [defect] });
+  expect(threadStatus(defect)).toMatchObject({ key: "error", title: "Invalid owned dependency wait", attention: true });
+  expect(defect.waitingOnAgents.reason).toBe("Original evidence");
+  expect(() => validateStreamSnapshot("state", { type: "state", sessions: [{ ...session, waitingOnAgents: { ...legacy, kind: "available" } }] })).toThrow("invalid state");
 });
 
 test("route boundaries allow the empty entrance but reject malformed or undescribed routes", () => {

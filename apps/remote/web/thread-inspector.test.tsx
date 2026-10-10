@@ -6,6 +6,7 @@ import { InspectorSheet } from "./src/features/inspector/InspectorSheet";
 const thread: Session = {
   id: "consumer", parentId: null, hasChildren: false, origin: "person", model: "openai/astra",
   name: "Consumer", cwd: "/home", workspaceName: "Home", environment: "home", state: "waiting",
+  lifecycle: { kind: "waiting", target: "agents", reason: "Waiting for agent results", since: 1 }, humanAttention: true,
   held: false, activity: "awaiting", activityDetail: "Waiting for agent results", dependencies: ["producer"],
   activeTools: [], provider: "openai", createdAt: "", updatedAt: "", revision: 1, idleUnread: false,
   queuedMessages: [], archivedAt: null,

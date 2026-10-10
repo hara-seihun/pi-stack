@@ -7,14 +7,14 @@ import { AgentsDirectory } from "./src/features/agents/AgentsScreen";
 const session = (id: string, changes: Partial<Session> = {}): Session => ({
   id, agentName: `Name ${id}`, name: `Task ${id}`, parentId: null, hasChildren: false,
   origin: "person", foreground: false, model: "test", provider: "test", cwd: "/fixture", workspaceName: "Home", environment: "test",
-  state: "idle", activity: "idle", held: false, activeTools: [], createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+  state: "idle", lifecycle: { kind: "idle" }, humanAttention: true, activity: "idle", held: false, activeTools: [], createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
   revision: 1, idleUnread: false, queuedMessages: [], archivedAt: null, ...changes,
 });
 const directory = [
   session("launcher", { foreground: true, agentName: "Renian", name: "Publish release" }),
   session("quiet", { parentId: "launcher" }),
-  session("active", { parentId: "launcher", state: "running", activity: "thinking" }),
-  session("waiting", { parentId: "active", state: "waiting", activity: "awaiting", waitingOnAgents: { kind: "job", jobId: "compile", reason: "Wait for build", since: 1 } }),
+  session("active", { parentId: "launcher", state: "running", lifecycle: { kind: "working", phase: "thinking", since: 1 }, activity: "thinking" }),
+  session("waiting", { parentId: "active", state: "waiting", lifecycle: { kind: "waiting", target: "job", reason: "Wait for build", since: 1 }, activity: "awaiting", waitingOnAgents: { kind: "job", jobId: "compile", reason: "Wait for build", since: 1 } }),
   session("system", { origin: "fleet" }), session("watch", { watchList: true }), session("detached"),
   session("gone-parent", { parentId: "archived-launcher" }), session("closed", { archivedAt: "2026-01-02T00:00:00Z" }),
 ];
@@ -59,8 +59,9 @@ test("resource failure keeps a visibly stale usable directory, never a successfu
 test("task purpose and owned activity are readable without agent identity or opening a transcript", () => {
   const agents = [session("unnamed-task", { name: "Publish new release", agentName: undefined,
     taskDescription: "Install the Orchestrator changes on both machines.", state: "waiting", activity: "awaiting",
+    lifecycle: { kind: "waiting", target: "deployment", reason: "Waiting for the Converge release to finish", since: 1 },
     waitingOnAgents: { kind: "deployment", publicationId: "PUB-test", reason: "Waiting for the Converge release to finish", since: 1 } }),
-    session("named-task", { name: "Fix account routing", agentName: "Renian", state: "running", activity: "waiting_on_tool", activeTools: ["functions.read"] })];
+    session("named-task", { name: "Fix account routing", agentName: "Renian", state: "running", lifecycle: { kind: "working", phase: "waiting_on_tool", since: 1, detail: "Running read" }, activity: "waiting_on_tool", activeTools: ["functions.read"] })];
   const html = renderToStaticMarkup(<AgentsDirectory directory={{ state: "ready", sessions: agents }} onRefresh={() => {}} onOpen={() => {}} />);
   expect(html).toContain("Install the Orchestrator changes on both machines.");
   expect(html).toContain("Waiting for the Converge release to finish");

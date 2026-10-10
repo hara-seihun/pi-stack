@@ -8,7 +8,7 @@ import { validateStreamSnapshot } from "../shared/state-validation";
 import type { ThreadLifecycle } from "../../../packages/orchestrator/src/threads/lifecycle";
 
 const observation = (lifecycle: ThreadLifecycle, patch: Partial<Session> = {}) => ({
-  lifecycle, state: "idle" as const, held: false, activity: "idle" as Session["activity"], activeTools: [], idleUnread: false, archivedAt: null, ...patch,
+  lifecycle, state: "idle" as const, held: false, activity: "idle" as Session["activity"], activeTools: [], idleUnread: false, humanAttention: true, archivedAt: null, ...patch,
 });
 
 test("missing owner lifecycle is an instrumentation error, never inferred from old activity", () => {
@@ -93,6 +93,16 @@ test("confirmed failure and cancellation are distinct, and failure preserves the
   const failure = threadStatus(observation({ kind: "failed", reason: "Runner could not cancel", control: "stop" }));
   expect(failure).toMatchObject({ key: "error", busy: false, attention: true, title: "Runner could not cancel" });
   expect(renderToStaticMarkup(createElement(StatusPill, { status: failure }))).toContain('class="status-error-detail">Runner could not cancel</span>');
+});
+
+test("human attention requires an explicit owner grant without erasing lifecycle evidence", () => {
+  for (const humanAttention of [true, false, undefined]) {
+    const unread = threadStatus(observation({ kind: "idle" }, { idleUnread: true, humanAttention }));
+    const failed = threadStatus(observation({ kind: "failed", reason: "Runner exited", control: "none" }, { humanAttention }));
+    expect(unread).toMatchObject({ key: "idle", busy: false, attention: humanAttention === true });
+    expect(failed).toMatchObject({ key: "error", busy: false, title: "Runner exited", attention: humanAttention === true });
+    expect(attentionRank(unread)).toBe(humanAttention === true ? 2 : 21);
+  }
 });
 
 test("lack of updates is visible in dense rows, not hidden in a desktop tooltip", () => {
