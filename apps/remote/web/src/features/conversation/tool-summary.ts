@@ -86,8 +86,8 @@ export function managerToolSummary(name: string, args: any, home: string, runnin
     case "agent_browser": return running ? "Browsing" : "Browsed";
     case "grep": case "find": return `${running ? "Searching" : "Searched"}${shownPath}`;
     case "ls": return `${running ? "Listing" : "Listed"}${shownPath}`;
-    default: return `Tool: ${tool.replaceAll("_", " ")}`;
   }
+  return `Tool: ${tool.replaceAll("_", " ")}`;
 }
 
 export function toolSummary(name: string, args: any = {}, home = "") {

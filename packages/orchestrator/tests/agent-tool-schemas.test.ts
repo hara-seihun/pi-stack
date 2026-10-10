@@ -19,6 +19,7 @@ interface WireSchema extends TSchema {
   anyOf?: WireSchema[];
   allOf?: WireSchema[];
   oneOf?: WireSchema[];
+  not?: WireSchema;
 }
 const zeroArgumentTools = new Set(["watch_list", "manager_questions_list"]);
 const affectedFields = {
