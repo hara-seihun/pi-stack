@@ -5,7 +5,7 @@ import { validateThreadObservation } from "../shared/state-validation";
 import type { Room, RoomActivity, RoomSnapshot, RoomHistoryOptions, RoomPaging } from "../shared/rooms";
 import { roomInput, roomMembers, roomMetadata, readRoomInput, readRoomPaging, readRoomHistoryOptions } from "../shared/rooms";
 
-interface OwnedRoomThread { id: string; title: string; state: Thread["state"]; held?: boolean; metadata?: Record<string, unknown>; executionActivity?: Thread["executionActivity"] }
+interface OwnedRoomThread { id: string; title: string; lifecycle: Thread["lifecycle"]; state: Thread["state"]; held?: boolean; metadata?: Record<string, unknown>; executionActivity?: Thread["executionActivity"] }
 export interface RoomHistory { messages: unknown[]; paging: RoomPaging; live: string; questions?: RoomSnapshot["questions"]; thinking?: string; error?: string; execution?: RoomActivity }
 export class RoomHistoryError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
@@ -18,7 +18,7 @@ interface RoomOwner {
   history(id: string, options: RoomHistoryOptions): Promise<RoomHistory>;
   stop?(id: string): Promise<void>;
   answer?(id: string, questionId: string, sender: NonNullable<ReturnType<typeof roomMembers>>[number], body: any): Promise<void>;
-  notify(id: string, receiptId: string, title: string, body: string, time: number): void;
+  notify(id: string, receiptId: string, title: string, body: string, time: number): void | Promise<void>;
   subscribe?(listener: (id: string) => void): () => void;
 }
 const uuid = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f-]{36}$/i.test(value);
@@ -27,7 +27,7 @@ const fail = (error: string, status = 400) => Response.json({ error }, { status 
 export function publicRoomSnapshot(thread: OwnedRoomThread, source: RoomHistory): RoomSnapshot {
   if (!readRoomPaging(source.paging) || source.messages.length !== source.paging.end - source.paging.start) throw new RoomHistoryError(503, "Room owner returned an invalid history page");
   const metadata = roomMetadata(thread.metadata?.room)!;
-  const execution = source.execution ?? projectThreadActivity(thread.state, undefined, thread.executionActivity, thread.metadata, Boolean(thread.held));
+  const execution = projectThreadActivity(thread);
   const error = source.error ?? execution.executionError;
   let activity: RoomActivity;
   try {
@@ -87,7 +87,7 @@ export async function handleRoomOwner(req: Request, owner: RoomOwner): Promise<R
   if (action === "notify" && req.method === "POST") {
     if (typeof body?.receiptId !== "string" || body.receiptId.length > 300 || typeof body.title !== "string" || typeof body.body !== "string"
       || !Number.isFinite(body.time)) return fail("Invalid room notice");
-    owner.notify(id, body.receiptId, body.title.slice(0, 120), body.body.slice(0, 1000), body.time);
+    await owner.notify(id, body.receiptId, body.title.slice(0, 120), body.body.slice(0, 1000), body.time);
     return Response.json({ ok: true });
   }
   if (!action && req.method === "POST") {

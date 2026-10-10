@@ -51,14 +51,32 @@ export function validateThreadObservation(value: unknown): void {
   requireState(row.activity, ACTIVITIES, "Thread activity");
 }
 
+export function validateLifecycle(value: unknown): void {
+  const row = stateObject(value, "Owner lifecycle");
+  const kind = requireState(row.kind, { idle: true, archived: true, working: true, waiting: true, cancelling: true, failed: true }, "Owner lifecycle kind");
+  switch (kind) {
+    case "idle": case "archived": case "cancelling": return;
+    case "working":
+      requireState(row.phase, { queued: true, admitting: true, starting: true, preparing: true, finishing: true, cancelling: true, recovering: true, thinking: true, responding: true, preparing_tool: true, waiting_for_model: true, waiting_on_agents: true, waiting_on_tool: true, compacting: true, retrying: true, waiting_for_capacity: true, waiting_to_retry: true }, "Working phase");
+      if (!Number.isFinite(row.since)) throw new Error("Working lifecycle: invalid timestamp");
+      return;
+    case "waiting":
+      if (!Number.isFinite(row.since)) throw new Error("Waiting lifecycle: timestamp required");
+      const delayed = { agents: false, job: false, deployment: false, message: false, dispatch: false, capacity: true, retry: true };
+      if (delayed[requireState(row.target, delayed, "Waiting target")] && !stateString(row.reason, "Waiting reason").trim()) throw new Error("Delayed lifecycle: reason required");
+      return;
+    case "failed":
+      if (!stateString(row.reason, "Failure reason").trim()) throw new Error("Failure lifecycle: reason required");
+      requireState(row.control, { stop: true, cancel_wait: true, none: true }, "Failure control");
+      return;
+  }
+}
+
 export function validateSession(value: unknown): asserts value is Session {
   validateThreadObservation(value);
+  validateLifecycle(stateObject(value, "Session").lifecycle);
   const row = stateObject(value, "Session");
   stateString(row.id, "Session id");
-  if (row.taskDescription !== undefined) {
-    const description = stateString(row.taskDescription, "Task description");
-    if (!description.trim() || description.length > 240) throw new Error("Task description: expected 1..240 characters");
-  }
   requireState(row.origin, { person: true, fleet: true } satisfies Record<Session["origin"], true>, "Session origin");
   if (row.manager !== undefined && typeof row.manager !== "boolean") throw new Error("Session manager: expected boolean");
   if (typeof row.held !== "boolean") throw new Error("Session held: expected boolean");
@@ -75,7 +93,6 @@ export function validateSession(value: unknown): asserts value is Session {
       if (row.activity !== "status_error") throw new Error("Dependency wait: wait type missing");
     } else {
       const kind = requireState(wait.kind, { agents: true, job: true, deployment: true, message: true } satisfies Record<NonNullable<Session["waitingOnAgents"]>["kind"], true>, "Dependency wait");
-      stateString(wait.reason, "Wait reason");
       switch (kind) {
         case "agents":
           if (!stateArray(wait.threadIds, "Agent dependencies").length) throw new Error("Agent wait: dependencies are empty");

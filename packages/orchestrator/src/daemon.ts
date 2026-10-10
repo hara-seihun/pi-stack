@@ -358,7 +358,7 @@ export class Daemon {
       :{...shared,PI_ORCHESTRATOR_AUTH:this.config.authPath};
   }
   private async launch(run:Run):Promise<boolean>{
-    const choice=assignCompletion(this.store,run.id,run.profile,this.config);
+    const choice=assignCompletion(this.store,run.id,run.profile,this.config,new ModelAvailabilityStore(modelAvailabilityPath()));
     if(!choice.assignment){this.store.setControl(`refusal:${run.id}`,choice.refusals.map(r=>`${r.accountId}: ${r.reason}`).join("; "));return false;}
     if(!this.store.assignRun(run.id,{...choice.assignment,unit:`completion:${run.id}`,releasePath:this.releasePath}))return false;
     this.store.setControl(`refusal:${run.id}`,"");this.completionPool.start(this.store.run(run.id)!);return true;

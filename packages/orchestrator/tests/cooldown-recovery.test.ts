@@ -104,7 +104,7 @@ it("does not touch expired cooldowns or accounts nobody cooled", () => {
 
 const thread: Thread = { id: "worker", parentId: "parent", title: "work", cwd: "/tmp", sessionFile: "/tmp/worker.jsonl",
   settings: { model: `anthropic/${opus}`, thinkingLevel: "high", speed: "standard" }, admission: "force",
-  state: "running", held: false, revision: 1, createdAt: 1, updatedAt: 1, pendingMessages: 1 };
+  lifecycle: { kind: "idle" }, state: "running", held: false, revision: 1, createdAt: 1, updatedAt: 1, pendingMessages: 1 };
 
 it("replays September 29: an Opus success on one account reopens fleet admission to it alone", async () => {
   const store = anthropicPool();

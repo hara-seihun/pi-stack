@@ -2,7 +2,7 @@ import { afterEach, expect, it } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ModelAvailabilityStore, modelAvailabilityPath } from "../src/threads/model-availability.js";
+import { ModelAvailabilityStore, modelAvailabilityPath, sharedModelRefusal } from "../src/threads/model-availability.js";
 import { ThreadService } from "../src/threads/service.js";
 import type { Result } from "../src/threads/contracts.js";
 
@@ -86,6 +86,18 @@ it("admits new live meetings and their priority workers while Astra and Fable ar
   expect(explicit.settings).toEqual({ model: "anthropic/claude-opus-5-5", thinkingLevel: "high", speed: "standard" });
   expect(store.admit("astra").ok).toBe(false);
   expect(store.admit("fable").ok).toBe(false);
+});
+
+it("thread start and shared-model refusal read one decision", () => {
+  const { store } = fixture();
+  value(store.set("fable", false));
+  expect(value(store.decide("anthropic-2/claude-fable-5-1"))).toEqual({ state: "disabled", model: "anthropic-2/claude-fable-5-1", key: "anthropic/claude-fable-5-1", policy: store.path });
+  expect(value(store.decide("sol"))).toEqual({ state: "enabled", model: "sol", key: "openai-codex/gpt-6.1-sol" });
+  expect(store.admit("fable")).toEqual({ ok: false, error: { code: "invalid_request", message: "fable is disabled for new threads. Enable it in Machine \u2192 Models." } });
+  expect(sharedModelRefusal(store, "fable")).toMatchObject({ code: "model-disabled", model: "anthropic/claude-fable-5-1", policy: store.path });
+  expect(sharedModelRefusal(store, "sol")).toBeNull();
+  writeFileSync(store.path, "broken policy\n");
+  expect(sharedModelRefusal(store, "sol")).toMatchObject({ code: "model-policy-unavailable", model: "sol" });
 });
 
 it("fails closed on unreadable policy without rewriting or enabling it", async () => {

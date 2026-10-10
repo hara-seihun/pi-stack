@@ -1,48 +1,19 @@
-import { createExecutionActivity, executionWaitActivity, restoreExecutionActivity, settleExecutionActivity, validateWaitDependency, type ExecutionActivity, type Thread, type ThreadState } from "pi-orchestrator/api";
+import { createExecutionActivity, restoreExecutionActivity, settleExecutionActivity, type ExecutionActivity, type Thread } from "pi-orchestrator/api";
 import type { ToolProgress } from "./tool-progress";
-import type { Activity, Session } from "./protocol";
+import type { Session } from "./protocol";
 
-export function threadActivity(state: ThreadState, live?: LiveProjection): Activity {
-  if (state === "idle") return "idle";
-  if (state === "waiting") return "awaiting";
-  if (state === "running") return live?.compacting ? "compacting" : live?.retrying ? "retrying"
-    : live?.activeTools.size ? "waiting_on_tool" : live?.activity ?? (live?.thinkingActive ? "thinking" : "status_error");
-  state satisfies never;
-  throw new Error("Unsupported thread execution state");
-}
-
-export function projectThreadActivity(state: ThreadState, live?: LiveProjection,
-  snapshot?: Thread["executionActivity"], metadata?: Thread["metadata"], held = false): Pick<Session, "activity" | "activitySince" | "lastActivityAt" | "activityDetail" | "activeTools" | "executionError"> {
-  const dependency = metadata?.agentWait as import("pi-orchestrator/api").AgentWait | undefined;
-  if ((state === "idle" || state === "waiting") && !held && !metadata?.archived && dependency) {
-    const parsed = validateWaitDependency(dependency);
-    if (!parsed.ok || typeof dependency.reason !== "string" || !dependency.reason.trim() || !Number.isFinite(dependency.since)) {
-      const detail = "Wait reporting defect: missing, unsupported or invalid dependency";
-      return { activity: "status_error", activitySince: dependency.since, activityDetail: detail, activeTools: [], executionError: detail };
-    }
-    return {
-      activity: "awaiting", activitySince: dependency.since, activityDetail: dependency.reason,
-      activeTools: [], executionError: typeof metadata?.executionError === "string" ? metadata.executionError : undefined,
-    };
+export function projectThreadActivity(thread: Pick<Thread, "lifecycle" | "executionActivity">): Pick<Session, "lifecycle" | "activity" | "activitySince" | "lastActivityAt" | "activityDetail" | "activeTools" | "executionError"> {
+  const lifecycle = thread.lifecycle;
+  const empty = { lifecycle, activeTools: [] as string[] };
+  switch (lifecycle.kind) {
+    case "idle": case "archived": return { ...empty, activity: "idle" };
+    case "cancelling": return { ...empty, activity: "cancelling" };
+    case "failed": return { ...empty, activity: "status_error", executionError: lifecycle.reason };
+    case "waiting": return { ...empty, activity: "awaiting", activitySince: lifecycle.since, ...("reason" in lifecycle ? { activityDetail: lifecycle.reason } : {}) };
+    case "working": return { lifecycle, activity: lifecycle.phase, activitySince: lifecycle.since,
+      activityDetail: lifecycle.detail, lastActivityAt: thread.executionActivity?.lastActivityAt,
+      activeTools: thread.executionActivity?.activeTools ?? [] };
   }
-  if (state === "waiting" && !held && !metadata?.archived) return {
-    activity: "awaiting", activityDetail: "Waiting for agent results", activeTools: [],
-    executionError: typeof metadata?.executionError === "string" ? metadata.executionError : undefined,
-  };
-  const wait = state === "running" ? executionWaitActivity(metadata) : undefined;
-  const resuming = snapshot?.activity && !["waiting_for_capacity", "waiting_to_retry"].includes(snapshot.activity)
-    && (snapshot.lastActivityAt ?? 0) > (wait?.lastActivityAt ?? wait?.activitySince ?? Infinity);
-  if (wait && !resuming) snapshot = { ...wait, activeTools: [] };
-  const activity = state !== "running" && (held || metadata?.archived) ? "idle"
-    : snapshot ? state !== "running" ? threadActivity(state) : snapshot.activity ?? "status_error"
-    : threadActivity(state, live);
-  const evidence = snapshot ?? live;
-  return { activity,
-    activitySince: state === "running" ? evidence?.activitySince : undefined,
-    lastActivityAt: evidence?.lastActivityAt,
-    activityDetail: state === "running" ? evidence?.activityDetail : undefined,
-    executionError: typeof metadata?.executionError === "string" && (held || !wait) ? metadata.executionError : undefined,
-    activeTools: state === "running" ? snapshot?.activeTools ?? [...(live?.activeTools.values() ?? [])] : [] };
 }
 
 /** Disposable visual state. None of these fields admits or completes work. */

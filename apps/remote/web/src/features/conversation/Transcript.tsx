@@ -8,6 +8,7 @@ import { resourceUrl } from "../../resource-url";
 import { formatResponseMetrics } from "../../response-metrics";
 import type { ContextEntry } from "../../types";
 import { assertNever } from "../../../../shared/explicit-state";
+import { monoMessage } from "../../app/mono";
 import { AgentDisclosure, AgentRoute, copyOutgoingMessage, outgoingAgentMessage, presentAgentMessage, spawnedThread } from "./agent-message";
 import { AGENT_NAME } from "../../../../server/agent-identity";
 import { useItemBody } from "./item-bodies";
@@ -26,6 +27,7 @@ const transcriptMessageIds = (item: RenderedTranscriptItem): readonly string[] =
 
 export interface TranscriptProps {
   entries: ContextEntry[];
+  mono?: boolean;
   liveThinking?: string;
   /** The thread is thinking now, so the live step exists before any text does. */
   thinkingActive?: boolean;
@@ -94,10 +96,11 @@ function useElapsed<T extends HTMLElement>(startedAt: number | undefined, runnin
   return { ref, elapsed: startedAt ? Math.max(0, now - startedAt) : undefined };
 }
 
-const MessageEntry = memo(function MessageEntry({ entry, sessionId, autoCollapse, onEdit, onReply }: {
+const MessageEntry = memo(function MessageEntry({ entry, sessionId, autoCollapse, mono, onEdit, onReply }: {
   entry: ContextEntry;
   sessionId: string;
   autoCollapse: boolean;
+  mono: boolean;
   onEdit(entry: ContextEntry): void;
   onReply(target: ReplyTarget): void;
 }) {
@@ -136,7 +139,7 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, autoCollapse
     reactions={entry.reactions}
     reply={entry.reply}
     onReply={onReply}
-    responseMetrics={entry.kind === "assistant" ? entry.responseMetrics : undefined}
+    responseMetrics={!mono && entry.kind === "assistant" ? entry.responseMetrics : undefined}
     contentFormat="markdown"
     renderMarkdown={source => <Markdown source={source} sessionId={sessionId} streaming={entry.streaming} assistant={entry.kind === "assistant"} />}
     menu={entry.kind === "user" && !presented.agentSender && Number(entry.messageTimestamp) > 0 ? [{ label: "Edit and resend from here", onSelect: edit }] : []}
@@ -152,7 +155,7 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, autoCollapse
   return <div data-transcript-seq={entry.seq}>{sender
     ? <AgentDisclosure route={route} open={open} onOpen={setOpen}>{content}</AgentDisclosure>
     : content}</div>;
-}, (before, after) => before.entry.signature === after.entry.signature && before.sessionId === after.sessionId && before.autoCollapse === after.autoCollapse && before.onEdit === after.onEdit && before.onReply === after.onReply);
+}, (before, after) => before.entry.signature === after.entry.signature && before.sessionId === after.sessionId && before.autoCollapse === after.autoCollapse && before.mono === after.mono && before.onEdit === after.onEdit && before.onReply === after.onReply);
 
 const OutgoingEntry = memo(function OutgoingEntry({ entry, sessionId, autoCollapse }: { entry: ContextEntry; sessionId: string; autoCollapse: boolean }) {
   const preview = outgoingAgentMessage(entry);
@@ -379,9 +382,9 @@ const WorkCard = memo(function WorkCard({ item, newest, sessionId, home, onThink
   && before.item.entries.length === after.item.entries.length
   && before.item.entries.every((entry, index) => entry.signature === after.item.entries[index]?.signature));
 
-export function Transcript({ entries, liveThinking, thinkingActive, autoCollapse = true, sessionId, home, images, earlierAvailable, loadingEarlier, earlierError, onShowEarlier, newerAvailable, onShowNewer, onVisibleRange, onThinkingOpen, onEdit, onReply }: TranscriptProps) {
-  const stable = useMemo(() => buildStableTranscript(entries), [entries]);
-  const grouped = useMemo(() => appendLiveThinking(stable, liveThinking, thinkingActive), [stable, liveThinking, thinkingActive]);
+export function Transcript({ entries, liveThinking, thinkingActive, autoCollapse = true, mono = false, sessionId, home, images, earlierAvailable, loadingEarlier, earlierError, onShowEarlier, newerAvailable, onShowNewer, onVisibleRange, onThinkingOpen, onEdit, onReply }: TranscriptProps) {
+  const stable = useMemo(() => buildStableTranscript(mono ? entries.filter(monoMessage) : entries), [entries, mono]);
+  const grouped = useMemo(() => mono ? stable : appendLiveThinking(stable, liveThinking, thinkingActive), [stable, liveThinking, thinkingActive, mono]);
   const items = useMemo(() => autoCollapse ? grouped : grouped.flatMap<RenderedTranscriptItem>(item => item.kind === "work" ? [...item.entries, ...(item.live ? [item.live] : [])].map(entry => ({ kind: "step" as const, entry })) : [item]), [grouped, autoCollapse]);
   const ref = useVisibleHeads(items, onVisibleRange);
   const visible = items;
@@ -398,7 +401,7 @@ export function Transcript({ entries, liveThinking, thinkingActive, autoCollapse
           ? <Step entry={item.entry} sessionId={sessionId} home={home} forceExpanded onThinkingOpen={onThinkingOpen} />
           : item.kind === "outgoing"
             ? <OutgoingEntry entry={item.entry} sessionId={sessionId} autoCollapse={autoCollapse} />
-            : <MessageEntry entry={item.entry} sessionId={sessionId} autoCollapse={autoCollapse} onEdit={onEdit} onReply={onReply} />} />
+            : <MessageEntry entry={item.entry} sessionId={sessionId} autoCollapse={autoCollapse} mono={mono} onEdit={onEdit} onReply={onReply} />} />
       {newerAvailable && <button type="button" className="context-earlier context-newer" disabled={loadingEarlier} onClick={onShowNewer}>{loadingEarlier ? "Loading newer…" : "Show 60 newer"}</button>}
     </div>
   </InlineImagesContext.Provider>;

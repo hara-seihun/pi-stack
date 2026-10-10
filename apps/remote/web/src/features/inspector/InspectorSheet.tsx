@@ -109,10 +109,7 @@ export function InspectorSheet({ session, sessions, open, pending, onClose, onOp
         {session.wakeSchedule && <>
           <Row label="Wake check">{session.wakeSchedule.reason}</Row>
           <Row label="Check interval">{session.wakeSchedule.cadenceMs / 60000} minutes</Row>
-          <Row label="Next check">{formatTime(new Date(session.wakeSchedule.nextDueAt).toISOString())}{session.wakeSchedule.deferredReason && ` (${session.wakeSchedule.deferredReason})`}</Row>
-          {session.wakeSchedule.lastDueAt !== undefined && <Row label="Last wake due">{formatTime(new Date(session.wakeSchedule.lastDueAt).toISOString())}</Row>}
-          {session.wakeSchedule.lastDeliveredAt && <Row label="Last wake queued">{formatTime(new Date(session.wakeSchedule.lastDeliveredAt).toISOString())}</Row>}
-          {session.wakeSchedule.lastLandedAt && <Row label="Last wake landed">{formatTime(new Date(session.wakeSchedule.lastLandedAt).toISOString())}</Row>}
+          <Row label="Next check">{formatTime(new Date(session.wakeSchedule.nextDueAt).toISOString())}</Row>
         </>}
         <Row label="Model">{session.model}</Row>
         {!session.model.includes("/") && <Row label="Provider">{session.provider}</Row>}

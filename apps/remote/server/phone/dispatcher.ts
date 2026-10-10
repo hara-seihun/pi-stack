@@ -46,7 +46,7 @@ export async function telephoneDispatcher(req: Request, options: {
     if (!existing) {
       const created = await threads.spawn({ id, requestId: `telephone:${id}`, cwd: options.cwd,
         title: "Telephone conversation", settings: { model: options.model, thinkingLevel: "low", speed: "standard" },
-        metadata: { raw: true, telephoneContext: fixed, foreground: false } });
+        metadata: { raw: true, telephoneContext: fixed } });
       if (!created.ok) return error(created.error.message, 503);
     }
     if (route[2] === "approved") {

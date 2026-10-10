@@ -1,5 +1,6 @@
 import { appStorageKey } from "./app-path";
 import type { IdleNotificationFeed } from "../../server/protocol";
+import { humanNotification } from "../../shared/notification-policy";
 import { nativePlatform, nativeSessionReady, remote } from "./native";
 
 export interface NotificationTarget { environment?: string; sessionId?: string; user?: string }
@@ -57,7 +58,9 @@ export function deliverIdleNotifications(feed: IdleNotificationFeed, replay = tr
   const previous = pending?.user === user && pending.session === session ? pending.feed : null;
   pending = { user, session, replay: replay && (!pending || pending.replay), after, feed: {
     cursor: Math.max(previous?.cursor ?? 0, feed.cursor),
-    notifications: [...new Map([...(previous?.notifications ?? []), ...feed.notifications].map(item => [item.seq, item])).values()],
+    ...(feed.policy ? { policy: feed.policy } : {}),
+    notifications: [...new Map([...(previous?.notifications ?? []), ...feed.notifications].map(item => [item.seq, item])).values()]
+      .filter(item => feed.policy === undefined || humanNotification(feed.policy, item.sessionId, item.kind)),
   } };
 }
 

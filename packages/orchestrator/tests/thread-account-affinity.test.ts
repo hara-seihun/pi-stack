@@ -8,7 +8,7 @@ import type { Thread } from "../src/threads/contracts.js";
 const opus = { provider: "anthropic", model: "claude-opus-5-5", thinking: "high" } as const;
 const thread: Thread = { id: "cached-thread", parentId: "parent", title: "work", cwd: "/tmp", sessionFile: "/tmp/cache-affinity.jsonl",
   settings: { model: `${opus.provider}/${opus.model}`, thinkingLevel: "high", speed: "standard" }, admission: "force",
-  state: "running", held: false, revision: 1, createdAt: 1, updatedAt: 1, pendingMessages: 1 };
+  lifecycle: { kind: "idle" }, state: "running", held: false, revision: 1, createdAt: 1, updatedAt: 1, pendingMessages: 1 };
 function fixture() {
   const store = Store.open(":memory:");
   for (const id of ["anthropic-1", "anthropic-2"]) store.upsertAccount({ id, provider: opus.provider, concurrency: 1 });

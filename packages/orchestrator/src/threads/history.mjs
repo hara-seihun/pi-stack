@@ -2,6 +2,7 @@ import { existsSync, readFileSync, openSync, closeSync, readSync, fstatSync, sta
 import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { TextDecoder } from "node:util";
+import { projectAnthropicNarrationMessage } from "./anthropic-narration.mjs";
 
 export const MAX_HISTORY_RECORD_BYTES = 8 * 1024 * 1024;
 export const MAX_HISTORY_INDEX_BYTES = 64 * 1024 * 1024;
@@ -97,7 +98,8 @@ function recordMetadata(entry, raw, path, line, offset) {
     timestamp: timestampMs(entry.timestamp) ?? null, digest: createHash("sha256").update(raw).digest("hex"),
     ...(entry.type === "custom" && entry.customType != null ? { customType: entry.customType } : {}) };
   if (entry.type !== "message" && entry.type !== "custom_message") return ok(Object.freeze(base));
-  const message = entry.type === "custom_message" ? { role: "custom", content: entry.content, timestamp: entry.timestamp } : entry.message;
+  const nativeMessage = entry.type === "custom_message" ? { role: "custom", content: entry.content, timestamp: entry.timestamp } : entry.message;
+  const message = nativeMessage && typeof nativeMessage === "object" ? projectAnthropicNarrationMessage(nativeMessage) : nativeMessage;
   if (!message || !nonempty(message.role) || (message.toolCallId != null && !nonempty(message.toolCallId))) {
     return failure("invalid-record", path, `Invalid session message at line ${line}`, { line, offset });
   }
@@ -354,7 +356,8 @@ export function visibleThreadHistory(path, leafId) {
   return readThreadHistory(path, leafId).flatMap(entry => {
     if (!["message", "custom_message"].includes(entry.type)) return [];
     if (entry.message?.role !== "assistant" || !Array.isArray(entry.message.content)) return [entry];
-    const content = entry.message.content.filter(block => block.type !== "thinking").map(block => {
+    const message = projectAnthropicNarrationMessage(entry.message);
+    const content = message.content.filter(block => block.type !== "thinking").map(block => {
       const { thinkingSignature, textSignature, encrypted_content, encryptedContent, thoughtSignature, ...visible } = block;
       return visible;
     });

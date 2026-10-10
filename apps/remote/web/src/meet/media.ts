@@ -81,14 +81,9 @@ function stateColor(state: string): string {
 export function meetThreadStatus(thread: MeetThreadState): ThreadStatus {
   if (thread.finished) return { key: "idle", label: "Done", short: "Done", busy: false, attention: false };
   return threadStatus({
-    state: thread.state,
-    held: thread.held,
-    activity: thread.activity,
-    activeTools: thread.tools,
-    activitySince: thread.activitySince, lastActivityAt: thread.lastActivityAt, activityDetail: thread.activityDetail,
-    executionError: thread.executionError, waitingOnAgents: thread.waitingOnAgents,
+    lifecycle: thread.lifecycle,
+    lastActivityAt: thread.lastActivityAt,
     idleUnread: false,
-    archivedAt: null,
   });
 }
 
@@ -140,7 +135,7 @@ function threadLines(context: CanvasRenderingContext2D, thread: MeetThreadState)
   };
   const status = meetThreadStatus(thread);
   add(status.label, true);
-  if (status.title) add(`TOOLS · ${status.title}`, true);
+  if (status.title) add(`DETAIL · ${status.title}`, true);
   if (thread.output && !thread.events.some((event) => event.kind === "assistant" && event.text === thread.output)) {
     add("ASSISTANT OUTPUT", true); add(thread.output);
   }
@@ -271,7 +266,7 @@ export async function avatarStream(src: string, getState: () => MeetCameraState)
     card(64, 664, 896, 256, "#121d2d");
     const thread = threads[selected];
     if (thread) {
-      const signature = JSON.stringify([thread.name, thread.state, thread.held, thread.activity, thread.tools, thread.output, thread.events]);
+      const signature = JSON.stringify([thread.name, thread.lifecycle, thread.finished, thread.lastActivityAt, thread.output, thread.events]);
       let entry = content.get(thread.id);
       if (!entry || entry.signature !== signature) {
         entry = { signature, lines: threadLines(context, thread), page: entry?.page ?? 0 };

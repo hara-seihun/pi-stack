@@ -86,7 +86,7 @@ test("a failed second write identifies the settings already saved", async () => 
   const thread: Thread = {
     id: "cold", parentId: null, title: "Cold", cwd: "/missing/checkout", sessionFile: "/missing/native.jsonl",
     settings: { model: "openai-codex/gpt-6-astra", thinkingLevel: "high", speed: "standard" },
-    admission: "force", state: "idle", held: false, revision: 1, createdAt: 0, updatedAt: 0, pendingMessages: 0,
+    admission: "force", lifecycle: { kind: "idle" }, state: "idle", held: false, revision: 1, createdAt: 0, updatedAt: 0, pendingMessages: 0,
     metadata: { retain: true },
   };
   const control = vi.fn<ThreadApi["control"]>().mockResolvedValueOnce({ ok: true, value: thread })

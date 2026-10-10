@@ -7,7 +7,7 @@ import type { Thread } from "../src/threads/contracts.js";
 
 const thread: Thread = { id: "retained", parentId: null, title: "retained", cwd: "/tmp", sessionFile: "/tmp/retained.jsonl",
   settings: { model: "openai-codex/gpt-6-astra", thinkingLevel: "high", speed: "standard" }, admission: "force",
-  state: "running", held: false, revision: 1, createdAt: 1, updatedAt: 1, pendingMessages: 1 };
+  lifecycle: { kind: "idle" }, state: "running", held: false, revision: 1, createdAt: 1, updatedAt: 1, pendingMessages: 1 };
 
 it.each([false, true])("detaches timers without releasing accepted execution custody (broker: %s)", async broker => {
   vi.useFakeTimers();

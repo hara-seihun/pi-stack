@@ -7,6 +7,7 @@ import { loadConfig } from "../src/config.js";
 import { CompletionService } from "../src/completion.js";
 import { CompletionPool } from "../src/host/completion-pool.js";
 import { assignCompletion } from "../src/policy.js";
+import { noModelPolicy } from "./fixtures/model-availability.js";
 import { reservationKey } from "../src/admission-reservation.js";
 import type { CompletionExecution, CompletionOutcome } from "../src/completion-contract.js";
 
@@ -22,7 +23,7 @@ function fixture() {
   for (const meter of ["codex-5h", "codex-7d"]) store.recordMeter(accountId, meter, 83, Date.now() + 86400000, Date.now());
   const submit = (id: string, meta = metadata) => value(service.submit(id, { model: "luna", prompt: id, metadata: meta }));
   const admit = (id: string) => {
-    const record = submit(id), choice = assignCompletion(store, record.runId, "luna", config);
+    const record = submit(id), choice = assignCompletion(store, record.runId, "luna", config, noModelPolicy);
     expect(choice.assignment).toBeDefined();
     expect(store.assignRun(record.runId, { ...choice.assignment!, unit: `completion:${record.runId}`, releasePath: "/release" })).toBe(true);
     return store.run(record.runId)!;
@@ -52,17 +53,17 @@ it("keeps reservation, pause, exhaustion, freshness and cooldown as real admissi
   const f = fixture();
   try {
     const wrong = f.submit("wrong", { caller: "other", purpose: metadata.purpose });
-    expect(assignCompletion(f.store, wrong.runId, "luna", f.config).assignment).toBeUndefined();
+    expect(assignCompletion(f.store, wrong.runId, "luna", f.config, noModelPolicy).assignment).toBeUndefined();
     const right = f.submit("right");
     f.store.setControl("launches", "paused");
-    expect(assignCompletion(f.store, right.runId, "luna", f.config).assignment).toBeUndefined();
+    expect(assignCompletion(f.store, right.runId, "luna", f.config, noModelPolicy).assignment).toBeUndefined();
     f.store.setControl("launches", "enabled");
-    expect(assignCompletion(f.store, right.runId, "luna", f.config, Date.now() + f.config.meterMaxAgeMs + 1).assignment).toBeUndefined();
+    expect(assignCompletion(f.store, right.runId, "luna", f.config, noModelPolicy, Date.now() + f.config.meterMaxAgeMs + 1).assignment).toBeUndefined();
     f.store.setCooldown(f.accountId, Date.now() + 60000);
-    expect(assignCompletion(f.store, right.runId, "luna", f.config).assignment).toBeUndefined();
+    expect(assignCompletion(f.store, right.runId, "luna", f.config, noModelPolicy).assignment).toBeUndefined();
     f.store.setCooldown(f.accountId, 0);
     f.store.recordMeter(f.accountId, "codex-7d", 100, Date.now() + 86400000, Date.now() + 1);
-    expect(assignCompletion(f.store, right.runId, "luna", f.config).assignment).toBeUndefined();
+    expect(assignCompletion(f.store, right.runId, "luna", f.config, noModelPolicy).assignment).toBeUndefined();
   } finally { f.close(); }
 });
 

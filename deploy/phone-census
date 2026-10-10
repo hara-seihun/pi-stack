@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $# == 1 && $1 == /* ]] || { echo 'usage: phone-census ABSOLUTE_PI_CALL_PATH' >&2; exit 64; }
+fail() { echo "Phone census unavailable: $1" >&2; exit 66; }
+load=$(systemctl show pi-stack-phone.service -p LoadState --value) || fail 'unit discovery failed'
+case $load in
+  not-found) printf '{"activeCalls":0}\n'; exit 0 ;;
+  loaded) ;;
+  *) fail "unknown unit load state: $load" ;;
+esac
+state=$(systemctl show pi-stack-phone.service -p ActiveState --value) || fail 'unit state discovery failed'
+case $state in
+  inactive) printf '{"activeCalls":0}\n'; exit 0 ;;
+  active) ;;
+  *) fail "unit is not settled: $state" ;;
+esac
+status=$(PI_STACK_PHONE_CONFIG="${PI_STACK_PHONE_CONFIG:-/etc/pi-stack/phone.json}" timeout --signal=TERM --kill-after=1s 10s bun "$1" status) || fail 'status request failed'
+count=$(jq -cse 'select(length == 1) | .[0].activeCalls | select(type == "number" and . >= 0 and . <= 9007199254740991 and . == floor)' <<<"$status") || fail 'invalid activeCalls count'
+# Emit only the restart admission fact, not the caller identity or service metadata.
+printf '{"activeCalls":%s}\n' "$count"

@@ -69,6 +69,32 @@ test("omitting autoCollapse preserves the compact WorkCard, as does explicit tru
   expect(html).not.toContain("first tool result");
 });
 
+test("mono keeps assistant text plain after tools and before an unsettled wait, independently of live thinking", () => {
+  const final = { ...answer, seq: 20, streaming: true };
+  const wait = entry("unsettled wait", "toolCall", { seq: 21, text: undefined,
+    toolCall: { name: "thread_wait", arguments: { action: "set", kind: "agents", threadIds: ["worker"] } } });
+  const entries = [user, ...work, final, wait];
+  const before = JSON.stringify(entries);
+  for (const autoCollapse of [true, false]) {
+    for (const tail of [[], [wait]]) {
+      const html = render({ mono: true, autoCollapse, entries: [user, ...work, final, ...tail], thinkingActive: true, liveThinking: "Live private reasoning" });
+      expect(html.match(/class="message assistant/g)).toHaveLength(1);
+      expect(html).toContain('<div data-transcript-seq="20"><article');
+      expect(html).not.toContain("work-card");
+      expect(html).not.toContain("conversation-step");
+      expect(html).not.toContain("step-arguments");
+      expect(html).not.toContain("step-thinking-body");
+      expect(html).not.toContain("Live private reasoning");
+      expect(html).not.toContain('data-transcript-seq="21"');
+    }
+  }
+  const classic = render({ entries });
+  expect(classic.match(/class="message assistant/g)).toHaveLength(1);
+  expect(classic).toContain('<div data-transcript-seq="20"><article');
+  expect(classic).toContain("work-card");
+  expect(JSON.stringify(entries)).toBe(before);
+});
+
 test("autoCollapse false renders every intervening entry individually expanded and in transcript order", () => {
   const html = render({ autoCollapse: false, entries: [entry("system detail", "system"), user, ...work, answer] });
   const details = expectExpanded(html, work.length + 1);

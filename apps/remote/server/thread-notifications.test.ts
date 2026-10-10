@@ -10,7 +10,7 @@ import { projectThreadNotifications, projectQuestionNotifications, projectAttent
 
 type NotificationApi = Pick<ThreadApi, "settlements" | "questionEvents" | "attentionEvents" | "questions" | "list">;
 function thread(id: string, overrides: Partial<Thread> = {}): Thread {
-  return { id, title: id, parentId: null, role: "agent", cwd: "/tmp", sessionFile: `/tmp/${id}.jsonl`, settings: { model: "test", thinkingLevel: "off", speed: "standard" }, admission: "background", state: "idle", held: false, revision: 1, createdAt: 1, updatedAt: 1000, pendingMessages: 0, metadata: { foreground: true }, ...overrides };
+  return { id, title: id, parentId: null, role: "agent", cwd: "/tmp", sessionFile: `/tmp/${id}.jsonl`, settings: { model: "test", thinkingLevel: "off", speed: "standard" }, admission: "background", lifecycle: { kind: "idle" }, state: "idle", held: false, revision: 1, createdAt: 1, updatedAt: 1000, pendingMessages: 0, metadata: { foreground: true }, ...overrides };
 }
 function settlement(id: string, seq = 1, overrides: Partial<ThreadSettlement> = {}): ThreadSettlement {
   return { seq, executionId: `execution-${id}-${seq}`, threadId: id, workId: `work-${id}-${seq}`, outcome: "complete", time: seq * 1000, finalMessage: { role: "assistant", content: [{ type: "text", text: `Reply ${seq}` }] }, ...overrides };
@@ -56,7 +56,7 @@ test("deferred completions are write-free while busy and persist removal without
   let db = new Database(path);
   try {
     ensureSupervisorSchema(db);
-    const agent = thread("agent", { state: "running" });
+    const agent = thread("agent", { lifecycle: { kind: "working", phase: "thinking", since: 1 }, state: "running" });
     const api = apiFor([agent], [settlement("agent")]);
     const before = changes(db);
     await projectThreadNotifications(db, "person", api);
@@ -73,7 +73,7 @@ test("deferred completions are write-free while busy and persist removal without
     expect(changes(db) - reopened).toBe(1);
     expect(db.query("SELECT value FROM metadata WHERE key='thread-completions:person'").get()).toEqual({ value: "[]" });
     db.close(); db = new Database(path); ensureSupervisorSchema(db);
-    agent.metadata = { foreground: true }; agent.state = "idle";
+    agent.metadata = { foreground: true }; agent.state = "idle"; agent.lifecycle = { kind: "idle" };
     await projectThreadNotifications(db, "person", api);
     expect(count(db)).toBe(0);
   } finally { db.close(); rmSync(directory, { recursive: true, force: true }); }
@@ -81,11 +81,11 @@ test("deferred completions are write-free while busy and persist removal without
 
 test("pending completion publishes and clears atomically without rewriting its cursor", async () => {
   const db = database();
-  const agent = thread("agent", { state: "running" });
+  const agent = thread("agent", { lifecycle: { kind: "working", phase: "thinking", since: 1 }, state: "running" });
   const api = apiFor([agent], [settlement("agent")]);
   await projectThreadNotifications(db, "person", api);
   db.exec("CREATE TRIGGER reject_pending BEFORE INSERT ON metadata WHEN NEW.key='thread-completions:person' BEGIN SELECT RAISE(ABORT,'pending write failed'); END");
-  agent.state = "idle";
+  agent.state = "idle"; agent.lifecycle = { kind: "idle" };
   await expect(projectThreadNotifications(db, "person", api)).rejects.toThrow("pending write failed");
   expect(count(db)).toBe(0);
   expect(db.query("SELECT count(*) n FROM thread_views").get()).toEqual({ n: 0 });
@@ -116,7 +116,7 @@ test("new completion cursor and notification roll back together on cursor failur
 
 test("attention from a running background agent publishes before failed settlement retrieval", async () => {
   const db = database();
-  const agent = thread("child", { parentId: "parent", state: "running", metadata: { foreground: false } });
+  const agent = thread("child", { parentId: "parent", lifecycle: { kind: "working", phase: "thinking", since: 1 }, state: "running", metadata: { foreground: false } });
   const api = apiFor([agent]);
   api.attentionEvents = (after = 0) => ({ ok: true, value: { cursor: 1, items: after < 1 ? [{ accepted: true, seq: 1, threadId: agent.id, summary: "Review now", foreground: false, time: 1000 }] : [] } });
   let published = false;
@@ -143,7 +143,7 @@ test("receipt cursors and unread acknowledgement survive replay and owners canno
 
 test("launch provenance never gates another foreground agent's completion", async () => {
   const db = database();
-  const child = thread("child", { parentId: "root", state: "running", pendingMessages: 1 });
+  const child = thread("child", { parentId: "root", lifecycle: { kind: "working", phase: "thinking", since: 1 }, state: "running", pendingMessages: 1 });
   const api = apiFor([thread("root"), child], [settlement("root")]);
   await projectThreadNotifications(db, "person", api);
   expect(count(db)).toBe(1);
@@ -152,11 +152,11 @@ test("launch provenance never gates another foreground agent's completion", asyn
 
 test("an explicit own wait defers completion and is rechecked without new settlements", async () => {
   const db = database();
-  const agent = thread("agent", { state: "waiting", waitingOnAgents: { kind: "job", jobId: "job", reason: "Need result", since: 1 } });
+  const agent = thread("agent", { lifecycle: { kind: "waiting", target: "job", since: 1, dependency: { kind: "job", jobId: "job", since: 1 } }, state: "waiting", waitingOnAgents: { kind: "job", jobId: "job", since: 1 } });
   const api = apiFor([agent], [settlement("agent")]);
   await projectThreadNotifications(db, "person", api);
   expect(count(db)).toBe(0);
-  delete agent.waitingOnAgents; agent.state = "idle";
+  delete agent.waitingOnAgents; agent.state = "idle"; agent.lifecycle = { kind: "idle" };
   await projectThreadNotifications(db, "person", api);
   expect(count(db)).toBe(1);
   db.close();
@@ -172,7 +172,7 @@ test("background completion stays silent, promoted launched-agent completion not
 
 test("questions are recorded immediately and retained after the agent archives", async () => {
   const db = database();
-  const agent = thread("agent", { state: "running", metadata: { archived: true, foreground: false } });
+  const agent = thread("agent", { lifecycle: { kind: "archived" }, state: "idle", metadata: { archived: true, foreground: false } });
   const api = apiFor([agent], [], [], [{ seq: 1, questionId: "q", threadId: "agent", question: "Which route?", time: 1000 }]);
   await projectQuestionNotifications(db, "person", api);
   await projectQuestionNotifications(db, "person", api);
@@ -192,7 +192,10 @@ test("failed attention projection never commits half a page or advances its curs
 });
 
 for (const [label, overrides] of [
-  ["running", { state: "running" }], ["queued", { pendingMessages: 1 }], ["held", { held: true }], ["archived", { metadata: { archived: true } }],
+  ["running", { lifecycle: { kind: "working", phase: "thinking", since: 1 }, state: "running" }],
+  ["queued", { lifecycle: { kind: "waiting", target: "dispatch", reason: "Waiting for execution dispatch", since: 1 }, pendingMessages: 1 }],
+  ["held", { lifecycle: { kind: "idle" }, held: true }],
+  ["archived", { lifecycle: { kind: "archived" }, metadata: { archived: true } }],
 ] as Array<[string, Partial<Thread>]>) test(`${label} agent cannot produce a completion alert`, async () => {
   const db = database(); await projectThreadNotifications(db, "person", apiFor([thread("agent", overrides)], [settlement("agent")])); expect(count(db)).toBe(0); db.close();
 });
@@ -201,10 +204,10 @@ for (const [label, overrides] of [
   ["no reply", { finalMessage: null }], ["whitespace", { finalMessage: { role: "assistant", content: [{ type: "text", text: " \n " }] } }], ["cancelled", { outcome: "cancelled" }], ["failed", { outcome: "failed" }],
 ] as Array<[string, Partial<ThreadSettlement>]>) test(`${label} supersedes an earlier deferred reply`, async () => {
   const db = database();
-  const agent = thread("agent", { pendingMessages: 1 });
+  const agent = thread("agent", { lifecycle: { kind: "waiting", target: "dispatch", since: 1 }, pendingMessages: 1 });
   const receipts = [settlement("agent")]; const api = apiFor([agent], receipts);
   await projectThreadNotifications(db, "person", api); expect(count(db)).toBe(0);
-  receipts.push(settlement("agent", 2, overrides)); agent.pendingMessages = 0;
+  receipts.push(settlement("agent", 2, overrides)); agent.pendingMessages = 0; agent.lifecycle = { kind: "idle" };
   await projectThreadNotifications(db, "person", api); expect(count(db)).toBe(0); db.close();
 });
 

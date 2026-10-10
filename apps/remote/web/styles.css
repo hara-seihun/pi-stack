@@ -163,6 +163,9 @@ div.math-pending { display: block; padding: .2em 0; }
 .composer-icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
 .composer-icon.send { border-radius: var(--radius-2); color: var(--bg); background: var(--accent); }
 .composer-icon .stop-icon, .composer-icon .resume-icon { display: none; fill: currentColor; stroke: none; }
+.composer-icon .cancel-wait-icon { display: none; }
+.composer-icon.cancel-wait .send-icon { display: none; }
+.composer-icon.cancel-wait .cancel-wait-icon { display: inline; }
 .composer-icon.resume { width: auto; min-width: 56px; padding: 0 10px; color: var(--bg); background: var(--status-held); }
 .composer-icon.resume .send-icon { display: none; }
 .composer-icon.resume .resume-icon { display: inline; }

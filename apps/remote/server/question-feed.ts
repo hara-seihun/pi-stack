@@ -8,7 +8,8 @@ export class QuestionFeed {
   private readonly reads = new Map<string, Promise<SettledQuestions>>();
   private readonly snapshots = new Map<string, SettledQuestions>();
 
-  constructor(private readonly read: (sessionId: string) => Promise<Result<ThreadQuestion[]>>) {}
+  constructor(private readonly read: (sessionId: string) => Promise<Result<ThreadQuestion[]>>,
+    private readonly present: (resource: SettledQuestions) => SettledQuestions = resource => resource) {}
 
   async settle(sessionId: string): Promise<void> {
     await this.reads.get(sessionId);
@@ -42,6 +43,6 @@ export class QuestionFeed {
     // A refresh is not a loss of the last settled snapshot.
     if (!this.snapshots.has(sessionId)) stream.publish({ type: "questions", sessionId, state: "loading", questions: [] });
     const snapshot = await this.refresh(sessionId);
-    if (!stream.closed && stream.subscription.session === sessionId) stream.publish({ type: "questions", sessionId, ...snapshot });
+    if (!stream.closed && stream.subscription.session === sessionId) stream.publish({ type: "questions", sessionId, ...this.present(snapshot) });
   }
 }

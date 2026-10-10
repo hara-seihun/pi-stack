@@ -142,6 +142,7 @@ for (const target of [{selector:'#input'}, {locator:'label',value:'Input'}]) {
 }
 JS
   runtime_required_pattern 'Anthropic error content' "$release/node_modules/@earendil-works/pi-ai/dist/api/anthropic-messages.js" 'Anthropic error tool results require text'
+  runtime_required_pattern 'signed Anthropic narration' "$release/node_modules/@earendil-works/pi-ai/dist/api/anthropic-messages.js" 'PiStack signed Anthropic narration'
   local shell_source
   for shell_source in core/bash-executor.js core/tools/output-accumulator.js core/tools/bash.js; do
     runtime_required_pattern "bounded SDK $shell_source output" "$release/node_modules/@earendil-works/pi-coding-agent/dist/$shell_source" 'PiStack shell output stays in memory'
@@ -248,7 +249,8 @@ dependency_hash=$({
   sha256sum packages/runtime/patch-bash-cancellation.mjs packages/runtime/pi-shell-owner.mjs packages/runtime/pi-shell-owner.py
   sha256sum packages/runtime/stack-pi.mjs packages/runtime/native-host.mjs packages/runtime/native-recovery.mjs packages/runtime/native-guardian.mjs packages/runtime/managed-agent.mjs packages/runtime/patch-managed-cli.mjs
   find packages/orchestrator/src -type f -print0 | sort -z | xargs -0 sha256sum
-  sha256sum packages/runtime/patch-claude-oauth.mjs packages/runtime/extensions/claude-oauth/client.json packages/runtime/patch-anthropic-error-content.mjs packages/runtime/patch-summary-recovery.mjs packages/runtime/bounded-summary.js packages/runtime/extensions/codex-compaction/retry.mjs
+  sha256sum packages/runtime/patch-anthropic-tool-schema.mjs packages/runtime/anthropic-tool-schema.js
+  sha256sum packages/runtime/patch-claude-oauth.mjs packages/runtime/extensions/claude-oauth/client.json packages/runtime/patch-anthropic-error-content.mjs packages/runtime/patch-anthropic-narration.mjs packages/runtime/patch-summary-recovery.mjs packages/runtime/bounded-summary.js packages/runtime/extensions/codex-compaction/retry.mjs
   find packages/kenan-memory/src packages/kenan-root/src -type f -print0 | sort -z | xargs -0 sha256sum
   sha256sum packages/kenan-memory/package.json packages/kenan-memory/tsconfig.json packages/kenan-memory/discretion.md packages/kenan-memory/person.md
   sha256sum packages/kenan-root/package.json packages/kenan-root/tsconfig.json packages/kenan-root/instructions.md
@@ -285,6 +287,8 @@ if [[ ! -x $dependency_release/node_modules/.bin/pi ]]; then
   node "$runtime_source/patch-claude-oauth.mjs" "$stage/node_modules"
   node "$runtime_source/patch-codex-sse.mjs" "$stage/node_modules"
   node "$runtime_source/patch-anthropic-error-content.mjs" "$stage/node_modules"
+  node "$runtime_source/patch-anthropic-tool-schema.mjs" "$stage/node_modules"
+  node "$runtime_source/patch-anthropic-narration.mjs" "$stage/node_modules"
   node "$runtime_source/patch-codex-service-recovery.mjs" "$stage/node_modules"
   browser_job="$stage/node_modules/pi-agent-browser-native/dist/extensions/agent-browser/lib/input-modes/job.js"
   node "$runtime_source/patch-browser-qa.mjs" "$browser_job"
@@ -303,6 +307,10 @@ if [[ ! -x $dependency_release/node_modules/.bin/pi ]]; then
   node "$runtime_source/patch-shared-rpc.mjs" "$stage/node_modules"
   node "$runtime_source/patch-managed-cli.mjs" "$stage/node_modules"
   rm -f "$stage/node_modules/pi-orchestrator" "$stage/node_modules/pi-remote"
+  # Memory runs from this closure and imports pi-orchestrator/person-timezone; scope that link to Memory alone.
+  rsync -a packages/orchestrator/src "$stage/packages/orchestrator/"
+  install -d "$stage/packages/kenan-memory/node_modules"
+  ln -sfn ../../orchestrator "$stage/packages/kenan-memory/node_modules/pi-orchestrator"
   rm -rf "$stage/node_modules/@hara-seihun"
   dependency_stage="$dependencies_root/.stage.$$.${RANDOM}"
   pi_stack_as_root install -d -m 755 "$dependency_stage"

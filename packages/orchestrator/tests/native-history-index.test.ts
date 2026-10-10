@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { indexedThreadHistory, MAX_HISTORY_RECORD_BYTES, MAX_HISTORY_INDEX_BYTES, MAX_HISTORY_INDEXES, type IndexedThreadHistory, type IndexedThreadHistoryOptions } from "../src/threads/history.mjs";
+import { indexedThreadHistory, visibleThreadHistory, MAX_HISTORY_RECORD_BYTES, MAX_HISTORY_INDEX_BYTES, MAX_HISTORY_INDEXES, type IndexedThreadHistory, type IndexedThreadHistoryOptions } from "../src/threads/history.mjs";
 import { formatThreadMessage } from "../src/threads/message-format.js";
 
 const directories: string[] = [];
@@ -28,6 +28,31 @@ function wakeText(source: "explicit" | "notification" = "notification", id = "th
     source, text: "Scheduled wake check: WAKE_BODY_NOT_INDEXED", delivery: "steer", createdAt: 1, state: "queued" },
   "Scheduled wake check: WAKE_BODY_NOT_INDEXED");
 }
+
+it("counts signed narration as text while retaining exact source and branch paging identity", () => {
+  const field = (number: number, bytes: Buffer): Buffer => Buffer.concat([Buffer.from([number * 8 + 2, bytes.length]), bytes]);
+  const signature = (channel: string) => field(2, field(1, field(8, Buffer.from(channel)))).toString("base64");
+  const entries = [
+    message("wake", null, "user", wakeText()),
+    message("report", "wake", "assistant", [
+      { type: "thinking", thinking: "Visible narration", thinkingSignature: signature("narration") },
+      { type: "thinking", thinking: "Private reasoning", thinkingSignature: signature("thinking") },
+      { type: "toolCall", id: "wait", name: "thread_wait", arguments: {} },
+    ], { api: "anthropic-messages", stopReason: "toolUse" }),
+    message("blank", "report", "assistant", [{ type: "thinking", thinking: "", thinkingSignature: signature("narration") }], { api: "anthropic-messages", stopReason: "stop" }),
+  ];
+  const path = source(entries);
+  const native = index(path), manager = index(path, undefined, managerVisibility);
+  expect(native.messages.map(record => record.displayedItemCount)).toEqual([1, 3, 1]);
+  expect(manager.messages.map(record => record.monoVisibility)).toEqual(["hidden", "visible", "visible"]);
+  expect(native.messages[1]!.blocks.map(block => block.type)).toEqual(["text", "thinking", "toolCall"]);
+  expect(manager.source).toEqual(native.source);
+  expect(native.read(native.messages[1]!)).toEqual({ ok: true, value: entries[1] });
+  const visible = visibleThreadHistory(path);
+  expect(visible[1].message.content).toEqual([{ type: "text", text: "Visible narration" }, { type: "toolCall", id: "wait", name: "thread_wait", arguments: {} }]);
+  expect(JSON.stringify(visible)).not.toContain("Signature");
+  expect(JSON.stringify(native.messages)).not.toContain(signature("narration"));
+});
 
 it("hides the entire quiet manager wake turn without changing the native source or other thread views", () => {
   const entries = [

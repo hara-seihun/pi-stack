@@ -8,7 +8,7 @@ function worker(): Session {
   return {
     id: "bonsai", parentId: null, hasChildren: false, origin: "fleet", model: "openai-codex/gpt-6-sol",
     name: "bonsai-optimization", cwd: "/home", workspaceName: "Home", environment: "local",
-    state: "running", held: false, activity: "queued", activeTools: [], provider: "openai",
+    lifecycle: { kind: "working", phase: "queued", since: 1 }, state: "running", held: false, activity: "queued", activeTools: [], provider: "openai",
     createdAt: "2026-09-22T00:00:00.000Z", updatedAt: "2026-09-22T00:00:00.000Z", revision: 1,
     idleUnread: false, queuedMessages: [], archivedAt: null,
   };
@@ -24,7 +24,7 @@ for (const subscription of [{ dashboard: false }, { session: "local-chat", viewi
     stream.publish({ type: "state", sessions: [peer], archivedTotal: 0, ownerErrors: [] });
     for (const frame of frames.splice(0)) expect(replica.apply(JSON.parse(frame.split("data: ")[1])).ok).toBe(true);
     // The owner changes without a Remote request, reconnect or Machine visit.
-    Object.assign(peer, { state: "idle", held: true, activity: "idle", revision: 2 });
+    Object.assign(peer, { lifecycle: { kind: "idle" }, state: "idle", held: true, activity: "idle", revision: 2 });
     const received = Promise.withResolvers<void>();
     const stop = startThreadRefresh({
       subscriptions: () => [stream.subscription],
@@ -39,7 +39,7 @@ for (const subscription of [{ dashboard: false }, { session: "local-chat", viewi
       await received.promise;
       for (const frame of frames) expect(replica.apply(JSON.parse(frame.split("data: ")[1])).ok).toBe(true);
       const state = replica.get("state")!.value as { sessions: Session[] };
-      expect(state.sessions[0]).toMatchObject({ state: "idle", held: true, activity: "idle" });
+      expect(state.sessions[0]).toMatchObject({ lifecycle: { kind: "idle" }, state: "idle", held: true, activity: "idle" });
     } finally { stop(); stream.close(); }
   });
 }

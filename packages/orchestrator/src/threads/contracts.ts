@@ -1,6 +1,7 @@
 export const THREAD_EXECUTION_CONTRACT = "unified-threads-v1";
 import type { ThreadCreator } from "./caller.js";
 import type { ExecutionActivitySnapshot } from "./execution-activity.js";
+import type { ThreadLifecycle } from "./lifecycle.js";
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: ThreadError };
 export type ThreadError = { code: "not_found" | "invalid_request" | "conflict" | "no_pending_messages" | "unavailable" | "cancellation_failed" | "oversized"; message: string; retryable?: boolean; retryAt?: number; requestId?: string };
@@ -39,6 +40,8 @@ export interface Thread {
   /** Actual accepted execution or next queued work; settings above are future preferences. */
   effectiveSettings?: ThreadSettings;
   admission: Admission;
+  /** Owner-derived observation. state below is scheduler custody, not UI activity. */
+  lifecycle: ThreadLifecycle;
   state: ThreadState;
   held: boolean;
   revision: number;
@@ -319,7 +322,7 @@ export type ThreadControl =
   /** A person's title, pinned against the agent's own naming until they rename again. */
   | { threadId: string; action: "rename"; title: string }
   /** The thread's own agent naming its thread; refused while a person's rename pins the title. */
-  | { threadId: string; action: "title"; title: string; taskDescription?: string }
+  | { threadId: string; action: "title"; title: string }
   | { threadId: string; action: "settings"; settings: SettingsOverrides }
   /** Retry dormant waiting work on the saved model, without interrupting live native work. */
   | { threadId: string; action: "retryWaiting" }
@@ -333,7 +336,7 @@ export type WaitDependency =
   | { kind: "job"; jobId: string }
   | { kind: "deployment"; publicationId: string }
   | { kind: "message"; fromThreadId: string };
-export type AgentWait = { reason: string; since: number } & WaitDependency;
+export type AgentWait = { since: number } & WaitDependency;
 export type AgentWaitRegistration =
   | { status: "registered"; wait: AgentWait }
   | { status: "already_arrived"; settlement: ThreadSettlement }
@@ -342,7 +345,7 @@ export type AgentWaitRegistration =
 /** Current thread snapshot and immutable outcome of this request, also on retry. */
 export type AgentWaitResult = Thread & { waitRegistration: AgentWaitRegistration };
 export type AgentWaitRequest = { threadId: string; requestId: string } & (
-  | ({ action: "set"; reason: string } & (
+  | ({ action: "set" } & (
       // Retained pre-typed runners send concrete child waits without kind.
       | { kind?: "agents"; threadIds: string[]; after?: Record<string, number> }
       | { kind: "job"; jobId: string }
@@ -386,8 +389,8 @@ export function validateWaitDependency(input: unknown): Result<WaitDependency> {
 }
 export interface ThreadWakeSchedule {
   reason: string; cadenceMs: number; nextDueAt: number;
-  lastDueAt?: number; lastDeliveredAt?: number; lastMessageId?: string; lastLandedAt?: number;
-  deferredReason?: "stopped" | "archived" | "busy";
+  /** Queued wake input that cancel withdraws. */
+  lastMessageId?: string;
 }
 export type ThreadWakeRequest = { threadId: string } & (
   | { action: "list" }
@@ -400,6 +403,8 @@ export interface ThreadAttentionReceipt {
   accepted: true; seq: number; threadId: string; summary: string; foreground: boolean; time: number;
 }
 export interface ThreadAttentionEvents { cursor: number; items: ThreadAttentionReceipt[] }
+export type ManagerNotificationPolicy = { view: "classic" } | { view: "mono"; managerThreadId: string };
+
 export interface ThreadApi {
   attention(input: ThreadAttentionRequest): Promise<Result<ThreadAttentionReceipt>>;
   attentionEvents(after?: number, limit?: number): Result<ThreadAttentionEvents> | Promise<Result<ThreadAttentionEvents>>;
@@ -407,6 +412,8 @@ export interface ThreadApi {
   wakeSchedule(input: ThreadWakeRequest): Promise<Result<ThreadWakeSchedule | null>>;
   watch(input: import("./watch-list.js").WatchRequest): Promise<Result<import("./watch-list.js").WatchResponse>>;
   managerThread(): Promise<Result<Thread | null>>;
+  managerNotificationPolicy(): Promise<Result<ManagerNotificationPolicy>>;
+  questionOrigin(threadId: string): Promise<Result<Pick<Thread, "id" | "title" | "agentName">>>;
   managerQuestionCustody(input: ManagerQuestionCustodyRequest): Promise<Result<ManagerQuestionCustodyReceipt>>;
   managerQuestions(input: ManagerQuestionsRequest): Promise<Result<ManagerQuestionsResponse>>;
   ask(input: AskThreadQuestions): Promise<Result<QuestionsReceipt>>;

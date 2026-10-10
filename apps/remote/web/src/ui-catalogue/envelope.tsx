@@ -35,10 +35,10 @@ type AppCaseState = "empty" | "loading" | "failure" | "waiting-close" | "close-f
 function AppFixture({ state }: { state: AppCaseState }) {
   const at = Date.now();
   const root: Session = { id: "ui-root", name: "Synthetic waiting parent", agentName: "Kenan", parentId: null, hasChildren: true, origin: "person", foreground: true,
-    model: "openai/gpt-6.1-sol", provider: "openai", cwd: "/synthetic", workspaceName: "Synthetic", environment: "synthetic", state: "waiting", held: false, activity: "awaiting", activeTools: [],
-    waitingOnAgents: { kind: "agents", threadIds: ["ui-worker"], after: {}, since: at, reason: "Waiting for the synthetic worker's result" },
+    model: "openai/gpt-6.1-sol", provider: "openai", cwd: "/synthetic", workspaceName: "Synthetic", environment: "synthetic", state: "waiting", lifecycle: { kind: "waiting", target: "agents", since: at }, held: false, activity: "awaiting", activeTools: [],
+    waitingOnAgents: { kind: "agents", threadIds: ["ui-worker"], after: {}, since: at },
     createdAt: new Date(at).toISOString(), updatedAt: new Date(at).toISOString(), revision: 1, idleUnread: false, queuedMessages: [], archivedAt: null };
-  const child: Session = { ...root, id: "ui-worker", name: "Synthetic active worker", parentId: root.id, hasChildren: false, foreground: false, state: "running", activity: "thinking", waitingOnAgents: undefined };
+  const child: Session = { ...root, id: "ui-worker", name: "Synthetic active worker", parentId: root.id, hasChildren: false, foreground: false, state: "running", lifecycle: { kind: "working", phase: "thinking", since: at }, activity: "thinking", waitingOnAgents: undefined };
   validateSession(root); validateSession(child);
   let rows = state === "waiting-close" || state === "close-failure" || state === "undo-failure" ? [root, child] : [];
   let archivedTotal = 0;
@@ -70,13 +70,13 @@ function AppFixture({ state }: { state: AppCaseState }) {
     { method: "GET", match: url => /^\/v1\/sessions\/ui-(root|worker)\/questions$/.test(url.pathname), reply: () => Response.json({ state: "ready", questions: [] }) },
     { method: "DELETE", path: "/v1/sessions/ui-root", reply: () => {
       if (state === "close-failure") return Response.json({ error: "Synthetic close failed; parent and worker remain visible" }, { status: 503 });
-      const archived: Session = { ...root, state: "idle", activity: "idle", foreground: false, archivedAt: new Date().toISOString(), waitingOnAgents: undefined };
+      const archived: Session = { ...root, state: "idle", lifecycle: { kind: "archived" }, activity: "idle", foreground: false, archivedAt: new Date().toISOString(), waitingOnAgents: undefined };
       validateSession(archived); archivedTotal = 1; rows = [child];
       return Response.json({ ok: true, archived: true, session: archived });
     } },
     { method: "POST", path: "/v1/sessions/ui-root/unarchive", reply: () => {
       if (state === "undo-failure") return Response.json({ error: "Synthetic restore failed; retry Undo when the environment returns" }, { status: 503 });
-      const reopened: Session = { ...root, state: "idle", activity: "idle", waitingOnAgents: undefined };
+      const reopened: Session = { ...root, state: "idle", lifecycle: { kind: "idle" }, activity: "idle", waitingOnAgents: undefined };
       validateSession(reopened); rows = [reopened, child]; archivedTotal = 0;
       return Response.json({ ok: true, session: reopened });
     } },

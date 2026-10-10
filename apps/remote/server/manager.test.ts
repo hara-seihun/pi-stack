@@ -34,7 +34,9 @@ describe("person manager view", () => {
     expect(results.every(result => result.ok)).toBe(true);
     expect(f.spawned).toHaveLength(1);
     expect(f.spawned[0]!.message).toBeUndefined();
-    expect(f.spawned[0]!.metadata).toMatchObject({ manager: true, foreground: true, profileId: "personal", contextFiles: ["PROFILE.md"] });
+    expect(f.spawned[0]!.metadata).toMatchObject({ manager: true, profileId: "personal", contextFiles: ["PROFILE.md"] });
+    expect(f.spawned[0]!.metadata).not.toHaveProperty("foreground");
+    expect(f.spawned[0]!.createdBy).toEqual({ kind: "person", via: "router" });
     expect(f.spawned[0]!.settings).toEqual({ model: "anthropic/claude-opus-5-5", thinkingLevel: "high", speed: "standard" });
     expect(f.wakes).toHaveLength(1);
     expect(f.wakes[0]).toMatchObject({ action: "set", cadenceMs: MANAGER_HEARTBEAT_MS });

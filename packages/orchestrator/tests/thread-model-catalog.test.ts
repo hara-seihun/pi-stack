@@ -93,3 +93,13 @@ test("invalid model configuration fails discovery instead of silently hiding con
   writeFileSync(join(root, "models.json"), "{broken");
   await expect(loadThreadModelCatalog(root)).rejects.toThrow("Cannot load thread models");
 });
+
+test("a shared-account model configured with an icon is offered without a personal credential", async () => {
+  const root = fixture();
+  writeFileSync(join(root, "models.json"), JSON.stringify({ providers: { anthropic: { models: [
+    { ...builtinProviders().find(provider => provider.id === "anthropic")!.getModels().find(model => model.id === "claude-haiku-4-5"), icon: "🍃" },
+  ] } } }));
+  writeFileSync(join(root, "auth.json"), "{}");
+  const catalog = await loadThreadModelCatalog(root);
+  expect(catalog.configuredModels.map(model => `${model.provider}/${model.id}:${model.icon}`)).toEqual(["anthropic/claude-haiku-4-5:🍃"]);
+});

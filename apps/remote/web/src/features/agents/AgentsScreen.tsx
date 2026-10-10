@@ -61,7 +61,6 @@ function AgentGroupView({ group, expanded, onToggle, onOpen }: { group: AgentGro
         <button className="agent-open" type="button" onClick={() => onOpen(agent.id)} title="Open original task in Chats">
           <StatusIcon status={status} className="agent-row-status" />
           <span className="agent-row-task">{agent.name.trim() || "Task title not set"}</span>
-          {agent.taskDescription && <span className="agent-row-description">{agent.taskDescription}</span>}
           <span className="agent-row-activity">{activity.label}</span>
           {activity.detail && <span className="agent-row-detail">{activity.detail}</span>}
           {agent.attentionSummary && agent.attentionSummary !== activity.detail && <span className="agent-row-attention">{agent.attentionSummary}</span>}

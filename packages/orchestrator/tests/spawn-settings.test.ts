@@ -20,7 +20,7 @@ function parent(model: string): Thread {
   return {
     id: "parent", parentId: null, role: "agent", title: "Parent", cwd: "/work",
     sessionFile: "/work/parent.jsonl", settings: { model, thinkingLevel: "high", speed: "standard" },
-    admission: "force", state: "idle", held: false, revision: 1, createdAt: 1, updatedAt: 1, pendingMessages: 0,
+    admission: "force", lifecycle: { kind: "idle" }, state: "idle", held: false, revision: 1, createdAt: 1, updatedAt: 1, pendingMessages: 0,
   };
 }
 

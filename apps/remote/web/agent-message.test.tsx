@@ -45,6 +45,30 @@ test("new incoming agent words retain immutable sender routes in toggle-controll
   expect(JSON.stringify(context)).toBe(native);
 });
 
+test("mono hides routed inputs, sends and spawns while classic retains their disclosures", () => {
+  const incoming = presentAgentMessage(entry(text));
+  const outgoing: ContextEntry = { kind: "toolCall", key: "send", signature: "send", toolCall: { name: "thread_send", arguments: { threadId: sender, text: "Internal send" } } };
+  const spawn: ContextEntry = { kind: "toolCall", key: "spawn", signature: "spawn", toolCall: { name: "thread_spawn", arguments: { message: "Internal assignment" } } };
+  const entries: ContextEntry[] = [entry("Human words"), entry(text), incoming, outgoing, spawn, { kind: "assistant", key: "answer", signature: "answer", seq: 99, text: "Person-facing answer", responseMetrics: { ttftMs: 1, generationMs: 2, outputTokens: 3, tokensPerSecond: 4 } }];
+  const before = JSON.stringify(entries);
+  for (const autoCollapse of [true, false]) {
+    const render = (mono: boolean) => renderToStaticMarkup(<Transcript entries={entries} sessionId={recipient} home="/" images={null} mono={mono} autoCollapse={autoCollapse} onEdit={() => {}} onReply={() => {}} />);
+    const mono = render(true);
+    expect(mono.match(/class="message user/g)).toHaveLength(1);
+    expect(mono.match(/class="message assistant/g)).toHaveLength(1);
+    expect(mono).toContain('<div data-transcript-seq="99"><article');
+    expect(mono).not.toContain("agent-route");
+    expect(mono).not.toContain("agent-message-step");
+    expect(mono).not.toContain("thread-chip");
+    expect(mono).not.toContain("message-metrics");
+    const classic = render(false);
+    expect(classic).toContain("agent-route incoming");
+    expect(classic).toContain("agent-route outgoing");
+    expect(classic).toContain("message-metrics");
+  }
+  expect(JSON.stringify(entries)).toBe(before);
+});
+
 test("old cached heads, new streamed heads and attachments share the body projection", () => {
   const attachment = "\n\n![Context image](/v1/sessions/example/image)";
   const cached = entryFromHead({ kind: "user", seq: 1, id: "old", size: text.length, text: text + attachment });

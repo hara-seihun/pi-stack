@@ -5,7 +5,7 @@ import { inboxRows, selectionAfterSync } from "./src/chats";
 import type { Session } from "./src/types";
 
 const session = (id: string, extra: Partial<Session> = {}): Session => ({
-  id, parentId: null, hasChildren: false, origin: "person", model: "astra", name: id, cwd: "/home", workspaceName: "Home", environment: "home", state: "idle", held: false, activity: "idle",
+  id, parentId: null, hasChildren: false, origin: "person", model: "astra", name: id, cwd: "/home", workspaceName: "Home", environment: "home", state: "idle", lifecycle: { kind: "idle" }, held: false, activity: "idle",
   activeTools: [], provider: "openai", createdAt: "", updatedAt: "", revision: 1, idleUnread: false,
   queuedMessages: [], archivedAt: null, ...extra,
 });
@@ -20,14 +20,14 @@ test("placement, not custody or provenance, controls Chats", () => {
 
 test("cancelling targets only the selected agent even when it launched agents", () => {
   const calls: unknown[] = [];
-  requestStop(session("parent", { hasChildren: true, state: "running" }), (id, descendants) => calls.push({ id, descendants }));
+  requestStop(session("parent", { hasChildren: true, state: "running", lifecycle: { kind: "working", phase: "thinking", since: 1 } }), (id, descendants) => calls.push({ id, descendants }));
   expect(calls).toEqual([{ id: "parent", descendants: false }]);
 });
 
 test("historical cancellation holds never create a persistent Resume composer state", () => {
   expect(composerAction(session("old", { held: true, queuedMessages: [{} as Session["queuedMessages"][number]] }), "")).toBe("send");
-  expect(composerAction(session("waiting", { state: "waiting", waitingOnAgents: { kind: "job", jobId: "job", reason: "Need result", since: 1 } }), "")).toBe("stop");
-  expect(composerAction(session("running", { state: "running" }), "new message")).toBe("send");
+  expect(composerAction(session("waiting", { state: "waiting", lifecycle: { kind: "waiting", target: "job", reason: "Need result", since: 1 }, waitingOnAgents: { kind: "job", jobId: "job", reason: "Need result", since: 1 } }), "")).toBe("cancel_wait");
+  expect(composerAction(session("running", { state: "running", lifecycle: { kind: "working", phase: "thinking", since: 1 } }), "new message")).toBe("send");
 });
 
 test("cancel transport carries selected-only scope and retains dependency refusal data", async () => {

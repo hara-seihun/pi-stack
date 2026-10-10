@@ -53,6 +53,25 @@ The current package additionally includes controlled empty-input clearing from n
 
 [`patch-browser-semantic-fill.mjs`](patch-browser-semantic-fill.mjs) repairs the pinned native semantic-action compiler's empty-versus-unset text validation. A supplied `text: ""` clears a field through selector, label and role routes; omitted text stays a typed validation error. Non-string values remain invalid, and zero, whitespace and nonempty strings are preserved exactly. Deployment hashes this repair into the immutable dependency identity and rejects unexpected upstream source. [`patch-browser-semantic-fill.test.mjs`](patch-browser-semantic-fill.test.mjs) exercises the actual compiled module. The host browser doctor checks DOM and controlled React state after empty/zero/nonempty fills on all three routes and raw fill, plus unset-text rejection, before accepting the release.
 
+## Anthropic tool parameter schemas
+
+[`patch-anthropic-tool-schema.mjs`](patch-anthropic-tool-schema.mjs) preserves complete
+parameter schemas in the SDK and bundled Anthropic provider. Pi 0.87.1's non-strict
+converter retained only root `properties` and `required`, erasing object unions
+used by life writes/policy/steering, thread control/wakes and Converge. The shared
+[`anthropic-tool-schema.js`](anthropic-tool-schema.js) retains all constraints and
+adds Anthropic's required root `type: "object"` when union/intersection branches
+already imply it. Non-object inputs fail explicitly; native registrations stay intact.
+Deployment hashes and applies both repair files. Orchestrator test preparation
+applies the same patch before provider payload tests.
+
+[`anthropic-tool-schema.test.mjs`](anthropic-tool-schema.test.mjs) captures real SDK
+and bundled provider payloads without network requests and checks unchanged schema
+validation. [`agent-tool-schemas.test.ts`](../orchestrator/tests/agent-tool-schemas.test.ts)
+checks registered agent tools, explicit zero-argument exceptions and affected
+operations; [`thread-wait-schema.test.ts`](../orchestrator/tests/thread-wait-schema.test.ts)
+requires dependency constraints on Anthropic and both OpenAI APIs.
+
 ## Anthropic error tool-result content
 
 [`patch-anthropic-error-content.mjs`](patch-anthropic-error-content.mjs) normalizes
@@ -73,6 +92,29 @@ the offending inline image replaced by a reference to its byte-preserved encrypt
 PNG, and the owner adopted that file using a serialized `switch_session` command.
 The original JSONL and per-entry/file SHA256 evidence remain in the person's
 private thread store. Opus and all user messages were retained.
+
+## Signed Anthropic narration
+
+[`patch-anthropic-narration.mjs`](patch-anthropic-narration.mjs) classifies Anthropic's
+signed `narration` channel as visible native text when its content block completes.
+The shared [`anthropic-narration.mjs`](../orchestrator/src/threads/anthropic-narration.mjs)
+reads only protobuf field `2.1.8` of the provider signature; `thinking`, malformed,
+unknown and redacted blocks remain thinking. No source prose is inspected.
+Both the SDK and bundled provider are patched. Native text retains the signature
+in `textSignature` so same-model Anthropic continuation restores the original
+signed wire block; cross-model continuation keeps ordinary text.
+
+Remote's per-record display projection applies the same classification to already
+persisted Anthropic records before removing continuation signatures. Native source
+history is not rewritten. Deployment includes the patch and shared helper in the
+immutable dependency identity. Synthetic SSE regressions cover replies after tool
+results, narration followed by `thread_wait`, genuine thinking, malformed metadata,
+JSON round trips and signed continuation replay:
+
+```sh
+node --test packages/runtime/anthropic-narration.test.mjs
+bun test apps/remote/server/context-display.test.ts
+```
 
 ## Codex transport framing
 

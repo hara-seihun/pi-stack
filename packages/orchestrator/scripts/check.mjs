@@ -23,9 +23,12 @@ export function orchestratorTestChecks(suites) {
   const patch = ["orchestrator shared RPC", process.execPath,
     [join(root, "packages/runtime/patch-shared-rpc.mjs"), join(root, "node_modules")],
     { cwd: root, dependsOn: [types[0]] }];
-  return [...orchestratorTypeChecks(), patch, ...suites.map(({ name, args }) => [
+  const schemas = ["orchestrator tool schemas", process.execPath,
+    [join(root, "packages/runtime/patch-anthropic-tool-schema.mjs"), join(root, "node_modules")],
+    { cwd: root, dependsOn: [types[0]] }];
+  return [...orchestratorTypeChecks(), patch, schemas, ...suites.map(({ name, args }) => [
     name, process.execPath, [join(root, "node_modules/vitest/vitest.mjs"), "run", "--maxWorkers=1", ...args],
-    { cwd, dependsOn: [patch[0]] },
+    { cwd, dependsOn: [patch[0], schemas[0]] },
   ])];
 }
 

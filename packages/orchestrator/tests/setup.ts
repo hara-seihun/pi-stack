@@ -15,5 +15,7 @@ for (const key of Object.keys(process.env)) {
 }
 
 process.env.PI_AGENT_CAPACITY_CONFIG = join(home, "agent-capacity-client.json");
+// Daemon admission reads the household model policy; never the host's.
+process.env.PI_STACK_MODEL_AVAILABILITY_PATH = join(home, "model-availability.json");
 
 afterAll(() => rmSync(home, { recursive: true, force: true }));

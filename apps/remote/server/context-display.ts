@@ -1,3 +1,4 @@
+import { projectAnthropicNarrationMessage } from "pi-orchestrator/anthropic-narration";
 import { projectMessageReply } from "./message-replies";
 import type { ResponseMetrics } from "./protocol";
 
@@ -27,7 +28,7 @@ export function displayAssistantMessage(message: JsonObject): JsonObject {
 export function displayContextMessage(value: unknown, imageReference?: ImageReference, metrics?: ResponseMetrics): unknown {
   const source = object(value);
   if (!source) return value;
-  const original = source.role === "assistant" ? displayAssistantMessage(source) : source;
+  const original = source.role === "assistant" ? displayAssistantMessage(projectAnthropicNarrationMessage(source)) : source;
   const message = { ...projectMessageReply(original) };
   if (message.role === "assistant") {
     for (const key of ["api", "provider", "model", "usage", "stopReason", "responseId", "rawStopReason"]) delete message[key];

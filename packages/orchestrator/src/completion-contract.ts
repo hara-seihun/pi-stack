@@ -39,6 +39,7 @@ export const CompletionErrorSchema = Type.Object({
     Type.Literal("request-conflict"), Type.Literal("invalid-state"), Type.Literal("provider"),
     Type.Literal("authentication"), Type.Literal("cancelled"), Type.Literal("indeterminate"),
     Type.Literal("missing-provider-evidence"), Type.Literal("transport"), Type.Literal("protocol"), Type.Literal("rate-limited"),
+    Type.Literal("model-disabled"), Type.Literal("model-policy-unavailable"),
   ]),
   message: Type.String(),
   httpStatus: Type.Optional(Type.Integer({ minimum: 100, maximum: 599 })),
@@ -91,6 +92,7 @@ const completionStatuses = {
   "request-conflict": 409, "invalid-state": 409,
   provider: 500, authentication: 500, cancelled: 500, indeterminate: 500,
   "missing-provider-evidence": 500, transport: 500, protocol: 500, "rate-limited": 500,
+  "model-disabled": 403, "model-policy-unavailable": 503,
 } satisfies Record<CompletionError["code"], number>;
 export function completionHttpStatus(code: CompletionError["code"]): number {
   if (!Object.hasOwn(completionStatuses, code)) throw new Error(`Unknown completion error code: ${String(code)}`);

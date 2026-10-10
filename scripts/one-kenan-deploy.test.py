@@ -76,6 +76,10 @@ if os.environ.get('FIXTURE_STOP_FAIL') and sys.argv[1:]==['disable','--now',os.e
         room=(units/'pi-rooms.service').read_text()
         self.assertNotIn('JoinsNamespaceOf',room); self.assertNotIn('LoadCredential=kenan-memory-root',room)
         self.assertIn('NoNewPrivileges=yes',room)
+        room_environment=json.loads((self.root/'etc/pi-stack/rooms.json').read_text())['environment']
+        timezone_directory=str(pathlib.Path(room_environment['PI_PERSON_TIMEZONE_FILE']).parent)
+        writable=next(line.split('=',1)[1].split() for line in room.splitlines() if line.startswith('ReadWritePaths='))
+        self.assertIn(timezone_directory,writable)
         self.assertTrue((units/'pi-remote@alice.service.d/one-kenan.conf').exists())
         broker=json.loads((self.root/'etc/pi-stack/one-kenan-broker.json').read_text())
         self.assertEqual(broker['grantOwner'],'one-kenan'); self.assertEqual([row['principal'] for row in broker['listeners']],['pi-kenan','pi-rooms'])
@@ -147,7 +151,7 @@ if os.environ.get('FIXTURE_STOP_FAIL') and sys.argv[1:]==['disable','--now',os.e
         self.assertEqual(list((shared/'private').iterdir()),[])
         root_config=json.loads((self.root/'etc/pi-stack/kenan-root.json').read_text())
         for key in ('cwd','agentDir','sessionsDir'):
-            self.assertTrue(pathlib.Path(root_config[key]).is_relative_to(shared/'private'))
+            self.assertTrue(pathlib.Path(root_config[key]).is_relative_to(shared/'private') and pathlib.Path(root_config[key])!=shared/'private')
         self.command('rollback')
         self.assertEqual(home.stat().st_mode&0o777,0o700)
         self.assertEqual(proof.read_text(),'Bun ignores explicit cache settings here')

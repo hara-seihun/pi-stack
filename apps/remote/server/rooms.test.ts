@@ -11,6 +11,7 @@ import { createHash } from "node:crypto";
 import { roomAudienceResolver } from "./room-audience.mjs";
 import { roomInput, roomInstructions, readRoomInput, ROOM_HISTORY_LIMIT } from "../shared/rooms";
 import type { RoomMember } from "../shared/rooms";
+import { deriveThreadLifecycle, type ThreadLifecycle, type ExecutionPhase, type AgentWait } from "pi-orchestrator/api";
 import { ReconcileReplica } from "../shared/reconcile";
 
 const people: RoomMember[] = [{ user: "alice", displayName: "Alice" }, { user: "bob", displayName: "Bob" }, { user: "cara", displayName: "Cara" }];
@@ -44,12 +45,13 @@ function fixture() {
     return handleRoomOwner(new Request(request(path, method, body, actor), { signal }), {
       get: id => threads.get(id) ?? null,
       subscribe: listener => { listeners.add(listener); return () => { listeners.delete(listener); }; },
-      create: async (id, title, members) => { threads.set(id, { id, title, state: "idle", metadata: { room: { id, members } } }); history.set(id, []); },
+      create: async (id, title, members) => { threads.set(id, { id, title, lifecycle: { kind: "idle" }, state: "idle", metadata: { room: { id, members } } }); history.set(id, []); },
       update: async (id, members) => { threads.get(id).metadata.room.members = members; },
       send: async (id, receipt, text) => {
         if (sent.has(receipt)) return;
         sent.add(receipt);
         threads.get(id).state = "running";
+        threads.get(id).lifecycle = { kind: "working", phase: "queued", since: 10 };
         threads.get(id).executionActivity = { activity: "queued", activitySince: 10, lastActivityAt: 10, activeTools: [] };
         inputs.push({ owner, actor, text }); history.get(id)!.push({ role: "user", timestamp: 10, content: text });
       },
@@ -64,8 +66,8 @@ function fixture() {
           questions: questions.get(id) ?? [], paging: { revision, total: all.length, start, end, hasOlder: start > 0, nextBefore: start > 0 ? start : null },
         });
       },
-      stop: async id => { threads.get(id).state = "idle"; },
-      answer: async (id, questionId) => { questions.set(id, (questions.get(id) ?? []).filter(question => question.id !== questionId)); threads.get(id).state = "running"; },
+      stop: async id => { threads.get(id).state = "idle"; threads.get(id).lifecycle = { kind: "idle" }; },
+      answer: async (id, questionId) => { questions.set(id, (questions.get(id) ?? []).filter(question => question.id !== questionId)); threads.get(id).state = "running"; threads.get(id).lifecycle = { kind: "working", phase: "queued", since: 10 }; },
       notify: (id, receipt) => { const set = notices.get(owner) ?? new Set(); set.add(receipt); notices.set(owner, set); },
     });
   };
@@ -102,8 +104,10 @@ test("two members discover and speak in one owned thread; a third can't enumerat
 test("members can add known people, but not while Kenan is speaking", async () => {
   const f = fixture(); await f.create();
   f.threads.get(f.id).state = "running";
+  f.threads.get(f.id).lifecycle = { kind: "working", phase: "thinking", since: 10 };
   expect((await f.rooms.handle(request(`/v1/rooms/${f.id}/members`, "POST", { members: ["cara"] }), "bob")).status).toBe(409);
   f.threads.get(f.id).state = "idle";
+  f.threads.get(f.id).lifecycle = { kind: "idle" };
   expect((await f.rooms.handle(request(`/v1/rooms/${f.id}/members`, "POST", { members: ["unknown"] }), "bob")).status).toBe(400);
   expect((await f.rooms.handle(request(`/v1/rooms/${f.id}/members`, "POST", { members: ["cara"] }), "bob")).status).toBe(200);
   expect((await f.rooms.handle(request(`/v1/rooms/${f.id}`), "cara")).status).toBe(200);
@@ -132,7 +136,7 @@ test("assistant completions notify every member exactly once in their own ledger
 
 test("unprivileged room work is transparent, including thinking, tool calls/results and local notices", () => {
   const id = crypto.randomUUID();
-  const snapshot = publicRoomSnapshot({ id, title: "House", state: "idle", metadata: { room: { id, members: people.slice(0, 2) } } }, { live: "Public live text", messages: [
+  const snapshot = publicRoomSnapshot({ id, title: "House", lifecycle: { kind: "idle" }, state: "idle", metadata: { room: { id, members: people.slice(0, 2) } } }, { live: "Public live text", messages: [
     { role: "user", timestamp: 1, content: roomInput(people[1]!, "Visible input") },
     { role: "user", timestamp: 2, content: "<agent_message>private worker details</agent_message>" },
     { role: "custom", content: "private custom message" },
@@ -146,7 +150,7 @@ test("unprivileged room work is transparent, including thinking, tool calls/resu
 
 test("room startup failure remains visible even before a user message enters native history", () => {
   const id = crypto.randomUUID();
-  const snapshot = publicRoomSnapshot({ id, title: "House", state: "idle", held: true, metadata: { room: { id, members: people.slice(0, 2) } } }, {
+  const snapshot = publicRoomSnapshot({ id, title: "House", lifecycle: { kind: "failed", reason: "Room tools did not initialize", control: "none" }, state: "idle", held: true, metadata: { room: { id, members: people.slice(0, 2) } } }, {
     live: "", error: "Room tools did not initialize", messages: [
       { role: "notice", content: { type: "model_change", provider: "openai-codex" } },
       { role: "notice", content: { type: "thinking_level_change", thinkingLevel: "high" } },
@@ -160,7 +164,7 @@ test("room startup failure remains visible even before a user message enters nat
 
 test("room input receipts retain their identity as work, while materialized input renders only once", () => {
   const id = crypto.randomUUID();
-  const thread = { id, title: "House", state: "idle" as const, metadata: { room: { id, members: people.slice(0, 2) } } };
+  const thread = { id, title: "House", lifecycle: { kind: "idle" } as ThreadLifecycle, state: "idle" as const, metadata: { room: { id, members: people.slice(0, 2) } } };
   const receipt = { role: "notice", identity: { id: "receipt" }, content: { type: "custom", customType: "thread_input", timestamp: "2026-10-03T23:00:00Z", data: { workId: "work", message: roomInput(people[1]!, "Hello") } } };
   const rejection = { role: "notice", content: { type: "custom", customType: "thread_rejected", data: { error: "fetch failed" } } };
   const failed = publicRoomSnapshot(thread, { live: "", error: "fetch failed", messages: [receipt, rejection] });
@@ -173,7 +177,7 @@ test("room input receipts retain their identity as work, while materialized inpu
 });
 
 test("a private thread is never converted into a room and a member cannot remove others", async () => {
-  const f = fixture(); f.threads.set(f.id, { id: f.id, title: "Private", state: "idle", metadata: {} });
+  const f = fixture(); f.threads.set(f.id, { id: f.id, title: "Private", lifecycle: { kind: "idle" }, state: "idle", metadata: {} });
   expect((await f.create()).status).toBe(409);
   f.threads.delete(f.id); await f.create();
   const response = await handleRoomOwner(request(`/v1/room-owner/${f.id}/members`, "POST", { members: [people[0]] }), {
@@ -217,6 +221,7 @@ test("closing and reading are caller-local, durable and directory-only; new inpu
   expect(await directoryRoom(restarted, "alice")).toMatchObject({ current: true, state: "running", unreadCount: 0 });
   expect(await directoryRoom(restarted, "bob")).toMatchObject({ current: true, state: "running", unreadCount: 1 });
   f.threads.get(f.id).state = "idle";
+  f.threads.get(f.id).lifecycle = { kind: "idle" };
   await restarted.tick();
   const lastActivity = (await directoryRoom(restarted)).updatedAt;
   await restarted.handle(request(`/v1/rooms/${f.id}/close`, "POST", {}), "alice");
@@ -232,7 +237,7 @@ test("closing and reading are caller-local, durable and directory-only; new inpu
 test("tick caches work/questions; read leaves questions pending; only fresh replies reopen closed rooms", async () => {
   const f = fixture(); await f.create();
   const question = { id: "question-1", threadId: f.id, question: "Which day?", suggestions: [], createdAt: Date.now() };
-  f.questions.set(f.id, [question]); f.threads.get(f.id).state = "running";
+  f.questions.set(f.id, [question]); f.threads.get(f.id).state = "running"; f.threads.get(f.id).lifecycle = { kind: "working", phase: "thinking", since: 10 };
   await f.rooms.tick();
   expect(await directoryRoom(f.rooms)).toMatchObject({ state: "running", pendingQuestions: 1, unreadCount: 1 });
   await f.rooms.handle(request(`/v1/rooms/${f.id}/read`, "POST", {}), "alice");
@@ -263,41 +268,54 @@ test("tick caches work/questions; read leaves questions pending; only fresh repl
 
 test("room wait evidence survives projection and unsupported owner phases are explicit defects", () => {
   const id = crypto.randomUUID();
-  const thread = { id, title: "House", state: "idle" as const, metadata: { room: { id, members: people.slice(0, 2) }, agentWait: { kind: "job" as const, jobId: "job-1", reason: "Result", since: 100 } } };
+  const dependency: AgentWait = { kind: "job", jobId: "job-1", since: 100 };
+  const thread = { id, title: "House", lifecycle: { kind: "waiting", target: "job", since: dependency.since, dependency } as ThreadLifecycle,
+    state: "waiting" as const, metadata: { room: { id, members: people.slice(0, 2) }, agentWait: dependency } };
   const snapshot = publicRoomSnapshot(thread, { messages: [], live: "" });
-  expect(snapshot).toMatchObject({ activity: "awaiting", waitingOnAgents: thread.metadata.agentWait });
-  expect(snapshot.room.waitingOnAgents).toEqual(thread.metadata.agentWait);
-  const legacy = publicRoomSnapshot({ ...thread, metadata: { ...thread.metadata, agentWait: { reason: "Result", threadIds: [], since: 100 } } }, { messages: [], live: "" });
-  expect(legacy).toMatchObject({ activity: "status_error", error: expect.stringContaining("Wait reporting defect") });
-  const unsupported = publicRoomSnapshot(thread, { messages: [], live: "", execution: { activity: "future", activeTools: [] } as any });
+  expect(snapshot).toMatchObject({ lifecycle: thread.lifecycle, activity: "awaiting", waitingOnAgents: dependency });
+  expect(snapshot.room.waitingOnAgents).toEqual(dependency);
+  const invalid = { reason: "Result", threadIds: [], since: 100 } as unknown as AgentWait;
+  const invalidLifecycle = deriveThreadLifecycle({ archived: false, cancelling: false, execution: null, pending: null, delay: null, subscriptions: [],
+    dependency: invalid, error: null, updatedAt: 100 });
+  const failed = publicRoomSnapshot({ ...thread, lifecycle: invalidLifecycle, metadata: { ...thread.metadata, agentWait: invalid } }, { messages: [], live: "" });
+  expect(failed).toMatchObject({ lifecycle: { kind: "failed", control: "cancel_wait" }, activity: "status_error", error: "Invalid owned dependency wait" });
+  const unsupported = publicRoomSnapshot({ ...thread, lifecycle: { kind: "working", phase: "future", since: 100 } as any }, { messages: [], live: "" });
   expect(unsupported).toMatchObject({ activity: "status_error", error: expect.stringContaining("supported execution phase") });
 });
 
 test("room owner transports owned phases, clocks, tools and failures without unrelated metadata", () => {
   const id = crypto.randomUUID();
   const thread = { id, title: "House", state: "running" as const, metadata: { room: { id, members: people.slice(0, 2) }, rootPrivate: "outside room" } };
-  for (const phase of ["queued", "admitting", "starting", "preparing", "thinking", "responding", "preparing_tool", "waiting_on_tool", "waiting_for_model", "compacting", "retrying", "waiting_for_capacity", "waiting_to_retry", "finishing", "cancelling", "recovering"]) {
+  const phases: ExecutionPhase[] = ["queued", "admitting", "starting", "preparing", "thinking", "responding", "preparing_tool", "waiting_on_tool", "waiting_for_model", "waiting_on_agents", "compacting", "retrying", "waiting_for_capacity", "waiting_to_retry", "finishing", "cancelling", "recovering"];
+  for (const phase of phases) {
     const evidence = { activity: phase, activitySince: 100, lastActivityAt: 150, activityDetail: `Owned ${phase}`, activeTools: phase === "waiting_on_tool" ? ["bash", "read"] : [] };
-    const snapshot = publicRoomSnapshot({ ...thread, executionActivity: evidence as any }, { messages: [], live: "" });
-    expect(snapshot).toMatchObject(evidence);
-    expect(snapshot.room).toMatchObject(evidence);
+    const lifecycle: ThreadLifecycle = { kind: "working", phase, since: 100, detail: `Owned ${phase}` };
+    const snapshot = publicRoomSnapshot({ ...thread, lifecycle, executionActivity: evidence }, { messages: [], live: "" });
+    expect(snapshot).toMatchObject({ lifecycle, ...evidence });
+    expect(snapshot.room).toMatchObject({ lifecycle, ...evidence });
     expect(JSON.stringify(snapshot)).not.toContain("outside room");
   }
-  const failed = publicRoomSnapshot({ ...thread, state: "idle", held: true, metadata: { ...thread.metadata, executionError: "Room startup failed" } }, { messages: [], live: "" });
-  expect(failed).toMatchObject({ held: true, executionError: "Room startup failed", error: "Room startup failed", activeTools: [] });
-  const live = publicRoomSnapshot(thread, { messages: [], live: "", execution: { activity: "waiting_on_tool", activeTools: ["bash"], activitySince: 90, lastActivityAt: 95 } });
-  expect(live).toMatchObject({ activity: "waiting_on_tool", activeTools: ["bash"], activitySince: 90, lastActivityAt: 95 });
-  expect(publicRoomSnapshot(thread, { messages: [], live: "" })).toMatchObject({ activity: "status_error", error: "Room owner did not report an execution phase" });
+  const failed = publicRoomSnapshot({ ...thread, lifecycle: { kind: "failed", reason: "Room startup failed", control: "none" }, state: "idle", held: true }, { messages: [], live: "" });
+  expect(failed).toMatchObject({ activity: "status_error", held: true, executionError: "Room startup failed", error: "Room startup failed", activeTools: [] });
+  const execution = { activity: "waiting_on_tool" as const, activeTools: ["bash"], activitySince: 90, lastActivityAt: 95 };
+  const lifecycle: ThreadLifecycle = { kind: "working", phase: "waiting_on_tool", since: 90 };
+  const live = publicRoomSnapshot({ ...thread, lifecycle, executionActivity: execution }, { messages: [], live: "", execution: { activity: "idle", activeTools: [] } });
+  expect(live).toMatchObject({ lifecycle, activity: "waiting_on_tool", activeTools: ["bash"], activitySince: 90, lastActivityAt: 95 });
+  const missingPhase = deriveThreadLifecycle({ archived: false, cancelling: false, execution: { since: 100, activity: { activeTools: [] } as any }, pending: null,
+    dependency: null, subscriptions: [], delay: null, error: null, updatedAt: 100 });
+  expect(publicRoomSnapshot({ ...thread, lifecycle: missingPhase }, { messages: [], live: "" })).toMatchObject({ activity: "status_error", error: "Execution owner did not report its activity" });
 });
 
 test("directory startup and owner reconciliation refresh evidence and expose retrieval failures", async () => {
   const f = fixture(); await f.create();
   const thread = f.threads.get(f.id);
   thread.state = "running";
+  thread.lifecycle = { kind: "working", phase: "waiting_on_tool", since: 10, detail: "Owned tools" };
   thread.executionActivity = { activity: "waiting_on_tool", activitySince: 10, lastActivityAt: 20, activityDetail: "Owned tools", activeTools: ["bash"] };
   await f.rooms.tick();
   expect(await directoryRoom(f.rooms)).toMatchObject(thread.executionActivity);
   const restarted = new Rooms(f.path, () => people, f.transport); cleanup.push(() => restarted.close());
+  thread.lifecycle = { kind: "working", phase: "responding", since: 30, detail: "Response text streaming" };
   thread.executionActivity = { activity: "responding", activitySince: 30, lastActivityAt: 40, activityDetail: "Response text streaming", activeTools: [] };
   expect(await directoryRoom(restarted)).toMatchObject(thread.executionActivity);
   expect((await (await restarted.handle(request(`/v1/rooms/${f.id}`), "bob")).json())).toMatchObject({ ...thread.executionActivity, room: thread.executionActivity });
@@ -306,10 +324,10 @@ test("directory startup and owner reconciliation refresh evidence and expose ret
   const failed = await directoryRoom(restarted);
   expect(failed).toMatchObject({ activity: "status_error", error: "Room owner status retrieval failed: HTTP 503", activeTools: [] });
   expect(failed.activitySince).toBeUndefined(); expect(failed.lastActivityAt).toBeUndefined();
-  thread.state = "idle"; thread.held = true; thread.metadata.executionError = "Room execution failed";
+  thread.state = "idle"; thread.held = true; thread.lifecycle = { kind: "failed", reason: "Room execution failed", control: "none" };
   f.statusUnavailable(false);
   await restarted.tick();
-  expect(await directoryRoom(restarted)).toMatchObject({ state: "idle", activity: "idle", held: true, error: "Room execution failed", activeTools: [] });
+  expect(await directoryRoom(restarted)).toMatchObject({ state: "idle", activity: "status_error", held: true, error: "Room execution failed", activeTools: [] });
   const calls = f.calls.length;
   expect((await (await restarted.handle(request("/v1/rooms"), "cara")).json()).rooms).toEqual([]);
   expect(f.calls.length).toBe(calls);
@@ -318,6 +336,7 @@ test("directory startup and owner reconciliation refresh evidence and expose ret
 test("owner status transport exceptions do not leave persisted running activity in a restarted directory", async () => {
   const f = fixture(); await f.create();
   f.threads.get(f.id).state = "running";
+  f.threads.get(f.id).lifecycle = { kind: "working", phase: "thinking", since: 10 };
   f.threads.get(f.id).executionActivity = { activity: "thinking", activitySince: 10, lastActivityAt: 20, activeTools: [] };
   await f.rooms.tick();
   const restarted = new Rooms(f.path, () => people, async () => { throw new Error("Private transport diagnostic"); }); cleanup.push(() => restarted.close());
@@ -328,10 +347,10 @@ test("owner status transport exceptions do not leave persisted running activity 
 
 test("room owner rereads lifecycle after awaited history inspection", async () => {
   const id = crypto.randomUUID();
-  let thread: any = { id, title: "House", state: "running", executionActivity: { activity: "thinking", activeTools: [] }, metadata: { room: { id, members: people.slice(0, 2) } } };
+  let thread: any = { id, title: "House", lifecycle: { kind: "working", phase: "thinking", since: 10 }, state: "running", executionActivity: { activity: "thinking", activeTools: [] }, metadata: { room: { id, members: people.slice(0, 2) } } };
   const response = await handleRoomOwner(request(`/v1/room-owner/${id}`), {
     get: () => thread, create: async () => {}, update: async () => {}, send: async () => {}, notify: () => {},
-    history: async () => { thread = { ...thread, state: "idle", held: true }; return historyPage([]); },
+    history: async () => { thread = { ...thread, lifecycle: { kind: "idle" }, state: "idle", held: true }; return historyPage([]); },
   });
   expect(await response.json()).toMatchObject({ state: "idle", activity: "idle", held: true, activeTools: [] });
 });
@@ -474,7 +493,7 @@ test("room sync sends small patches, stays actor-partitioned, and checks members
 
 test("awaited room history rechecks membership before returning any body", async () => {
   const id = crypto.randomUUID();
-  const thread = { id, title: "House", state: "idle" as const, metadata: { room: { id, members: people.slice(0, 2) } } };
+  const thread = { id, title: "House", lifecycle: { kind: "idle" } as ThreadLifecycle, state: "idle" as const, metadata: { room: { id, members: people.slice(0, 2) } } };
   const response = await handleRoomOwner(request(`/v1/room-owner/${id}`), {
     get: () => thread, create: async () => {}, update: async () => {}, send: async () => {}, notify: () => {},
     history: async () => {
@@ -488,7 +507,7 @@ test("awaited room history rechecks membership before returning any body", async
 
 test("awaited room history errors recheck audience before returning diagnostics", async () => {
   const id = crypto.randomUUID();
-  const thread = { id, title: "House", state: "idle" as const, metadata: { room: { id, members: people.slice(0, 2) } } };
+  const thread = { id, title: "House", lifecycle: { kind: "idle" } as ThreadLifecycle, state: "idle" as const, metadata: { room: { id, members: people.slice(0, 2) } } };
   const response = await handleRoomOwner(request(`/v1/room-owner/${id}?before=1&limit=2&revision=r1`), {
     get: () => thread, create: async () => {}, update: async () => {}, send: async () => {}, notify: () => {},
     history: async (_id, options) => {
@@ -563,7 +582,7 @@ test("invalid room history queries fail before owner reads and page sync bases a
 
 test("raw input receipt/user pairs split across pages remain transparent without duplicate chat identity", () => {
   const id = crypto.randomUUID();
-  const thread = { id, title: "House", state: "idle" as const, metadata: { room: { id, members: people.slice(0, 2) } } };
+  const thread = { id, title: "House", lifecycle: { kind: "idle" } as ThreadLifecycle, state: "idle" as const, metadata: { room: { id, members: people.slice(0, 2) } } };
   const input = roomInput(people[0]!, "Across pages");
   const receipt = { role: "notice", identity: { id: "receipt" }, content: { customType: "thread_input", data: { message: input } } };
   const user = { role: "user", identity: { id: "user" }, content: input };

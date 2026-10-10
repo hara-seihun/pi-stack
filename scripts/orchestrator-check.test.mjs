@@ -72,8 +72,8 @@ test("publication shares prerequisites once and bounds all seven runtime suites"
   } });
   assert.equal(peak, 3);
   assert.equal(active, 0);
-  assert.equal(new Set(started).size, 10);
-  assert.equal(results.filter(result => result.outcome === "passed").length, 10);
+  assert.equal(new Set(started).size, 11);
+  assert.equal(results.filter(result => result.outcome === "passed").length, 11);
 });
 
 test("focused npm test cannot report success for a transpile-valid fixture missing required settings", () => withoutExitCode(async () => {
@@ -93,6 +93,7 @@ test("focused npm test cannot report success for a transpile-valid fixture missi
     put("packages/orchestrator/package.json", JSON.stringify({ name: manifest.name, type: "module", scripts: manifest.scripts }));
     put("packages/kenan-memory/package.json", JSON.stringify({ name: "kenan-memory", scripts: { build: "node -e \"process.exit(0)\"" } }));
     put("packages/runtime/patch-shared-rpc.mjs", "process.exit(0);\n");
+    put("packages/runtime/patch-anthropic-tool-schema.mjs", "process.exit(0);\n");
     copyFileSync(join(repository, "packages/orchestrator/tsconfig.json"), join(cwd, "tsconfig.json"));
     mkdirSync(join(root, "node_modules"));
     for (const name of readdirSync(join(repository, "node_modules"))) {

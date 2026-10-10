@@ -8,7 +8,7 @@ globalThis.location ??= new URL("https://router.test/") as unknown as Location;
 
 const session: Session = {
   id: "thread", parentId: null, hasChildren: false, origin: "person", model: "model", name: "Thread",
-  cwd: "/", workspaceName: "", environment: "local", state: "idle", held: false, activity: "idle", activeTools: [],
+  cwd: "/", workspaceName: "", environment: "local", state: "idle", lifecycle: { kind: "idle" }, held: false, activity: "idle", activeTools: [],
   provider: "openai", createdAt: "", updatedAt: "2026-01-01T00:00:00Z", revision: 1, idleUnread: false,
   queuedMessages: [], archivedAt: null,
 };
@@ -50,6 +50,39 @@ test("mono keeps the shared composer and message view, suppresses live wake work
   expect(render({ mono: { ...mono, hintSeen: true } })).not.toContain('class="mono-hint"');
 });
 
+test("mono hides orchestration controls and status details but keeps the shared composer", () => {
+  const mono = { hintSeen: true, saving: false, onClassic() {}, onHintSeen() {} };
+  const waiting: Session = { ...session, hasChildren: true, state: "waiting", activity: "awaiting", lifecycle: { kind: "waiting", target: "agents", reason: "Internal dependency", since: 1 },
+    waitingOnAgents: { kind: "agents", threadIds: ["worker"], after: {}, reason: "Internal dependency", since: 1 },
+    queuedMessages: [{ id: "queued", text: "Internal routed input", delivery: "steer", state: "queued", canSteer: true, canHardSteer: true, canCancel: true, createdAt: "2026-10-09T23:00:00Z" }] };
+  const before = JSON.stringify(waiting);
+  const html = render({ mono, session: waiting, ancestors: [session], prompt: "New instruction" });
+  expect(html).toContain('id="prompt"');
+  expect(html).toContain('aria-label="Working"');
+  expect(html).not.toContain("Internal dependency");
+  expect(html).not.toContain("Thread details");
+  expect(html).not.toContain('class="header-chip"');
+  expect(html).not.toContain('aria-label="Launched by"');
+  expect(html).not.toContain("Change delivery");
+  expect(html).not.toContain('data-glyph="waiting"');
+  expect(JSON.stringify(waiting)).toBe(before);
+  const classic = render({ session: waiting, ancestors: [session], prompt: "New instruction" });
+  expect(classic).toContain("Thread details");
+  expect(classic).toContain('class="header-chip"');
+  expect(classic).toContain('aria-label="Launched by"');
+  expect(classic).toContain('data-glyph="waiting"');
+  const active = render({ mono, session: { ...session, state: "running", lifecycle: { kind: "working", phase: "waiting_on_tool", since: 1, detail: "Running thread spawn" }, activity: "waiting_on_tool", activeTools: ["thread_spawn"] }, prompt: "New instruction" });
+  expect(active).not.toContain("Change delivery");
+  expect(active).not.toContain("thread spawn");
+  expect(render({ mono, session: waiting })).toContain('aria-label="Cancel request"');
+  expect(render({ session: waiting })).toContain('aria-label="Cancel wait"');
+  const typing = render({ mono, session: { ...session, lifecycle: { kind: "working", phase: "responding", since: 1, detail: "Internal output phase" } }, liveText: "Visible reply", liveThinking: "Private reasoning", thinkingActive: true });
+  expect(typing).toContain('aria-label="Typing"');
+  expect(typing).toContain('class="live-answer"');
+  expect(typing).not.toContain("Private reasoning");
+  expect(typing).not.toContain("Internal output phase");
+});
+
 test("cached idle transcript stays visible while the header updates, then idle returns when ready", () => {
   const updating = render({ syncing: true });
   expect(header(updating)).toContain('class="conversation-syncing" role="status" aria-label="Updating"');
@@ -75,7 +108,7 @@ test("chat header consumes context usage and replaces a count with recalculating
 });
 
 test("a running conversation defaults to steer rather than waiting for the turn to finish", () => {
-  const html = render({ session: { ...session, state: "running" }, prompt: "Adjust the work" });
+  const html = render({ session: { ...session, state: "running", lifecycle: { kind: "working", phase: "thinking", since: 1 } }, prompt: "Adjust the work" });
   expect(html).toContain('aria-label="Change delivery. Current: Steer"');
   expect(html).not.toContain('aria-label="Change delivery. Current: Queued"');
 });
@@ -85,7 +118,7 @@ test("questions replace messaging, expose only the next answer, and preserve sto
   const originalStorage = globalThis.localStorage;
   Object.assign(globalThis, { window: { PiRemotePerson: { get: () => "person" } }, localStorage: { getItem: () => null } });
   try {
-    const html = render({ session: { ...session, state: "running" }, prompt: "Unsent message", questions: [
+    const html = render({ session: { ...session, state: "running", lifecycle: { kind: "working", phase: "thinking", since: 1 } }, prompt: "Unsent message", questions: [
       { id: "q1", threadId: "thread", question: "Which option?", createdAt: 1, suggestions: [{ id: "a", text: "Choice A" }], recommendedSuggestionId: "a" },
       { id: "q2", threadId: "thread", question: "Second question", createdAt: 2, suggestions: [] },
     ] });

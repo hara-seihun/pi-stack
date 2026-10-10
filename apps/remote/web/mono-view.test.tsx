@@ -43,10 +43,14 @@ test("quiet native turns stay in history but render no mono entries, including w
     { kind: "thinking", seq: 3, id: "quiet-thinking", size: 5, preview: "Private work", monoVisibility: "hidden" },
     { kind: "toolCall", seq: 4, id: "quiet-tool", size: 5, callId: "tool", name: "read", arguments: {}, argumentsTruncated: false, monoVisibility: "hidden" },
     { kind: "assistant", seq: 5, id: "answer", size: 5, text: "Hello back", monoVisibility: "visible" },
+    { kind: "user", seq: 6, id: "peer", size: 5, text: "Internal report", agentSender: { threadId: "peer", name: "Worker" }, monoVisibility: "visible" },
+    { kind: "toolCall", seq: 7, id: "delegation", size: 5, callId: "spawn", name: "thread_spawn", arguments: { message: "Internal assignment" }, argumentsTruncated: false, monoVisibility: "visible" },
+    { kind: "thinking", seq: 8, id: "ordinary-thinking", size: 5, preview: "Internal thoughts" },
+    { kind: "notice", seq: 9, id: "internal-notice", size: 5, text: "Internal phase" },
   ];
   expect(monoTranscript(heads).map(head => head.id)).toEqual(["human", "answer"]);
   expect(monoTranscript(heads.slice(1, 4))).toEqual([]);
-  expect(heads).toHaveLength(5);
+  expect(heads).toHaveLength(9);
   expect(heads[1]!.kind).toBe("user");
 });
 

@@ -5,6 +5,7 @@ import { allowsAccountUse, type BudgetClass, type OrchestratorConfig } from "./d
 import type { Store } from "./store.js";
 import { sharedCredentialRejection } from "./auth/shared-oauth.js";
 import { modelUnsupportedEvidence, modelUnsupportedReason } from "./auth/model-entitlement.js";
+import { sharedModelRefusal, type ModelAvailabilityStore } from "./threads/model-availability.js";
 
 function credentialRefusal(cfg: OrchestratorConfig, alias: string): string | undefined {
   const state = sharedCredentialRejection(cfg.authPath, alias);
@@ -61,7 +62,7 @@ export function assign(store:Store,profile:string,budget:BudgetClass,cfg:Orchest
   return{assignment,refusals};
 }
 
-export function assignCompletion(store:Store,runId:string,profile:string,cfg:OrchestratorConfig,now=Date.now()):{assignment?:Assignment;refusals:Refusal[]}{
+export function assignCompletion(store:Store,runId:string,profile:string,cfg:OrchestratorConfig,availability:Pick<ModelAvailabilityStore,"decide">,now=Date.now()):{assignment?:Assignment;refusals:Refusal[]}{
   if(store.control("launches")==="paused")return{refusals:[{accountId:"*",reason:"emergency halt"}]};
   if(store.control("ordinary-launches")==="paused")return{refusals:[{accountId:"*",reason:"ordinary work paused"}]};
   const requestId=store.control(`completion-run:${runId}`);
@@ -80,6 +81,10 @@ export function assignCompletion(store:Store,runId:string,profile:string,cfg:Orc
   if(!candidates?.length)throw new Error(`unknown completion profile ${profile}`);
   const refusals:Refusal[]=[],choices:(Assignment&{spent:number;reserved:boolean})[]=[];
   for(const candidate of candidates){
+    // A brokered completion is a shared-model request: the household policy refuses a disabled
+    // model even when the principal's grant includes it, as the broker does for live requests.
+    const disabled=principal===undefined?null:sharedModelRefusal(availability,`${candidate.provider}/${candidate.model}`);
+    if(disabled){refusals.push({accountId:"*",reason:disabled.message});continue;}
     for(const account of store.accounts().filter(account=>account.provider===candidate.provider)){
       const meters=store.latestMeters(account.id),credential=credentialRefusal(cfg,account.id),unsupported=modelUnsupportedEvidence(store,account.id,candidate.model,now);
       const reason=principal!==undefined&&!grant?`no live model broker grant for ${principal}`

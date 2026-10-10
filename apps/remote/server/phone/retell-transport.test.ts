@@ -111,10 +111,11 @@ test("listen and permanent takeover retain explicit transport credentials and pa
   const before = requests.length; assert.equal((await client.takeOver("invalid/id", "p")).ok, false); assert.equal(requests.length, before);
 });
 
-test("call_take_over is not hangup completion; terminal snapshots and identifiers are validated", async t => {
+test("terminal snapshots, including call_take_over after the media session closed, complete hangup; identifiers are validated", async t => {
   const { client } = fixture(t); let reason = "call_take_over", status = "ended";
   t.mock.method(globalThis, "fetch", async (url: string) => url.includes("stop-call") ? new Response(null, { status: 409 }) : Response.json({ call_id: "call_synthetic", call_status: status, disconnection_reason: reason, duration_ms: 100 }));
-  assert.equal((await client.hangup("call_synthetic")).ok, false);
+  assert.equal((await client.hangup("call_synthetic")).ok, true);
+  status = "ongoing"; assert.equal((await client.hangup("call_synthetic")).ok, false); status = "ended";
   reason = "user_hangup"; assert.equal((await client.hangup("call_synthetic")).ok, true);
   assert.deepEqual(await client.get("call_synthetic"), { ok: true, value: { call_id: "call_synthetic", call_status: "ended", status: "completed", disconnection_reason: "user_hangup", duration_ms: 100 } });
   status = "unknown"; assert.equal((await client.get("call_synthetic")).ok, false); assert.equal((await client.get("bad/id")).ok, false);

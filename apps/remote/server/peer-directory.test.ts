@@ -4,7 +4,7 @@ import { readLivePeers, readPeerAncestors, readPeerSession } from "./peer-direct
 
 function thread(id: string, parentId: string | null = null, archived = false): Thread {
   return { id, parentId, title: id, cwd: "/fixture", sessionFile: "/fixture/native", settings: { model: "sol", thinkingLevel: "high", speed: "standard" },
-    admission: "force", state: "idle", held: false, revision: 1, pendingMessages: 0, createdAt: 1, updatedAt: 1,
+    admission: "force", lifecycle: { kind: archived ? "archived" : "idle" }, state: "idle", held: false, revision: 1, pendingMessages: 0, createdAt: 1, updatedAt: 1,
     metadata: { archived, agentName: id } };
 }
 function fixture(rows: Thread[]) {

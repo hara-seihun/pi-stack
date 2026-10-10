@@ -6,18 +6,18 @@ import { threadTools } from "../src/threads/pi-tools.js";
 import { threadWaitParameters, parseRunnerWaitDependency } from "../src/threads/wait-contract.js";
 
 const inputs = [
-  { action: "set", kind: "agents", reason: "child result", threadIds: ["child"], after: { child: 0 } },
-  { action: "set", kind: "job", reason: "job result", jobId: "job-123" },
-  { action: "set", kind: "deployment", reason: "release", publicationId: "PUB-123" },
-  { action: "set", kind: "message", reason: "collaborator", fromThreadId: "colleague" },
+  { action: "set", kind: "agents", threadIds: ["child"], after: { child: 0 } },
+  { action: "set", kind: "job", jobId: "job-123" },
+  { action: "set", kind: "deployment", publicationId: "PUB-123" },
+  { action: "set", kind: "message", fromThreadId: "colleague" },
   { action: "clear" },
 ];
 const invalid = [
-  { action: "set", reason: "done" },
-  { action: "set", reason: "done", threadIds: [] },
-  { action: "set", kind: "agents", reason: "done", threadIds: [] },
-  { action: "set", kind: "job", reason: "unknown" },
-  { action: "set", kind: "job", reason: "ambiguous", jobId: "job", threadIds: ["child"] },
+  { action: "set" },
+  { action: "set", threadIds: [] },
+  { action: "set", kind: "agents", threadIds: [] },
+  { action: "set", kind: "job" },
+  { action: "set", kind: "job", jobId: "job", threadIds: ["child"] },
 ];
 it("generated discriminated schema and typed wire parser agree on named dependencies", () => {
   for (const input of inputs) {
@@ -46,10 +46,8 @@ it.each(["anthropic-messages", "openai-responses", "openai-completions"])("%s pr
   const tool = payload.tools[0];
   const projected = tool.input_schema ?? tool.parameters ?? tool.function.parameters;
   expect(projected.type).toBe("object");
-  expect(Object.keys(projected.properties).sort()).toEqual(["action", "kind", "reason", "threadIds", "after", "jobId", "publicationId", "fromThreadId"].sort());
+  expect(Object.keys(projected.properties).sort()).toEqual(["action", "kind", "threadIds", "after", "jobId", "publicationId", "fromThreadId"].sort());
   expect(JSON.stringify(projected.properties.kind)).toContain("deployment");
   for (const input of inputs) expect(Value.Check(projected, input)).toBe(true);
-  // Non-strict Anthropic drops anyOf; semantic refusal remains the owner's responsibility.
-  if (api === "anthropic-messages") expect(projected.anyOf).toBeUndefined();
-  else for (const input of invalid) expect(Value.Check(projected, input)).toBe(false);
+  for (const input of invalid) expect(Value.Check(projected, input)).toBe(false);
 });

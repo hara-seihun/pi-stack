@@ -101,7 +101,7 @@ it("mutual subscriptions do not veto Close and a cancelled idle waiter durably r
   a.service.setDirectory(directory); b.service.setDirectory(directory);
   value(await a.service.spawn({ requestId: "a", id: "a", cwd: a.root }));
   value(await b.service.spawn({ requestId: "b", id: "b", cwd: b.root }));
-  value(await a.service.agentWait({ action: "set", kind: "message", requestId: "wait", threadId: "a", reason: "Need peer", fromThreadId: "b" }));
+  value(await a.service.agentWait({ action: "set", kind: "message", requestId: "wait", threadId: "a", fromThreadId: "b" }));
   value(await b.service.control({ action: "dependencies", threadId: "b", threadIds: ["a"] }));
   value(await directory.control({ action: "close", threadId: "b" }));
   await until(() => a.service.pending("a").length === 1);
@@ -119,7 +119,7 @@ it("a subscription racing explicit Close receives one terminal cancellation with
   value(await a.service.spawn({ requestId: "a", id: "a", cwd: a.root }));
   value(await b.service.spawn({ requestId: "b", id: "b", cwd: b.root }));
   const closing = b.service.control({ action: "close", threadId: "b" });
-  value(await a.service.agentWait({ action: "set", kind: "message", requestId: "late-wait", threadId: "a", reason: "Need b", fromThreadId: "b" }));
+  value(await a.service.agentWait({ action: "set", kind: "message", requestId: "late-wait", threadId: "a", fromThreadId: "b" }));
   value(await closing);
   await until(() => a.service.pending("a").length === 1);
   expect(a.service.get("a")?.waitingOnAgents).toBeUndefined();
@@ -164,7 +164,7 @@ it("result cursors survive subscriptions and do not replay a previously settled 
   f.sessions.get("b")!.settle("first result");
   await until(() => f.service.get("b")?.state === "idle");
   const after = f.service.latestSettlement("b")!.seq;
-  value(await f.service.agentWait({ action: "set", kind: "agents", requestId: "next-b", threadId: "a", reason: "Next result", threadIds: ["b"], after: { b: after } }));
+  value(await f.service.agentWait({ action: "set", kind: "agents", requestId: "next-b", threadId: "a", threadIds: ["b"], after: { b: after } }));
   expect(f.service.get("a")?.state).toBe("waiting");
   expect(f.service.pending("a")).toHaveLength(0);
   value(await f.service.send({ requestId: "second", threadId: "b", text: "second" }));
@@ -182,7 +182,7 @@ it("turn settlement while waiting or questioning is not an assignment result or 
   value(await f.service.spawn({ requestId: "requester", id: "requester", cwd: f.root }));
   value(await f.service.spawn({ requestId: "assigned", id: "assigned", parentId: "requester", cwd: f.root, message: "work", ephemeral: true }));
   await until(() => !!f.sessions.get("assigned")?.active);
-  value(await f.service.agentWait({ action: "set", kind: "job", threadId: "assigned", requestId: "job", reason: "Job result", jobId: "job-id" }));
+  value(await f.service.agentWait({ action: "set", kind: "job", threadId: "assigned", requestId: "job", jobId: "job-id" }));
   f.sessions.get("assigned")!.settle("waiting, not finished");
   await until(() => f.service.get("assigned")?.state === "waiting");
   expect(f.service.latestSettlement("assigned")?.assignmentPending).toBe(true);
@@ -202,7 +202,7 @@ it("a later final turn discharges the original assignment reply exactly once wit
   value(await f.service.spawn({ requestId: "requester", id: "requester", cwd: f.root }));
   const assigned = value(await f.service.spawn({ requestId: "assigned", id: "assigned", parentId: "requester", cwd: f.root, message: "work" }));
   await until(() => !!f.sessions.get("assigned")?.active);
-  value(await f.service.agentWait({ action: "set", kind: "job", threadId: "assigned", requestId: "job", reason: "Need job", jobId: "job" }));
+  value(await f.service.agentWait({ action: "set", kind: "job", threadId: "assigned", requestId: "job", jobId: "job" }));
   f.sessions.get("assigned")!.settle("waiting");
   await until(() => f.service.get("assigned")?.state === "waiting");
   expect(f.service.pending("requester")).toHaveLength(0);
@@ -229,7 +229,7 @@ it("accepted subscriptions survive producer replacement and Close delivers cance
   a.service.setDirectory(directory); b.service.setDirectory(directory);
   value(await a.service.spawn({ requestId: "a", id: "a", cwd: a.root }));
   value(await b.service.spawn({ requestId: "b", id: "b", cwd: b.root }));
-  value(await a.service.agentWait({ action: "set", kind: "message", requestId: "wait-b", threadId: "a", reason: "Need b", fromThreadId: "b" }));
+  value(await a.service.agentWait({ action: "set", kind: "message", requestId: "wait-b", threadId: "a", fromThreadId: "b" }));
   value(await b.service.close()); services.splice(services.indexOf(b.service), 1);
   const replacement = new ThreadService(b.options); services.push(replacement);
   directory = new ThreadDirectory({ id: "left", api: a.service }, [{ id: "right", api: replacement }]);
@@ -248,7 +248,7 @@ it("offline result delivery survives restart and acknowledges once without recre
   a.service.setDirectory(directory); b.service.setDirectory(directory);
   value(await a.service.spawn({ requestId: "a", id: "a", cwd: a.root }));
   value(await b.service.spawn({ requestId: "b", id: "b", cwd: b.root }));
-  value(await a.service.agentWait({ action: "set", kind: "message", requestId: "wait-b", threadId: "a", reason: "Need b", fromThreadId: "b" }));
+  value(await a.service.agentWait({ action: "set", kind: "message", requestId: "wait-b", threadId: "a", fromThreadId: "b" }));
   const send = a.service.send.bind(a.service);
   a.service.send = async input => input.source === "notification" ? { ok: false, error: { code: "unavailable", message: "Recipient offline" } } : send(input);
   value(await b.service.control({ action: "close", threadId: "b" }));
@@ -275,7 +275,7 @@ it("closing a subscriber succeeds while its producer owner is unavailable", asyn
   a.service.setDirectory(directory); b.service.setDirectory(directory);
   value(await a.service.spawn({ requestId: "a", id: "a", cwd: a.root }));
   value(await b.service.spawn({ requestId: "b", id: "b", cwd: b.root }));
-  value(await a.service.agentWait({ action: "set", kind: "message", requestId: "wait-b", threadId: "a", reason: "Need b", fromThreadId: "b" }));
+  value(await a.service.agentWait({ action: "set", kind: "message", requestId: "wait-b", threadId: "a", fromThreadId: "b" }));
   b.service.list = async () => ({ ok: false, error: { code: "unavailable", message: "Producer offline" } });
   value(await a.service.control({ action: "close", threadId: "a" }));
   expect(a.service.get("a")).toMatchObject({ state: "idle", dependencies: [], metadata: { archived: true } });
@@ -314,7 +314,7 @@ it("recovers local subscriptions without graph reads while an unrelated personal
   await until(() => !f.service.get("parent")?.metadata?.dependencyUpdate);
   expect(f.service.get("parent")?.dependencies).toEqual(["child"]);
   expect(f.service.get("child")?.metadata?.peerDependents).toEqual(["parent"]);
-  value(await f.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "wait", reason: "Child result", threadIds: ["child"] }));
+  value(await f.service.agentWait({ action: "set", kind: "agents", threadId: "parent", requestId: "wait", threadIds: ["child"] }));
   value(await f.service.control({ action: "dependencies", threadId: "child", threadIds: ["parent"] }));
   expect(lockedReads).toBe(0);
   expect(await f.service.control({ action: "dependencies", threadId: "child", threadIds: ["foreign"] })).toMatchObject({ ok: false, error: { code: "unavailable" } });

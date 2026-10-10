@@ -12,7 +12,7 @@ import type { InlineImage } from "../../../../server/inline-image-contract";
 import type { ContextEntry, Session, SlashCommand } from "../../types";
 import { StatusIcon } from "../status/StatusIcon";
 import { agentName } from "../../agent-name";
-import { OFFLINE_STATUS, threadStatus } from "../status/thread-status";
+import { monoThreadStatus, OFFLINE_STATUS, threadStatus } from "../status/thread-status";
 import { composerAction } from "../../thread-state";
 import { DELIVERY_LABELS } from "../queue/delivery";
 import { Transcript } from "./Transcript";
@@ -100,11 +100,12 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
   onDraw(): void;
   onDismissControlError(): void;
 }) {
-  const status = offline ? { ...OFFLINE_STATUS, label: offline, title: offline } : threadStatus(session);
+  const status = offline ? { ...OFFLINE_STATUS, label: offline, title: offline } : mono ? monoThreadStatus(session) : threadStatus(session);
   const running = session.state === "running";
   const hasText = prompt.trim().length > 0 || attachments.some(file => !file.uploading);
   const queued = session.queuedMessages.length;
   const action = composerAction(session, prompt);
+  const cancelAction = composerAction(session, "");
   const [delivery, setDelivery] = useState<Delivery>(resolveDelivery({}));
   const [modeOpen, setModeOpen] = useState(false);
   const modeRef = useRef<HTMLDivElement>(null);
@@ -121,24 +122,24 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
   const slashToken = prompt.startsWith("/") && !/\s/.test(prompt) ? prompt.slice(1).toLowerCase() : null;
   const visibleCommands = slashToken === null ? [] : slashCommands.filter(command => command.source === "skill" && !command.name.toLowerCase().includes("mcp") && command.name.toLowerCase().startsWith(slashToken));
   return <div className={`conversation-screen${mono ? " mono-conversation" : ""}`}>
-    <ConversationHeader title={mono ? AGENT_NAME : session.name || "Agent"} onLongPress={mono?.onClassic} status={syncing && !offline ? <span className="conversation-syncing" role="status" aria-label="Updating" title="Updating"><span className="conversation-syncing-spinner" aria-hidden="true" /></span> : <StatusIcon status={status} />} meta={mono ? undefined : <ConversationModelMeta session={session} />} showIdentity={mono ? true : showIdentity} onBack={!mono && showBack ? onBack : null} onOpenInspector={onOpenInspector}
-      trailing={<>{questions.length > 0 && composerAction(session, "") === "stop" && <button type="button" className="header-action" disabled={pending} onClick={onStop}>Cancel work</button>}{queued > 0 && <button type="button" className="header-chip" onClick={onOpenQueue} aria-label={`${queued} waiting. Open the queue`}>{queued === 1 ? "1 waiting" : `${queued} waiting`}</button>}{offline && <button type="button" className="header-action" onClick={onReconnect}>Reconnect</button>}</>} />
+    <ConversationHeader title={mono ? AGENT_NAME : session.name || "Agent"} onLongPress={mono?.onClassic} status={syncing && !offline ? <span className="conversation-syncing" role="status" aria-label="Updating" title="Updating"><span className="conversation-syncing-spinner" aria-hidden="true" /></span> : <StatusIcon status={status} />} meta={mono ? undefined : <ConversationModelMeta session={session} />} showIdentity={mono ? true : showIdentity} onBack={!mono && showBack ? onBack : null} onOpenInspector={mono ? null : onOpenInspector}
+      trailing={<>{questions.length > 0 && (cancelAction === "stop" || cancelAction === "cancel_wait") && <button type="button" className="header-action" disabled={pending} onClick={onStop}>{cancelAction === "stop" ? "Cancel work" : mono ? "Cancel request" : "Cancel wait"}</button>}{!mono && queued > 0 && <button type="button" className="header-chip" onClick={onOpenQueue} aria-label={`${queued} waiting. Open the queue`}>{queued === 1 ? "1 waiting" : `${queued} waiting`}</button>}{offline && <button type="button" className="header-action" onClick={onReconnect}>Reconnect</button>}</>} />
     {mono && !mono.hintSeen && <aside className="mono-hint" role="status"><span>Long-press this header to return to classic view. Long-press Chats to come back here.</span><button type="button" disabled={mono.saving} onClick={mono.onHintSeen} aria-label="Dismiss mono view hint">Got it</button></aside>}
     {!mono && ancestors.length > 0 && <nav className="ancestry" aria-label="Launched by">{ancestors.map(ancestor => <button key={ancestor.id} type="button" title={ancestor.name || undefined} onClick={() => onOpenAncestor(ancestor)}>{agentName(ancestor) ?? (ancestor.name || ancestor.id)}</button>)}</nav>}
     <DismissibleError className="conversation-error" dismissLabel="Dismiss thread error" message={controlError} resetKey={session.id} onDismiss={async () => { onDismissControlError(); return { ok: true as const }; }} />
     {outbox}
-    <ConversationView key={session.id} active newerAvailable={newerAvailable} onJumpLatest={onJumpLatest} label={`Chat with ${session.name || "Agent"}`} drawing={drawing} transcript={<InlineImagesContext.Provider value={images}>
+    <ConversationView key={session.id} active newerAvailable={newerAvailable} onJumpLatest={onJumpLatest} label={`Chat with ${mono ? AGENT_NAME : session.name || "Agent"}`} drawing={drawing} transcript={<InlineImagesContext.Provider value={images}>
       {(syncing || offline) && entries.length === 0 && <div className="conversation-loading" role={offline ? "alert" : "status"}><strong>{offline ? "Conversation unavailable" : "Opening conversation…"}</strong><span>{offline || "Waiting for the selected environment to return its history."}</span></div>}
-      <Transcript entries={entries} liveThinking={mono ? "" : liveThinking} thinkingActive={mono ? false : thinkingActive} autoCollapse={autoCollapse} sessionId={session.id} home={home} images={images}
+      <Transcript entries={entries} mono={!!mono} liveThinking={liveThinking} thinkingActive={thinkingActive} autoCollapse={autoCollapse} sessionId={session.id} home={home} images={images}
         earlierAvailable={earlierAvailable} loadingEarlier={loadingEarlier} earlierError={earlierError} onShowEarlier={onShowEarlier} newerAvailable={newerAvailable} onShowNewer={onShowNewer} onVisibleRange={onVisibleRange} onThinkingOpen={onThinkingOpen} onEdit={onEdit} onReply={onReply} />
       {liveText && <div className="live-answer"><ChatMessage kind="assistant" label={AGENT_NAME} avatar={agentAvatar()} text={liveText} contentFormat="markdown" renderMarkdown={text => <Markdown source={text} sessionId={session.id} streaming assistant />} /></div>}
     </InlineImagesContext.Provider>}>
       <DismissibleError className="conversation-error" dismissLabel="Dismiss upload error" message={uploadError} resetKey={session.id} />
       {questionsResource?.state === "failed" && <div className="conversation-error" role="alert">Could not load questions: {questionsResource.error}. {questions.length > 0 ? "Showing previous questions; their status may have changed." : "Chat remains available."} <button type="button" onClick={onRetryQuestions}>Retry questions</button></div>}
-      {questions.length > 0 ? <QuestionsComposer sessionId={session.id} questions={questions} onAccepted={onQuestionAccepted} /> : <Composer id="prompt" value={prompt} onChange={onPrompt} onSend={() => action === "stop" ? onStop() : action === "resume" ? onResume() : onSend(delivery)} placeholder={`Message ${mono ? AGENT_NAME : session.name || "Agent"}`} action={action} disabled={pending || (action === "send" && (attachments.some(file => file.uploading) || !hasText))} layoutKey={session.id}
+      {questions.length > 0 ? <QuestionsComposer sessionId={session.id} questions={questions} onAccepted={onQuestionAccepted} /> : <Composer id="prompt" value={prompt} onChange={onPrompt} onSend={() => action === "stop" || action === "cancel_wait" ? onStop() : action === "resume" ? onResume() : onSend(delivery)} cancelWaitLabel={mono ? "Cancel request" : "Cancel wait"} placeholder={`Message ${mono ? AGENT_NAME : session.name || "Agent"}`} action={action} disabled={pending || (action === "send" && (attachments.some(file => file.uploading) || !hasText))} layoutKey={session.id}
         attachments={attachments} onRemove={onRemoveAttachment} onUpload={onUpload} onPaste={onPaste} onDraw={onDraw}
         before={<>{reply && <ReplyComposer target={reply} onCancel={onCancelReply} />}{visibleCommands.length > 0 && <div className="slash-commands" role="listbox">{visibleCommands.map(command => <button key={command.name} type="button" className="slash-command" onClick={() => onPrompt(`/${command.name} `)}><strong className="slash-command-name">/{command.name}</strong>{command.description && <span className="slash-command-description">{command.description}</span>}</button>)}</div>}</>}
-        actions={<>{running && hasText && <div className="delivery-mode" ref={modeRef}>
+        actions={<>{!mono && running && hasText && <div className="delivery-mode" ref={modeRef}>
           <button ref={modeToggleRef} type="button" className="delivery-toggle" aria-haspopup="menu" aria-expanded={modeOpen} aria-label={`Change delivery. Current: ${DELIVERY_LABELS[delivery].label}`} onClick={() => setModeOpen(open => !open)} onKeyDown={event => { if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); setModeOpen(true); } }}><span>{DELIVERY_LABELS[delivery].label}</span><ChevronIcon /></button>
           {modeOpen && <div ref={modeMenuRef} className="delivery-menu" role="menu" aria-label="Change delivery" onKeyDown={event => {
             if (event.key === "Escape") { setModeOpen(false); modeToggleRef.current?.focus(); return; }

@@ -77,7 +77,7 @@ export class Manager {
     const id = row.thread_id ?? crypto.randomUUID();
     if (row.thread_id === null) this.db.query("UPDATE manager_view SET thread_id=? WHERE singleton=1").run(id);
     const created = await this.threads.spawn({ id, requestId: `manager-create:${id}`, title: "Kenan", cwd: placement.value.cwd,
-      settings: this.settings, metadata: { ...placement.value.metadata, manager: true, foreground: true } });
+      settings: this.settings, createdBy: { kind: "person", via: "router" }, metadata: { ...placement.value.metadata, manager: true } });
     if (!created.ok) return created;
     const thread = created.value;
     if (thread.id !== id) this.db.query("UPDATE manager_view SET thread_id=? WHERE singleton=1").run(thread.id);

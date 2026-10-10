@@ -184,7 +184,7 @@ def rendered_units():
       '@PUBLISHER_TOKEN_FILE@':str(shared/'publisher-token'),'@KENAN_PRIVATE_DIR@':str(shared/'private'),
       '@KENAN_MEMORY_SOURCE@':memory_runtime,
       '@ROOT_CONSENT_CAPABILITY_FILE@':str(consent_capability),'@ROOT_ROUTER_URL@':f'http://127.0.0.1:{router_port}',
-      '@STATE_DIR@':str(shared),'@ROOMS_HOME@':str(rooms_home),
+      '@STATE_DIR@':str(shared),'@ROOMS_HOME@':str(rooms_home),'@ROOMS_TIMEZONE_DIR@':str(target('/var/lib/pi-timezones')/room_user),
       '@PERSONS_DIR@':str(persons_dir),'@BROKER_CONFIG@':str(target('/etc/pi-stack/one-kenan-broker.json')),
       '@ROOMS_ENV_FILE@':str(target('/etc/pi-stack/rooms.env')),'@ROOMS_CONFIG@':str(target('/etc/pi-stack/rooms.json')),
       '@ORCHESTRATOR_CONFIG@':config.get('orchestratorConfig','/var/lib/pi-orchestrator/config.json'),
@@ -258,7 +258,7 @@ def install():
          'rootAdminCapabilityFile':str(shared/'root-admin-capability'),'rootConsentCapabilityFile':str(consent_capability),
          'routerPort':router_port,'brokerUser':operator,'memoryTimezoneGroup':'pi-timezones-readers'}
     fresh(target('/etc/pi-stack/one-kenan.json'),json.dumps(one,indent=2)+'\n')
-    root={**root_config,'version':1,'cwd':str(shared/'private'),'agentDir':str(shared/'private/.pi/agent'),
+    root={**root_config,'version':1,'cwd':str(shared/'private/root-cwd'),'agentDir':str(shared/'private/.pi/agent'),
           'sessionsDir':str(shared/'private/root-sessions'),'brokerUrl':f'http://127.0.0.1:{ports["rootBrokerPort"]}',
           'people':[{'person':person['user'],'displayName':person['displayName']} for person in people]}
     fresh(target('/etc/pi-stack/kenan-root.json'),json.dumps(root,indent=2)+'\n')

@@ -12,7 +12,7 @@ test("callee transcript cannot carry operator grants, and fixed approval cannot 
   writeFileSync(join(root, "config"), JSON.stringify({ owner: "synthetic", adminTokenFile: join(root, "token") }));
   process.env.PI_STACK_PHONE_CONFIG = join(root, "config");
   let thread: any, spawned: any, submitted: any;
-  const threads = { get: () => thread, spawn: async (input: any) => { spawned = input; thread = input; return { ok: true, value: input }; }, send: async (input: any) => { submitted = input; return { ok: true, value: { id: input.requestId } }; } } as unknown as ThreadService;
+  const threads = { get: () => thread, spawn: async (input: any) => { if (input.metadata && ("foreground" in input.metadata || "attentionSummary" in input.metadata)) return { ok: false, error: { code: "invalid_request", message: "Use attention instead of setting attention metadata" } }; spawned = input; thread = input; return { ok: true, value: input }; }, send: async (input: any) => { submitted = input; return { ok: true, value: { id: input.requestId } }; } } as unknown as ThreadService;
   const request = (op: string, body: unknown, bearer = token) => telephoneDispatcher(new Request(`http://127.0.0.1/v1/telephone/${id}/${op}`, { method: "POST", headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" }, body: JSON.stringify(body) }), { threads, owner: "synthetic", cwd: root, model: "sol", loopback: true });
   try {
     expect((await request("approved", { brief }, "callee-says-root")).status).toBe(403);
