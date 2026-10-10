@@ -11,6 +11,7 @@ export const MAX_HISTORY_INDEXES = 32;
 const SCAN_CHUNK_BYTES = 64 * 1024;
 const indexes = new Map();
 const snapshotDescriptors = new WeakMap();
+const snapshotProofs = new WeakMap();
 let indexedMetadataBytes = 0;
 const decoder = new TextDecoder("utf-8", { fatal: true });
 const ok = value => ({ ok: true, value });
@@ -236,8 +237,16 @@ function scanRecords(fd, path, size, start, firstLine, hash, hashFrom, initialMe
     position += bytes;
   }
   if (length) {
-    const consumed = consume();
-    if (!consumed.ok) return consumed;
+    // A writer may be halfway through its final JSON/UTF-8 record at the captured
+    // byte boundary. Keep its start as the resume point, not an invalid record.
+    const raw = parts.length === 1 ? parts[0] : Buffer.concat(parts, length);
+    let complete = true;
+    try { if (raw.toString("utf8").trim()) JSON.parse(decoder.decode(raw)); }
+    catch { complete = false; }
+    if (complete) {
+      const consumed = consume();
+      if (!consumed.ok) return consumed;
+    }
   }
   return ok({ records, metadataBytes: estimatedBytes, resumeOffset: recordStart, resumeLine: line });
 }
@@ -250,6 +259,23 @@ function hashRange(fd, path, hash, start, end) {
     hash.update(chunk.subarray(0, bytes)); position += bytes;
   }
   return ok(hash);
+}
+
+/** Appends cannot invalidate a captured prefix; replacement, truncation and edits can. */
+function verifyPrefix(fd, path, proof) {
+  const current = fstatSync(fd, { bigint: true });
+  const named = statSync(path, { bigint: true });
+  if (!sameFile(proof.stat, current) || !sameFile(current, named) || current.size < BigInt(proof.size) || named.size < BigInt(proof.size))
+    return failure("stale-source", path, "Session was rewritten or replaced during window reading");
+  if (stamp(current) === proof.revision && stamp(named) === proof.revision) return ok(null);
+  const hash = hashRange(fd, path, createHash("sha256"), 0, proof.size);
+  if (!hash.ok) return hash;
+  if (hash.value.digest("hex") !== proof.digest)
+    return failure("stale-source", path, "Session was rewritten or replaced during window reading");
+  const after = fstatSync(fd, { bigint: true }), afterName = statSync(path, { bigint: true });
+  if (!sameFile(proof.stat, after) || !sameFile(after, afterName) || after.size < BigInt(proof.size) || afterName.size < BigInt(proof.size))
+    return failure("stale-source", path, "Session was rewritten or replaced during window reading");
+  return ok(null);
 }
 
 function branchRecords(cache, path, leafId, managerWakeVisibility, inputOrigins) {
@@ -313,7 +339,7 @@ function readRecordAt(fd, source, descriptor) {
   return parseRecord(raw, source.path, descriptor.line, descriptor.offset);
 }
 
-/** Project a bounded window synchronously; discard the whole projection if its exact revision changes. */
+/** Project one captured byte prefix synchronously. Concurrent appends belong to the next window. */
 export function withIndexedThreadHistory(path, leafId, options, project) {
   path = resolve(path);
   let generation;
@@ -328,7 +354,9 @@ export function withIndexedThreadHistory(path, leafId, options, project) {
         return failure("stale-source", path, "Session was rewritten or replaced during window reading");
       }
       generation = source.generation;
-      if (stamp(fstatSync(fd, { bigint: true })) !== source.revision) return failure("stale-source", path, "Session changed before window reading");
+      const proof = snapshotProofs.get(history);
+      const before = verifyPrefix(fd, path, proof);
+      if (!before.ok) { retryable = false; return before; }
       const descriptors = snapshotDescriptors.get(history);
       let active = true;
       const scoped = Object.freeze({ ...history, read: descriptor => {
@@ -339,9 +367,8 @@ export function withIndexedThreadHistory(path, leafId, options, project) {
       let value;
       try { value = project(scoped); }
       finally { active = false; }
-      if (stamp(fstatSync(fd, { bigint: true })) !== source.revision || stamp(statSync(path, { bigint: true })) !== source.revision) {
-        return failure("stale-source", path, "Session changed during window reading");
-      }
+      const after = verifyPrefix(fd, path, proof);
+      if (!after.ok) { retryable = false; return after; }
       return ok(value);
     });
     if (result.ok || !retryable || result.error.code !== "stale-source") return result;
@@ -395,8 +422,10 @@ export function indexedThreadHistory(path, leafId, options) {
         if (byId.has(record.id)) return failure("invalid-record", path, `Duplicate session entry ${record.id}`, { line: record.line, offset: record.offset, entryId: record.id });
         byId.set(record.id, record);
       }
-      if (stamp(fstatSync(fd, { bigint: true })) !== revision || stamp(statSync(path, { bigint: true })) !== revision) return failure("stale-source", path, "Session changed during indexing");
-      cache = { stat, revision, size, generation: append ? cache.generation : randomUUID(), digest: completeHash.digest("hex"),
+      const digest = completeHash.digest("hex");
+      const verified = verifyPrefix(fd, path, { stat, revision, size, digest });
+      if (!verified.ok) return verified;
+      cache = { stat, revision, size, generation: append ? cache.generation : randomUUID(), digest,
         records, byId, recordMetadataBytes, metadataBytes: recordMetadataBytes,
         snapshots: new Map(), resumeOffset: scanned.value.resumeOffset, resumeLine: scanned.value.resumeLine };
       const previous = indexes.get(path);
@@ -412,13 +441,15 @@ export function indexedThreadHistory(path, leafId, options) {
     const snapshotKey = JSON.stringify([leafId ?? null, managerWakeVisibility, inputOrigins ?? null]);
     const known = cache.snapshots.get(snapshotKey);
     if (known) {
-      if (stamp(statSync(path, { bigint: true })) !== revision) return failure("stale-source", path, "Session changed during indexing");
+      const verified = verifyPrefix(fd, path, cache);
+      if (!verified.ok) return verified;
       cache.snapshots.delete(snapshotKey); cache.snapshots.set(snapshotKey, known);
       return ok(known.value);
     }
     const branch = branchRecords(cache, path, leafId, managerWakeVisibility, inputOrigins);
     if (!branch.ok) return branch;
-    if (stamp(statSync(path, { bigint: true })) !== revision) return failure("stale-source", path, "Session changed during indexing");
+    const verified = verifyPrefix(fd, path, cache);
+    if (!verified.ok) return verified;
     const bytes = snapshotBytes(branch.value) + snapshotKey.length * 2;
     if (cache.recordMetadataBytes + bytes > MAX_HISTORY_INDEX_BYTES)
       return failure("oversized-index", path, `Session metadata and branch snapshot exceed ${MAX_HISTORY_INDEX_BYTES} estimated bytes`, { limit: MAX_HISTORY_INDEX_BYTES });
@@ -434,6 +465,7 @@ export function indexedThreadHistory(path, leafId, options) {
     const value = Object.freeze({ source, presentationRevision, entries: branch.value.entries, messages: branch.value.messages,
       read: descriptor => readIndexedRecord(source, descriptors, descriptor) });
     snapshotDescriptors.set(value, descriptors);
+    snapshotProofs.set(value, { stat: cache.stat, revision: cache.revision, size: cache.size, digest: cache.digest });
     cache.snapshots.set(snapshotKey, { value, bytes });
     cache.metadataBytes += bytes; indexedMetadataBytes += bytes;
     trimIndexCache();
