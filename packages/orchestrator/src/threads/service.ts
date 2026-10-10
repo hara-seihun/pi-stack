@@ -2763,7 +2763,6 @@ export class ThreadService implements ThreadApi {
         throw new Error(admitted.error.message);
       }
       if (this.suspended || this.closed || this.row(id)?.held || this.halts.has(id)) { await admitted.value.release(); await this.releaseUnenteredCapacity(id, recoveredExecution.id); throw new AdmissionWait("Recovery cancelled before opening"); }
-      this.clearAdmissionWait(id);
       recoveredAdmission = admitted.value; extraEnv = { ...extraEnv, ...admitted.value.env }; settings = admitted.value.settings ?? settings;
       if (recoveredExecution.retry_settings) this.sql("UPDATE thread_execution SET retry_settings=? WHERE id=? AND ended_at IS NULL").run(JSON.stringify(settings), recoveredExecution.id);
     }
@@ -2805,6 +2804,7 @@ export class ThreadService implements ThreadApi {
         args: ["--provider", provider!, "--model", model.join("/"), "--thinking", settings.thinkingLevel, "--name", thread.title, ...(raw ? [RAW_ARGUMENT] : []), ...(telephone ? [TELEPHONE_CONTEXT_ARGUMENT, JSON.stringify(telephone)] : []), ...(sandbox ? [SANDBOX_ARGUMENT, SANDBOX_POLICY_ARGUMENT, JSON.stringify(sandboxPolicy(thread.metadata ?? {}))] : []), ...(context ? ["--orchestrator-context", JSON.stringify(context)] : [])], env, threads: this.directory ?? this },
         event => this.output(id, runtime, event), code => this.exited(id, runtime, code));
       const state = await this.rpc(runtime, { type: "get_state" }); this.adoptReference(id, state);
+      this.clearAdmissionWait(id);
       if (env.PI_THREAD_RUNNER_REFERENCE && state.threadSessionKey !== env.PI_THREAD_SESSION_KEY) runtime.environmentKey = undefined;
       runtime.busy = this.busy(state); runtime.finalMessage = state.lastAssistantMessage;
       await this.rpc(runtime, { type: "set_session_name", name: thread.title });
@@ -3014,7 +3014,6 @@ export class ThreadService implements ThreadApi {
         if (admission.error.code !== "unavailable") { await this.rejectStartup(id, admission.error.message); return; }
         this.admissionWait(id, admission.error); return;
       }
-      this.clearAdmissionWait(id);
       if (this.suspended || this.row(id)?.held || this.halts.has(id)) { await admission.value.release(); await this.releaseUnenteredCapacity(id, executionId); return; }
       const effectiveSettings = admission.value.settings ?? settings;
       this.state(id, "running");
@@ -3031,6 +3030,7 @@ export class ThreadService implements ThreadApi {
           runtime = await this.open(id, effectiveSettings, false, admission.value.env);
           await runtime.session?.setActive?.(true);
         }
+        this.clearAdmissionWait(id);
         runtime.parked = false;
       } catch (error) {
         await admission.value.release();
