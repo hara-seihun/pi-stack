@@ -16,6 +16,12 @@ The daemon reconciles provider meters, weighted lanes and optional readiness pro
 
 Agents use ordinary peer messages and explicit quota admission. Foreground/background placement and launch provenance confer no execution-budget exemption. There is no external fleet coordinator, waiting run, receipt endpoint or worker restart lifecycle. The daemon detaches from shared runners on shutdown; ThreadService recovers durable execution when it reconnects. Cutover imports existing fleet records before starting the service and must refuse active source custody rather than replay it.
 
+## Startup history census
+
+[`src/native-history-startup.ts`](src/native-history-startup.ts) observes at most256 runner controls concurrently, with a3-second status deadline and one retry only on timeout. The daemon journal receives a version1 `fleet-native-census` JSON receipt: each runner is `native`, `legacy` or `unverified`, with its socket, generation, attempts and total latency; unverified observations retain a typed error. Missing/refused, unanswered and invalid controls do not veto the daemon's startup or become proven native generations.
+
+The receipt's `source` selects the decoder, not a claim that every producer answered. An acknowledged legacy runner or any nonempty `.events` spool outside the proven native generations requires the exact retained legacy maintenance source. Up to4096 spool sizes are inspected without decoding or modifying output. If that source is unavailable, startup refuses with the relevant runner/output paths; empty or absent output from an unverified runner does not require a decoder. `scripts/native-history-fleet-startup.test.mjs` proves stale controls, bounded retry, mixed ownership and retained-output fencing.
+
 ## Pooled credentials and admission
 
 OpenAI and Anthropic are served entirely from the shared account pool. No one on the machine holds a personal subscription or an API key, so the extension registers the `openai-codex` and `anthropic` family ids with pool-only auth: the model catalog stays intact, but the upstream ambient routes — `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and any credential left in a person's `~/.pi/agent/auth.json` — cannot authenticate a request. Traffic reaches a provider only through a numbered pooled alias, or through the model broker for ordinary Unix users. A session that never bound an account says so instead of reporting a missing API key, and a session model request that no pooled account can serve fails at startup rather than part-way through a turn.
