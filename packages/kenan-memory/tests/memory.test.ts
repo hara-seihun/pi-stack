@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MemoryStore } from "../src/store.js";
 import { memoryService } from "../src/service.js";
+import { fixtureAuthorization } from "./authorization.js";
 import { memoryClient } from "../src/client.js";
 import { memoryExtension } from "../src/tools.js";
 import { oneKenanEnabled } from "../src/config.js";
@@ -67,7 +68,7 @@ describe("one shared memory", () => {
 
 test("HTTP session proves person; claimed names grant nothing; publisher writes only", async () => {
   const s = store(); let enabled = true;
-  const server = memoryService({ store: s, auth: { supervisors: [{ person: "alice", token: "supervisor-alice" }], publisherToken: "publisher" }, enabled: () => enabled, peerUid: () => undefined });
+  const server = memoryService({ authorize: fixtureAuthorization, store: s, auth: { supervisors: [{ person: "alice", token: "supervisor-alice" }], publisherToken: "publisher" }, enabled: () => enabled, peerUid: () => undefined });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   cleanups.push(() => new Promise<void>(resolve => server.close(() => resolve())));
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;

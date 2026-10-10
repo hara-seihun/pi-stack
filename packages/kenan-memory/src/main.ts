@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { readTimezoneProjection } from "pi-orchestrator/person-timezone";
 import { MEMORY_DEFAULT_PORT } from "./contract.js";
 import { oneKenanEnabled } from "./config.js";
-import { memoryService, type MemoryAuth } from "./service.js";
+import { memoryService, type MemoryAuth, type MemoryAuthorizer } from "./service.js";
 import { MemoryStore } from "./store.js";
 import { awaitPrivateMount } from "./private-store.js";
 
@@ -24,7 +24,13 @@ if (!oneKenanEnabled()) {
     const store = new MemoryStore(process.env.PI_KENAN_MEMORY_STORE ?? `${privateDir}/memory/memory.sqlite3`);
     const roomModule = process.env.PI_KENAN_ROOM_AUDIENCE_MODULE;
     const roomAudience = roomModule ? (await import(roomModule)).roomAudienceResolver(process.env.PI_REMOTE_ROOMS_DB, "pi-rooms") : undefined;
-    const service = memoryService({ store, auth, enabled: () => oneKenanEnabled(), roomAudience,
+    const authorizationModule = process.env.PI_KENAN_MEMORY_AUTHORIZATION_MODULE;
+    if (!authorizationModule) throw new Error("Standalone memory custody requires the shared core authorization adapter");
+    const authorization = await import(authorizationModule);
+    if (typeof authorization.memoryAuthorizer !== "function") throw new Error("Memory authorization adapter must export memoryAuthorizer");
+    const authorize: MemoryAuthorizer = authorization.memoryAuthorizer({ auth, store });
+    if (typeof authorize !== "function") throw new Error("Memory authorization adapter is unset");
+    const service = memoryService({ store, auth, authorize, enabled: () => oneKenanEnabled(), roomAudience,
       timezone: person => {
         const file = auth.supervisors.find(entry => entry.person === person)?.timezoneFile;
         return file ? readTimezoneProjection(file) : { ok: false, error: { code: "unavailable", message: "Verified person has no host-declared timezone projection" } };

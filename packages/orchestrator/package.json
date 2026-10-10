@@ -14,6 +14,11 @@
     "src"
   ],
   "exports": {
+    "./permissions": {
+      "types": "./src/permissions.ts",
+      "bun": "./src/permissions.ts",
+      "default": "./dist/permissions.js"
+    },
     "./api": {
       "types": "./src/api.ts",
       "bun": "./src/api.ts",

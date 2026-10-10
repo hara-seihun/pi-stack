@@ -4,9 +4,8 @@ import { Type } from "typebox";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { memoryClient } from "./client.js";
 import { rootRequestResponse } from "./root-transport.js";
-import { registerLifeTools } from "./life-tools.js";
+import { memoryFolderPrompt } from "./markdown.js";
 import { ACTION_TOOL_NAMES, registerActionTools } from "./action-tools.js";
-import { LIFE_TOOL_NAMES, type LifeClient } from "./life-contract.js";
 import { oneKenanEnabled } from "./config.js";
 import { isMemoryRole, memoryRole, stateValue } from "./explicit-state.js";
 import { prepareMemoryEnvironment } from "./session.js";
@@ -35,7 +34,6 @@ export const memorySourceSchema = Type.Union([
 export interface MemoryToolOptions {
   env: NodeJS.ProcessEnv;
   client?: MemoryClient;
-  lifeClient?: LifeClient;
   rootTransport?: typeof fetch;
   rootTimeoutMs?: number;
   report?: InfrastructureReporter;
@@ -44,25 +42,24 @@ export interface MemoryToolOptions {
 export function memoryExtension(options: MemoryToolOptions) {
   return (pi: ExtensionAPI) => {
     let initialized = false;
-    let policyPrompt: (() => Promise<string>) | undefined;
     if (oneKenanEnabled(options.env)) {
-      policyPrompt = registerMemoryTools(options, pi);
+      registerMemoryTools(options, pi);
       initialized = true;
     }
     pi.on("before_agent_start", async event => {
-      const names = new Set([...MEMORY_TOOL_NAMES, ...LIFE_TOOL_NAMES, ...ACTION_TOOL_NAMES, "ask_kenan"]);
+      const names = new Set([...MEMORY_TOOL_NAMES, ...ACTION_TOOL_NAMES, "ask_kenan"]);
       if (!oneKenanEnabled(options.env)) {
         if (initialized) pi.setActiveTools(pi.getActiveTools().filter(name => !names.has(name)));
         return;
       }
       if (!initialized) {
-        policyPrompt = registerMemoryTools(options, pi);
+        registerMemoryTools(options, pi);
         initialized = true;
       }
       pi.setActiveTools([...new Set([...pi.getActiveTools(), ...pi.getAllTools().filter(tool => names.has(tool.name)).map(tool => tool.name)])]);
       const guidance = readFileSync(new URL(memoryRole(options.env.PI_KENAN_MEMORY_ROLE) === "root" ? "../discretion.md" : "../person.md", import.meta.url), "utf8");
-      const authority = policyPrompt ? await policyPrompt() : "";
-      return { systemPrompt: `${event.systemPrompt}\n\n${guidance}${authority ? `\n\n${authority}` : ""}` };
+      const folder = memoryFolderPrompt(options.env.PI_KENAN_MEMORY_FOLDER);
+      return { systemPrompt: `${event.systemPrompt}\n\n${guidance}\n\n${folder.ok ? folder.value : `Memory folder unavailable: ${folder.error.message}. Expanded standing delegation is unset; explicit requests retain their stated scope.`}` };
     });
   };
 }
@@ -150,7 +147,6 @@ function registerMemoryTools(options: MemoryToolOptions, pi: ExtensionAPI) {
     }
     if (room && !root) return;
     registerActionTools(pi, options.env);
-    const policyPrompt = registerLifeTools(pi, { env: options.env, root, ensureSession, client: options.lifeClient });
     let turnId = randomUUID();
     pi.on("turn_start", () => { turnId = randomUUID(); });
     const roomId = options.env.PI_REMOTE_ROOM_ID ?? options.env.PI_KENAN_MEMORY_ROOM_ID;
@@ -202,5 +198,4 @@ function registerMemoryTools(options: MemoryToolOptions, pi: ExtensionAPI) {
       parameters: Type.Object({ text: nonBlank(), about: strings, to: strings, memoryIds: Type.Optional(strings), occurredAt: optionalTime }),
       execute: async (_id, input) => request({ operation: "log-disclosure", disclosure: { ...input, setting: setting() } }),
     }));
-    return policyPrompt;
 }

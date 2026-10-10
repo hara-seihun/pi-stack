@@ -2,21 +2,30 @@ import { createServer, type IncomingMessage } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { PersonTimezone, SettingsResult } from "pi-orchestrator/person-timezone";
+import type { Authorization, PermissionResult } from "pi-orchestrator/permissions";
 import type { RootAdmission } from "./contract.js";
 import { KENAN_REQUEST_ID_PATTERN, MEMORY_TOKEN_HEADER, type MemoryRequest, type MemoryResult, type MemoryRole, type MemoryValue, type RoomAudienceResolver, type RootResumeConsent, type RootLogConsent, type RootLogNotification, type RootLogRequestStatus } from "./contract.js";
 import { MemoryStore } from "./store.js";
 import { validateRequest } from "./validation.js";
 import { unreachable } from "./explicit-state.js";
-import { LifeStore } from "./life-store.js";
-import { LIFE_ROOT_SUBJECT } from "./life-contract.js";
-import { validateLifeRequest } from "./life-validation.js";
 export interface MemoryAuth {
   supervisors: { person: string; token: string; displayName?: string; timezoneFile?: string }[];
   publisherToken?: string;
   rootToken?: string;
   uidPersons?: Record<string, string>;
 }
-type Principal = { kind: "person"; person: string; role: MemoryRole; threadId?: string } | { kind: "publisher" } | { kind: "root-service" };
+export type MemoryPrincipal = { kind: "person"; person: string; role: MemoryRole; threadId?: string } | { kind: "publisher" } | { kind: "root-service" };
+export type MemoryAuthorizer = (request: { caller: MemoryPrincipal; route: string; input: unknown }) => PermissionResult<Authorization> | Promise<PermissionResult<Authorization>>;
+export interface MemoryServiceOptions {
+  store: MemoryStore;
+  auth: MemoryAuth;
+  authorize: MemoryAuthorizer;
+  enabled: () => boolean;
+  peerUid?: (request: IncomingMessage) => number | undefined;
+  roomAudience?: RoomAudienceResolver;
+  timezone?: (person: string) => SettingsResult<PersonTimezone | null>;
+  releaseCommit?: string;
+}
 const equal = (a: string, b: string) => { const x = Buffer.from(a), y = Buffer.from(b); return x.length === y.length && timingSafeEqual(x, y); };
 const object = (v: unknown): v is Record<string, any> => !!v && typeof v === "object" && !Array.isArray(v);
 const strings = (v: unknown): v is string[] => Array.isArray(v) && v.length <= 100 && v.every(id => typeof id === "string" && id.length > 0 && id.length <= 200);
@@ -31,16 +40,15 @@ export function loopbackUid(request: IncomingMessage): number | undefined {
     if (f[1] === client && f[2] === server) return Number(f[7]);
   }
 }
-export function memoryService(options: { store: MemoryStore; auth: MemoryAuth; enabled: () => boolean; peerUid?: (request: IncomingMessage) => number | undefined; roomAudience?: RoomAudienceResolver; timezone?: (person: string) => SettingsResult<PersonTimezone | null>; releaseCommit?: string }) {
+export function memoryService(options: MemoryServiceOptions) {
   const { store, auth } = options;
-  const life = new LifeStore(store.db);
   const withTimezone = (admission: RootAdmission): MemoryResult<RootAdmission> => {
     if (!options.timezone) return { ok: true, value: admission };
     const timezone = options.timezone(admission.person);
     return timezone.ok ? { ok: true, value: { ...admission, timezone: timezone.value } }
       : { ok: false, error: "unavailable", message: `Authenticated asking-person timezone unavailable: ${timezone.error.message}` };
   };
-  const principal = (request: IncomingMessage): Principal | undefined => {
+  const principal = (request: IncomingMessage): MemoryPrincipal | undefined => {
     const supplied = request.headers[MEMORY_TOKEN_HEADER];
     if (typeof supplied === "string") {
       if (auth.rootToken && equal(supplied, auth.rootToken)) return { kind: "root-service" };
@@ -61,7 +69,7 @@ export function memoryService(options: { store: MemoryStore; auth: MemoryAuth; e
     try {
       if (!options.enabled()) return send(503, { ok: false, error: "disabled", message: "One Kenan is disabled on this host" });
       if (request.method === "GET" && request.url === "/v1/health") return send(200, { ok: true, service: "kenan-memory", releaseCommit: options.releaseCommit ?? null });
-      if (request.method !== "POST" || !["/v1/memory", "/v1/life", "/v1/sessions", "/v1/root/admit", "/v1/root/finalize-reply", "/v1/root/resume-consent", "/v1/root/log-consent", "/v1/root/authorize-request", "/v1/root/authenticate-caller", "/v1/root/resume-request", "/v1/root/log-notification", "/v1/root/log-request-status"].includes(request.url ?? ""))
+      if (request.method !== "POST" || !["/v1/memory", "/v1/sessions", "/v1/root/admit", "/v1/root/finalize-reply", "/v1/root/resume-consent", "/v1/root/log-consent", "/v1/root/authorize-request", "/v1/root/authenticate-caller", "/v1/root/resume-request", "/v1/root/log-notification", "/v1/root/log-request-status"].includes(request.url ?? ""))
         return send(404, { ok: false, error: "invalid-request", message: "Unknown memory route" });
       const caller = principal(request);
       if (!caller) return denied("Memory access requires a verified local identity");
@@ -69,6 +77,9 @@ export function memoryService(options: { store: MemoryStore; auth: MemoryAuth; e
       for await (const chunk of request) { bytes += chunk.length; if (bytes > 1_000_000) return send(413, { ok: false, error: "invalid-request", message: "Memory request is too large" }); chunks.push(Buffer.from(chunk)); }
       let input: unknown;
       try { input = JSON.parse(Buffer.concat(chunks).toString()); } catch { return invalid("Memory request must be JSON"); }
+      if (typeof options.authorize !== "function") return send(503, { ok: false, error: "unavailable", message: "Unified memory authorization is unset" });
+      const authorization = await options.authorize({ caller, route: request.url!, input });
+      if (!authorization.ok) return send(403, { ok: false, error: "unauthenticated", message: authorization.error.message });
       if (request.url?.startsWith("/v1/root/")) {
         if (caller.kind !== "root-service") return denied("This operation belongs to the root Kenan service");
         if (!object(input)) return invalid("Root operation must be an object");
@@ -173,40 +184,6 @@ export function memoryService(options: { store: MemoryStore; auth: MemoryAuth; e
         return send(result.ok ? 200 : result.error === "unauthenticated" ? 403 : 400, result);
       }
       if (caller.kind === "root-service") return denied("The root service must use an admitted root memory session");
-      if (request.url === "/v1/life") {
-        if (caller.kind !== "person") return denied("Life state is unavailable to journal publishers");
-        const parsed = validateLifeRequest(input);
-        if (!parsed.ok) return send(400, parsed);
-        const operation = parsed.value;
-        const audience = caller.threadId ? await options.roomAudience?.(caller.person, caller.threadId) : undefined;
-        const admission = caller.role === "root" && caller.threadId ? store.rootAdmission(caller.threadId) : undefined;
-        if (caller.role === "person" && (caller.person === "pi-rooms" || audience)) return denied("Rooms do not expose private life tools or policies");
-        if (caller.role === "root" && !admission) return denied("Life access requires an admitted root session");
-        if (admission?.roomId) {
-          const current = await options.roomAudience?.(admission.person, admission.threadId);
-          if (!current || current.roomId !== admission.roomId || [...current.people].sort().join("\0") !== [...admission.recipients].sort().join("\0")) return denied("The admitted room audience changed");
-        }
-        let subject: string;
-        if (caller.role === "person") {
-          if (operation.target.scope !== "self") return denied("Other-person or root life state belongs to ask_kenan");
-          subject = caller.person;
-        } else {
-          if (operation.target.scope === "self") return invalid("Root must explicitly select root or a registered person; self is ambiguous");
-          subject = operation.target.scope === "root" ? LIFE_ROOT_SUBJECT : operation.target.person;
-        }
-        const registered = new Set([...auth.supervisors.map(entry => entry.person), ...Object.values(auth.uidPersons ?? {})]);
-        if (subject !== LIFE_ROOT_SUBJECT && (!registered.has(subject) || subject === "pi-rooms")) return invalid("Life target must be a registered individual person");
-        if (caller.role === "person" && operation.operation !== "policy-write") {
-          const initialized = life.initializePersonPolicy(subject);
-          if (!initialized.ok) return send(500, initialized);
-        }
-        const result = life.request(subject, { person: caller.role === "root" ? "kenan" : caller.person, threadId: caller.threadId ?? null }, operation);
-        if (result.ok && admission && subject !== LIFE_ROOT_SUBJECT) {
-          const subjects = [...new Set([...admission.subjects, subject])];
-          store.db.query("UPDATE root_runs SET body=? WHERE id=?").run(JSON.stringify({ ...admission, subjects }), admission.rootSessionId);
-        }
-        return send(result.ok ? 200 : result.error === "conflict" ? 409 : result.error === "not-found" ? 404 : result.error === "unavailable" ? 500 : 400, result);
-      }
       if (request.url === "/v1/sessions") {
         if (caller.kind !== "person" || caller.threadId || caller.role !== "person") return denied("Only a supervisor can issue a person memory session");
         if (!object(input) || !fields(input, ["threadId"]) || typeof input.threadId !== "string" || !input.threadId || input.threadId.length > 200) return invalid("Invalid person session request");
@@ -233,10 +210,6 @@ export function memoryService(options: { store: MemoryStore; auth: MemoryAuth; e
         if (operation.operation === "forget" && !store.canForget(person, operation.ids)) return denied("Forgetting shared or other-person memory belongs to ask_kenan");
         if (operation.operation === "log-disclosure" && operation.disclosure.about.some(id => id !== person)) return denied("Cross-person disclosure accounting belongs to ask_kenan");
         if (operation.operation === "finalize-turn") return denied("Root disclosure finalization belongs to the root boundary");
-      }
-      if (operation.operation === "forget") {
-        const invalidated = life.invalidateMemories(operation.ids);
-        if (!invalidated.ok) return send(500, invalidated);
       }
       const result: MemoryResult = { ok: true, value: dispatch(store, person, role, operation) };
       send(200, result);

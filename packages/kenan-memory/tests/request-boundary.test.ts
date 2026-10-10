@@ -2,12 +2,13 @@ import { expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { MemoryStore } from "../src/store.js";
 import { memoryService } from "../src/service.js";
+import { fixtureAuthorization } from "./authorization.js";
 import { kenanRequestNotice } from "../src/contract.js";
 
 async function fixture() {
   const store = new MemoryStore(":memory:");
   let audience = { roomId: "fixture-room", people: ["alice", "bob"] };
-  const server = memoryService({ store, enabled: () => true, peerUid: () => undefined,
+  const server = memoryService({ authorize: fixtureAuthorization, store, enabled: () => true, peerUid: () => undefined,
     auth: { rootToken: "fixture-service", supervisors: [{ person: "alice", token: "fixture-alice" }, { person: "bob", token: "fixture-bob" }] },
     roomAudience: (person, thread) => person === "pi-rooms" && thread === "room-thread" ? audience : undefined });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));

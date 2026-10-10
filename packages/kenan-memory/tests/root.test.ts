@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test";
 import { MemoryStore } from "../src/store.js";
 import { memoryService } from "../src/service.js";
+import { fixtureAuthorization } from "./authorization.js";
 import { memoryClient } from "../src/client.js";
 import type { Disclosure, MemoryItem, MemoryRead, RootAdmission } from "../src/contract.js";
 
@@ -35,7 +36,7 @@ test("root admission is server-authenticated and exact reply committed before ac
   const alice = store.session("alice", "a");
   const bob = store.session("bob", "b");
   let roomPeople = ["alice", "bob"];
-  const server = memoryService({ store, auth: { supervisors: [{ person: "alice", token: "alice-supervisor" }, { person: "bob", token: "bob-supervisor" }], rootToken: "root-service" }, enabled: () => true, peerUid: () => undefined,
+  const server = memoryService({ authorize: fixtureAuthorization, store, auth: { supervisors: [{ person: "alice", token: "alice-supervisor" }, { person: "bob", token: "bob-supervisor" }], rootToken: "root-service" }, enabled: () => true, peerUid: () => undefined,
     roomAudience: (person, threadId) => person === "pi-rooms" && threadId === "room" ? { roomId: "room", people: roomPeople } : undefined });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
