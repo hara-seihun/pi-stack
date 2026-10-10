@@ -156,12 +156,13 @@ export class WatchList implements WatchApi {
       const outcome = this.options.checkOutcome(threadId);
       if (!outcome.ok) return outcome;
       switch (outcome.value.status) {
-        case "open": break;
-        case "missing": ended.set(threadId, { threadId, status: "failed", at: Date.now(), error: "Check thread no longer exists" }); break;
-        case "complete": ended.set(threadId, { threadId, status: "complete", at: outcome.value.at }); break;
-        case "failed": ended.set(threadId, { threadId, status: "failed", at: outcome.value.at, error: outcome.value.error }); break;
-        default: { const unknown: never = outcome.value; return bad("unavailable", `Unknown watch check outcome ${JSON.stringify(unknown)}`); }
+        case "open": continue;
+        case "missing": ended.set(threadId, { threadId, status: "failed", at: Date.now(), error: "Check thread no longer exists" }); continue;
+        case "complete": ended.set(threadId, { threadId, status: "complete", at: outcome.value.at }); continue;
+        case "failed": ended.set(threadId, { threadId, status: "failed", at: outcome.value.at, error: outcome.value.error }); continue;
       }
+      const unknown: never = outcome.value;
+      return bad("unavailable", `Unknown watch check outcome ${JSON.stringify(unknown)}`);
     }
     if (!ended.size) return good(undefined);
     this.db.exec("BEGIN IMMEDIATE");
