@@ -229,8 +229,15 @@ for (const row of db.query("SELECT id,brief,dial_state,provider_id FROM calls WH
   const parsed = callBrief(JSON.parse(row.brief));
   if (!parsed.ok) throw new Error("Retained phone brief is invalid; action import requires repair");
   const submitted = actions.submit({ ...phoneIntent(parsed.value), requestId: `telephone-retained:${row.id}` });
-  if (!submitted.ok) throw new Error("Retained telephone action import unavailable");
-  if (submitted.value.disposition === "recipient-held") { log(row.id, "retained-action-recipient-fenced", { actionId: submitted.value.action.id }); continue; }
+  if (!submitted.ok) {
+    if ((submitted.error === "fenced" || submitted.error === "payload-conflict") && submitted.action) {
+      const held = actions.holdRecipient(parsed.value.to, `Retained telephone effect ${row.id} requires reconciliation alongside prior action ${submitted.action.id}`, "phone-service-retained-import");
+      if (!held.ok) throw new Error("Retained telephone recipient hold could not be recorded");
+      log(row.id, "retained-action-recipient-fenced", { actionId: submitted.action.id, error: submitted.error });
+      continue;
+    }
+    throw new Error("Retained telephone action import unavailable");
+  }
   db.query("UPDATE calls SET action_id=? WHERE id=?").run(submitted.value.action.id, row.id);
   if (submitted.value.action.state === "accepted") {
     const claimed = actions.claim(submitted.value.action.id, "phone-service-retained-import");
@@ -296,7 +303,7 @@ const local = Bun.serve<SocketData>({ hostname: "127.0.0.1", port: localPort, ma
     let body: unknown; try { body = await req.json(); } catch { return error("JSON required"); }
     const brief = callBrief(body); if (!brief.ok) return error(brief.error);
     const previous = db.query("SELECT id,brief,status FROM calls WHERE request_id=?").get(brief.value.requestId) as { id: string; brief: string; status: string } | null;
-    if (previous) return previous.brief === JSON.stringify(brief.value) ? json({ id: previous.id, status: previous.status, replayed: false }) : error("Approved request identity already belongs to another brief", 409);
+    if (previous) return previous.brief === JSON.stringify(brief.value) ? json({ id: previous.id, status: previous.status, replayed: false }) : json({ code: "payload-conflict", error: "Approved request identity already belongs to another brief" }, 409);
     if (selected.value === null || config.callingEnabled !== true) return error("Calling disabled until provider/number and silent takeover agent are confirmed", 409);
     if (stopping || active.size >= 2) return error("Phone service busy", 409);
     const permitted = contactGuard(db, brief.value, config, Date.now());

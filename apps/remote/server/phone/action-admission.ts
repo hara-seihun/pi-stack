@@ -13,8 +13,8 @@ export function reservePhoneAction(actions: ActionAuthority, brief: CallBrief, a
     ? actions.followup(prior.value.id, prior.value.revision, phoneIntent(brief), { kind: "operator-observation", reference: approval.callId, detail: `Reconciled at ${approval.reconciledAt}: ${approval.reason}` })
     : actions.submit(phoneIntent(brief));
   if (!submitted.ok) return submitted;
-  const { action, disposition } = submitted.value;
-  if (disposition === "recipient-held" || action.state !== "accepted") return { ok: false as const, error: "action-already-owned" as const, message: "Contact already has a durable action; inspect/reconcile it rather than redial", action };
+  const { action } = submitted.value;
+  if (action.state !== "accepted") return { ok: false as const, error: "action-already-owned" as const, message: "Contact already has a durable action; inspect/reconcile it rather than redial", action };
   const claim = actions.claim(action.id, "phone-service");
   return claim.ok ? { ok: true as const, value: claim.value } : claim;
 }

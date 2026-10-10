@@ -1,10 +1,13 @@
 import { test, expect } from "bun:test";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
+import { Database } from "bun:sqlite";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { silentAgent } from "./retell-transport";
 import { ActionStore, actionRequest } from "kenan-memory/actions";
+import { phoneIntent, reservePhoneAction, settlePhoneAction } from "./action-admission";
 
+const retainedCallId = "d208e41f-cafe-4bc5-991f-02dcb8f0f723";
 const brief = { requestId: "4208e41f-cafe-4bc5-991f-02dcb8f0f723", to: "+15555550123", purpose: "Book Tuesday afternoon", shareableFacts: ["Tuesday after 14:00"], opening: "I am Kenan, an AI assistant", maxSeconds: 60 };
 async function eventually<T>(read: () => Promise<T | undefined>) {
   const until = Date.now() + 2500;
@@ -12,11 +15,19 @@ async function eventually<T>(read: () => Promise<T | undefined>) {
   throw new Error("Synthetic service condition did not settle");
 }
 const port = () => { const s = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() }); const p = s.port; s.stop(true); return p; };
-async function fixture(mode: "uncertain" | "cancel" | "connected") {
+async function fixture(mode: "uncertain" | "cancel" | "connected", retained?: { brief: typeof brief; seed: (actions: ActionStore) => void }) {
   const root = mkdtempSync(join(tmpdir(), "phone-takeover-")), localPort = port(), publicPort = port();
   const token = "a".repeat(64), admin = "owner-capability".repeat(4);
   const requests: { path: string; body: any }[] = [];
   const actions = new ActionStore(join(root, "authority"), "synthetic");
+  if (retained) {
+    retained.seed(actions);
+    mkdirSync(join(root, "state"));
+    const calls = new Database(join(root, "state", "calls.sqlite3"));
+    calls.exec("CREATE TABLE calls(id TEXT PRIMARY KEY,provider_id TEXT,voice_id TEXT,status TEXT NOT NULL,brief TEXT NOT NULL,started_at INTEGER NOT NULL,ended_at INTEGER,error TEXT,cleanup INTEGER NOT NULL DEFAULT 0,dial_state TEXT NOT NULL,accepted_at INTEGER)");
+    calls.query("INSERT INTO calls(id,status,brief,started_at,ended_at,cleanup,dial_state) VALUES(?,?,?,?,?,1,'uncertain')").run(retainedCallId, "interrupted", JSON.stringify(retained.brief), Date.now(), Date.now());
+    calls.close();
+  }
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
   const settings = { apiKey: "synthetic-provider-secret", agentId: "agent_synthetic", agentVersion: 0, callerId: "+15555550200", silentUrl: `wss://phone.example/retell/silent/${token}` };
@@ -77,8 +88,52 @@ await import(${JSON.stringify(new URL("./service.ts", import.meta.url).href)});
   const close = async () => { release(); child.kill("SIGTERM"); const timer = setTimeout(() => child.kill("SIGKILL"), 1500); await child.exited; clearTimeout(timer); mockServer.stop(true); actions.close(); rmSync(root, { recursive: true, force: true }); };
   try { await eventually(async () => { try { if ((await request("/status")).ok) return true; } catch {} if (child.exitCode !== null) throw new Error(await stderr); return undefined; }); }
   catch (e) { await close(); throw e; }
-  return { requests, request, release, close, publicPort, token, hold: (holds: Record<string, string>) => writeFileSync(join(root, "holds.json"), JSON.stringify(holds)) };
+  return { actions, requests, request, release, close, publicPort, token, hold: (holds: Record<string, string>) => writeFileSync(join(root, "holds.json"), JSON.stringify(holds)) };
 }
+
+function priorAcceptedAction(actions: ActionStore, value = brief) {
+  const reserved = reservePhoneAction(actions, value);
+  if (!reserved.ok) throw new Error(reserved.message);
+  expect(actions.dispatch(reserved.value).ok).toBe(true);
+  const settled = settlePhoneAction(actions, reserved.value, "prior-call", "accepted", "prior-provider");
+  if (!settled.ok) throw new Error(settled.message);
+  return settled.value;
+}
+
+test("canonical succeeded action refuses changed intent/payload before any provider preparation", async () => {
+  const f = await fixture("connected");
+  try {
+    const prior = priorAcceptedAction(f.actions);
+    for (const [changes, code] of [[{ purpose: "Different purpose" }, "fenced"], [{ opening: "Changed opening" }, "payload-conflict"]] as const) {
+      const denied = await f.request("/calls", "POST", { ...brief, ...changes, requestId: crypto.randomUUID() });
+      expect(denied.status).toBe(409);
+      expect(await denied.json()).toMatchObject({ code, action: { id: prior.id, state: "succeeded" } });
+    }
+    expect(f.requests).toHaveLength(0);
+  } finally { await f.close(); }
+});
+
+for (const conflict of ["fenced", "payload-conflict"] as const) test(`retained uncertainty ${conflict} migration holds recipient after prior purpose resolves`, async () => {
+  let priorId!: string;
+  const f = await fixture("connected", { brief, seed(actions) {
+    priorId = priorAcceptedAction(actions, { ...brief, requestId: "prior-request", ...(conflict === "fenced" ? { purpose: "Another unresolved purpose" } : { opening: "Different prior payload" }) }).id;
+  } });
+  try {
+    const calls = await (await f.request("/calls")).json();
+    expect(calls).toHaveLength(1);
+    const row = await (await f.request(`/calls/${retainedCallId}`)).json();
+    expect(row.call.action_id).toBeNull();
+    expect(row.events).toContainEqual(expect.objectContaining({ type: "retained-action-recipient-fenced", payload: JSON.stringify({ actionId: priorId, error: conflict }) }));
+    const prior = f.actions.inspect(priorId);
+    if (!prior.ok) throw new Error(prior.message);
+    expect(f.actions.reconcile(priorId, prior.value.revision, "resolve-purpose", { kind: "operator-observation", reference: "prior-purpose", detail: "Prior purpose resolved, historical dial still uncertain" }, "fixture").ok).toBe(true);
+    const next = f.actions.submit(phoneIntent({ ...brief, purpose: "New contact", requestId: "after-resolution" }));
+    expect(next).toMatchObject({ ok: true, value: { action: { state: "held" } } });
+    if (!next.ok) throw new Error(next.message);
+    expect(f.actions.claim(next.value.action.id, "fixture")).toMatchObject({ ok: false, error: "fenced" });
+    expect(f.requests).toHaveLength(0);
+  } finally { await f.close(); }
+});
 
 test("POST calls refuses held recipients before dispatch and returns the hold reason", async () => {
   const f = await fixture("connected");
@@ -106,6 +161,14 @@ test("POST calls refuses accepted-contact cooldown even with caller-authored fol
     const first = await (await f.request("/calls", "POST", brief)).json();
     await eventually(async () => { const v = await (await f.request(`/calls/${first.id}`)).json(); return v.call.dial_state === "accepted" ? true : undefined; });
     await f.request(`/calls/${first.id}`, "DELETE");
+    const retry = await f.request("/calls", "POST", brief);
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toMatchObject({ id: first.id, replayed: false });
+    for (const changes of [{ purpose: "Different purpose" }, { opening: "Different payload" }]) {
+      const changed = await f.request("/calls", "POST", { ...brief, ...changes });
+      expect(changed.status).toBe(409);
+      expect(await changed.json()).toMatchObject({ code: "payload-conflict" });
+    }
     const denied = await f.request("/calls", "POST", { ...brief, requestId: "5208e41f-cafe-4bc5-991f-02dcb8f0f723", followUpOf: first.id });
     expect(denied.status).toBe(409);
     expect(await denied.json()).toMatchObject({ code: "recipient-cooldown", callId: first.id });

@@ -13,10 +13,13 @@ test("new worker/request UUID and changed wording cannot replay an accepted or u
     const first = reservePhoneAction(f.actions, brief); expect(first.ok).toBe(true); if (!first.ok) return;
     expect(f.actions.dispatch(first.value).ok).toBe(true);
     expect(settlePhoneAction(f.actions, first.value, "call1", "accepted", "provider1").ok).toBe(true);
-    expect(reservePhoneAction(f.actions, { ...brief, requestId: "new-worker" }).ok).toBe(false);
-    expect(reservePhoneAction(f.actions, { ...brief, purpose: "Try again differently", requestId: "new-purpose" }).ok).toBe(false);
+    expect(reservePhoneAction(f.actions, { ...brief, requestId: "new-worker" })).toMatchObject({ ok: false, error: "action-already-owned", action: { id: first.value.id } });
+    expect(f.actions.submit(phoneIntent({ ...brief, requestId: "exact-retry" }))).toMatchObject({ ok: true, value: { disposition: "existing", action: { id: first.value.id } } });
+    expect(reservePhoneAction(f.actions, { ...brief, purpose: "Try again differently", requestId: "new-purpose" })).toMatchObject({ ok: false, error: "fenced", action: { id: first.value.id } });
+    expect(reservePhoneAction(f.actions, { ...brief, opening: "Changed payload", requestId: "changed-payload" })).toMatchObject({ ok: false, error: "payload-conflict", action: { id: first.value.id } });
     const crossChannel = f.actions.submit({ intentKey: "text reminder", recipients: [brief.to], transport: "sms", payload: "hello", requestId: "sms1", threadId: "other-worker" });
-    expect(crossChannel.ok && crossChannel.value.disposition).toBe("recipient-held");
+    expect(crossChannel).toMatchObject({ ok: false, error: "fenced", action: { id: first.value.id } });
+    expect(f.actions.list()).toMatchObject({ ok: true, value: [{ id: first.value.id }] });
   } finally { f.close(); }
 });
 test("prepared canonical action can claim once; restart retains no replay after uncertainty", () => {
