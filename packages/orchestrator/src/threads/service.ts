@@ -1064,13 +1064,13 @@ export class ThreadService implements ThreadApi {
         this.sql("UPDATE manager_watchdog SET last_human_at=?,next_due_at=?,paused_at=? WHERE thread_id=?").run(newestHuman, due, pausedAt, manager.id);
         if (due === null || newestHuman !== state.last_human_at) { this.managerWatchdogApproved = null; this.cancelQueuedManagerChecks(manager.id); }
         else if (newestHuman === null || newestHuman + MANAGER_INACTIVITY_MS <= now) this.managerWatchdogApproved = `${MANAGER_WATCHDOG_PREFIX}${manager.id}:${state.sequence}`;
-        if (due === null || due > now || this.halts.has(manager.id) || this.opening.has(manager.id)
-          || this.execution(manager.id) || this.pending(manager.id).length || this.runtimes.get(manager.id)?.busy) return;
+        if (due === null || due > now || this.halts.has(manager.id)
+          || this.pending(manager.id).some(message => message.id.startsWith(MANAGER_WATCHDOG_PREFIX))) return;
         receipt = `${MANAGER_WATCHDOG_PREFIX}${manager.id}:${state.sequence + 1}`;
         this.managerWatchdogApproved = receipt;
         this.insertMessage(receipt, { requestId: receipt, threadId: manager.id, senderId: manager.id, source: "notification", delivery: "queue",
-          text: `Five-minute inactivity check: the person has not sent a human message for five minutes and managed work remains active. Inspect the accessible orchestrator work and canonical dependency waits for stuck work, unblock what you can, and return quietly if nothing needs attention. Agent messages and tool events do not reset this schedule. The controller owns this conditional timer; do not create a thread_wake for it.\n\n${BACKGROUND_ATTENTION_POLICY}` }, manager.settings);
-        this.sql("UPDATE thread SET state='running',metadata=json_remove(metadata,'$.agentWait') WHERE id=?").run(manager.id);
+          text: `Five-minute inactivity check: the person has not sent a human message for five minutes and managed work remains active. Inspect the accessible orchestrator work and canonical dependency waits for stuck work, unblock what you can, and return quietly if nothing needs attention. Agent messages and tool events do not reset this schedule. The controller owns this conditional timer; do not create a thread_wake for it.\n\n${BACKGROUND_ATTENTION_POLICY}` }, manager.settings, true);
+        this.sql("UPDATE thread SET state='running' WHERE id=?").run(manager.id);
         this.sql("UPDATE manager_watchdog SET next_due_at=?,sequence=? WHERE thread_id=?").run(now + MANAGER_INACTIVITY_MS, state.sequence + 1, manager.id);
       });
       owner.onError(null);
@@ -1079,6 +1079,35 @@ export class ThreadService implements ThreadApi {
     } catch (error) {
       if (!this.closed && !this.suspended) owner.onError(errorText(error));
     } finally { this.managerWatchdogRunning = false; }
+  }
+
+  private async validateManagerCheck(threadId: string, workId: string): Promise<boolean> {
+    const owner = this.managerWatchdog;
+    if (!owner) return false;
+    try {
+      const result = await owner.observe();
+      if (this.closed || this.suspended || !this.started) return false;
+      if (!result.ok) { this.managerWatchdogApproved = null; owner.onError(result.error.message); return false; }
+      const manager = this.get(threadId);
+      const localHuman = this.sql("SELECT MAX(created_at) time FROM thread_work WHERE sender_id IS NULL AND source='explicit'").get() as { time: number | null };
+      const times = [result.value.lastHumanMessageAt, localHuman.time].filter((time): time is number => time !== null);
+      const humanAt = times.length ? Math.max(...times) : null;
+      const state = this.sql("SELECT paused_at FROM manager_watchdog WHERE thread_id=?").get(threadId) as { paused_at: number | null } | undefined;
+      const valid = result.value.managerThreadId === threadId && result.value.activeWork && manager?.metadata?.manager === true && !manager.held
+        && (humanAt === null || humanAt + MANAGER_INACTIVITY_MS <= Date.now())
+        && !!state && (state.paused_at === null || humanAt !== null && humanAt > state.paused_at);
+      if (!valid) this.cancelQueuedManagerChecks(threadId);
+      else {
+        this.managerWatchdogApproved = workId;
+        this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.agentWait') WHERE id=?").run(threadId);
+      }
+      owner.onError(null);
+      return valid;
+    } catch (error) {
+      this.managerWatchdogApproved = null;
+      if (!this.closed && !this.suspended) owner.onError(errorText(error));
+      return false;
+    }
   }
 
   private async validateDependencies(id: string, ids: string[]): Promise<Result<void>> {
@@ -2900,7 +2929,8 @@ export class ThreadService implements ThreadApi {
     const work = this.sql(`SELECT * FROM thread_work WHERE thread_id=? AND status='queued' ${execution ? "AND delivery IN ('steer','hardSteer')" : ""} ORDER BY front DESC,ordinal LIMIT 1`).get(id) as Json | undefined;
     if (!work) { if (!execution && !runtime?.busy) { this.state(id, "idle"); if (runtime) await this.park(id, runtime); } return; }
     if (!execution && runtime?.busy) return;
-    if (work.id.startsWith(MANAGER_WATCHDOG_PREFIX) && this.managerWatchdogApproved !== work.id) return;
+    if (work.id.startsWith(MANAGER_WATCHDOG_PREFIX)
+      && (!await this.validateManagerCheck(id, work.id) || this.managerWatchdogApproved !== work.id || !this.queuedWork(work.id))) return;
     if (work.prepared === null) {
       if (!execution) this.phase(id, "preparing", "Preparing queued input and attachments");
       const prepared = this.options.prepareMessage ? await this.options.prepareMessage(thread, this.message(work)) : good({ text: work.text as string, images: JSON.parse(work.images) as unknown[] });

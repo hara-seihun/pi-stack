@@ -93,9 +93,11 @@ it("busy managers coalesce overdue checks through restart and never get overlapp
   unwrap(await f.service.send({ threadId: "manager", requestId: "human", text: "Long task" })); unwrap(await f.service.start());
   await until(() => f.sessions[0]?.commands.some(command => command.workId === "human") === true); await f.tick();
   now += 10 * MANAGER_INACTIVITY_MS; await f.tick(); await f.tick();
-  expect(f.service.pending("manager").map(message => message.id)).toEqual(["human"]);
-  f.sessions[0]!.settle(); await until(() => f.service.get("manager")?.lifecycle.kind === "idle"); await f.tick();
-  await until(() => f.service.pending("manager").some(message => message.id.startsWith(MANAGER_WATCHDOG_PREFIX)));
+  expect(f.service.pending("manager")).toHaveLength(2);
+  expect(f.service.pending("manager").filter(message => message.id.startsWith(MANAGER_WATCHDOG_PREFIX))).toHaveLength(1);
+  expect(f.sessions.flatMap(session => session.commands).filter(command => command.type === "prompt")).toHaveLength(1);
+  f.sessions[0]!.settle();
+  await until(() => f.sessions.some(session => session.commands.some(command => String(command.workId).startsWith(MANAGER_WATCHDOG_PREFIX))));
   const id = f.service.pending("manager")[0]!.id;
   f.sessions.find(session => session.commands.some(command => command.workId === id))!.settle(); await until(() => f.service.get("manager")?.lifecycle.kind === "idle");
   await boundary(); unwrap(await f.service.close());
@@ -138,6 +140,30 @@ it("restart before the deadline preserves the original silence clock and explici
   unwrap(await next.service.send({ threadId: "worker", requestId: "human-resumes", text: "Resume managing" }));
   await next.tick(); now += MANAGER_INACTIVITY_MS; await next.tick();
   await until(() => next.service.pending("manager").length === 1);
+});
+
+it("due checks take the next admission boundary ahead of recurring agent traffic without an idle timer tick", async () => {
+  let now = 1_000_000; vi.spyOn(Date, "now").mockImplementation(() => now);
+  const f = fixture(); await initialize(f); await waitForJob(f);
+  unwrap(await f.service.send({ threadId: "manager", senderId: "worker", requestId: "first-agent", source: "notification", text: "Progress", delivery: "steer" }));
+  unwrap(await f.service.start()); await until(() => f.sessions[0]?.commands.some(command => command.workId === "first-agent") === true); await f.tick();
+  for (let i = 0; i < 8; i++) unwrap(await f.service.send({ threadId: "manager", senderId: "worker", requestId: `traffic-${i}`, source: "notification", text: "More progress", delivery: "steer" }));
+  now += MANAGER_INACTIVITY_MS; await f.tick();
+  expect(f.service.pending("manager")[0]!.id.startsWith(MANAGER_WATCHDOG_PREFIX)).toBe(true);
+  f.sessions[0]!.settle();
+  await until(() => f.sessions[0]!.commands.filter(command => command.type === "prompt").length === 2);
+  expect(String(f.sessions[0]!.commands.filter(command => command.type === "prompt")[1]!.workId).startsWith(MANAGER_WATCHDOG_PREFIX)).toBe(true);
+  expect(f.sessions[0]!.commands.some(command => command.type === "steer" && String(command.workId).startsWith(MANAGER_WATCHDOG_PREFIX))).toBe(false);
+});
+
+it("a busy manager-only task becoming idle withdraws its queued check at admission, not one timer tick later", async () => {
+  let now = 1_000_000; vi.spyOn(Date, "now").mockImplementation(() => now);
+  const f = fixture(); await initialize(f);
+  unwrap(await f.service.send({ threadId: "manager", requestId: "human-long-task", text: "Work alone" }));
+  unwrap(await f.service.start()); await until(() => f.sessions[0]?.commands.some(command => command.workId === "human-long-task") === true); await f.tick();
+  now += MANAGER_INACTIVITY_MS; await f.tick(); expect(f.service.pending("manager")).toHaveLength(2);
+  f.sessions[0]!.settle(); await until(() => f.service.pending("manager").length === 0);
+  expect(f.sessions[0]!.commands.filter(command => command.type === "prompt")).toHaveLength(1);
 });
 
 it("replaces the unmodified creation heartbeat but preserves an explicitly changed wake", async () => {
