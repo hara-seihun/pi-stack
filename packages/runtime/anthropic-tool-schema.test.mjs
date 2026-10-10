@@ -20,6 +20,10 @@ const union = Type.Union([
 ]);
 const tools = [
   { name: "union", parameters: union },
+  { name: "manager_numeric", parameters: Type.Union([
+    Type.Object({ action: Type.Literal("bash"), timeout: Type.Number({ exclusiveMinimum: 0, maximum: 5 }) }),
+    Type.Object({ action: Type.Literal("converge"), input: Type.Object({ timeout: Type.Number({ exclusiveMinimum: 0, maximum: 5 }) }) }),
+  ]) },
   { name: "shaped", parameters: Type.Union([
     Type.Object({ action: Type.Literal("array"), value: Type.Array(Type.String()) }, { additionalProperties: false }),
     Type.Object({ action: Type.Literal("object"), value: Type.Object({ model: Type.String() }) }, { additionalProperties: false }),
@@ -69,6 +73,42 @@ for (const [name, path] of [["SDK", sdk], ["bundled", bundle]]) test(`${name}: A
   }
   assert.equal(JSON.stringify(context), before, "native tool schemas remain intact");
   assert.equal(readFileSync(path, "utf8"), original, "installed provider remains untouched");
+});
+
+test("number presentation drops unsupported keywords while native ranges remain executable", () => {
+  const parameters = tools.find(tool => tool.name === "manager_numeric").parameters;
+  const original = JSON.stringify(parameters);
+  const wire = anthropicToolSchema(parameters);
+  function check(schema) {
+    if (!schema || typeof schema !== "object") return;
+    if (schema.type === "number") {
+      for (const key of ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf"]) assert.equal(Object.hasOwn(schema, key), false);
+    }
+    for (const value of Object.values(schema)) check(value);
+  }
+  check(wire);
+  assert.equal(wire.properties.timeout.type, "number");
+  assert.match(wire.properties.timeout.description, /"exclusiveMinimum":0,"maximum":5/);
+  const native = Compile(parameters), advertised = Compile(wire);
+  for (const action of ["bash", "converge"]) {
+    const input = timeout => action === "bash" ? { action, timeout } : { action, input: { timeout } };
+    assert.equal(native.Check(input(5)), true);
+    assert.equal(advertised.Check(input(5)), true);
+    for (const timeout of [0, 6]) {
+      assert.equal(native.Check(input(timeout)), false);
+      assert.equal(advertised.Check(input(timeout)), true);
+    }
+    assert.equal(advertised.Check(input("5")), false);
+  }
+  assert.equal(JSON.stringify(parameters), original);
+  const literals = { type: "object", properties: { value: { type: "number", minimum: 0, multipleOf: 0.5 } }, const: { type: "number", maximum: 5 }, examples: [{ type: "number", maximum: 5 }] };
+  const presented = anthropicToolSchema(literals);
+  assert.deepEqual(presented.const, literals.const);
+  assert.deepEqual(presented.examples, literals.examples);
+  assert.equal(presented.properties.value.minimum, undefined);
+  assert.equal(presented.properties.value.multipleOf, undefined);
+  const integer = { type: "object", properties: { timeout: { type: "integer", minimum: 1, maximum: 5 } } };
+  assert.equal(anthropicToolSchema(integer), integer);
 });
 
 test("root object normalization retains branch contracts and root argument types", () => {
