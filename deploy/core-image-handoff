@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""Fence original image claims while accepted provider tasks finish; never abort them."""
+import hashlib
+import json
+import inspect
+import os
+from pathlib import Path
+import sqlite3
+import sys
+from core_namespace import absolute, enter, publish, trusted
+
+TRIGGERS = {
+ 'pi_core_image_claim_insert': "CREATE TRIGGER pi_core_image_claim_insert BEFORE INSERT ON inline_images WHEN json_extract(NEW.value,'$.state')='generating' BEGIN SELECT RAISE(IGNORE); END",
+ 'pi_core_image_claim_update': "CREATE TRIGGER pi_core_image_claim_update BEFORE UPDATE OF value ON inline_images WHEN json_extract(NEW.value,'$.state')='generating' AND json_extract(OLD.value,'$.state')!='generating' BEGIN SELECT RAISE(IGNORE); END",
+}
+
+
+def gate_database(path, identity, operation, expected):
+    stat = Path(path).stat()
+    if {'dev': str(stat.st_dev), 'ino': str(stat.st_ino)} != identity:
+        raise ValueError('original image database identity changed')
+    db = sqlite3.connect('file:' + path + '?mode=rw', uri=True, timeout=1)
+    try:
+        db.execute('BEGIN IMMEDIATE')
+        for name, sql in expected.items():
+            existing = db.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", (name,)).fetchone()
+            if existing is not None and existing[0] != sql:
+                raise ValueError('another purpose owns the image admission trigger')
+            if operation == 'gate' and existing is None:
+                db.execute(sql)
+            if operation == 'release' and existing is not None:
+                db.execute('DROP TRIGGER ' + name)
+        generating = db.execute("SELECT count(*) FROM inline_images WHERE json_extract(value,'$.state')='generating'").fetchone()[0]
+        queued = db.execute("SELECT count(*) FROM inline_images WHERE json_extract(value,'$.state')='queued'").fetchone()[0]
+        db.commit()
+        return {'generating': generating, 'queued': queued}
+    finally:
+        db.close()
+
+
+def execute(operation, path):
+    plan = trusted(path)
+    if plan.get('version') != 1 or operation not in ('gate', 'release'):
+        raise ValueError('explicit image admission handoff operation required')
+    source = absolute(plan['sourcePath'])
+    text = source.read_text()
+    if hashlib.sha256(source.read_bytes()).hexdigest() != plan['sourceSha256'] or 'if (!this.save(row.session_id' not in text or 'if (!result.changes) return false' not in text:
+        raise ValueError('original image pump must refuse zero-change claims before creating provider task')
+    if operation == 'gate':
+        fields = Path(f"/proc/{plan['pid']}/stat").read_text().rsplit(')', 1)[1].split()
+        if fields[19] != plan['startTicks']:
+            raise ValueError('original image owner birth changed')
+    else:
+        detached = trusted(absolute(plan['detachmentReceiptPath']))
+        if detached.get('state') != 'detached' or detached.get('scopeId') != plan['scopeId'] or detached.get('previousOwner', {}).get('identity', '').split(':')[1:3] != [str(plan['pid']), plan['startTicks']]:
+            raise ValueError('image gate release requires affirmative exact original owner detachment')
+    program = 'import json,sys,sqlite3\nfrom pathlib import Path\n' + inspect.getsource(gate_database) + "\np=json.loads(sys.argv[1]);print(json.dumps(gate_database(p['databasePath'],p['databaseIdentity'],sys.argv[2],json.loads(sys.argv[3]))))"
+    custody = plan['custody']
+    result = json.loads(enter(custody['namespace'], ['python3', '-c', program, json.dumps(plan), operation, json.dumps(TRIGGERS)], custody['uid'], custody['gid']))
+    receipt = {'version': 1, 'protocol': 'pi-core-original-image-drain-v1', 'state': 'released' if operation == 'release' else 'drained' if result['generating'] == 0 else 'pending', 'scopeId': plan['scopeId'], 'pid': plan['pid'], 'startTicks': plan['startTicks'], 'databasePath': plan['databasePath'], 'databaseIdentity': plan['databaseIdentity'], 'sourceProof': {'path': str(source), 'sha256': plan['sourceSha256']}, 'triggersSha256': hashlib.sha256(json.dumps(TRIGGERS, sort_keys=True).encode()).hexdigest(), **result}
+    target = absolute(plan['releaseReceiptPath'] if operation == 'release' else plan['receiptPath'])
+    if target.exists() and operation == 'gate':
+        existing = trusted(target)
+        if any(existing.get(key) != receipt[key] for key in ('scopeId', 'pid', 'startTicks', 'databasePath', 'databaseIdentity', 'sourceProof', 'triggersSha256')):
+            raise ValueError('another image handoff purpose owns this receipt')
+        if existing.get('state') == 'drained':
+            if result['generating'] != 0:
+                raise ValueError('image generation resumed behind an accepted admission fence')
+            return {'protocol': existing['protocol'], 'state': existing['state'], **result}
+    publish(target, receipt)
+    return {'protocol': receipt['protocol'], 'state': receipt['state'], **result}
+
+
+if __name__ == '__main__':
+    try:
+        if os.geteuid() != 0 or len(sys.argv) != 3:
+            raise ValueError('usage: root core-image-handoff gate|release ROOT_PLAN')
+        print(json.dumps({'ok': True, 'value': execute(sys.argv[1], absolute(sys.argv[2]))}))
+    except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as error:
+        print(json.dumps({'ok': False, 'error': {'code': 'image-drain-unconfirmed', 'message': str(error)}}))
+        sys.exit(75)

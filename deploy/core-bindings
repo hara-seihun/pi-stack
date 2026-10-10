@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Capture original technical environment/path metadata into protected scoped bindings."""
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -9,7 +10,7 @@ import subprocess
 import sys
 from core_namespace import absolute, publish, trusted
 
-SAFE_NAMES = {'HOME', 'USER', 'LOGNAME', 'PATH', 'SHELL', 'LANG', 'LC_ALL', 'TMPDIR', 'XDG_RUNTIME_DIR', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME'}
+SAFE_NAMES = {'HOME', 'USER', 'LOGNAME', 'PATH', 'SHELL', 'LANG', 'LC_ALL', 'TMPDIR', 'XDG_RUNTIME_DIR', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'PI_REMOTE_ENVIRONMENT_ID', 'PI_REMOTE_MANAGER_ENVIRONMENT', 'PI_REMOTE_USER', 'PI_REMOTE_PORT', 'PI_REMOTE_ROUTER_PORT', 'PI_REMOTE_ROOMS_RUNTIME', 'PI_REMOTE_WATCH_ENABLED', 'PI_KENAN_MEMORY_ENABLED', 'PI_KENAN_ROOT_ENABLED'}
 RETIRED = ('PI_REMOTE_SPEECH', 'PI_LOCAL_MODEL', 'PI_CONDENSE', 'PI_AGENT_FACTORY')
 
 
@@ -79,6 +80,7 @@ def collect(directory, runtime_path, output_path):
         if 'source' not in plan:
             # Locked/inactive resource descriptors are inert and retain their declared paths.
             scope['environment'] = dict(references)
+            scope['storage']['adoptionReceiptPath'] = str(directory/'host-plans/receipts'/(hashlib.sha256(scope['id'].encode()).hexdigest()+'.json'))
             scope['resources'] = [{'path': str(Path(scope['storage']['databasePath']).parent), 'kind': 'directory'}, {'path': scope['storage']['sessionsDir'], 'kind': 'directory'}]
             scope['custody']['namespace'] = {'kind': 'host'}
             scope['custody']['retainedRunnerNamespace'] = {'kind': 'host'}
@@ -136,6 +138,28 @@ def collect(directory, runtime_path, output_path):
                 continue
             registered.append({'path': entry['path'], 'kind': info['kind']})
         scope['resources'] = registered
+    indexed = {item['id']:item for item in result}
+    source = Path('/srv/pi/pi-remote/server/server.ts').resolve()
+    raw = source.read_bytes()
+    if b'ThreadDirectory({ id: "person", api: threads }, fleet ? [{ id: "fleet", api: fleet }]' not in raw or b'process.env.PI_REMOTE_HOST ?? "127.0.0.1"' not in raw:
+        raise ValueError('original related ThreadDirectory and loopback origin source proof required')
+    for user in original['individualRegistries']['remote']:
+        remote_id, fleet_id = 'remote:'+user, 'fleet:'+user
+        if remote_id not in indexed:continue
+        registry = trusted(Path('/var/lib/pi-remote/persons')/(user+'.json'))
+        target = indexed[remote_id]
+        host = target['environment'].get('PI_REMOTE_HOST', '127.0.0.1')
+        origin = 'http://'+host+':'+str(registry['port'])
+        target['environment']['PI_REMOTE_SERVER_URL'] = origin
+        if fleet_id not in indexed:continue
+        fleet = indexed[fleet_id]
+        original_target = next(item for item in base['scopes'] if item['id']==remote_id)
+        original_fleet = next(item for item in base['scopes'] if item['id']==fleet_id)
+        if original_target['principalId'] != original_fleet['principalId'] or any(original_target['resource'][key] != original_fleet['resource'][key] for key in ('owner','subjects','privacy')) or any(target['custody'][key] != fleet['custody'][key] for key in ('uid','gid')):
+            raise ValueError('original fleet callback owner mismatch')
+        fleet['environment']['PI_REMOTE_SERVER_URL'] = origin
+        fleet['callbackGateway'] = {'kind':'shared-remote-callback','targetScopeId':remote_id,'peerUid':target['custody']['uid']}
+        fleet['callbackEvidence'] = {'kind':'original-related-thread-directory','sourcePath':str(source),'sourceSha256':hashlib.sha256(raw).hexdigest(),'targetScopeId':remote_id}
     value = {'version': 1, 'scopes': result, 'metadata': {'privateContentRead': False, 'pending': pending, 'absentOptionalPaths': absent, 'sourceSchemas': observed}}
     publish(output_path, value)
     return {'scopeCount': len(result), 'pendingCount': len(pending), 'writtenPath': str(output_path)}

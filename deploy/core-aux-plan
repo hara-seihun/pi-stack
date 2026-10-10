@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""Prepare measured original-owner auxiliary baseline inputs; no admission/drain effects."""
+import copy
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+from core_namespace import absolute, namespace_path, publish, trusted
+
+META = r'''
+import json,os,sqlite3,sys
+out={}
+for entry in json.load(sys.stdin):
+ p=entry['path'];s=os.stat(p);record={'path':p,'dev':str(s.st_dev),'ino':str(s.st_ino)}
+ db=sqlite3.connect('file:'+p+'?mode=ro',uri=True,timeout=1)
+ tables={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+ record['sessionRoots']=sorted({os.path.dirname(r[0]) for r in db.execute('SELECT DISTINCT session_file FROM thread') if r[0] and os.path.isabs(r[0])}) if 'thread' in tables else []
+ if entry['supervisor']:
+  record['manager']=None if 'manager_view' not in tables else db.execute('SELECT view,thread_id FROM manager_view WHERE singleton=1').fetchone()
+  record['origins']=[r[0] for r in db.execute("SELECT DISTINCT value FROM metadata WHERE key LIKE 'manager-origin:%'")] if 'metadata' in tables else []
+ db.close()
+ out[p]=record
+print(json.dumps(out))
+'''
+
+
+def prepare(directory, output):
+    original = trusted(directory / 'manifest.json')
+    projected = trusted(directory / 'activation/core-config.projection.json')['config']['scopes']
+    custody = trusted(directory / 'host-plans/scope-adoption.plan.json')
+    bindings = trusted(directory / 'host-plans/scope-bindings.json')['scopes']
+    specs = trusted(directory / 'activation/final-schema/images-duties-authority-e4b3609f/per-scope.fragment.json')['scopes']
+    scopes = {item['id']: item for item in projected}
+    bind = {item['id']: item for item in bindings}
+    plans = {item['scopeId']: item for item in custody['scopes']}
+    owners = {item['unit']: item for item in custody['owners']}
+    per_scope = {item['id']: copy.deepcopy(item) for item in specs}
+    groups = {}
+    for identifier, scope in scopes.items():
+        plan = plans[identifier]
+        if 'source' not in plan:
+            continue
+        candidates = [item for item in scopes.values() if item['id'].startswith('remote:') and item['principalId'] == scope['principalId'] and item['custody']['uid'] == scope['custody']['uid'] and item['availability']['kind'] == 'adopt']
+        view_owner = plans[candidates[0]['id']]['ownerUnit'] if len(candidates) == 1 else plan['ownerUnit']
+        key = (view_owner, scope['custody']['uid'], scope['custody']['gid'])
+        groups.setdefault(key, []).append(identifier)
+    created = []
+    group_data = {}
+    for (unit, uid, gid), ids in groups.items():
+        owner = owners[unit]
+        queries = {}
+        for identifier in ids:
+            queries[plans[identifier]['databasePath']] = False
+            spec = per_scope.get(identifier)
+            if spec and spec['images']:
+                queries[spec['images']['databasePath']] = True
+            if identifier.startswith('fleet:'):
+                related = 'remote:' + identifier.removeprefix('fleet:')
+                if related in per_scope and per_scope[related]['images'] and scopes[related]['availability']['kind'] == 'adopt':
+                    queries[per_scope[related]['images']['databasePath']] = True
+        nsfd = os.open(namespace_path(owner['pinned']), os.O_RDONLY)
+        try:
+            response = subprocess.run(['nsenter', f'--mount=/proc/self/fd/{nsfd}', '--', 'setpriv', '--reuid='+str(uid), '--regid='+str(gid), '--clear-groups', 'python3', '-c', META], input=json.dumps([{'path':p,'supervisor':supervisor} for p,supervisor in queries.items()]), text=True, capture_output=True, pass_fds=(nsfd,), check=True, timeout=15)
+            metadata = json.loads(response.stdout)
+        finally:
+            os.close(nsfd)
+        group_data[unit] = metadata
+        records = []
+        for identifier in ids:
+            scope, plan = scopes[identifier], plans[identifier]
+            spec = per_scope.get(identifier)
+            images = None if spec is None else spec['images']
+            duties = None if spec is None else spec['duties']
+            supervisor_path = images['databasePath'] if images else None
+            if identifier.startswith('fleet:'):
+                remote = 'remote:' + identifier.removeprefix('fleet:')
+                if remote in per_scope and per_scope[remote]['images'] and scopes[remote]['availability']['kind'] == 'adopt':
+                    supervisor_path = per_scope[remote]['images']['databasePath']
+            if images:
+                related = [other for other in ids if other != identifier and scopes[other]['principalId'] == scope['principalId'] and scopes[other]['custody']['uid'] == scope['custody']['uid'] and all(scopes[other]['resource'][key] == scope['resource'][key] for key in ('owner','subjects','privacy'))]
+                images['relatedThreadScopeIds'] = sorted(related)
+            routing = {'kind': 'none'}
+            manager = {'kind': 'none'}
+            if supervisor_path and (identifier.startswith('remote:') or identifier.startswith('fleet:')):
+                env = bind[identifier]['environment']
+                environment_id = env['PI_REMOTE_ENVIRONMENT_ID'] if 'PI_REMOTE_ENVIRONMENT_ID' in env else bind['remote:'+identifier.removeprefix('fleet:')]['environment']['PI_REMOTE_ENVIRONMENT_ID']
+                view = metadata[supervisor_path]['manager']
+                if view and view[1]:
+                    canonical = {'environmentId': environment_id, 'threadId': view[1]}
+                else:
+                    canonical = None
+                # The local issuer's exact owned resource represents its already configured peer route.
+                peers = [{'id': origin, 'resource': scope['resource']} for origin in metadata[supervisor_path]['origins'] if origin != environment_id]
+                routing = {'kind':'configured','relay':{'scopeId':identifier,'environmentId':environment_id,'callbackUrl':'http://127.0.0.1/v1/core/manager-relay','canonicalManager':canonical,'remoteEnvironments':peers,'adoptedOrigins':[]},'notices':{'notificationOwnerId':'fleet' if identifier.startswith('fleet:') else 'person','adoptedCursors':{}}}
+                if identifier.startswith('remote:'):
+                    manager = {'kind':'supervisor'}
+            source = Path('/srv/pi/pi-remote/server/thread-notifications.ts').resolve()
+            records.append({'id':identifier,'availability':'available','threads':{key:metadata[plan['databasePath']][key] for key in ('path','dev','ino')},'supervisor':None if supervisor_path is None else {key:metadata[supervisor_path][key] for key in ('path','dev','ino')},'sessionRoots':sorted(set([plan['sessionsDir']]+metadata[plan['databasePath']]['sessionRoots'])),'manager':manager,'managerRouting':routing,'images':images,'duties':duties,'missingCursor':{'kind':'original-zero','sourcePath':str(source),'sha256':hashlib.sha256(source.read_bytes()).hexdigest()},'detachedReceiptPath':None,'liveOwner':{'pid':owners[plan['ownerUnit']]['namespace']['pid'],'startTicks':owners[plan['ownerUnit']]['namespace']['startTicks']}})
+        for record in records:
+            if record['images']:
+                other_roots=[plans[other]['sessionsDir'] for other in record['images']['relatedThreadScopeIds']]
+                record['sessionRoots']=sorted(set(record['sessionRoots']+other_roots))
+        name = hashlib.sha256(unit.encode()).hexdigest()[:20]
+        path = output / ('aux-'+name+'.plan.json')
+        publish(path, {'version':1,'phase':'baseline','outputPath':str(output/('aux-'+name+'.baseline.json')),'baselinePath':None,'baselineSha256':None,'scopes':records})
+        created.append({'planPath':str(path),'ownerUnit':unit,'uid':uid,'gid':gid,'namespace':owner['pinned'],'scopes':len(records)})
+    unavailable = []
+    for identifier, scope in scopes.items():
+        if scope['availability']['kind'] == 'unavailable':
+            spec=per_scope.get(identifier)
+            unavailable.append({'id':identifier,'availability':'unavailable','threads':None,'supervisor':None,'sessionRoots':[],'manager':scope['manager'],'managerRouting':{'kind':'none'},'images':None if spec is None else spec['images'],'duties':None if spec is None else spec['duties'],'missingCursor':{'kind':'reject'},'detachedReceiptPath':None,'liveOwner':None})
+    if unavailable:
+        for record in unavailable:
+            if record['images']:record['images']['relatedThreadScopeIds']=[]
+        path=output/'aux-unavailable.plan.json'
+        publish(path,{'version':1,'phase':'baseline','outputPath':str(output/'aux-unavailable.baseline.json'),'baselinePath':None,'baselineSha256':None,'scopes':unavailable})
+        created.append({'planPath':str(path),'ownerUnit':None,'uid':0,'gid':0,'namespace':{'kind':'host'},'scopes':len(unavailable)})
+    publish(output/'auxiliary-plans.json',{'version':1,'groups':created,'sourceMetadataOnly':True,'activationPermitted':False})
+    return {'planCount':len(created),'scopeCount':sum(item['scopes'] for item in created),'activationPermitted':False}
+
+
+if __name__ == '__main__':
+    try:
+        if os.geteuid()!=0 or len(sys.argv)!=3:raise ValueError('usage: root core-aux-plan MIGRATION_DIRECTORY OUTPUT_DIRECTORY')
+        print(json.dumps({'ok':True,'value':prepare(absolute(sys.argv[1]),absolute(sys.argv[2]))}))
+    except (OSError,ValueError,KeyError,TypeError,subprocess.SubprocessError) as error:
+        message = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) else str(error)
+        print(json.dumps({'ok':False,'error':{'code':'auxiliary-plan-unavailable','message':message}}));sys.exit(75)

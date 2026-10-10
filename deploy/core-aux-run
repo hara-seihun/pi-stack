@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""Run a finite read-only auxiliary capture as its original UID; retain output only as root."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+from core_namespace import absolute, namespace_path, publish, trusted
+
+
+def capture(index_path, bundle_path, selected):
+    index = trusted(index_path)
+    bundle = absolute(str(bundle_path))
+    s = bundle.lstat()
+    if bundle.is_symlink() or not bundle.is_file() or s.st_uid != 0 or s.st_mode & 0o022:
+        raise ValueError('immutable root-owned auxiliary bundle required')
+    groups = index['groups']
+    if selected < 0 or selected >= len(groups):
+        raise ValueError('declared auxiliary group index required')
+    group = groups[selected]
+    plan = trusted(absolute(group['planPath']))
+    if plan['phase'] != 'baseline':
+        raise ValueError('original UID capture is baseline only; detached capture uses prepared root custody')
+    destination = absolute(plan['outputPath'])
+    plan_sha = hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
+    bundle_sha = hashlib.sha256(bundle.read_bytes()).hexdigest()
+    receipt_path = destination.with_suffix('.capture.json')
+    if receipt_path.exists():
+        receipt = trusted(receipt_path)
+        if receipt['planSha256'] != plan_sha or receipt['bundleSha256'] != bundle_sha or not destination.exists() or hashlib.sha256(destination.read_bytes()).hexdigest() != receipt['outputSha256']:
+            raise ValueError('existing baseline custody conflicts; never replace earlier native watermark')
+        return {'state': 'captured', 'scopeCount': receipt['scopeCount'], 'sha256': receipt['outputSha256'], 'reused': True}
+    fd = os.open(namespace_path(group['namespace']), os.O_RDONLY)
+    bundle_fd = os.open(bundle, os.O_RDONLY)
+    script = "const {captureAuxiliary}=await import('data:text/javascript;base64,'+Buffer.from(await Bun.file('/proc/self/fd/"+str(bundle_fd)+"').text()).toString('base64'));const input=JSON.parse(await Bun.stdin.text());process.stdout.write(JSON.stringify(captureAuxiliary(input)));"
+    try:
+        response = subprocess.run(['nsenter', f'--mount=/proc/self/fd/{fd}', '--', 'setpriv', '--reuid='+str(group['uid']), '--regid='+str(group['gid']), '--clear-groups', '/usr/local/bin/bun', '-e', script], input=json.dumps(plan), text=True, capture_output=True, pass_fds=(fd,bundle_fd), check=True, timeout=1200)
+    finally:
+        os.close(bundle_fd)
+        os.close(fd)
+    value = json.loads(response.stdout)
+    publish(destination, value)
+    digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+    receipt = {'version':1,'planSha256':plan_sha,'bundleSha256':bundle_sha,'outputSha256':digest,'scopeCount':len(value['scopes']),'outputPath':str(destination),'phase':'baseline'}
+    publish(receipt_path, receipt)
+    return {'state':'captured','scopeCount':receipt['scopeCount'],'sha256':digest,'reused':False}
+
+
+if __name__ == '__main__':
+    try:
+        if os.geteuid()!=0 or len(sys.argv)!=4:raise ValueError('usage: root core-aux-run INDEX_JSON IMMUTABLE_BUNDLE GROUP_INDEX')
+        print(json.dumps({'ok':True,'value':capture(absolute(sys.argv[1]),absolute(sys.argv[2]),int(sys.argv[3]))}))
+    except (OSError,ValueError,KeyError,TypeError,subprocess.SubprocessError) as error:
+        # Foreign stderr may include a private data line. Keep it in the protected repair artifact.
+        if isinstance(error,subprocess.CalledProcessError):
+            index=trusted(absolute(sys.argv[1]));plan=trusted(absolute(index['groups'][int(sys.argv[3])]['planPath']))
+            publish(absolute(plan['outputPath']).with_suffix('.error.json'),{'version':1,'code':'capture-failed','stderr':error.stderr,'exitCode':error.returncode})
+            message='capture failed; protected error artifact retained'
+        else:message=str(error)
+        print(json.dumps({'ok':False,'error':{'code':'auxiliary-capture-unavailable','message':message}}));sys.exit(75)
