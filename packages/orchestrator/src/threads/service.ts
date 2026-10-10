@@ -319,6 +319,13 @@ export class ThreadService implements ThreadApi {
     if (!executionColumns.some(column => column.name === "retry_settings")) this.db.exec("ALTER TABLE thread_execution ADD COLUMN retry_settings TEXT");
     if (!executionColumns.some(column => column.name === "assignment_pending")) this.db.exec("ALTER TABLE thread_execution ADD COLUMN assignment_pending INTEGER NOT NULL DEFAULT 0");
     if (executionColumns.some(column => column.name === "state")) this.db.exec("ALTER TABLE thread_execution DROP COLUMN state");
+    if (!(this.sql("PRAGMA table_info(thread_work)").all() as { name: string }[]).some(column => column.name === "input_origin")) {
+      this.transaction(() => this.db.exec(`ALTER TABLE thread_work ADD COLUMN input_origin TEXT CHECK(input_origin IN ('human','machine'));
+        UPDATE thread_work SET input_origin=CASE
+          WHEN EXISTS(SELECT 1 FROM thread_human_activity h WHERE h.work_id=thread_work.id) THEN 'human'
+          WHEN sender_id IS NOT NULL OR source='notification' THEN 'machine'
+          ELSE NULL END;`));
+    }
     if (!(this.sql("PRAGMA table_info(thread_work)").all() as { name: string }[]).some(column => column.name === "priority")) this.db.exec("ALTER TABLE thread_work ADD COLUMN priority INTEGER NOT NULL DEFAULT 0 CHECK(priority IN (0,1,2))");
     this.db.exec(`UPDATE thread_work SET priority=CASE WHEN EXISTS(SELECT 1 FROM thread_human_activity h WHERE h.work_id=thread_work.id) THEN 2 ELSE 1 END,
       delivery=CASE WHEN id LIKE 'thread-wake:manager-inactivity:%' THEN delivery ELSE 'steer' END,
@@ -549,8 +556,25 @@ export class ThreadService implements ThreadApi {
       } catch (error) { return bad(error instanceof NativeRejection ? error.code : "unavailable", errorText(error)); }
     });
   }
+  private inputOrigin(threadId: string, workId: string): "human" | "machine" | undefined {
+    const row = this.sql("SELECT input_origin FROM thread_work WHERE thread_id=? AND id=?").get(threadId, workId) as { input_origin: "human" | "machine" | null } | undefined;
+    return row?.input_origin ?? undefined;
+  }
+  private historyInputOrigins(threadId: string): Record<string, "human" | "machine"> {
+    const rows = this.sql("SELECT id,input_origin FROM thread_work WHERE thread_id=? AND input_origin IS NOT NULL ORDER BY id").all(threadId) as Array<{ id: string; input_origin: "human" | "machine" }>;
+    return Object.fromEntries(rows.map(row => [row.id, row.input_origin]));
+  }
   private nativeMessageIdentity(thread: Thread, entry: Json, message: Json): Json {
     if (message.role !== "user" && message.role !== "assistant") return message;
+    const inputOrigin = message.role === "user" ? message.inputOrigin ?? (message.inputId ? this.inputOrigin(thread.id, message.inputId) : undefined) : undefined;
+    if (inputOrigin) message = { ...message, inputOrigin };
+    if (inputOrigin === "machine") {
+      const timestamp = timestampMs(message.timestamp) ?? timestampMs(entry.timestamp);
+      const machine = { ...message }; delete machine.identity;
+      return { ...machine, ...(timestamp === undefined ? {} : { identity: {
+        id: ["pi", thread.id, entry.id].map(encodeURIComponent).join("/"), timestamp, sender: { id: "machine", name: "Machine" },
+      } }) };
+    }
     const metadata = entry.type === "message" ? entry.message : entry.details;
     const identity = metadata?.identity;
     const senderValue = (value: unknown): Json | undefined => {
@@ -671,7 +695,7 @@ export class ThreadService implements ThreadApi {
       hash.update(String(Buffer.byteLength(encoded))).update(":").update(encoded);
     }
     const receiptHash = hash.digest("hex");
-    const key = digest({ source: history.source.revision, path: history.source.path, leafId: history.source.leafId, receipts: receiptHash });
+    const key = digest({ source: history.source.revision, path: history.source.path, leafId: history.source.leafId, receipts: receiptHash, presentation: history.presentationRevision });
     const cached = this.nativeContexts.get(thread.id, key);
     if (cached) return cached;
     const messages = this.nativeContextLayout(history.messages, receipts);
@@ -687,7 +711,7 @@ export class ThreadService implements ThreadApi {
       generation, revision: generation, size: 0, leafId: null };
   }
   private nativeContextRecords(thread: Thread, request: NonNullable<InspectOptions["contextRecords"]>): Result<ThreadContextRecords> {
-    const indexed = indexedThreadHistory(thread.sessionFile, request.leafId);
+    const indexed = indexedThreadHistory(thread.sessionFile, request.leafId, { inputOrigins: this.historyInputOrigins(thread.id) });
     if (!indexed.ok) {
       if (indexed.error.code !== "missing" || thread.metadata?.nativeHistoryRequired === true || request.leafId !== undefined) return historyFailure(indexed.error);
       const source = this.unstartedContextSource(thread);
@@ -703,7 +727,7 @@ export class ThreadService implements ThreadApi {
       this.nativeContexts.set(thread.id, metadata.key, metadata, metadata.bytes);
     }
     const projected = includeEntries ? metadata.entries! : metadata.messages;
-    const revision = digest({ native: history.source.revision, leafId: history.source.leafId, receipts: metadata.receiptHash, includeEntries });
+    const revision = digest({ native: history.source.revision, leafId: history.source.leafId, receipts: metadata.receiptHash, presentation: history.presentationRevision, includeEntries });
     if (request.revision !== undefined && request.revision !== revision) return bad("conflict", "Native context source revision changed; restart the context export");
     const records: ThreadContextRecords["records"] = [];
     const end = request.before === undefined ? Math.min(projected.length, (request.after ?? -1) + 1 + request.limit) : Math.min(projected.length, request.before);
@@ -775,7 +799,7 @@ export class ThreadService implements ThreadApi {
       const code = codes[index]!, count = counts[index]!;
       if (code < 0) { key([metadata.receipts[-code - 1]!.entryId, "user"]); continue; }
       const descriptor = history.messages[code]!;
-      if (descriptor.role !== "assistant" || !descriptor.blocks.length) { key([descriptor.id, descriptor.role, descriptor.monoVisibility ?? null]); continue; }
+      if (descriptor.role !== "assistant" || !descriptor.blocks.length) { key([descriptor.id, descriptor.role, descriptor.monoVisibility ?? null, descriptor.inputOrigin ?? null]); continue; }
       let emitted = 0;
       for (const block of descriptor.blocks) {
         if (!block.displayed || emitted >= count) continue;
@@ -799,7 +823,7 @@ export class ThreadService implements ThreadApi {
     return window;
   }
   private nativeContextWindow(thread: Thread, request: NonNullable<InspectOptions["contextWindow"]>): Result<ThreadContextWindow> {
-    const projected = withIndexedThreadHistory(thread.sessionFile, request.leafId, { managerWakeVisibility: thread.metadata?.manager === true },
+    const projected = withIndexedThreadHistory(thread.sessionFile, request.leafId, { managerWakeVisibility: thread.metadata?.manager === true, inputOrigins: this.historyInputOrigins(thread.id) },
       history => this.projectNativeContextWindow(thread, request, history));
     if (!projected.ok) {
       if (projected.error.code !== "missing" || thread.metadata?.nativeHistoryRequired === true || request.leafId !== undefined) return historyFailure(projected.error);
@@ -839,12 +863,14 @@ export class ThreadService implements ThreadApi {
         const descriptor = history.messages[code]!;
         const entry = history.read(descriptor);
         if (!entry.ok) return historyFailure(entry.error);
-        sourceMessage = this.nativeMessageIdentity(thread, entry.value, message(entry.value));
+        sourceMessage = message(entry.value);
+        if (descriptor.inputOrigin) sourceMessage = { ...sourceMessage, inputOrigin: descriptor.inputOrigin };
         const inputId = (descriptor as MessageRecordDescriptor & { inputId?: string }).inputId;
         if (inputId !== undefined && sourceMessage.role === "user") {
           const inputState = this.inputReceipt(thread.id, inputId);
           sourceMessage = { ...sourceMessage, inputId, ...(inputState ? { inputState } : {}) };
         }
+        sourceMessage = this.nativeMessageIdentity(thread, entry.value, sourceMessage);
         entryId = descriptor.id;
         const selectedCalls = new Set<string>();
         let ordinal = 0;
@@ -1410,8 +1436,9 @@ export class ThreadService implements ThreadApi {
     }
     const manager = current?.metadata?.manager === true;
     const delivery = manager && !id.startsWith(MANAGER_WATCHDOG_PREFIX) ? "steer" : resolveDelivery(input);
-    this.sql("INSERT INTO thread_work(id,thread_id,sender_id,text,images,delivery,source,reply_to,front,settings,created_at,priority) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
-      .run(id, input.threadId, input.senderId ?? null, input.text, JSON.stringify(input.images ?? []), delivery, input.source ?? "explicit", input.replyTo ?? null, manager && !id.startsWith(MANAGER_WATCHDOG_PREFIX) ? 0 : front ? Date.now() : 0, JSON.stringify(settings), Date.now(), manager ? humanActivity ? 2 : 1 : 0);
+    const inputOrigin = humanActivity ? "human" : input.senderId || input.source === "notification" || input.humanActivity === false ? "machine" : null;
+    this.sql("INSERT INTO thread_work(id,thread_id,sender_id,text,images,delivery,source,reply_to,front,settings,created_at,priority,input_origin) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)")
+      .run(id, input.threadId, input.senderId ?? null, input.text, JSON.stringify(input.images ?? []), delivery, input.source ?? "explicit", input.replyTo ?? null, manager && !id.startsWith(MANAGER_WATCHDOG_PREFIX) ? 0 : front ? Date.now() : 0, JSON.stringify(settings), Date.now(), manager ? humanActivity ? 2 : 1 : 0, inputOrigin);
     if (humanActivity) this.sql("INSERT INTO thread_human_activity(work_id,thread_id,created_at) SELECT id,thread_id,created_at FROM thread_work WHERE id=?").run(id);
     if (senderName) this.sql("UPDATE thread_work SET sender_name=? WHERE id=?").run(senderName, id);
     if (input.source === "notification" && this.get(input.threadId)?.metadata?.archived) this.sql("UPDATE thread_work SET status='done',outcome='cancelled' WHERE id=?").run(id);
@@ -2818,7 +2845,7 @@ export class ThreadService implements ThreadApi {
         } else if (!runtime.busy && works.length && !this.row(id)?.held && !this.halts.has(id)) {
           const work = works[0]!, prepared = work.prepared ? JSON.parse(work.prepared) : { text: work.text, images: JSON.parse(work.images) };
           this.phase(id, "preparing", "Resuming accepted input in runtime");
-          if (!await this.inputRpc(id, runtime, { type: "prompt", workId: work.id, message: formatThreadMessage(this.message(work), prepared.text), images: prepared.images, resume: accepted.has(work.id) || work.inserted_at !== null, ...(providerWait ? { resumeProviderWait: true } : {}) })) return runtime;
+          if (!await this.inputRpc(id, runtime, { type: "prompt", workId: work.id, message: formatThreadMessage(this.message(work), prepared.text), inputOrigin: this.inputOrigin(id, work.id), images: prepared.images, resume: accepted.has(work.id) || work.inserted_at !== null, ...(providerWait ? { resumeProviderWait: true } : {}) })) return runtime;
           if(providerWait)this.sql("UPDATE thread SET metadata=json_set(json_remove(metadata,'$.providerWait','$.admissionWait'),'$.providerRetry',json(?)) WHERE id=?").run(JSON.stringify({executionId:providerWait.executionId,attempts:providerWait.attempts??1}),id);
           this.sql("UPDATE thread_work SET landed_at=COALESCE(landed_at,?) WHERE id=?").run(Date.now(), work.id);
           runtime.busy = true;
@@ -3053,7 +3080,7 @@ export class ThreadService implements ThreadApi {
       const prepared = JSON.parse(work.prepared);
       const prompt = !runtime!.busy;
       if (prompt) this.phase(id, "preparing", "Delivering accepted input to runtime");
-      if (!await this.inputRpc(id, runtime!, { type: prompt ? "prompt" : "steer", workId: work.id, message: formatThreadMessage(this.message(work), prepared.text), images: prepared.images ?? [] })) return;
+      if (!await this.inputRpc(id, runtime!, { type: prompt ? "prompt" : "steer", workId: work.id, message: formatThreadMessage(this.message(work), prepared.text), inputOrigin: this.inputOrigin(id, work.id), images: prepared.images ?? [] })) return;
       const insertedAt = Date.now();
       if (this.suspended || this.row(id)?.held || this.halts.has(id) || this.runtimes.get(id) !== runtime) return;
       this.sql("UPDATE thread_work SET inserted_at=COALESCE(inserted_at,?),landed_at=CASE WHEN ? THEN COALESCE(landed_at,?) ELSE landed_at END WHERE id=? AND status='dispatched'").run(insertedAt, prompt ? 1 : 0, insertedAt, work.id);

@@ -1,9 +1,10 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { ThreadService, type ThreadServiceOptions } from "../src/threads/service.js";
 import { ThreadDirectory } from "../src/threads/directory.js";
+import { openSqlite } from "../src/sqlite.js";
 import type { PiCommand, PiEvent, PiSessionOptions, Result } from "../src/threads/contracts.js";
 const roots: string[] = [], owners: ThreadService[] = [];
 const value = <T>(r: Result<T>): T => { if (!r.ok) throw new Error(r.error.message); return r.value; };
@@ -42,10 +43,49 @@ it("all manager ingress is high-priority steer; human input is FIFO ahead of mac
   value(await f.service.start()); await until(() => f.sessions[0]?.commands.filter(c => c.type === "prompt" || c.type === "steer").length === 22);
   const commands = f.sessions[0]!.commands.filter(c => c.type === "prompt" || c.type === "steer");
   expect(commands[0]!.workId).toBe("human-1"); expect(commands[1]!.workId).toBe("human-2");
+  expect(commands.map(command => command.inputOrigin)).toEqual(["human", "human", ...Array(20).fill("machine")]);
   expect(commands.filter(c => c.type === "prompt")).toHaveLength(1);
   expect(value(await f.service.inspect("manager")).inputs).toHaveLength(22);
   expect(f.sessions[0]!.options.env.PI_THREAD_MANAGER).toBe("1");
 });
+it("old machine receipts are projected as machine, human literal envelopes stay human and silent settlements retain evidence", async () => {
+  const f = fixture(); await create(f);
+  const machine = value(await f.service.send({ threadId: "manager", requestId: "machine", source: "notification", text: "Publication finished" }));
+  const human = value(await f.service.send({ threadId: "manager", requestId: "human", humanActivity: true, text: "<agent_message> literal human text <silent/>" }));
+  const entry = (id: string, parentId: string | null, type: string, fields: Record<string, unknown>) => ({ id, parentId, type, timestamp: "2026-10-10T00:00:00Z", ...fields });
+  writeFileSync(f.service.get("manager")!.sessionFile, [
+    entry("machine-landed", null, "custom", { customType: "thread_landed", data: { workId: machine.id } }),
+    entry("machine-user", "machine-landed", "message", { message: { role: "user", content: machine.text } }),
+    entry("machine-reply", "machine-user", "message", { message: { role: "assistant", content: "<silent/>", stopReason: "stop" } }),
+    entry("human-landed", "machine-reply", "custom", { customType: "thread_landed", data: { workId: human.id } }),
+    entry("human-user", "human-landed", "message", { message: { role: "user", content: human.text } }),
+    entry("human-reply", "human-user", "message", { message: { role: "assistant", content: "Literal <silent/> stays visible", stopReason: "stop" } }),
+  ].map(record => JSON.stringify(record)).join("\n") + "\n");
+  const page = value(await f.service.inspect("manager", { contextWindow: { limit: 20 } })).contextWindow!;
+  expect(page.records[0]).toMatchObject({ monoVisibility: "hidden", message: { inputOrigin: "machine", identity: { sender: { id: "machine", name: "Machine" } } } });
+  expect(page.records[1]).toMatchObject({ monoVisibility: "hidden", message: { content: "<silent/>" } });
+  expect(page.records[2]).toMatchObject({ message: { inputOrigin: "human", content: human.text } });
+  expect(page.records[2]!.message.identity?.sender.id).not.toBe("machine");
+  expect(page.records[2]!.monoVisibility).toBeUndefined();
+  expect(page.records[3]!.monoVisibility).toBeUndefined();
+});
+
+it("origin migration preserves unknown pre-ledger human input instead of treating ledger absence as machine evidence", async () => {
+  const f = fixture(); await create(f);
+  value(await f.service.send({ threadId: "manager", requestId: "old-human", text: "Historical person message" }));
+  value(await f.service.send({ threadId: "manager", requestId: "known-human", text: "Current person message", humanActivity: true }));
+  value(await f.service.send({ threadId: "manager", requestId: "known-machine", text: "Wake", source: "notification" }));
+  value(await f.service.close());
+  const db = openSqlite(join(f.root, "threads.sqlite"));
+  db.exec("ALTER TABLE thread_work DROP COLUMN input_origin"); db.close();
+  const resumed = fixture(f.root);
+  const restored = openSqlite(join(f.root, "threads.sqlite"));
+  expect(restored.prepare("SELECT id,input_origin FROM thread_work ORDER BY id").all()).toEqual([
+    { id: "known-human", input_origin: "human" }, { id: "known-machine", input_origin: "machine" }, { id: "old-human", input_origin: null },
+  ]);
+  restored.close(); value(await resumed.service.close());
+});
+
 it("human input arriving during machine admission wins the next unentered execution without cancelling effects", async () => {
   let release!: () => void, entered = false, calls = 0, released = 0;
   const gate = new Promise<void>(resolve => { release = resolve; });

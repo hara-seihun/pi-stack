@@ -31,6 +31,14 @@ Questions remain in durable manager custody. The manager can list them, answer w
 
 Mono holds do not expire into human attention. Classic retains its two-hour release and direct manager questions. Custody, routing and answer receipts survive restart. See [asynchronous questions](questions.md).
 
+## Quiet manager turns
+
+The manager's reserved entire final text is exactly `<silent/>`, without surrounding whitespace. A sentinel turn has no message bubble, completion notification or unread badge, in either manager view. Its machine trigger and associated work receive `monoVisibility: "hidden"`; human input is never hidden by the reply. Inline mentions, quoted markers and human text are ordinary content. Native JSONL, settlement final messages and exact transcript bodies remain retained. Empty wake turns use the same visibility projection. Streaming buffers only prefixes that could still become the sentinel, then releases ordinary text as soon as it diverges.
+
+User-role input heads carry `inputOrigin: "human" | "machine"` only when native input receipts or the authenticated controller ledger establish it. `thread_work.input_origin` persists that provenance; migration classifies recorded human activity, senders and notifications, leaving pre-ledger bare explicit inputs unknown. New native `thread_input` receipts retain the known origin. Machine identity is Machine, not the person's identity, and human-supplied agent envelopes remain literal text. Transport-envelope decoding alone never establishes input origin. The history index joins exact landing ancestry to work IDs, so classification and silent-turn visibility survive paging, branching and supervisor restart.
+
+Owners: [`manager-turn.mjs`](../../../packages/orchestrator/src/threads/manager-turn.mjs), [`history.mjs`](../../../packages/orchestrator/src/threads/history.mjs), [`service.ts`](../../../packages/orchestrator/src/threads/service.ts), [`transcript-items.ts`](../server/transcript-items.ts) and [`thread-notifications.ts`](../server/thread-notifications.ts). Focused contracts run in `packages/orchestrator/tests/manager-turn.test.ts`, `manager-dispatch.test.ts` and Remote's transcript/notification suites.
+
 ## Human attention
 
 The account preference owns delivery, including while a linked classic screen is open. In mono, only the canonical manager's explicit `thread_attention` reaches web toasts, Android alerts, notification history or unread badges. Worker/watch notices, room updates, questions and settlements go durably to the manager. Its own completions and question events stay silent. Stored classic notices are filtered without erasing their history or read receipts; switching back restores classic behavior. Android applies the same server policy to cancel stale alerts and queued toasts.

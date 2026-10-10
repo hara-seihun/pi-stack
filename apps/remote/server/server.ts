@@ -52,6 +52,7 @@ import {
   readBrokerUsage,
 } from "pi-orchestrator/api";
 import { createLiveProjection, settleLiveProjection, restoreLiveProjection, projectThreadActivity, type LiveProjection } from "./live-projection";
+import { managerLiveText, isSilentAssistant } from "pi-orchestrator/manager-turn";
 import { InlineImages } from "./inline-images";
 import { planCards } from "./catalog-presentation";
 import { updateThreadSettings } from "./thread-settings";
@@ -1170,11 +1171,16 @@ async function pushNotifications(target?: ClientStream): Promise<void> {
   }
 }
 
+function visibleLiveText(sessionId: string): string {
+  const text = liveProjections.get(sessionId)?.liveText ?? "";
+  return threads.get(sessionId)?.metadata?.manager === true ? managerLiveText(text) : text;
+}
+
 function sendLive(stream: ClientStream): void {
   const sessionId = stream.subscription.session;
   if (!sessionId) return;
   const runtime = liveProjections.get(sessionId);
-  stream.publish({ type: "live", sessionId, text: runtime?.liveText ?? "", messageTimestamp: runtime?.messageTimestamp ?? null,
+  stream.publish({ type: "live", sessionId, text: visibleLiveText(sessionId), messageTimestamp: runtime?.messageTimestamp ?? null,
     ...(stream.subscription.thinking ? { thinking: runtime?.liveThinking ?? "" } : {}) });
 }
 
@@ -1441,7 +1447,7 @@ function handlePiEvent(sessionId: string, event: any) {
       signalTranscript(sessionId);
       signalLiveSync();
     }
-    if (text && event.message?.role === "assistant") {
+    if (text && event.message?.role === "assistant" && !(threads.get(sessionId)?.metadata?.manager === true && isSilentAssistant(event.message))) {
       emit(sessionId, "assistant", { text }, `assistant:${messageFinalizationKey(event.message)}`);
     }
   } else if (event.type === "tool_execution_start") {
@@ -1727,7 +1733,7 @@ const meetingRuntime = await MeetGateway.connect(db, {
   return { held: Boolean(row.held) && !finished, finished,
     ...projectThreadActivity(row),
     waitingOnAgents: row.waitingOnAgents,
-    tools: row.executionActivity?.activeTools ?? [...(runtime?.activeTools.values() ?? [])], output: runtime?.liveText ?? "" };
+    tools: row.executionActivity?.activeTools ?? [...(runtime?.activeTools.values() ?? [])], output: visibleLiveText(row.id) };
   }),
 });
 if (!meetingRuntime.ok) throw new Error(`Meeting runtime unavailable: ${meetingRuntime.error}`);
@@ -1882,7 +1888,7 @@ const server = Bun.serve<SocketData>({
           const start = page.records[0]?.index ?? end;
           return { messages, paging: { revision: page.source.revision, total: page.total, start, end,
             hasOlder: start > 0, nextBefore: start > 0 ? start : null }, ...(failure ? { error: failure } : {}),
-            live: liveProjections.get(id)?.liveText ?? "", thinking: liveProjections.get(id)?.liveThinking ?? "",
+            live: visibleLiveText(id), thinking: liveProjections.get(id)?.liveThinking ?? "",
             execution: projectThreadActivity(current), questions };
         },
         stop: async id => { unwrap(await directory.control({ threadId: id, action: "cancel" })); },
@@ -2606,7 +2612,7 @@ const server = Bun.serve<SocketData>({
       const rt = liveProjections.get(id);
       return json({
         events,
-        liveText: rt?.liveText ?? "",
+        liveText: visibleLiveText(id),
         liveThinking: rt?.liveThinking ?? "",
         session: publicSession(sessionRow.get(id)),
       });

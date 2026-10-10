@@ -406,6 +406,7 @@ interface TranscriptItemBase {
 /** Visible words; large messages carry a marked preview with an exact lazy body. */
 export interface InlineTextItem extends TranscriptItemBase {
   inputId?: string;
+  inputOrigin?: "human" | "machine";
   inputState?: ThreadInputState;
   agentSender?: { threadId: string; name?: string };
   identity?: import("./message-protocol.js").MessageIdentity;
