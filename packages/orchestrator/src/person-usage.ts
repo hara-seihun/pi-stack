@@ -1,5 +1,5 @@
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
-import { modelsWithCustomDefinitions } from "./models.js";
+import { modelsWithCustomDefinitions, POOLED_PROVIDERS } from "./models.js";
 import { catalogMeter, ORCHESTRATOR_CATALOG, type PlanDefinition } from "./catalog.js";
 import type { UsageComponent } from "./domain.js";
 import type { Store } from "./store.js";
@@ -74,7 +74,6 @@ type UsageSource = "interactive" | "fleet" | "completion";
 type Price = Record<UsageComponent, number>;
 type PriceOf = (model: string) => Price | undefined;
 const COMPONENTS: readonly UsageComponent[] = ["input", "output", "cacheRead", "cacheWrite"];
-const POOLED_PROVIDERS = new Set(["openai-codex", "anthropic"]);
 const HOUR = 3_600_000;
 /** Monthly plan prices are prorated over a 30-day month, as `pi-user-usage` does. */
 export const SUBSCRIPTION_MONTH_MS = 30 * 24 * HOUR;
