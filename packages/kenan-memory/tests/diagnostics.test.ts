@@ -128,6 +128,32 @@ test("replacement reconnects preserve the original ask and report only a verifie
   expect(recovered.result.content[0].text).not.toMatch(/private-session|private-error/);
 });
 
+test("timeout recovery accepts only a fenced not-accepted receipt and never resubmits", async () => {
+  const calls: string[] = [];
+  const transport = (async (_url, init) => {
+    calls.push(init!.method!);
+    if (init!.method === "POST") return await new Promise<Response>((_resolve, reject) => {
+      init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason), { once: true });
+    });
+    return Response.json({ requestId, state: "not-accepted", safeToResubmit: true });
+  }) as typeof fetch;
+  const timedOut = await ask(transport, 5);
+  const requestId = timedOut.result.details.memoryResult.requestId;
+  const recovered = await ask(transport, 100, undefined, { requestId });
+  expect(calls).toEqual(["POST", "GET"]);
+  expect(recovered.result.details.rootRequest).toMatchObject({ requestId, state: "not-accepted", safeToResubmit: true });
+  expect(recovered.result.content[0].text).toContain("old ID is fenced");
+  for (const invalid of [
+    { requestId: "unrelated", state: "not-accepted", safeToResubmit: true },
+    { requestId, state: "not-accepted", safeToResubmit: false },
+    { requestId, state: "not-accepted", safeToResubmit: true, status: "pending" },
+  ]) {
+    const rejected = await ask((async () => Response.json(invalid)) as typeof fetch, 100, undefined, { requestId });
+    expect(rejected.result.isError).toBe(true);
+    expect(rejected.result.details.rootRequest).toBeUndefined();
+  }
+});
+
 test("unrelated receipts are rejected without trusting or replaying them", async () => {
   let calls = 0;
   const wrong = await ask((async () => { calls++; return Response.json({ requestId: "unrelated", status: "pending" }, { status: 202 }); }) as typeof fetch);

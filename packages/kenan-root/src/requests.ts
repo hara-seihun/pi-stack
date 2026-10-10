@@ -37,13 +37,22 @@ export class RootRequestStore {
     if (path !== ":memory:") chmodSync(path, 0o600);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;
       CREATE TABLE IF NOT EXISTS requests(id TEXT PRIMARY KEY, body TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS not_accepted(id TEXT PRIMARY KEY);
       UPDATE requests SET body=json_set(body,'$.state','interrupted') WHERE json_extract(body,'$.state')='executing';`);
   }
   get(id: string): RootRequest | undefined {
     const row = this.db.query("SELECT body FROM requests WHERE id=?").get(id) as { body: string } | null;
     return row ? parseRootRequest(row.body) : undefined;
   }
+  notAccepted(id: string): boolean {
+    return !!this.db.query("SELECT id FROM not_accepted WHERE id=?").get(id);
+  }
+  fenceNotAccepted(id: string): void {
+    if (this.get(id)) throw new Error("An accepted request cannot be declared not accepted");
+    this.db.query("INSERT OR IGNORE INTO not_accepted(id) VALUES(?)").run(id);
+  }
   accept(id: string, request: string, admission: RootAdmission, asynchronous = true, initial: "executing" | "queued" = "executing"): RootRequest {
+    if (this.notAccepted(id)) throw new Error("A request fenced as not accepted cannot execute");
     const { memoryToken: _token, ...original } = admission;
     const common = { id, requestHash: requestHash(request), admission: original, delivery: asynchronous ? "pending" as const : "inline" as const };
     const record: RootRequest = initial === "executing" ? { ...common, state: "executing" }

@@ -111,7 +111,7 @@ test("publication partitions deployment checks without dropping or repeating con
 
 test("publication fixture files run exactly once as separately bounded jobs", async () => {
   const suites = checkJobs.filter(([name]) => name.startsWith("publication "));
-  const expected = ["config", "transport", "roots", "", "gate", "bundle", "source", "progress", "proof", "continuation", "hosts", "host-lanes"]
+  const expected = ["config", "transport", "roots", "", "gate", "bundle", "source", "progress", "proof", "continuation", "timings", "hosts", "host-lanes"]
     .map(suite => `scripts/publication${suite ? `-${suite}` : ""}.test.mjs`);
   assert.deepEqual(suites.flatMap(([, , args]) => args.filter(arg => arg.endsWith(".test.mjs"))), expected);
   assert.ok(suites.every(job => job[3].timeoutMs === 55_000));

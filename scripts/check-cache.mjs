@@ -59,14 +59,14 @@ export function toolchain(root, directory) {
     tools[command === process.execPath ? 'node' : command] = { version: result.stdout.trim(), executable: digest(readFileSync(realpathSync(located))) };
   }
   const source = resolve(root);
-  const skip = (name, path) => name.split('/').some(part => part === '.cache') || name.startsWith('.pi-stack-') ||
+  const skip = (name, path) => name.split('/').some(part => ['.cache', '.vite'].includes(part)) || name.startsWith('.pi-stack-') ||
     ['apps', 'packages', 'tools'].some(area => path.startsWith(`${source}/${area}/`) && !path.split('/').includes('node_modules'));
   const dependencyAreas = ['node_modules', ...sourceFiles(root, ['apps', 'packages', 'tools'])
     .filter(file => /^(?:apps|packages|tools)\/[^/]+\/package\.json$/.test(file))
     .map(file => join(dirname(file), 'node_modules')).filter(path => existsSync(join(root, path)))];
   const dependencies = dependencyAreas.map(area => ({ area, ...fingerprintTree(join(root, area), {
     indexPath: directory ? join(directory, `toolchain-${digest(area).slice(0, 16)}-content-index.json`) : undefined, skip,
-  }) }));
+  }) })).filter(dependency => dependency.area === 'node_modules' || dependency.files > 0);
   if (dependencies[0].state !== 'present') throw new Error('check-toolchain-unset: node_modules');
   return { platform: process.platform, arch: process.arch, tools, dependencies };
 }

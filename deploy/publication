@@ -25,7 +25,7 @@ import { hostWaitKind, rollForwardHosts, mergeHostLanes, readHostLane, runHostLa
 import { sourceOnlyQueued, freezeSourceBundle, sourceBundleMembers, resolveSourceBundle } from "./publication-bundle.mjs";
 import { publicationJournalEnabled, beginPublication, finishPublication } from "./action-journal.mjs";
 import { repairSourceRef, sourceContinuation, canResumeCheckedRequest, failureSignature } from "./publication-continuation.mjs";
-import { publicationTimings } from './publication-timings.mjs';
+import { publicationTimings, recordCommandTiming } from './publication-timings.mjs';
 
 const config = loadPublicationConfig();
 const { repositoryUrl, canonicalRepository, stateRoot, installedCommand, userUnitRoot, targets, alertInbox } = config;
@@ -108,10 +108,7 @@ export function commandResult(command, args, options = {}) {
   );
   if (tracked) {
     activeRequest.progress.completedAt = new Date().toISOString();
-    (activeRequest.stageTimings ??= {})[activeRequest.step] = {
-      startedAt: activeRequest.progress.startedAt, completedAt: activeRequest.progress.completedAt,
-      elapsedMs: Date.parse(activeRequest.progress.completedAt) - Date.parse(activeRequest.progress.startedAt), command,
-    };
+    recordCommandTiming(activeRequest, activeRequest.progress);
     activeRequest.progress.deadlineAt = new Date(Date.now() + policy.betweenStepsMs).toISOString();
     writeRequest(activeRequest);
   }

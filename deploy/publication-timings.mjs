@@ -3,6 +3,17 @@ const elapsed = (start, end) => {
   return Number.isFinite(value) && value >= 0 ? value : null;
 };
 
+export function recordCommandTiming(request, progress) {
+  const item = { step: progress.step, startedAt: progress.startedAt, completedAt: progress.completedAt,
+    elapsedMs: elapsed(progress.startedAt, progress.completedAt), command: progress.command };
+  if (item.elapsedMs === null) throw new Error('invalid-command-timing');
+  (request.commandTimings ??= []).push(item);
+  const previous = (request.stageTimings ??= {})[progress.step];
+  request.stageTimings[progress.step] = { startedAt: previous?.startedAt ?? item.startedAt,
+    completedAt: item.completedAt, elapsedMs: (previous?.elapsedMs ?? 0) + item.elapsedMs,
+    commands: (previous?.commands ?? 0) + 1 };
+}
+
 export function publicationTimings(request, proofs = {}) {
   const hosts = Object.fromEntries(Object.entries(request.hosts ?? {}).map(([id, outcome]) => {
     const proof = proofs[id];
