@@ -383,8 +383,8 @@ it("projects durable person-input recency without agent sends, notifications or 
     sessionFile: join(directory, "recency.jsonl"), settings: { model: "sol", thinkingLevel: "high", speed: "standard" },
     createdAt: 1, updatedAt: 2 }));
   expect(thread.lastUserMessageAt).toBeUndefined();
-  value(service.importMessage({ id: "person-old", threadId: thread.id, text: "first", createdAt: 10, state: "done" }));
-  value(service.importMessage({ id: "person-new", threadId: thread.id, text: "next", createdAt: 20, state: "done" }));
+  value(service.importMessage({ id: "person-old", threadId: thread.id, humanActivity: true, text: "first", createdAt: 10, state: "done" }));
+  value(service.importMessage({ id: "person-new", threadId: thread.id, humanActivity: true, text: "next", createdAt: 20, state: "done" }));
   value(service.importMessage({ id: "agent", threadId: thread.id, senderId: "child", text: "agent send", createdAt: 30, state: "done" }));
   value(service.importMessage({ id: "notice", threadId: thread.id, source: "notification", text: "notice", createdAt: 40, state: "done" }));
   value(service.importMessage({ id: "person-new", threadId: thread.id, text: "next", createdAt: 50, state: "done" }));

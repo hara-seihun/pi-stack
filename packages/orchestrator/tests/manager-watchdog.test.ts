@@ -66,7 +66,7 @@ it("idle schedules and the watchdog's own turn never create an endless manager l
 it("worker messages and tool events cannot postpone silence; a human message on any owned surface does", async () => {
   let now = 1_000_000; vi.spyOn(Date, "now").mockImplementation(() => now);
   const f = fixture(); await initialize(f); await waitForJob(f);
-  unwrap(await f.service.send({ threadId: "manager", requestId: "human", text: "Manage this" }));
+  unwrap(await f.service.send({ threadId: "manager", requestId: "human", humanActivity: true, text: "Manage this" }));
   unwrap(await f.service.start()); await until(() => f.sessions[0]?.commands.some(command => command.workId === "human") === true);
   f.sessions[0]!.settle(); await until(() => f.service.get("manager")?.lifecycle.kind === "idle"); await f.tick();
   now += MANAGER_INACTIVITY_MS - 1;
@@ -81,16 +81,44 @@ it("worker messages and tool events cannot postpone silence; a human message on 
   const checkSession = f.sessions.find(session => session.commands.some(command => String(command.workId).startsWith(MANAGER_WATCHDOG_PREFIX)))!;
   checkSession.settle(); await until(() => f.service.get("manager")?.lifecycle.kind === "idle");
   now += MANAGER_INACTIVITY_MS - 1;
-  unwrap(await f.service.send({ threadId: "worker", requestId: "another-human", text: "New instruction on another surface" }));
+  unwrap(await f.service.send({ threadId: "worker", requestId: "another-human", humanActivity: true, text: "New instruction on another surface" }));
   await f.tick(); now++; await f.tick(); expect(f.service.pending("manager")).toHaveLength(0);
   now += MANAGER_INACTIVITY_MS - 1; await f.tick(); await until(() => f.service.pending("manager").length === 1);
   expect(unwrap(await f.service.managerWorkSummary()).lastHumanMessageAt).toBe(1_000_000 + 2 * MANAGER_INACTIVITY_MS - 1);
 });
 
+it("senderless automated reports cannot reset silence or cancel a queued check, and authenticated human input survives restart", async () => {
+  let now = 1_000_000; vi.spyOn(Date, "now").mockImplementation(() => now);
+  const f = fixture(undefined, true); await initialize(f); await waitForJob(f);
+  const resolver = callerResolver({ capability: threadCapability(join(f.root, "human-key")) });
+  const human = unwrap(await (async () => {
+    const admitted = await resolver.admit("send", { threadId: "worker", requestId: "human-ingress", text: "Work" }, { kind: "person", via: "router" });
+    if (!admitted.ok) throw new Error(admitted.message);
+    return f.service.send(admitted.input as import("../src/threads/contracts.js").SendThread);
+  })());
+  unwrap(await f.service.start()); await f.tick(); now += MANAGER_INACTIVITY_MS; await f.tick();
+  expect(f.service.pending("manager").filter(message => message.id.startsWith(MANAGER_WATCHDOG_PREFIX))).toHaveLength(1);
+  const automated = await resolver.admit("send", { threadId: "manager", requestId: "publisher-report", text: "Deployment report", humanActivity: true }, { kind: "process", uid: 1000 });
+  if (!automated.ok) throw new Error(automated.message);
+  unwrap(await f.service.send(automated.input as import("../src/threads/contracts.js").SendThread));
+  expect(unwrap(await f.service.managerWorkSummary()).lastHumanMessageAt).toBe(human.createdAt);
+  expect(f.service.pending("manager").filter(message => message.id.startsWith(MANAGER_WATCHDOG_PREFIX))).toHaveLength(1);
+  for (const caller of [{ kind: "thread", threadId: "worker" }, { kind: "runtime", pid: 1 }, { kind: "service", pid: 2 }] as const) {
+    const input = await resolver.admit("send", { threadId: "manager", requestId: caller.kind, text: "Progress", ...(caller.kind === "thread" ? { senderId: "worker", humanActivity: true } : {}) }, caller);
+    expect(input.ok && input.input.humanActivity).toBe(false);
+  }
+  const forwarded = await resolver.admit("send", { threadId: "worker", requestId: "phone", text: "Human speech", humanActivity: true }, { kind: "service", pid: 2 });
+  expect(forwarded.ok && forwarded.input.humanActivity).toBe(true);
+  await f.tick(); await boundary();
+  unwrap(await f.service.close()); const restored = fixture(f.root, true);
+  expect(unwrap(await restored.service.managerWorkSummary()).lastHumanMessageAt).toBe(human.createdAt);
+  expect(restored.service.get("worker")?.lastUserMessageAt).toBe(human.createdAt);
+});
+
 it("busy managers coalesce overdue checks through restart and never get overlapping or queued duplicates", async () => {
   let now = 1_000_000; vi.spyOn(Date, "now").mockImplementation(() => now);
   const f = fixture(); await initialize(f); await waitForJob(f);
-  unwrap(await f.service.send({ threadId: "manager", requestId: "human", text: "Long task" })); unwrap(await f.service.start());
+  unwrap(await f.service.send({ threadId: "manager", requestId: "human", humanActivity: true, text: "Long task" })); unwrap(await f.service.start());
   await until(() => f.sessions[0]?.commands.some(command => command.workId === "human") === true); await f.tick();
   now += 10 * MANAGER_INACTIVITY_MS; await f.tick(); await f.tick();
   expect(f.service.pending("manager")).toHaveLength(2);
@@ -112,7 +140,7 @@ it.each(["human", "idle"])("withdraws unadmitted conditional checks when %s supe
   const f = fixture(undefined, true); await initialize(f); await waitForJob(f); unwrap(await f.service.start()); await f.tick();
   now += MANAGER_INACTIVITY_MS; await f.tick(); await until(() => f.service.pending("manager").length === 1);
   unwrap(await f.service.close()); const next = fixture(f.root);
-  if (cause === "human") unwrap(await next.service.send({ threadId: "worker", requestId: "human", text: "Continue" }));
+  if (cause === "human") unwrap(await next.service.send({ threadId: "worker", requestId: "human", humanActivity: true, text: "Continue" }));
   else unwrap(await next.service.agentWait({ action: "clear", threadId: "worker", requestId: "idle" }));
   unwrap(await next.service.start()); await next.tick(); expect(next.service.pending("manager")).toHaveLength(0);
   expect(next.sessions.some(session => session.commands.some(command => String(command.workId).startsWith(MANAGER_WATCHDOG_PREFIX)))).toBe(false);
@@ -137,7 +165,7 @@ it("restart before the deadline preserves the original silence clock and explici
   unwrap(await next.service.control({ action: "stop", threadId: "manager", descendants: false }));
   now += 10 * MANAGER_INACTIVITY_MS; await next.tick();
   expect(next.service.pending("manager")).toHaveLength(0);
-  unwrap(await next.service.send({ threadId: "worker", requestId: "human-resumes", text: "Resume managing" }));
+  unwrap(await next.service.send({ threadId: "worker", requestId: "human-resumes", humanActivity: true, text: "Resume managing" }));
   await next.tick(); now += MANAGER_INACTIVITY_MS; await next.tick();
   await until(() => next.service.pending("manager").length === 1);
 });
@@ -159,7 +187,7 @@ it("due checks take the next admission boundary ahead of recurring agent traffic
 it("a busy manager-only task becoming idle withdraws its queued check at admission, not one timer tick later", async () => {
   let now = 1_000_000; vi.spyOn(Date, "now").mockImplementation(() => now);
   const f = fixture(); await initialize(f);
-  unwrap(await f.service.send({ threadId: "manager", requestId: "human-long-task", text: "Work alone" }));
+  unwrap(await f.service.send({ threadId: "manager", requestId: "human-long-task", humanActivity: true, text: "Work alone" }));
   unwrap(await f.service.start()); await until(() => f.sessions[0]?.commands.some(command => command.workId === "human-long-task") === true); await f.tick();
   now += MANAGER_INACTIVITY_MS; await f.tick(); expect(f.service.pending("manager")).toHaveLength(2);
   f.sessions[0]!.settle(); await until(() => f.service.pending("manager").length === 0);

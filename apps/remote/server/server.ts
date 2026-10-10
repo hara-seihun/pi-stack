@@ -1540,12 +1540,12 @@ async function threadCommands(row: any) {
   const commands = await rpc(row.id, "get_commands");
   return { commands: commands.commands ?? [] };
 }
-async function runCommand(row: any, requestId: string, name: string, args: string) {
+async function runCommand(row: any, requestId: string, name: string, args: string, humanActivity: boolean) {
   const previous = requestResult(requestId);
   if (previous) return { response: JSON.parse(previous.response), status: previous.status };
   const response = name === "compact"
     ? await rpc(row.id, "compact", { id: requestId, customInstructions: args || undefined })
-    : await enqueuePrompt(row.id, requestId, `/${name}${args ? ` ${args}` : ""}`, resolveDelivery({}));
+    : await enqueuePrompt(row.id, requestId, `/${name}${args ? ` ${args}` : ""}`, resolveDelivery({}), [], humanActivity);
   saveRequest(requestId, row.id, "command", 202, response);
   return { response, status: 202 };
 }
@@ -1648,8 +1648,8 @@ function notificationThread(id: string): { parentId: string | null; role?: "agen
   return ROOMS_ENABLED && db.query("SELECT value FROM metadata WHERE key=?").get(`room-link:${id}`) ? { parentId: null } : null;
 }
 
-async function enqueuePrompt(sessionId: string, requestId: string, text: string, delivery: "queue" | "steer" | "hardSteer", images: ImageContent[] = []) {
-  const sent = await directory.send({ threadId: sessionId, requestId, text, delivery, images });
+async function enqueuePrompt(sessionId: string, requestId: string, text: string, delivery: "queue" | "steer" | "hardSteer", images: ImageContent[] = [], humanActivity = false) {
+  const sent = await directory.send({ threadId: sessionId, requestId, text, delivery, images, humanActivity });
   const message = unwrap(sent);
   return { accepted: true, workId: message.id, delivery: message.delivery, session: publicSession(sessionRow.get(sessionId)) };
 }
@@ -1730,11 +1730,11 @@ phoneOverlay = new PhoneOverlay({
   create: async (message, device) => {
     const destination = meetingDestination();
     const id = crypto.randomUUID();
-    await insertThread(id, `Phone · ${device.name}`, destination, destination.defaultModel, null, message);
+    await insertThread(id, `Phone · ${device.name}`, destination, destination.defaultModel, null, message, undefined, undefined, [], { kind: "person", via: "upstream" });
     signalSync();
     return id;
   },
-  prompt: async (threadId, requestId, text) => { await enqueuePrompt(threadId, requestId, text, "steer"); },
+  prompt: async (threadId, requestId, text) => { await enqueuePrompt(threadId, requestId, text, "steer", [], true); },
   send: (deviceId, command, args) => phones.send(deviceId, command, args),
   online: deviceId => phones.online(deviceId),
   load: () => (db.query("SELECT key,value FROM metadata WHERE key LIKE 'phone-overlay:%'").all() as Array<{ key: string; value: string }>)
@@ -1813,7 +1813,7 @@ const server = Bun.serve<SocketData>({
           ensureThreadView(db, id);
         },
         update: async (id, members) => { unwrap(threads.update(id, { metadata: { room: { id, members } } })); },
-        send: async (id, requestId, text) => { await enqueuePrompt(id, requestId, text, "queue"); },
+        send: async (id, requestId, text) => { await enqueuePrompt(id, requestId, text, "queue", [], humanCaller()); },
         history: async (id, options) => {
           const inspect = async (before: number | undefined, limit: number, revision?: string) => {
             const result = await directory.inspect(id, { contextRecords: { includeEntries: true,
@@ -1844,7 +1844,7 @@ const server = Bun.serve<SocketData>({
           const previous = db.query("SELECT value FROM metadata WHERE key=?").get(key) as { value: string } | null;
           if (previous && JSON.parse(previous.value).user !== sender.user) throw new Error("Another room member already answered this question");
           db.query("INSERT OR IGNORE INTO metadata(key,value) VALUES(?,?)").run(key, JSON.stringify(sender));
-          const answered = await directory.answer({ threadId: id, questionId, selectedSuggestionIds: body?.selectedSuggestionIds, text: body?.text, dismissed: body?.dismissed });
+          const answered = await directory.answer({ threadId: id, questionId, humanActivity: humanCaller(), selectedSuggestionIds: body?.selectedSuggestionIds, text: body?.text, dismissed: body?.dismissed });
           if (!answered.ok && !previous) db.query("DELETE FROM metadata WHERE key=?").run(key);
           unwrap(answered);
         },
@@ -2423,7 +2423,7 @@ const server = Bun.serve<SocketData>({
       if (!sessionRow.get(answerRequest.sessionId)) return error("Session not found", 404);
       try {
         const body = await readBody(req);
-        const result = await directory.answer({ threadId: answerRequest.sessionId, questionId: answerRequest.questionId,
+        const result = await directory.answer({ threadId: answerRequest.sessionId, questionId: answerRequest.questionId, humanActivity: humanCaller(),
           selectedSuggestionIds: body?.selectedSuggestionIds, text: body?.text, dismissed: body?.dismissed });
         if (!result.ok) return threadError(result.error);
         await questionFeed.settle(answerRequest.sessionId);
@@ -2492,7 +2492,7 @@ const server = Bun.serve<SocketData>({
         },
         send: async (threadId, requestId, prepared) => {
           if (req.signal.aborted) return { ok: false, error: { code: "unavailable", message: "The caller disconnected before admission; check the saved request explicitly." } };
-          return directory.send({ threadId, requestId, ...prepared });
+          return directory.send({ threadId, requestId, ...prepared, humanActivity: humanCaller() });
         },
       });
       if (result.body.outcome === "accepted" && body && typeof body === "object" && "requestId" in body && typeof body.requestId === "string") trackFeature("chat", humanCaller() ? "human" : "agent", body.requestId);
@@ -2571,7 +2571,7 @@ const server = Bun.serve<SocketData>({
         if (!/^[0-9a-f-]{36}$/i.test(requestId)) return error("Valid requestId required");
         const name = String(body.name ?? "");
         const args = String(body.args ?? "").trim();
-        const result = await runCommand(row, requestId, name, args);
+        const result = await runCommand(row, requestId, name, args, humanCaller());
         return json(result.response, result.status);
       } catch (e: any) { return error(e.message ?? "Slash command failed", 400); }
     }
