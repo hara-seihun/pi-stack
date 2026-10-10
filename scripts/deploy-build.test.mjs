@@ -44,6 +44,15 @@ async function run() {
   fs.mkdirSync(out, { recursive: true });
   fs.writeFileSync(out + '/main.js', 'built');
   if (name === 'remote') {
+    const zlib = require('node:zlib');
+    fs.mkdirSync(out + '/assets', { recursive: true });
+    fs.writeFileSync(out + '/assets/client.js', 'nested bundle');
+    fs.writeFileSync(out + '/assets/icon.svg', '<svg/>');
+    for (const asset of ['main.js', 'assets/client.js']) {
+      const bytes = fs.readFileSync(out + '/' + asset);
+      fs.writeFileSync(out + '/' + asset + '.gz', zlib.gzipSync(bytes));
+      fs.writeFileSync(out + '/' + asset + '.br', zlib.brotliCompressSync(bytes));
+    }
     fs.mkdirSync('apps/remote/server/phone/dist', { recursive: true });
     fs.writeFileSync('apps/remote/server/phone/dist/retell-sdk.js', 'sdk');
   }
@@ -109,15 +118,26 @@ test("Root publication reuses prepared compilation but rejects changed inputs or
   assert.equal(f.calls().length, 8);
 });
 
-test('Kenan copies the checked shared build, while a new revision refreshes its embedded identity', t => {
+test('Kenan stages raw WebView assets without HTTP encoding twins and refreshes its embedded identity', t => {
   const f = fixture(t);
   const build = () => {
     const result = spawnSync(process.execPath, [join(f.repo, 'apps/kenan/build.mjs')], { cwd: f.repo, env: f.env, encoding: 'utf8', timeout: 3000 });
     assert.equal(result.status, 0, result.stderr);
   };
-  build(); build();
+  build();
+  f.put('apps/kenan/dist/stale.js.gz', 'previous staging');
+  f.put('apps/kenan/dist/assets/stale.js.br', 'previous staging');
+  build();
   assert.deepEqual(f.calls(), ['remote']);
-  assert.equal(readFileSync(join(f.repo, 'apps/kenan/dist/main.js'), 'utf8'), 'built');
+  for (const [asset, content] of [['main.js', 'built'], ['assets/client.js', 'nested bundle'], ['assets/icon.svg', '<svg/>']]) {
+    assert.equal(readFileSync(join(f.repo, 'apps/kenan/dist', asset), 'utf8'), content);
+  }
+  for (const asset of ['main.js', 'assets/client.js']) for (const encoding of ['gz', 'br']) {
+    assert.equal(existsSync(join(f.repo, 'apps/kenan/dist', `${asset}.${encoding}`)), false);
+    assert.ok(existsSync(join(f.repo, 'apps/remote/web/dist', `${asset}.${encoding}`)), 'browser compression remains intact');
+  }
+  assert.equal(existsSync(join(f.repo, 'apps/kenan/dist/stale.js.gz')), false);
+  assert.equal(existsSync(join(f.repo, 'apps/kenan/dist/assets/stale.js.br')), false);
   f.put('revision-marker', 'new source identity');
   assert.equal(spawnSync('git', ['-C', f.repo, 'add', 'revision-marker']).status, 0);
   assert.equal(spawnSync('git', ['-C', f.repo, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'next revision']).status, 0);
