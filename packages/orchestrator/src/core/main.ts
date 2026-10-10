@@ -6,7 +6,8 @@ import type { CoreConfig } from "./contracts.js";
 import { CoreService } from "./service.js";
 import { CoreReloadOwner } from "./reload.js";
 import { createCoreCustodyFactory } from "./custody.js";
-import { CoreImages } from "./images.js";
+import { CoreImages, type CoreImageScope } from "./images.js";
+import { authorizeRelatedImageScope } from "./image-scopes.js";
 import { createCoreMemory, type CoreMemoryAdapter } from "./memory.js";
 import { authorize } from "../permissions.js";
 import { CoreDuties } from "./duties-runtime.js";
@@ -79,14 +80,19 @@ export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningC
     } };
     if (config.images.kind === "configured") {
       if (!provider) { await close(); return { ok: false, error: { code: "invalid-config", message: "Image generation requires the configured shared provider owner" } }; }
+      const imageScope = (id: string): CoreResult<CoreImageScope | null> => {
+        const scope = config.scopes.find(scope => scope.id === id);
+        if (!scope) return { ok: false, error: { code: "invalid-config", message: "Unknown image scope" } };
+        if (scope.availability.kind === "unavailable") return { ok: true, value: null };
+        const owner = core.owner(id);
+        if (!owner.ok) return owner;
+        return { ok: true, value: { runtime: owner.value.runtime, uid: scope.custody.uid, gid: scope.custody.gid, threads: owner.value.threads, allowsThread: threadId => !!owner.value.threads.get(threadId) } };
+      };
       images = new CoreImages(config.images, { accounts: provider.imageAccounts,
-        scope: id => {
-          const scope = config.scopes.find(scope => scope.id === id);
-          if (!scope) return { ok: false, error: { code: "invalid-config", message: "Unknown image scope" } };
-          if (scope.availability.kind === "unavailable") return { ok: true, value: null };
-          const owner = core.owner(id);
-          if (!owner.ok) return owner;
-          return { ok: true, value: { runtime: owner.value.runtime, uid: scope.custody.uid, threads: owner.value.threads, allowsThread: threadId => !!owner.value.threads.get(threadId) } };
+        scope: imageScope,
+        relatedScope: (registryId, relatedId) => {
+          const allowed = authorizeRelatedImageScope(config, registryId, relatedId);
+          return allowed.ok ? imageScope(relatedId) : allowed;
         },
         authorize: (request, id, resource, actions) => core.authorizeScope(request, id, resource, actions),
         authorizeNative: (id, resource, actions) => {

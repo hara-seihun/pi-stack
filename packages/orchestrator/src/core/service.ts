@@ -17,6 +17,7 @@ import { unixGatewayFetch } from "./gateway-fetch.js";
 import { scopeCallbackTarget, scopeCallbackTransport } from "./scope-callbacks.js";
 import { CoreManagerNotices } from "./manager-notices.js";
 import { readManagerReplies, type ManagerRepliesInput } from "./manager-replies.js";
+import type { ImageReader } from "./image-read.js";
 
 export type CoreRuntime = {
   openSession: OpenPiSession;
@@ -24,6 +25,7 @@ export type CoreRuntime = {
   recoverSession(threadId: string, output: (event: PiEvent) => void, exit: (code: number | null) => void): Promise<PiSession | null>;
   detach(): void;
   path(logicalPath: string): string;
+  readImage: ImageReader;
 };
 export type CoreRuntimeFactory = (scope: CoreScope) => Promise<CoreResult<CoreRuntime>>;
 type ScopeOwner = { scope: CoreScope; threads: ThreadService; runtime: CoreRuntime; ownership: ScopeOwnership; unsubscribe(): void; capability: ReturnType<typeof threadCapability>; metadata: ReturnType<typeof openSqlite>; relay?: CoreManagerRelay; notices?: CoreManagerNotices; directory?: ThreadDirectory };
