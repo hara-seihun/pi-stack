@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Session } from "../server/protocol";
 import { ConversationScreen } from "./src/features/conversation/ConversationScreen";
+import { threadStatus } from "./src/features/status/thread-status";
 
 // Artwork paths derive from the page address; there is no page here.
 globalThis.location ??= new URL("https://router.test/") as unknown as Location;
@@ -33,7 +34,7 @@ function render(patch: Partial<typeof props> = {}) {
 }
 
 function header(html: string) {
-  return html.match(/<header class="conversation-header">.*?<\/header>/s)?.[0] ?? "";
+  return html.match(/<header class="conversation-header"[^>]*>.*?<\/header>/s)?.[0] ?? "";
 }
 
 test("mono keeps the shared composer and message view, suppresses live wake work, and acknowledges its first-use hint", () => {
@@ -50,7 +51,7 @@ test("mono keeps the shared composer and message view, suppresses live wake work
   expect(render({ mono: { ...mono, hintSeen: true } })).not.toContain('class="mono-hint"');
 });
 
-test("mono hides orchestration controls and status details but keeps the shared composer", () => {
+test("mono preserves execution and queue state without exposing orchestration details", () => {
   const mono = { hintSeen: true, saving: false, onClassic() {}, onHintSeen() {} };
   const waiting: Session = { ...session, hasChildren: true, state: "waiting", activity: "awaiting", lifecycle: { kind: "waiting", target: "agents", reason: "Internal dependency", since: 1 },
     waitingOnAgents: { kind: "agents", threadIds: ["worker"], after: {}, reason: "Internal dependency", since: 1 },
@@ -58,13 +59,13 @@ test("mono hides orchestration controls and status details but keeps the shared 
   const before = JSON.stringify(waiting);
   const html = render({ mono, session: waiting, ancestors: [session], prompt: "New instruction" });
   expect(html).toContain('id="prompt"');
-  expect(html).toContain('aria-label="Working"');
+  expect(html).toContain('class="status-label">Waiting for agent results</span>');
   expect(html).not.toContain("Internal dependency");
   expect(html).not.toContain("Thread details");
-  expect(html).not.toContain('class="header-chip"');
+  expect(html).toContain('aria-label="1 queued. Open the queue"');
   expect(html).not.toContain('aria-label="Launched by"');
   expect(html).not.toContain("Change delivery");
-  expect(html).not.toContain('data-glyph="waiting"');
+  expect(html).toContain('data-glyph="waiting"');
   expect(JSON.stringify(waiting)).toBe(before);
   const classic = render({ session: waiting, ancestors: [session], prompt: "New instruction" });
   expect(classic).toContain("Thread details");
@@ -83,19 +84,43 @@ test("mono hides orchestration controls and status details but keeps the shared 
   expect(typing).not.toContain("Internal output phase");
 });
 
-test("cached idle transcript stays visible while the header updates, then idle returns when ready", () => {
+test("connection synchronization never replaces canonical execution state or the cached transcript", () => {
   const updating = render({ syncing: true });
-  expect(header(updating)).toContain('class="conversation-syncing" role="status" aria-label="Updating"');
-  expect(header(updating)).toContain('class="conversation-syncing-spinner" aria-hidden="true"');
-  expect(header(updating)).not.toContain("Idle");
+  expect(header(updating)).toContain('data-connection="syncing">Syncing conversation</span>');
+  expect(header(updating)).toContain('class="status-label">Idle</span>');
+  expect(header(updating)).not.toContain('data-glyph="working"');
   expect(updating).toContain('class="message user"');
   expect(updating).toContain("Cached conversation text");
 
   const ready = render({ syncing: false });
   expect(header(ready)).toContain('data-status="idle"');
   expect(header(ready)).toContain('aria-label="Idle"');
-  expect(header(ready)).not.toContain("Updating");
+  expect(header(ready)).not.toContain("Syncing conversation");
   expect(ready).toContain("Cached conversation text");
+});
+
+test("classic and mono show canonical execution text during sync, including queued, waiting, cancellation and failure", () => {
+  const lifecycles: Session["lifecycle"][] = [
+    { kind: "idle" },
+    { kind: "working", phase: "thinking", since: Date.now() },
+    { kind: "working", phase: "responding", since: Date.now() },
+    { kind: "waiting", target: "dispatch", since: Date.now() },
+    { kind: "waiting", target: "capacity", reason: "No model capacity", since: Date.now() },
+    { kind: "waiting", target: "deployment", since: Date.now() },
+    { kind: "cancelling" },
+    { kind: "failed", reason: "Runner exited unexpectedly", control: "none" },
+  ];
+  for (const lifecycle of lifecycles) {
+    const observed = { ...session, lifecycle, state: "idle" as const, activity: "idle" as const };
+    const expected = threadStatus(observed);
+    for (const mono of [undefined, { hintSeen: true, saving: false, onClassic() {}, onHintSeen() {} }]) {
+      const html = header(render({ session: observed, syncing: true, mono }));
+      expect(html).toContain(`data-status="${expected.key}"`);
+      expect(html).toContain(`class="status-label">${expected.label}</span>`);
+      expect(html).toContain('data-connection="syncing"');
+      if (lifecycle.kind === "failed") expect(html).toContain(`class="status-error-detail">${lifecycle.reason}</span>`);
+    }
+  }
 });
 
 test("chat header consumes context usage and replaces a count with recalculating or unavailable", () => {
@@ -153,12 +178,17 @@ test("question resource failure never marks chat offline and a ready resource cl
   expect(ready).not.toContain("Question owner unavailable");
 });
 
-test("offline status and reconnect take precedence even while a refresh is pending", () => {
-  const offline = render({ syncing: true, offline: "Connection lost. Reconnecting…" });
-  expect(header(offline)).toContain('data-status="offline"');
+test("disconnect preserves last observed execution state instead of manufacturing idle or completion", () => {
+  const working = { ...session, lifecycle: { kind: "working", phase: "thinking", since: 1 } as const };
+  const offline = render({ session: working, syncing: true, offline: "Connection lost. Reconnecting…" });
+  expect(header(offline)).toContain('data-status="working"');
+  expect(header(offline)).toContain('class="status-label">Working</span>');
+  expect(header(offline)).toContain("Last known:");
+  expect(header(offline)).toContain('data-connection="disconnected"');
   expect(header(offline)).toContain("Connection lost. Reconnecting…");
   expect(header(offline)).toContain("Reconnect");
-  expect(header(offline)).not.toContain("Updating…");
+  expect(header(offline)).not.toContain("Syncing conversation");
+  expect(header(offline)).not.toContain('data-status="idle"');
   expect(offline).toContain("Cached conversation text");
 });
 

@@ -10,9 +10,9 @@ import { DismissibleError } from "../../dismissible-error";
 import type { ChatDrawing } from "../../chat-drawing";
 import type { InlineImage } from "../../../../server/inline-image-contract";
 import type { ContextEntry, Session, SlashCommand } from "../../types";
-import { StatusIcon } from "../status/StatusIcon";
+import { ConversationStatus, type ConversationConnection } from "../status/ConversationStatus";
 import { agentName } from "../../agent-name";
-import { monoThreadStatus, OFFLINE_STATUS, threadStatus } from "../status/thread-status";
+import { monoThreadStatus, threadStatus } from "../status/thread-status";
 import { composerAction } from "../../thread-state";
 import { DELIVERY_LABELS } from "../queue/delivery";
 import { Transcript } from "./Transcript";
@@ -30,15 +30,15 @@ export function BackIcon() { return <svg viewBox="0 0 24 24" aria-hidden="true">
 function InfoIcon() { return <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 11v5m0-8v.2" /></svg>; }
 function ChevronIcon() { return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>; }
 
-export function ConversationHeader({ title, subtitle, status, onBack, onOpenInspector, trailing, meta, avatar, showIdentity = true, onLongPress }: { onLongPress?(): void; title: string; /** A second identity line, such as an agent's task under its name. */ subtitle?: string; /** A status glyph, shown at the leading edge. */ status?: ReactNode; onBack: (() => void) | null; onOpenInspector: (() => void) | null; trailing?: ReactNode; meta?: ReactNode; /** The contact's picture next to the title. */ avatar?: string; showIdentity?: boolean }) {
+export function ConversationHeader({ title, subtitle, status, onBack, onOpenInspector, trailing, meta, avatar, showIdentity = true, onLongPress }: { onLongPress?(): void; title: string; /** A second identity line, such as an agent's task under its name. */ subtitle?: string; /** Readable conversation state, beneath its identity. */ status?: ReactNode; onBack: (() => void) | null; onOpenInspector: (() => void) | null; trailing?: ReactNode; meta?: ReactNode; /** The contact's picture next to the title. */ avatar?: string; showIdentity?: boolean }) {
   const longPress = useLongPress(onLongPress);
   return <header className="conversation-header" {...longPress} title={onLongPress ? "Long-press to return to classic view" : undefined}>
     {onBack && <button type="button" className="header-icon" aria-label="Back" onClick={onBack}><BackIcon /></button>}
     {avatar && showIdentity && <CachedImage className="conversation-avatar" src={avatar} alt="" decoding="async" />}
-    {status && (onOpenInspector ? <button type="button" className="conversation-status" onClick={onOpenInspector}>{status}</button> : <span className="conversation-status">{status}</span>)}
     <div className="conversation-title">
       {showIdentity ? <span className="conversation-title-line"><span className="conversation-title-text">{title}</span>{meta}</span> : meta}
       {showIdentity && subtitle && <span className="conversation-subtitle" title={subtitle}>{subtitle}</span>}
+      {status && <span className="conversation-status">{status}</span>}
     </div>
     {trailing}
     {onOpenInspector && <button type="button" className="header-icon" aria-label={`${title}. Thread details`} onClick={onOpenInspector}><InfoIcon /></button>}
@@ -100,7 +100,8 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
   onDraw(): void;
   onDismissControlError(): void;
 }) {
-  const status = offline ? { ...OFFLINE_STATUS, label: offline, title: offline } : mono ? monoThreadStatus(session) : threadStatus(session);
+  const status = mono ? monoThreadStatus(session) : threadStatus(session);
+  const connection: ConversationConnection = offline ? { kind: "disconnected", reason: offline } : syncing ? { kind: "syncing" } : { kind: "connected" };
   const running = session.state === "running";
   const hasText = prompt.trim().length > 0 || attachments.some(file => !file.uploading);
   const queued = session.queuedMessages.length;
@@ -122,8 +123,8 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
   const slashToken = prompt.startsWith("/") && !/\s/.test(prompt) ? prompt.slice(1).toLowerCase() : null;
   const visibleCommands = slashToken === null ? [] : slashCommands.filter(command => command.source === "skill" && !command.name.toLowerCase().includes("mcp") && command.name.toLowerCase().startsWith(slashToken));
   return <div className={`conversation-screen${mono ? " mono-conversation" : ""}`}>
-    <ConversationHeader title={mono ? AGENT_NAME : session.name || "Agent"} onLongPress={mono?.onClassic} status={syncing && !offline ? <span className="conversation-syncing" role="status" aria-label="Updating" title="Updating"><span className="conversation-syncing-spinner" aria-hidden="true" /></span> : <StatusIcon status={status} />} meta={mono ? undefined : <ConversationModelMeta session={session} />} showIdentity={mono ? true : showIdentity} onBack={!mono && showBack ? onBack : null} onOpenInspector={mono ? null : onOpenInspector}
-      trailing={<>{questions.length > 0 && (cancelAction === "stop" || cancelAction === "cancel_wait") && <button type="button" className="header-action" disabled={pending} onClick={onStop}>{cancelAction === "stop" ? "Cancel work" : mono ? "Cancel request" : "Cancel wait"}</button>}{!mono && queued > 0 && <button type="button" className="header-chip" onClick={onOpenQueue} aria-label={`${queued} waiting. Open the queue`}>{queued === 1 ? "1 waiting" : `${queued} waiting`}</button>}{offline && <button type="button" className="header-action" onClick={onReconnect}>Reconnect</button>}</>} />
+    <ConversationHeader title={mono ? AGENT_NAME : session.name || "Agent"} onLongPress={mono?.onClassic} status={<ConversationStatus status={status} connection={connection} />} meta={mono ? undefined : <ConversationModelMeta session={session} />} showIdentity={mono ? true : showIdentity} onBack={!mono && showBack ? onBack : null} onOpenInspector={mono ? null : onOpenInspector}
+      trailing={<>{questions.length > 0 && (cancelAction === "stop" || cancelAction === "cancel_wait") && <button type="button" className="header-action" disabled={pending} onClick={onStop}>{cancelAction === "stop" ? "Cancel work" : mono ? "Cancel request" : "Cancel wait"}</button>}{queued > 0 && <button type="button" className="header-chip" onClick={onOpenQueue} aria-label={`${queued} queued. Open the queue`}>{queued} queued</button>}{offline && <button type="button" className="header-action" onClick={onReconnect}>Reconnect</button>}</>} />
     {mono && !mono.hintSeen && <aside className="mono-hint" role="status"><span>Long-press this header to return to classic view. Long-press Chats to come back here.</span><button type="button" disabled={mono.saving} onClick={mono.onHintSeen} aria-label="Dismiss mono view hint">Got it</button></aside>}
     {!mono && ancestors.length > 0 && <nav className="ancestry" aria-label="Launched by">{ancestors.map(ancestor => <button key={ancestor.id} type="button" title={ancestor.name || undefined} onClick={() => onOpenAncestor(ancestor)}>{agentName(ancestor) ?? (ancestor.name || ancestor.id)}</button>)}</nav>}
     <DismissibleError className="conversation-error" dismissLabel="Dismiss thread error" message={controlError} resetKey={session.id} onDismiss={async () => { onDismissControlError(); return { ok: true as const }; }} />

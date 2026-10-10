@@ -3,7 +3,7 @@ import type { Room, RoomSnapshot } from "../../../../shared/rooms";
 import { assertNever } from "../../../../shared/explicit-state";
 import type { ThreadLifecycle } from "../../../../../../packages/orchestrator/src/threads/lifecycle";
 
-export type StatusKey = "working" | "typing" | "waiting" | "stopping" | "reporting_error" | "error" | "archived" | "idle" | "offline";
+export type StatusKey = "working" | "typing" | "queued" | "waiting" | "stopping" | "reporting_error" | "error" | "archived" | "idle" | "offline";
 export interface ThreadStatus {
   key: StatusKey; label: string; short: string; title?: string;
   busy: boolean; attention: boolean; since?: number; lastActivityAt?: number;
@@ -17,7 +17,9 @@ function lifecycleStatus(lifecycle: ThreadLifecycle, unread: boolean, lastActivi
     case "archived": return { key: "archived", label: "Archived", short: "Archived", busy: false, attention: false };
     case "cancelling": return { key: "stopping", label: "Cancelling", short: "Cancelling", busy: true, attention: false };
     case "failed": return { key: "error", label: "Failed", short: "Failed", title: lifecycle.reason, busy: false, attention: true };
-    case "waiting": return { key: "waiting", label: `Waiting for ${lifecycle.target === "agents" ? "agent results" : lifecycle.target === "dispatch" ? "execution" : lifecycle.target}`, short: "Waiting", ...("reason" in lifecycle ? { title: lifecycle.reason } : {}), busy: false, attention: false, since: lifecycle.since };
+    case "waiting": return lifecycle.target === "dispatch"
+      ? { key: "queued", label: "Queued for execution", short: "Queued", busy: false, attention: false, since: lifecycle.since }
+      : { key: "waiting", label: `Waiting for ${lifecycle.target === "agents" ? "agent results" : lifecycle.target}`, short: "Waiting", ...("reason" in lifecycle ? { title: lifecycle.reason } : {}), busy: false, attention: false, since: lifecycle.since };
     case "working": {
       const typing = lifecycle.phase === "responding";
       return { key: typing ? "typing" : "working", label: typing ? "Typing" : "Working", short: typing ? "Typing" : "Working", busy: true, attention: false, title: lifecycle.detail, since: lifecycle.since, lastActivityAt };
@@ -32,8 +34,7 @@ export function threadStatus(session: StatusSession): ThreadStatus {
 }
 export function monoThreadStatus(session: StatusSession): ThreadStatus {
   const status = threadStatus(session);
-  if (status.key === "waiting" || status.key === "stopping") return { key: "working", label: "Working", short: "Working", busy: true, attention: false };
-  if (status.key === "working" || status.key === "typing") return { ...status, title: undefined };
+  if (status.key === "working" || status.key === "typing" || status.key === "waiting") return { ...status, title: undefined };
   return status;
 }
 export function roomThreadStatus(room: Room | RoomSnapshot): ThreadStatus {
@@ -46,7 +47,7 @@ export function attentionRank(status: ThreadStatus): number {
     case "error": case "reporting_error": return 0;
     case "idle": return status.attention ? 2 : 21;
     case "working": case "typing": case "stopping": return 10;
-    case "waiting": return 11;
+    case "queued": case "waiting": return 11;
     case "archived": return 30;
     case "offline": return 40;
   }
@@ -56,6 +57,7 @@ export type StatusGlyph = "working" | "waiting" | "held" | "stopping" | "done" |
 export function statusGlyph(status: ThreadStatus): StatusGlyph {
   switch (status.key) {
     case "working": case "typing": return "working";
+    case "queued": return "held";
     case "waiting": return "waiting";
     case "stopping": return "stopping";
     case "idle": return status.attention ? "unread" : "done";
@@ -73,7 +75,7 @@ function elapsed(at: number, now: number): string {
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 export function activityTiming(status: ThreadStatus, now: number): { elapsed?: string; quiet?: string } {
-  if (!status.busy && status.key !== "waiting") return {};
-  return { ...(status.since ? { elapsed: elapsed(status.since, now) } : {}),
-    ...(status.key !== "waiting" && status.lastActivityAt && now - status.lastActivityAt >= 15_000 ? { quiet: elapsed(status.lastActivityAt, now) } : {}) };
+  if (!status.busy && status.key !== "waiting" && status.key !== "queued") return {};
+  return { ...(status.since !== undefined ? { elapsed: elapsed(status.since, now) } : {}),
+    ...(status.busy && status.lastActivityAt !== undefined && now - status.lastActivityAt >= 15_000 ? { quiet: elapsed(status.lastActivityAt, now) } : {}) };
 }

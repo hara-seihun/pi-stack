@@ -22,5 +22,11 @@
 .status-elapsed { flex: 0 0 auto; color: var(--muted); font-variant-numeric: tabular-nums; font-weight: 400; }
 .status-quiet, .status-error-detail { color: var(--muted); font-size: var(--text-xs); font-weight: 400; white-space: normal; overflow-wrap: anywhere; }
 .status-pill[data-status="error"] .status-error-detail, .status-pill[data-status="reporting_error"] .status-error-detail { color: var(--danger); }
+.conversation-state { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: var(--space-3); row-gap: 2px; min-width: 0; }
+.conversation-execution { display: inline-flex; align-items: baseline; gap: var(--space-2); min-width: 0; max-width: 100%; }
+.conversation-last-known, .conversation-connection { color: var(--muted); font-size: var(--text-xs); font-weight: 400; overflow-wrap: anywhere; }
+.conversation-last-known { flex: 0 0 auto; }
+.conversation-connection[data-connection="syncing"] { color: var(--accent); }
+.conversation-connection[data-connection="disconnected"] { color: var(--danger); }
 .model-glyph { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; font-size: 13px; line-height: 1; }
 .model-glyph.initial { background: var(--surface-3); color: var(--text); font-size: 11px; font-weight: 800; }
