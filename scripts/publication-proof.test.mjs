@@ -77,6 +77,7 @@ esac
     { user: "kenan", unlocked: false }, { user: "sybil", unlocked: true },
   ] };
   const health = { ok: true, releaseCommit: revision, environmentId: environment };
+  writeFileSync(join(repository, 'deploy/one-kenan-activate'), `import pathlib, sys\nsource = pathlib.Path(__file__).resolve().parent.parent\nassert (source / '.git').exists(), 'owner equivalence requires retained Git source'\nassert sys.argv[1] == 'proof'\nprint('source-bound owner proof')\n`);
   const script = hostProofScript.replaceAll("/srv/pi", root);
   function run(overrides = {}, requiredUnits = []) {
     writeFileSync(trace, "");
@@ -133,6 +134,15 @@ for (const environment of ["local", "converge"]) {
     assert.equal(required.status, 1);
     assert.ok(required.stderr.includes(`${unit} is not active`));
     assert.equal(required.stdout, "");
+  });
+
+  test(`${environment}: One Kenan proof runs from retained Git source, not installed component bytes`, t => {
+    const { run, root } = fixture(t, environment);
+    writeFileSync(join(root, 'host.json'), JSON.stringify({ fleetUser: 'kenan', oneKenan: true }));
+    const result = run();
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.trace, /health sybil/);
+    assert.equal(JSON.parse(result.stdout).environmentId, environment);
   });
 
   test(`${environment}: publication accepts unchanged running source with explicit equivalence evidence`, t => {

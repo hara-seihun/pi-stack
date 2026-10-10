@@ -1393,7 +1393,7 @@ prove_owner() {
 }
 prove_owner voice "$voice"
 if jq -e '.oneKenan == true' "$host_config" >/dev/null; then
-  pi_stack_as_root python3 /srv/pi/pi-remote/deploy/one-kenan-activate proof --host "$host_config" --expected "$expected" >/dev/null
+  pi_stack_as_root python3 "$source_repository/deploy/one-kenan-activate" proof --host "$host_config" --expected "$expected" >/dev/null
 fi
 [[ $remote == "$expected" && $orchestrator == "$expected" ]] || {
   printf '%s: deployed commit markers do not match integration: expected=%s remote=%s orchestrator=%s voice=%s\n' "$host" "$expected" "$remote" "$orchestrator" "$voice" >&2; exit 1;
