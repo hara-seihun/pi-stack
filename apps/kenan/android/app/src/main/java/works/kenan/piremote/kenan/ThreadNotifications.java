@@ -17,6 +17,36 @@ final class ThreadNotifications {
     private static long generation;
     private static WeakReference<MainActivity> activity = new WeakReference<>(null);
     private static final List<PendingToast> pending = new ArrayList<>();
+    private static final java.util.Map<String, String> managerOnly = new java.util.HashMap<>();
+
+    static synchronized void policy(Context context, String user, String environment, JSONObject policy) throws Exception {
+        String scope = key(user, environment, "");
+        switch (policy.getString("view")) {
+            case "classic" -> managerOnly.remove(scope);
+            case "mono" -> {
+                String manager = policy.getString("managerThreadId");
+                if (manager.isBlank()) throw new IllegalArgumentException("Mono notification policy requires a manager");
+                managerOnly.put(scope, key(user, environment, manager));
+            }
+            default -> throw new IllegalArgumentException("Unknown notification view");
+        }
+        pending.removeIf(toast -> !allowed(toast.notification));
+        NotificationManager notifications = context.getSystemService(NotificationManager.class);
+        for (StatusBarNotification notification : notifications.getActiveNotifications()) {
+            if (notification.getNotification().extras.containsKey("piRemoteThread") && !allowed(notification.getNotification()))
+                notifications.cancel(notification.getTag(), notification.getId());
+        }
+    }
+
+    private static boolean allowed(Notification notification) {
+        String thread = notification.extras.getString("piRemoteThread");
+        if (thread == null) return true;
+        try {
+            org.json.JSONArray identity = new org.json.JSONArray(thread.substring("thread:".length()));
+            String manager = managerOnly.get(key(identity.getString(0), identity.getString(1), ""));
+            return manager == null || manager.equals(thread) && "attention".equals(notification.extras.getString("piRemoteKind"));
+        } catch (Exception malformed) { throw new IllegalArgumentException("Invalid notification identity", malformed); }
+    }
 
     private static final class PendingToast {
         final String thread;
@@ -50,6 +80,7 @@ final class ThreadNotifications {
         selected = null;
         ready = false;
         pending.clear();
+        managerOnly.clear();
         clearAlerts(context);
     }
 
@@ -81,6 +112,7 @@ final class ThreadNotifications {
     }
 
     static synchronized void deliver(Context context, String thread, Notification notification, JSONObject detail) {
+        if (!allowed(notification)) return;
         if (resumed && thread.equals(selected)) return;
         if (!resumed) {
             show(context, thread, notification);
@@ -95,7 +127,7 @@ final class ThreadNotifications {
         if (current == null) { show(context, toast.thread, toast.notification); return; }
         current.runOnUiThread(() -> {
             synchronized (ThreadNotifications.class) {
-                if (dispatchedGeneration != generation) return;
+                if (dispatchedGeneration != generation || !allowed(toast.notification)) return;
                 if (!resumed || activity.get() != current) {
                     show(context, toast.thread, toast.notification);
                 } else if (toast.thread.equals(selected)) {
@@ -108,6 +140,7 @@ final class ThreadNotifications {
     }
 
     static synchronized void show(Context context, String key, Notification notification) {
+        if (!allowed(notification)) return;
         if (resumed && key.equals(selected)) return;
         context.getSystemService(NotificationManager.class).notify(key, 2, notification);
     }

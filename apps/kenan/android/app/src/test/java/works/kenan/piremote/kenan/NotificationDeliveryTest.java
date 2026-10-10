@@ -62,6 +62,37 @@ public final class NotificationDeliveryTest {
         assertEquals("?after=1", NotificationDelivery.query(context, "home"));
     }
 
+    @Test public void monoPolicyCancelsClassicAlertsAndOnlyAllowsExplicitManagerAttention() throws Exception {
+        NotificationDelivery.receive(context, identity, "home", "Home", feed(1, true), false);
+        NotificationManager manager = context.getSystemService(NotificationManager.class);
+        assertEquals(1, manager.getActiveNotifications().length);
+        JSONObject policy = new JSONObject().put("view", "mono").put("managerThreadId", "manager");
+        NotificationDelivery.receive(context, identity, "home", "Home", feed(1, false).put("policy", policy), false);
+        assertEquals(0, manager.getActiveNotifications().length);
+        JSONObject managerNotice = feed(2, true).put("policy", policy);
+        managerNotice.getJSONArray("notifications").getJSONObject(0).put("sessionId", "manager");
+        NotificationDelivery.receive(context, identity, "home", "Home", managerNotice, false);
+        assertEquals(1, manager.getActiveNotifications().length);
+        JSONObject managerQuestion = feed(3, true).put("policy", policy);
+        managerQuestion.getJSONArray("notifications").getJSONObject(0).put("sessionId", "manager").put("kind", "question");
+        NotificationDelivery.receive(context, identity, "home", "Home", managerQuestion, false);
+        assertEquals(1, manager.getActiveNotifications().length);
+        JSONObject childNotice = feed(4, true).put("policy", policy);
+        NotificationDelivery.receive(context, identity, "home", "Home", childNotice, false);
+        assertEquals(1, manager.getActiveNotifications().length);
+        NotificationDelivery.receive(context, identity, "home", "Home", feed(5, true).put("policy", new JSONObject().put("view", "classic")), false);
+        assertEquals(2, manager.getActiveNotifications().length);
+    }
+
+    @Test public void monoPolicyDropsQueuedClassicToastsBeforeBackgroundDelivery() throws Exception {
+        ThreadNotifications.resume(context, null);
+        NotificationDelivery.receive(context, identity, "home", "Home", feed(1, true), false);
+        NotificationDelivery.receive(context, identity, "home", "Home", feed(1, false)
+            .put("policy", new JSONObject().put("view", "mono").put("managerThreadId", "manager")), false);
+        ThreadNotifications.pause(context);
+        assertEquals(0, context.getSystemService(NotificationManager.class).getActiveNotifications().length);
+    }
+
     @Test public void visibleAttentionIsSuppressedWithoutOpeningAnything() throws Exception {
         ThreadNotifications.resume(context, null);
         ThreadNotifications.select(context, "person", "home", "running-worker");

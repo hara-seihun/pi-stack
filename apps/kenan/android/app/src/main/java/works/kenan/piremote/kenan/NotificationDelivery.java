@@ -61,6 +61,7 @@ final class NotificationDelivery {
         RemoteSession state = NotificationIdentity.get(context);
         synchronized (state) {
             if (!state.isCurrent(identity)) return;
+            if (feed.has("policy")) ThreadNotifications.policy(context, identity.user, environment, feed.getJSONObject("policy"));
             SharedPreferences prefs = preferences(context);
             String cursorKey = CURSOR + environment;
             String seenKey = SEEN + environment;
@@ -94,10 +95,12 @@ final class NotificationDelivery {
                     .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
                 PendingIntent target = PendingIntent.getActivity(context, 0, open,
                     PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+                android.os.Bundle extras = ThreadNotifications.extras(thread);
+                extras.putString("piRemoteKind", event.getString("kind"));
                 android.app.Notification notification = new NotificationCompat.Builder(context, CHANNEL)
                     .setSmallIcon(R.drawable.ic_notification)
                     .setLargeIcon(android.graphics.BitmapFactory.decodeResource(context.getResources(), R.mipmap.ic_launcher_foreground))
-                    .addExtras(ThreadNotifications.extras(thread))
+                    .addExtras(extras)
                     .setContentTitle(title).setContentText(body)
                     .setStyle(new NotificationCompat.BigTextStyle().bigText(body))
                     .setContentIntent(target).setAutoCancel(true).setOnlyAlertOnce(!alertAgain)

@@ -8,7 +8,8 @@ const error = (code: "not_found" | "invalid_request" | "conflict", message: stri
 
 export class ThreadDirectory implements ThreadApi {
   readonly owners: readonly ThreadOwner[];
-  constructor(local: ThreadOwner, peers: readonly ThreadOwner[] = []) {
+  constructor(local: ThreadOwner, peers: readonly ThreadOwner[] = [], private managerOwner?: ThreadOwner,
+    private questionOwner?: (id: string) => ThreadOwner | null) {
     this.owners = [local, ...peers];
     if (new Set(this.owners.map(owner => owner.id)).size !== this.owners.length) throw new Error("Thread owner IDs must be unique");
   }
@@ -38,6 +39,14 @@ export class ThreadDirectory implements ThreadApi {
       if (!result.ok) return result;
       if (result.value.threads.some(thread => thread.id === threadId)) return { ok: true, value: owner };
     }
+    const managerOwner = this.managerOwner ?? this.owners.find(owner => owner.id === "person");
+    if (managerOwner) {
+      const manager = await managerOwner.api.managerNotificationPolicy();
+      if (!manager.ok) return manager;
+      if (manager.value.view === "mono" && manager.value.managerThreadId === threadId) return { ok: true, value: managerOwner };
+    }
+    const origin = this.questionOwner?.(threadId);
+    if (origin) return { ok: true, value: origin };
     return error("not_found", `Thread ${threadId} was not found`);
   }
   async spawn(input: SpawnThread): Promise<Result<Thread>> {
@@ -56,6 +65,15 @@ export class ThreadDirectory implements ThreadApi {
   async managerThread(): Promise<Result<Thread | null>> {
     const person = this.owners.find(owner => owner.id === "person");
     return (person ?? this.owners[0]!).api.managerThread();
+  }
+  async managerNotificationPolicy(): Promise<Result<import("./contracts.js").ManagerNotificationPolicy>> {
+    if (this.managerOwner) return this.managerOwner.api.managerNotificationPolicy();
+    const person = this.owners.find(owner => owner.id === "person");
+    return (person ?? this.owners[0]!).api.managerNotificationPolicy();
+  }
+  async questionOrigin(threadId: string): Promise<Result<Pick<Thread, "id" | "title" | "agentName">>> {
+    const owner = await this.owner(threadId);
+    return owner.ok ? owner.value.api.questionOrigin(threadId) : owner;
   }
   async managerQuestionCustody(input: ManagerQuestionCustodyRequest): Promise<Result<ManagerQuestionCustodyReceipt>> {
     const owner = await this.owner(input.threadId);

@@ -12,7 +12,7 @@ export interface ThreadClientOptions { signal?: AbortSignal; timeoutMs?: number;
 export type ThreadAdmission = (operation: string, input: Record<string, any>) => Promise<AdmissionResult>;
 type ThreadFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
-const operations = ["attention", "attentionEvents", "agentWait", "wakeSchedule", "watch", "ask", "questions", "managerQuestions", "managerThread", "managerQuestionCustody", "pendingQuestions", "questionState", "questionEvents", "answer", "spawn", "send", "list", "read", "control", "inspect", "command", "settlements", "await", "archived"] as const;
+const operations = ["attention", "attentionEvents", "agentWait", "wakeSchedule", "watch", "ask", "questions", "managerQuestions", "managerThread", "managerNotificationPolicy", "questionOrigin", "managerQuestionCustody", "pendingQuestions", "questionState", "questionEvents", "answer", "spawn", "send", "list", "read", "control", "inspect", "command", "settlements", "await", "archived"] as const;
 type Operation = typeof operations[number];
 const failure = (message: string): Result<never> => ({ ok: false, error: { code: "unavailable", message } });
 
@@ -51,6 +51,8 @@ export async function threadHttp(api: ThreadApi, request: Request, prefix = "/v1
         : operation === "inspect" ? api.inspect(fields.threadId, inspection?.ok ? inspection.value : undefined)
         : operation === "questions" ? api.questions(fields.threadId)
         : operation === "managerThread" ? api.managerThread()
+        : operation === "managerNotificationPolicy" ? api.managerNotificationPolicy()
+        : operation === "questionOrigin" ? api.questionOrigin(fields.threadId)
         : operation === "questionState" ? api.questionState(fields.threadId, fields.questionId)
         : operation === "command" ? api.command(fields.threadId, fields.command)
         : (api[operation] as (input: unknown) => Promise<Result<unknown>>).call(api, input));
@@ -75,7 +77,7 @@ export function createThreadClient(baseUrl: string, fetcher: ThreadFetch = fetch
   async function call<T>(operation: Operation, input: unknown, callSignal?: AbortSignal): Promise<Result<T>> {
     const body = JSON.stringify(input ?? {});
     const requestId = (["send", "spawn", "ask", "managerQuestions", "managerQuestionCustody", "watch", "agentWait", "wakeSchedule", "attention"].includes(operation)) ? (input as { requestId?: string })?.requestId : undefined;
-    const replayable = typeof requestId === "string" && !!requestId.trim() || ["list", "archived", "read", "inspect", "questions", "managerThread", "pendingQuestions", "questionState", "questionEvents", "attentionEvents", "answer", "settlements"].includes(operation) || ["watch", "wakeSchedule", "managerQuestions"].includes(operation) && (input as { action?: string })?.action === "list";
+    const replayable = typeof requestId === "string" && !!requestId.trim() || ["list", "archived", "read", "inspect", "questions", "managerThread", "managerNotificationPolicy", "questionOrigin", "pendingQuestions", "questionState", "questionEvents", "attentionEvents", "answer", "settlements"].includes(operation) || ["watch", "wakeSchedule", "managerQuestions"].includes(operation) && (input as { action?: string })?.action === "list";
     const terminal = (value: Result<T>): Result<T> => value.ok ? value
       : { ok: false, error: { ...value.error, retryable: false, ...(requestId ? { requestId } : {}) } };
     const context = requestContext.getStore();
@@ -125,6 +127,8 @@ export function createThreadClient(baseUrl: string, fetcher: ThreadFetch = fetch
     ask: input => call("ask", input), questions: threadId => call("questions", { threadId }), answer: input => call("answer", input),
     managerQuestions: input => call("managerQuestions", input),
     managerThread: () => call("managerThread", {}),
+    managerNotificationPolicy: () => call("managerNotificationPolicy", {}),
+    questionOrigin: threadId => call("questionOrigin", { threadId }),
     managerQuestionCustody: input => call("managerQuestionCustody", input),
     questionState: (threadId, questionId) => call("questionState", { threadId, questionId }),
     pendingQuestions: input => call("pendingQuestions", input),

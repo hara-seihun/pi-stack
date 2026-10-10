@@ -19,6 +19,7 @@ import { Rooms, ROOM_CUSTODIAN } from "./rooms";
 import { loopbackPeer } from "pi-orchestrator/api";
 import { handleAgentRooms, roomPersonUids } from "./agent-rooms";
 import { handleAgentSignal, isSignalProductPath } from "./agent-signal";
+import { handleAgentManager } from "./agent-manager";
 import { oneKenanEnabled } from "kenan-memory/config";
 import { oneKenanConfig, custodyAuthenticate, custodyStatus } from "./one-kenan";
 import { EditorAccess, editorOriginAllowed, editorSocket } from "./editor-access";
@@ -362,7 +363,7 @@ async function websocketRoute(req: Request, url: URL, server: Bun.Server<ProxySo
   return upgraded ? undefined : new Response("WebSocket upgrade failed", { status: 400 });
 }
 
-async function proxy(person: Pick<Person, "user" | "port">, origin: string, req: Request, url: URL, signal: AbortSignal, upstream?: string): Promise<Response> {
+async function proxy(person: Pick<Person, "user" | "port">, origin: string, req: Request, url: URL, signal: AbortSignal, upstream?: string, managerOrigin?: string): Promise<Response> {
   const headers = new Headers(req.headers);
   for (const name of (headers.get("connection") ?? "").split(",")) if (name.trim()) headers.delete(name.trim());
   for (const name of [...headers.keys()]) {
@@ -370,6 +371,7 @@ async function proxy(person: Pick<Person, "user" | "port">, origin: string, req:
   }
   headers.set("x-pi-remote-user", person.user);
   if (upstream) headers.set(UPSTREAM_CREDENTIAL_HEADER, upstreamCredential(upstream));
+  if (managerOrigin) headers.set("x-pi-remote-manager-origin", managerOrigin);
   const query = new URLSearchParams(url.search);
   query.delete("user");
   query.delete("session");
@@ -472,6 +474,10 @@ const consentBridge = rootConsentHandler({ capability: rootConsentCapability, pe
   roomsOrigin: process.env.PI_REMOTE_ROOMS_OWNER_URL });
 async function route(req: Request, url: URL, peer?: { uid: number }): Promise<Response> {
   if (/^\/v1\/agent-rooms(?:\/|$)/.test(url.pathname)) return handleAgentRooms(req, peer, roomPeople, activeRooms());
+  if (/^\/v1\/agent-manager(?:\/|$)/.test(url.pathname)) return handleAgentManager(req, peer, roomPeople, user => byUser.get(user),
+    user => grants.get(user) ?? [], ENVIRONMENT_ID,
+    (person, origin, request, target, upstream, sourceEnvironment) => proxy(person, origin, request, target, request.signal, upstream, sourceEnvironment));
+  if (/^\/v1\/(?:manager-relay|remotes\/[^/]+\/v1\/manager-relay)(?:\/|$)/.test(url.pathname)) return Response.json({ error: "Use the account-bound manager relay" }, { status: 403 });
   if (/^\/v1\/agent-signal(?:\/|$)/.test(url.pathname)) return handleAgentSignal(req, peer, roomPeople, user => byUser.get(user),
     (person, request, target) => proxy(person, `http://127.0.0.1:${person.port}`, request, target, request.signal));
   if (isSignalProductPath(url.pathname)) return Response.json({ error: "Signal is an agent tool, not an app endpoint", code: "forbidden" }, { status: 403 });
@@ -577,7 +583,7 @@ Bun.serve<ProxySocketData>({
     if (url.pathname.startsWith("/v1/auth/")) return oauthRoute(req, url);
     if (req.method === "OPTIONS" && url.pathname.startsWith("/v1/")) return preflight();
     if (req.headers.get("upgrade")?.toLowerCase() === "websocket") return websocketRoute(req, url, server);
-    const socket = /^\/v1\/(?:agent-rooms|agent-signal)(?:\/|$)/.test(url.pathname) ? server.requestIP(req) : null;
+    const socket = /^\/v1\/(?:agent-rooms|agent-signal|agent-manager)(?:\/|$)/.test(url.pathname) ? server.requestIP(req) : null;
     const peer = socket?.address === "127.0.0.1" && HOST === "127.0.0.1"
       ? loopbackPeer({ address: socket.address, port: socket.port, localAddress: HOST, localPort: PORT }, "/proc", false) : undefined;
     const response = await route(req, url, peer);
