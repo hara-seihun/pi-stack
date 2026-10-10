@@ -18,8 +18,19 @@ const rootReceiptStates = {
   interrupted: { message: terminalReceiptMessage, isError: true },
 } satisfies Record<KenanRequestStatus, { message: string; isError: boolean }>;
 export const MEMORY_TOOL_NAMES = ["memory_search", "memory_read", "memory_write", "memory_forget", "memory_disclosures", "memory_log_disclosure"];
-const strings = Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 100 });
-const optionalTime = Type.Optional(Type.String());
+// Mirrors validation.ts: every string field the service checks as text() must be non-blank and at most 100000 characters.
+const nonBlank = (description?: string) => Type.String({ minLength: 1, maxLength: 100_000, pattern: "\\S", ...(description ? { description } : {}) });
+const strings = Type.Array(nonBlank(), { minItems: 1, maxItems: 100 });
+const optionalTime = Type.Optional(Type.String({ description: "ISO 8601 date-time, e.g. 2026-10-09T19:30:00-07:00" }));
+const sourceDetail = {
+  action: Type.Optional(nonBlank("Action identifier for an action record, e.g. email.send")),
+  externalId: Type.Optional(nonBlank("Stable external identifier of the action, e.g. a message ID")),
+};
+/** At least one of saidBy or actedFor is required; the memory service rejects a source with neither. */
+export const memorySourceSchema = Type.Union([
+  Type.Object({ saidBy: nonBlank("Person ID of who said or stated it"), actedFor: Type.Optional(nonBlank("Person ID an action was taken for")), ...sourceDetail }),
+  Type.Object({ actedFor: nonBlank("Person ID an action was taken for"), ...sourceDetail }),
+], { description: "Provenance. Must include saidBy (who said it) or actedFor (whom an action served), or both. Action records use actedFor with action and externalId." });
 export interface MemoryToolOptions {
   env: NodeJS.ProcessEnv;
   client?: MemoryClient;
@@ -155,7 +166,7 @@ function registerMemoryTools(options: MemoryToolOptions, pi: ExtensionAPI) {
     };
     pi.registerTool(defineTool({ name: "memory_search", label: "Search Kenan's memory",
       description: root ? "Search unrestricted host memory for root Kenan's discretion. Ranked tolerant natural terms; about uses registered person IDs; empty query lists recent items. Stopped items excluded." : "Search your person's own memory and recipient-relevant action records. Ranked natural terms; about must be your verified person ID. Empty query lists accessible items. Use ask_kenan for cross-person questions; this direct view is not the whole account.",
-      parameters: Type.Object({ query: Type.String(), about: Type.Optional(strings), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }),
+      parameters: Type.Object({ query: Type.String({ maxLength: 10_000 }), about: Type.Optional(strings), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }),
       execute: async (_id, input) => request({ operation: "search", ...input, context: context() }),
     }));
     pi.registerTool(defineTool({ name: "memory_read", label: "Read Kenan's memory",
@@ -163,9 +174,8 @@ function registerMemoryTools(options: MemoryToolOptions, pi: ExtensionAPI) {
       execute: async (_id, input) => request({ operation: "read", ...input, context: context() }),
     }));
     pi.registerTool(defineTool({ name: "memory_write", label: "Remember",
-      description: "Record a durable memory, its subjects, provenance and privacy. This connection supplies the verified setting and person.",
-      parameters: Type.Object({ text: Type.String(), about: strings, obviouslyPrivate: Type.Boolean(), occurredAt: optionalTime,
-        source: Type.Object({ saidBy: Type.Optional(Type.String()), actedFor: Type.Optional(Type.String()), action: Type.Optional(Type.String()), externalId: Type.Optional(Type.String()) }) }),
+      description: "Record a durable memory, its subjects, provenance and privacy. source must include saidBy (person who said it) or actedFor (person an action was taken for); action records use actedFor with action and externalId. This connection supplies the verified setting and person.",
+      parameters: Type.Object({ text: nonBlank(), about: strings, obviouslyPrivate: Type.Boolean(), occurredAt: optionalTime, source: memorySourceSchema }),
       execute: async (_id, input) => request({ operation: "write", item: { ...input, setting: setting() } }),
     }));
     pi.registerTool(defineTool({ name: "memory_forget", label: "Forget",
@@ -182,12 +192,12 @@ function registerMemoryTools(options: MemoryToolOptions, pi: ExtensionAPI) {
     }));
     pi.registerTool(defineTool({ name: "memory_disclosures", label: "What Kenan told people about me",
       description: "Read the disclosure log about the verified asking person. Answer from this record, preserving other people's confidences.",
-      parameters: Type.Object({ limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })), about: Type.Optional(Type.String({ description: root ? "Person whose disclosure account to consult; defaults to authenticated requester." : "Your own verified person ID only; broader account requires ask_kenan." })) }),
+      parameters: Type.Object({ limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })), about: Type.Optional(Type.String({ minLength: 1, maxLength: 100_000, pattern: "\\S", description: root ? "Person whose disclosure account to consult; defaults to authenticated requester." : "Your own verified person ID only; broader account requires ask_kenan." })) }),
       execute: async (_id, input) => request({ operation: "disclosures", ...input, context: context() }),
     }));
     pi.registerTool(defineTool({ name: "memory_log_disclosure", label: "Record a disclosure",
       description: "Log exactly what Kenan told whom about whom, including acknowledgements and refusals about private information.",
-      parameters: Type.Object({ text: Type.String(), about: strings, to: strings, memoryIds: Type.Optional(strings), occurredAt: optionalTime }),
+      parameters: Type.Object({ text: nonBlank(), about: strings, to: strings, memoryIds: Type.Optional(strings), occurredAt: optionalTime }),
       execute: async (_id, input) => request({ operation: "log-disclosure", disclosure: { ...input, setting: setting() } }),
     }));
     return policyPrompt;

@@ -212,8 +212,9 @@ export function memoryService(options: { store: MemoryStore; auth: MemoryAuth; e
         if (!object(input) || !fields(input, ["threadId"]) || typeof input.threadId !== "string" || !input.threadId || input.threadId.length > 200) return invalid("Invalid person session request");
         return send(200, { ok: true, value: store.session(caller.person, input.threadId, "person") });
       }
-      const operation = validateRequest(input);
-      if (!operation) return invalid("Invalid memory operation or fields");
+      const validation = validateRequest(input);
+      if (!validation.ok) return invalid(validation.reason);
+      const operation = validation.request;
       if (caller.kind === "publisher" && (operation.operation !== "write" || !operation.item.source.action || !operation.item.source.externalId)) return denied("The journal publisher may only record identified actions");
       const person = caller.kind === "person" ? caller.person : operation.operation === "write" ? operation.item.setting.person : "";
       const role = caller.kind === "person" ? caller.role : "root";

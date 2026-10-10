@@ -37,7 +37,7 @@ test("unknown forget/consent/notice states do not mutate records or become known
     expect(store.logRequestStatus({ rootSessionId: admission.rootSessionId, requestId: "id", status: "future-status" } as unknown as RootLogRequestStatus)).toMatchObject({ ok: false, error: "invalid-request" });
     expect(() => kenanRequestNotice("id", "future-status" as "failed")).toThrow();
     expect(store.db.query("SELECT count(*) AS n FROM disclosures").get()).toEqual({ n: 0 });
-    expect(validateRequest({ operation: "future-operation", context })).toBeUndefined();
+    expect(validateRequest({ operation: "future-operation", context })).toEqual({ ok: false, reason: expect.stringContaining("operation must be one of") });
   } finally { store.close(); }
 });
 
