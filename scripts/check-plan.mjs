@@ -35,6 +35,7 @@ const shipping = {
   'One Kenan deployment': ['deploy', 'config', 'scripts/one-kenan-deploy.test.py'],
   'One Kenan activation': ['deploy/one-kenan-activate', 'deploy/host-plan.mjs', 'deploy/source-scopes.mjs'],
   'prompt availability': ['deploy/prompt-availability', 'scripts/prompt-availability.test.py'],
+  'public application source boundary': ['deploy/public-app'],
   'Meet recognition protocol': ['apps/meet-recognition'],
   'action journal publication': ['deploy'],
   'mail send boundary': ['tools/mail-send'],
@@ -77,7 +78,7 @@ export function checkPolicy(name, job) {
       completeScope: generatedRuntimeFixtures.has(name) || generatedOrchestratorFixture };
   }
   if (name === 'remote types') return { kind: 'memo', inputs: ['apps/remote/server', 'apps/remote/tsconfig.json', 'packages/orchestrator/src', 'packages/kenan-memory/src', 'packages/kenan-root/src'], completeScope: true, typeProgram: true };
-  if (Object.hasOwn(shipping, name)) return { kind: 'memo', inputs: shipping[name], completeScope: ['job lifecycle', 'explicit state dispatch', 'manifests', 'tools', 'deploy lock', 'deploy host guest disabled', 'deploy host guest enabled', 'remote deployment', 'runtime dependency closure'].includes(name) };
+  if (Object.hasOwn(shipping, name)) return { kind: 'memo', inputs: shipping[name], completeScope: ['job lifecycle', 'explicit state dispatch', 'manifests', 'tools', 'deploy lock', 'deploy host guest disabled', 'deploy host guest enabled', 'remote deployment', 'runtime dependency closure', 'public application source boundary'].includes(name) };
   throw new Error(`No declared check inputs for ${name}`);
 }
 
