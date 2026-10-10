@@ -27,10 +27,37 @@ const record = (value: unknown): value is Record<string, any> => !!value && type
 const same = (a: unknown, b: unknown) => completionCanonical(a) === completionCanonical(b);
 const members = (value: unknown): unknown[] => record(value) && Array.isArray(value.set) ? value.set : [value];
 const portMatch = (match: any, port: number) => match?.op === "==" && same(match.left, { payload: { protocol: "tcp", field: "dport" } }) && members(match.right).includes(port);
-const safeRule = (rule: any) => Array.isArray(rule.expr) && rule.expr.every((part: unknown) => record(part) && Object.keys(part).length === 1 && ["match", "reject", "counter"].some(key => key in part) && (!("match" in part) || record(part.match)));
+const safeRule = (rule: any) => Array.isArray(rule.expr) && rule.expr.every((part: unknown) => record(part) && Object.keys(part).length === 1 && ["match", "reject", "counter"].some(key => key in part) && (!("match" in part) || record(part.match)))
+  && rule.expr.slice(0, -1).every((part: any) => !("reject" in part)) && record(rule.expr.at(-1)) && "reject" in rule.expr.at(-1);
+const finite = (value: unknown): (string | number)[] | undefined => {
+  const values = members(value);
+  return values.length > 0 && values.every(v => typeof v === "string" && !v.startsWith("@") || typeof v === "number" && Number.isSafeInteger(v)) ? values as (string | number)[] : undefined;
+};
+function excludesProtectedTraffic(match: any, binding: RetainedBrokerBinding, direction: "output" | "input"): boolean {
+  if (!record(match)) return false;
+  const values = finite(match.right);
+  if (!values) return false;
+  if (same(match.left, { payload: { protocol: "tcp", field: "dport" } })) return match.op === "==" && !values.includes(binding.port) || match.op === "!=" && values.includes(binding.port);
+  if (same(match.left, { meta: { key: "l4proto" } })) return match.op === "==" && !values.includes("tcp") && !values.includes(6) || match.op === "!=" && (values.includes("tcp") || values.includes(6));
+  if (direction === "output" && same(match.left, { meta: { key: "skuid" } })) return match.op === "==" && values.every(uid => typeof uid === "number" && binding.authorizedUids.includes(uid));
+  if (direction === "input" && same(match.left, { meta: { key: "iifname" } })) return match.op === "==" && values.every(name => name === "lo");
+  return false;
+}
+function protectedPrefix(rules: any[], gate: number, binding: RetainedBrokerBinding, direction: "output" | "input"): boolean {
+  return rules.slice(0, gate).every(rule => {
+    if (safeRule(rule)) return true;
+    if (!Array.isArray(rule.expr)) return false;
+    for (const part of rule.expr) {
+      if (!record(part) || Object.keys(part).length !== 1) return false;
+      if ("match" in part && record(part.match)) { if (excludesProtectedTraffic(part.match, binding, direction)) return true; }
+      else if (!("counter" in part)) return false;
+    }
+    return false;
+  });
+}
 
-/** Proves the generated host's reject-only base chains. Unknown expressions,
- * named sets, early accept/jump paths or a widened UID set are not identity proof. */
+/** Proves exact terminal port gates and every preceding path. Later confinement
+ * cannot bypass their rejects; earlier effects need a proved disjoint guard. */
 export function verifyUidBoundRules(value: unknown, binding: RetainedBrokerBinding): boolean {
   if (!record(value) || !Array.isArray(value.nftables)) return false;
   const objects = value.nftables;
@@ -40,22 +67,24 @@ export function verifyUidBoundRules(value: unknown, binding: RetainedBrokerBindi
   if (!base(binding.outputChain, "output") || !base(binding.inputChain, "input")) return false;
   const rules = objects.flatMap((item: any) => record(item.rule) && inTable(item.rule) ? [item.rule] : []);
   const chainRules = (name: string) => rules.filter((rule: any) => rule.chain === name);
-  if ([...chainRules(binding.outputChain), ...chainRules(binding.inputChain)].some(rule => !safeRule(rule))) return false;
   const matches = (rule: any) => rule.expr.flatMap((part: any) => part.match ? [part.match] : []);
   const rejects = (rule: any) => rule.expr.some((part: any) => part.reject !== undefined);
   const allowed = [...binding.authorizedUids].sort((a, b) => a - b);
-  const output = chainRules(binding.outputChain).some(rule => {
+  const outputRules = chainRules(binding.outputChain), inputRules = chainRules(binding.inputChain);
+  const output = outputRules.findIndex(rule => {
+    if (!safeRule(rule)) return false;
     const conditions = matches(rule);
     return rejects(rule) && conditions.length === 3 && conditions.some((match: any) => portMatch(match, binding.port))
       && conditions.some((match: any) => match.op === "==" && same(match.left, { fib: { result: "type", flags: ["daddr"] } }) && match.right === "local")
       && conditions.some((match: any) => match.op === "!=" && same(match.left, { meta: { key: "skuid" } }) && same(members(match.right).sort((a, b) => Number(a) - Number(b)), allowed));
   });
-  const input = chainRules(binding.inputChain).some(rule => {
+  const input = inputRules.findIndex(rule => {
+    if (!safeRule(rule)) return false;
     const conditions = matches(rule);
     return rejects(rule) && conditions.length === 2 && conditions.some((match: any) => portMatch(match, binding.port))
       && conditions.some((match: any) => match.op === "!=" && same(match.left, { meta: { key: "iifname" } }) && match.right === "lo");
   });
-  return output && input;
+  return output >= 0 && input >= 0 && protectedPrefix(outputRules, output, binding, "output") && protectedPrefix(inputRules, input, binding, "input");
 }
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
