@@ -167,7 +167,7 @@ export function threadTools(options: PiSessionOptions) {
     defineTool({
       name: "thread_send", label: "Send to a thread",
       description: "Send to an existing accessible thread. Agents steer by default and may hard steer to cancel and confirm current local work before running the message. A closed recipient needs an explicit thread_control reopen before sending. Reopen never continues discarded work.",
-      parameters: Type.Object({ threadId: Type.String(), text: Type.String(), delivery: Type.Optional(Type.Union(agentDelivery.anyOf, { default: "steer", description: "Agents may steer or hard steer." })), replyTo: Type.Optional(Type.String()) }),
+      parameters: Type.Object({ threadId: Type.String(), text: Type.String(), delivery: Type.Optional(Type.Union(agentDelivery.anyOf, { default: "steer", description: "Agents may steer or hard steer." })) }),
       execute: async (id, input, signal) => {
         if (input.threadId === options.threadId && input.delivery === "hardSteer") return result({ ok: false, error: { code: "invalid_request", message: "Hard steer cannot wait for the tool that requested it. Return and continue in this thread instead." } });
         const request = { ...input, requestId: `${options.threadId}:${id}`, senderId: options.threadId, delivery: resolveDelivery({ ...input, senderId: options.threadId }), source: "explicit" as const };

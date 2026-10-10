@@ -134,7 +134,7 @@ error. Historical notifications are still delivered, without releasing the wait.
 Bounded
 `thread_await` still reads historical results according to its explicit cursors.
 
-Every successful request returns the current thread snapshot plus a durable
+Every successful owner request returns the current thread snapshot plus a durable
 `waitRegistration` outcome: `registered` contains the accepted wait;
 `already_arrived` contains the current assignment settlement; `resumed` identifies
 new input by `messageIds`; `cleared` confirms release. A retry returns the same
@@ -142,6 +142,15 @@ registration outcome even if subsequent input has already removed the active wai
 Only a still-active `registered` wait terminates the native turn. An already-arrived
 result or resuming input remains available for the agent to handle; success without
 an explanation for an absent wait is not a valid registration outcome.
+
+Agent tools return only what the calling agent acts on, through
+[`agent-results.ts`](../packages/orchestrator/src/threads/agent-results.ts):
+`thread_wait` returns the registration status (with `messageIds` or the
+settlement's final text when it matters), `thread_send` the message ID and state,
+`thread_spawn` the new thread's ID and agent name, and thread listings a compact
+view with identity, title, lifecycle, pending input, dependencies and wake. The
+owner API keeps full records for clients; tool results never echo what the
+caller just sent.
 
 `set` atomically replaces the previous wait and its peer subscriptions, retaining
 independently declared explicit subscriptions even when a peer belonged to both.
