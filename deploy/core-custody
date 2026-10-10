@@ -165,7 +165,11 @@ def apply(addition, namespace):
             if child.poll() is None:
                 child.terminate(); child.wait(timeout=5)
         for mount in reversed(mounted):
-            command(['/usr/bin/umount', '--lazy', '--', str(mount)])
+            state = subprocess.run(['/usr/bin/mountpoint', '-q', '--', str(mount)], timeout=5).returncode
+            if state == 0:
+                command(['/usr/bin/umount', '--lazy', '--', str(mount)])
+            elif state != 32:
+                raise ValueError('rollback mount state could not be observed')
         raise
     finally:
         for _, descriptor, _, _ in handles:
