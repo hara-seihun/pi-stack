@@ -7,15 +7,17 @@ const page = readFileSync(new URL('./media.html', import.meta.url), 'utf8');
 const client = page.match(/<script type="module">([\s\S]*?)<\/script>/)![1].replace(/^import .*;$/m, '');
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
-async function browser(options: { takeoverFails?: boolean; deferTakeover?: boolean } = {}) {
+async function browser(options: { takeoverFails?: boolean; deferTakeover?: boolean; gateway?: boolean } = {}) {
   const sends: any[] = [], liveSends: any[] = [], requests: { url: string; body: any }[] = [];
   const clones: { stopped: boolean }[] = [];
   let releaseTakeover: () => void = () => {};
   const takeover = options.deferTakeover ? new Promise<void>(resolve => { releaseTakeover = resolve; }) : Promise.resolve();
-  const originalTrack = { kind: 'audio', readyState: 'live', stopped: false, stop() { this.stopped = true; }, clone() { const track = { kind: 'audio', readyState: 'live', stopped: false, stop() { this.stopped = true; } }; clones.push(track); return track; } };
+  const originalTrack = { id: 'caller-audio', kind: 'audio', readyState: 'live', stopped: false, stop() { this.stopped = true; }, clone() { const track = { kind: 'audio', readyState: 'live', stopped: false, stop() { this.stopped = true; } }; clones.push(track); return track; } };
   const nativeCapture = async (_constraints: unknown): Promise<any> => { throw new Error('Hardware microphone must not be requested'); };
   const devices = { getUserMedia: nativeCapture };
   const room = { remoteParticipants: new Map([['caller', { trackPublications: new Map([['caller', { trackName: 'user_audio', track: { sid: 'caller', kind: 'audio', mediaStreamTrack: originalTrack, setVolume() {} } }]]) }]]), on() {}, off() {} };
+  const gatewayAudio = { muted: false };
+  const gatewayPeer = { getReceivers: () => [{ track: originalTrack }], addEventListener() {} };
   const context = vm.createContext({
     document: { getElementById: () => ({ textContent: '' }) },
     location: { origin: 'http://localhost:8799', hash: '#test-token', pathname: '/media', search: '', href: 'http://localhost:8799/media#test-token', protocol: 'http:' },
@@ -26,7 +28,9 @@ async function browser(options: { takeoverFails?: boolean; deferTakeover?: boole
       assert.equal(init.headers.Authorization, 'Bearer test-token');
       requests.push({ url, body: JSON.parse(init.body) });
       if (url === '/media/offer') return Response.json({ session: { id: 'voice' }, transport: { sdp: 'answer' } });
-      if (url === '/media/transport') return Response.json({ callId: 'call-1', accessToken: 'join-token', participantId: 'monitor-1', url: 'wss://test.livekit.cloud', transport: 'livekit' });
+      if (url === '/media/transport') return Response.json(options.gateway
+        ? { callId: 'call-1', accessToken: 'join-token', participantId: 'monitor-1', transport: 'gateway' }
+        : { callId: 'call-1', accessToken: 'join-token', participantId: 'monitor-1', url: 'wss://test.livekit.cloud', transport: 'livekit' });
       if (url === '/media/takeover') {
         await takeover;
         return options.takeoverFails ? new Response('denied', { status: 409 }) : Response.json({ takenOver: true });
@@ -73,7 +77,7 @@ async function browser(options: { takeoverFails?: boolean; deferTakeover?: boole
         assert.equal(config.transcript, false);
         const api = this.config.fetch;
         const monitor = {
-          ready: Promise.resolve(), status: 'monitoring', transport: { room },
+          ready: Promise.resolve(), status: 'monitoring', transport: options.gateway ? { pc: gatewayPeer, audioEl: gatewayAudio } : { room },
           async listen() { const response = await api('http://localhost:8799/v2/listen-live-call/call-1', { method: 'POST', body: '{}' }); assert.equal((await response.json()).access_token, 'join-token'); this.status = 'listening'; },
           async takeOver() {
             const probe = await devices.getUserMedia({ audio: true } as never) as any;
@@ -97,7 +101,7 @@ async function browser(options: { takeoverFails?: boolean; deferTakeover?: boole
   vm.runInContext(`channel.onmessage({data:'{"type":"session.started"}'})`, context);
   await tick();
   const control = (value: unknown) => { context.controlPayload = JSON.stringify(value); vm.runInContext('socket.onmessage({data:controlPayload})', context); };
-  return { context, sends, liveSends, requests, clones, devices, nativeCapture, originalTrack, releaseTakeover, control };
+  return { context, sends, liveSends, requests, clones, devices, nativeCapture, originalTrack, gatewayAudio, releaseTakeover, control };
 }
 
 test('voice ready precedes dial, opening is gated by successful permanent takeover, capture is restored', async () => {
@@ -126,6 +130,26 @@ test('voice ready precedes dial, opening is gated by successful permanent takeov
   state.control({ type: 'close' });
   assert.equal(state.clones[1].stopped, true);
   assert.equal(state.originalTrack.stopped, false);
+  assert.equal(vm.runInContext('closed && audio.state === "closed"', state.context), true);
+});
+
+test('gateway grants without a LiveKit URL route caller audio and gate the opening on permanent takeover', async () => {
+  const state = await browser({ gateway: true, deferTakeover: true });
+  state.control({ type: 'context', text: 'Approved opening' });
+  state.control({ type: 'transport', callId: 'call-1' });
+  await tick();
+  assert.equal(vm.runInContext('incoming.size', state.context), 1);
+  assert.equal(state.gatewayAudio.muted, true);
+  assert.equal(state.liveSends.length, 0);
+  assert.equal(state.sends.some(value => value.type === 'transport-ready'), false);
+  state.releaseTakeover();
+  await tick();
+  assert.deepEqual(state.requests.at(-1), { url: '/media/takeover', body: { callId: 'call-1', participantId: 'monitor-1' } });
+  assert.deepEqual(state.sends.at(-1), { type: 'transport-ready', callId: 'call-1', participantId: 'monitor-1' });
+  assert.equal(state.liveSends[0].content, 'Approved opening');
+  assert.equal(state.devices.getUserMedia, state.nativeCapture);
+  state.control({ type: 'close' });
+  assert.equal(state.clones[1].stopped, true);
   assert.equal(vm.runInContext('closed && audio.state === "closed"', state.context), true);
 });
 
