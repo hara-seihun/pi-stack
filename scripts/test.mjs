@@ -18,7 +18,7 @@ const jobs = [
   ["Kenan build", "npm", ["run", "build", "--workspace=kenan"], { dependsOn: ["Remote build"] }],
   ["manifests", "node", ["scripts/check-manifests.mjs"]],
   ["account deployment", "node", ["--test", "scripts/deploy-skills.test.mjs", "scripts/deploy-account.test.mjs", "scripts/deploy-person-configs.test.mjs"]],
-  ["deploy lock", "node", ["--test", "--test-skip-pattern=^host deployment activates Pi Remote", "scripts/deploy-lock.test.mjs", "scripts/deploy-runtime.test.mjs", "scripts/deploy-runtime-prepared.test.mjs", "scripts/prepared-components.test.mjs", "scripts/deploy-build.test.mjs", "scripts/deploy-prepare.test.mjs", "scripts/deploy-download.test.mjs", "scripts/deploy-retain.test.mjs", "scripts/release-checkout.test.mjs", "scripts/check-services.test.mjs"]],
+  ["deploy lock", "node", ["--test", "--test-skip-pattern=^host deployment activates Pi Remote", "scripts/deploy-lock.test.mjs", "scripts/deploy-runtime.test.mjs", "scripts/deploy-runtime-prepared.test.mjs", "scripts/native-session-closure.test.mjs", "scripts/prepared-components.test.mjs", "scripts/deploy-build.test.mjs", "scripts/deploy-prepare.test.mjs", "scripts/deploy-download.test.mjs", "scripts/deploy-retain.test.mjs", "scripts/release-checkout.test.mjs", "scripts/check-services.test.mjs"]],
   ...["disabled", "enabled"].map(guest => [
     `deploy host guest ${guest}`, "node", ["--test",
       `--test-name-pattern=^host deployment activates Pi Remote and reconciles daemons with guest ${guest}$`,
