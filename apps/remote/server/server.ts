@@ -1390,14 +1390,14 @@ function saveRequest(requestId: string, sessionId: string, kind: string, status:
     .run(requestId, sessionId, kind, status, JSON.stringify(response), now());
 }
 
-const handoffHistory: HandoffHistory = {
+const handoffHistory = (sourceScopeId: string): HandoffHistory => ({
   async *receipts(sessionId) {
     let after = 0;
     while (true) {
       const rows = db.query("SELECT rowid,work_id,octet_length(meeting_transcript) AS bytes FROM message_annotations WHERE session_id=? AND rowid>? ORDER BY rowid LIMIT 64")
         .all(sessionId, after) as Array<{ rowid: number; work_id: string; bytes: number }>;
       if (!rows.length) return;
-      const inspected = await directory.inspect(sessionId, { inputReceipts: { workIds: rows.map(row => row.work_id) } });
+      const inspected = await core.inspectScope(sourceScopeId, sessionId, { inputReceipts: { workIds: rows.map(row => row.work_id) } });
       if (!inspected.ok) throw new Error(`${inspected.error.code}: ${inspected.error.message}`);
       if (!inspected.value.inputReceipts) throw new Error("Native handoff delivery receipts are unavailable");
       const landed = new Set(inspected.value.inputReceipts.filter(receipt => receipt.landedAt !== null).map(receipt => receipt.workId));
@@ -1412,9 +1412,9 @@ const handoffHistory: HandoffHistory = {
       after = rows.at(-1)!.rowid;
     }
   },
-};
+});
 
-async function prepareThreadMessage(thread: Thread, message: ThreadMessage): Promise<Result<{text: string; images?: unknown[]}>> {
+async function prepareThreadMessage(sourceScopeId: string, thread: Thread, message: ThreadMessage): Promise<Result<{text: string; images?: unknown[]}>> {
   const room = ROOMS_ENABLED && roomMetadata(thread.metadata?.room);
   if (room && message.id.startsWith("question-answer:")) {
     const stored = db.query("SELECT value FROM metadata WHERE key=?").get(`room-answer:${message.id}`) as { value: string } | null;
@@ -1432,7 +1432,7 @@ async function prepareThreadMessage(thread: Thread, message: ThreadMessage): Pro
     const meetingId = remotePlacement(thread).meetingId;
     if (typeof meetingId !== "string" || !meetingId) return { ok: true, value: { text: message.text, images: message.images } };
     await meet.flushTranscript(meetingId);
-    const transcript = await prepareMeetingHandoff(meet.transcripts, meetingId, thread.id, handoffHistory);
+    const transcript = await prepareMeetingHandoff(meet.transcripts, meetingId, thread.id, handoffHistory(sourceScopeId));
     db.query("INSERT OR IGNORE INTO message_annotations(work_id,session_id,created_at,meeting_transcript) VALUES(?,?,?,?)")
       .run(message.id, thread.id, now(), JSON.stringify(transcript));
     const receipt = db.query("SELECT session_id,meeting_transcript FROM message_annotations WHERE work_id=?").get(message.id) as { session_id: string | null; meeting_transcript: string };
@@ -1582,13 +1582,14 @@ phoneReplies = new PhoneReplies(db, {
 const callbackUid = process.getuid?.();
 if (callbackUid === undefined) throw new Error("Remote core callbacks require a Unix process identity");
 const coreCallbacks = unwrap(await startCoreCallbacks(coreConfig, callbackUid, {
-  async prepare(value) {
+  async prepare(value, sourceScopeId) {
     if (!value || typeof value !== "object" || Array.isArray(value)) return error("Expected scoped thread/message input", 400);
     const input = value as { thread?: Thread; message?: ThreadMessage };
     if (!input.thread || !input.message || typeof input.thread.id !== "string" || input.message.threadId !== input.thread.id) return error("Expected scoped thread/message input", 400);
-    const owned = await threads.inspect(input.thread.id, { context: "omit" });
-    if (!owned.ok) return threadError(owned.error);
-    return json(await prepareThreadMessage(owned.value.thread, input.message));
+    const owned = await core.inspectScope(sourceScopeId, input.thread.id);
+    if (!owned.ok) return json(owned, owned.error.code === "unavailable" ? 503 : 403);
+    ensureThreadView(db, owned.value.thread.id);
+    return json(await prepareThreadMessage(sourceScopeId, owned.value.thread, input.message));
   },
   async relay(operation, value, signal) {
     if (!value || typeof value !== "object" || Array.isArray(value)) return error("Expected a manager relay envelope", 400);

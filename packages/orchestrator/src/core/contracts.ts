@@ -27,6 +27,7 @@ export type CoreManager = {
   kind: "existing";
   threadId: string;
 } | { kind: "none" };
+export type CoreCallbackGateway = { kind: "none" } | { kind: "remote-callback"; peerUid: number } | { kind: "shared-remote-callback"; targetScopeId: string; peerUid: number };
 export type CoreScope = {
   id: string;
   principalId: string;
@@ -41,7 +42,7 @@ export type CoreScope = {
   custody: CoreCustody;
   resources: { path: string; kind: "file" | "directory" }[];
   environment: Record<string, string>;
-  callbackGateway: { kind: "none" } | { kind: "remote-callback"; peerUid: number };
+  callbackGateway: CoreCallbackGateway;
   manager: CoreManager;
   managerRouting: { kind: "none" } | { kind: "configured"; relay: CoreManagerRelayConfig; notices: { notificationOwnerId: string; adoptedCursors: { settlements: number; attention: number; questions: number } } };
 };

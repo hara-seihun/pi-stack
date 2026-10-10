@@ -14,6 +14,7 @@ import { acquireScopeOwnership, type ScopeOwnership } from "./ownership.js";
 import { CoreManagerRelay } from "./manager-relay.js";
 import { gatewayAuthority, assertGatewayRequest, intersectGatewayAuthority } from "./gateway.js";
 import { unixGatewayFetch } from "./gateway-fetch.js";
+import { scopeCallbackTarget, scopeCallbackTransport } from "./scope-callbacks.js";
 import { CoreManagerNotices } from "./manager-notices.js";
 import { readManagerReplies, type ManagerRepliesInput } from "./manager-replies.js";
 
@@ -66,10 +67,7 @@ export class CoreService {
       const scopes = [...this.owners.values()].filter(candidate => candidate.scope.principalId === owner.scope.principalId && authorize(this.config.policy, { principal, resource: candidate.scope.resource, action: "read", now: Date.now() }).ok);
       if (owner.scope.managerRouting.kind === "configured") {
         const routing = owner.scope.managerRouting;
-        owner.relay = new CoreManagerRelay(routing.relay, owner.metadata, async (input, init) => {
-          if (owner.scope.callbackGateway.kind !== "remote-callback") throw new Error("Manager callback gateway is unset");
-          return unixGatewayFetch({ socketPath: `/run/pi-stack/gateways/remote-${owner.scope.id}/callback.sock`, peerUid: owner.scope.callbackGateway.peerUid }, input, init);
-        }, (resource, action) => {
+        owner.relay = new CoreManagerRelay(routing.relay, owner.metadata, scopeCallbackTransport(this.config.scopes, owner.scope, unixGatewayFetch), (resource, action) => {
           const grant = authorize(this.config.policy, { principal, resource, action, now: Date.now() });
           return grant.ok ? { ok: true, value: undefined } : failure("unavailable", grant.error.message);
         });
@@ -78,7 +76,10 @@ export class CoreService {
       owner.directory = directory;
       owner.threads.setDirectory(directory);
       if (owner.scope.managerRouting.kind === "configured") owner.notices = new CoreManagerNotices({ ...owner.scope.managerRouting.notices, scopeId: owner.scope.id, subscribe: listener => owner.threads.subscribe(listener), feedback: message => { if (message) console.error(`Core notices ${owner.scope.id}: ${message}`); } }, owner.metadata, owner.threads, {
-        managerNotificationPolicy: () => directory.managerNotificationPolicy(),
+        managerNotificationPolicy: () => {
+          const callback = scopeCallbackTarget(this.config.scopes, owner.scope);
+          return callback.ok ? directory.managerNotificationPolicy() : Promise.resolve(failure("unavailable", callback.error.message));
+        },
         send: async input => {
           const destination = [...this.owners.values()].find(candidate => candidate.threads.get(input.threadId));
           if (destination) {
@@ -125,6 +126,7 @@ export class CoreService {
       const keyPath = runtime.path(scope.storage.capabilityKeyPath);
       if (!existsSync(keyPath)) throw new Error("Existing capability key is missing; adoption cannot mint a replacement");
       const capability = threadCapability(keyPath);
+      const callback = scopeCallbackTransport(this.config.scopes, scope, unixGatewayFetch);
       threads = new ThreadService({
         databasePath: runtime.path(scope.storage.databasePath), sessionsDir: runtime.path(scope.storage.sessionsDir), capability,
         openSession: (options, output, exit) => runtime.openSession({ ...options, args: scope.environment.PI_THREAD_CONTEXT_EXTENSION ? [...options.args, "--extension", scope.environment.PI_THREAD_CONTEXT_EXTENSION] : options.args }, output, exit),
@@ -134,12 +136,13 @@ export class CoreService {
           ...(typeof thread.metadata?.bashTimeoutSeconds === "number" ? { PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS: String(thread.metadata.bashTimeoutSeconds) } : {}),
           ...(thread.metadata?.room ? { PI_REMOTE_ROOM_ID: thread.id } : {}),
         }),
-        ...(scope.callbackGateway.kind === "remote-callback" ? { prepareMessage: async (thread, message) => {
-          if (scope.callbackGateway.kind !== "remote-callback") return failure("unavailable", "Message preparation gateway is unset");
+        ...(scope.callbackGateway.kind !== "none" ? { prepareMessage: async (thread, message) => {
           try {
-            const response = await unixGatewayFetch({ socketPath: `/run/pi-stack/gateways/remote-${scope.id}/callback.sock`, peerUid: scope.callbackGateway.peerUid }, "http://pi-remote-callback/v1/core/prepare-message", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ thread, message }), signal: AbortSignal.timeout(30_000) });
+            const response = await callback("http://pi-remote-callback/v1/core/prepare-message", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ thread, message }), signal: AbortSignal.timeout(30_000) });
             const result = await response.json() as Result<{ text: string; images?: unknown[] }>;
-            if (!response.ok || typeof result?.ok !== "boolean") return failure("unavailable", `Message preparation returned HTTP ${response.status}`);
+            if (typeof result?.ok !== "boolean") return failure("unavailable", `Message preparation returned an invalid HTTP ${response.status} receipt`);
+            if (!result.ok) return result;
+            if (!response.ok) return failure("unavailable", `Message preparation returned HTTP ${response.status}`);
             return result;
           } catch (cause) { return failure("unavailable", `Message preparation unavailable: ${cause instanceof Error ? cause.message : String(cause)}`); }
         } } : {}),

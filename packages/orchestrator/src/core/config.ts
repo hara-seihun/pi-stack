@@ -9,6 +9,7 @@ import { parseGatewayConfig } from "./gateway.js";
 import { parseCoreImagesConfig } from "./images.js";
 import { parseCoreMemoryConfig } from "./memory.js";
 import { parseCoreDutiesConfig } from "./duties-runtime.js";
+import { validateScopeCallbacks } from "./scope-callbacks.js";
 
 export type CoreResult<T> = { ok: true; value: T } | { ok: false; error: { code: "invalid-config" | "io" | "ownership-conflict" | "unavailable"; message: string } };
 const invalid = (message: string): CoreResult<never> => ({ ok: false, error: { code: "invalid-config", message } });
@@ -48,8 +49,10 @@ export function parseCoreConfig(value: unknown): CoreResult<CoreConfig> {
     }
     if (!Array.isArray(scope.resources) || scope.resources.some(resource => !record(resource) || !absolute(resource.path) || !["file", "directory"].includes(String(resource.kind)))) return invalid(`Scope ${scope.id} needs an explicit resource registry`);
     if (!record(scope.environment) || Object.entries(scope.environment).some(([key, item]) => !/^[A-Z_][A-Z0-9_]*$/.test(key) || typeof item !== "string" || item.includes("\0"))) return invalid(`Scope ${scope.id} has invalid environment`);
-    if (!record(scope.callbackGateway) || !(scope.callbackGateway.kind === "none" || scope.callbackGateway.kind === "remote-callback" && integer(scope.callbackGateway.peerUid))) return invalid(`Scope ${scope.id} requires an explicit callback gateway`);
-    if (scope.environment.PI_REMOTE_SERVER_URL && scope.callbackGateway.kind !== "remote-callback") return invalid(`Scope ${scope.id} requires its declared Remote preparation gateway`);
+    if (!record(scope.callbackGateway) || !(scope.callbackGateway.kind === "none" && Object.keys(scope.callbackGateway).length === 1
+      || scope.callbackGateway.kind === "remote-callback" && integer(scope.callbackGateway.peerUid) && Object.keys(scope.callbackGateway).length === 2
+      || scope.callbackGateway.kind === "shared-remote-callback" && integer(scope.callbackGateway.peerUid) && id(scope.callbackGateway.targetScopeId) && Object.keys(scope.callbackGateway).length === 3)) return invalid(`Scope ${scope.id} requires an explicit closed callback gateway`);
+    if (scope.environment.PI_REMOTE_SERVER_URL && scope.callbackGateway.kind === "none" && scope.availability.kind === "adopt") return invalid(`Scope ${scope.id} requires its declared Remote preparation gateway`);
     if (!record(scope.manager) || !(scope.manager.kind === "none" || scope.manager.kind === "existing" && id(scope.manager.threadId))) return invalid(`Scope ${scope.id} requires an explicit manager identity or none`);
     if (!record(scope.managerRouting) || !["none", "configured"].includes(String(scope.managerRouting.kind))) return invalid(`Scope ${scope.id} requires explicit manager routing`);
     if (scope.managerRouting.kind === "configured") {
@@ -57,7 +60,7 @@ export function parseCoreConfig(value: unknown): CoreResult<CoreConfig> {
       if (!record(relay) || relay.scopeId !== scope.id || typeof relay.environmentId !== "string" || !/^[a-z][a-z0-9-]{0,31}$/.test(relay.environmentId)
         || !Array.isArray(relay.remoteEnvironments) || !Array.isArray(relay.adoptedOrigins) || !record(notices) || !id(notices.notificationOwnerId)
         || !record(notices.adoptedCursors) || ![notices.adoptedCursors.settlements, notices.adoptedCursors.attention, notices.adoptedCursors.questions].every(integer)
-        || relay.callbackUrl !== `${scope.environment.PI_REMOTE_SERVER_URL}/v1/core/manager-relay` || scope.callbackGateway.kind !== "remote-callback") return invalid(`Scope ${scope.id} has invalid manager callback or receipt custody`);
+        || relay.callbackUrl !== `${scope.environment.PI_REMOTE_SERVER_URL}/v1/core/manager-relay` || scope.callbackGateway.kind === "none") return invalid(`Scope ${scope.id} has invalid manager callback or receipt custody`);
       if (!(relay.canonicalManager === null || record(relay.canonicalManager) && typeof relay.canonicalManager.environmentId === "string" && id(relay.canonicalManager.threadId))) return invalid(`Scope ${scope.id} has invalid canonical manager routing`);
       const environments = new Set<string>();
       for (const remote of relay.remoteEnvironments) {
@@ -75,6 +78,8 @@ export function parseCoreConfig(value: unknown): CoreResult<CoreConfig> {
     scopeIds.add(scope.id);
     databases.add(storage.databasePath as string);
   }
+  const callbacksBound = validateScopeCallbacks(value.scopes as unknown as CoreScope[]);
+  if (!callbacksBound.ok) return callbacksBound;
   const gateways = parseGatewayConfig(value.gatewayTransport, value.gatewayBindings, value.principals, value.scopes as unknown as CoreScope[]);
   if (!gateways.ok) return gateways;
   const digests = new Set<string>();

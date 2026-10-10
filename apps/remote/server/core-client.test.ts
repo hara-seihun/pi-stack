@@ -59,6 +59,27 @@ test("projection is scoped/authenticated and inspection preserves selected archi
   client.close();
 });
 
+test("shared callback preparation inspects the exact fleet scope only through its existing gateway grant", async () => {
+  let permitted = true;
+  let expectedOptions: { context?: "omit"; inputReceipts?: { workIds: string[] } } = { context: "omit" };
+  const fleet = { ...thread, id: "retained-fleet" };
+  const client = new CoreClient(config, createThreadClient, (async (peer, input, init) => {
+    expect(peer).toEqual({ socketPath: config.socketPath, peerUid: 0 });
+    expect(String(input)).toBe("http://core.test/v1/scopes/fleet%3Aone/thread-owner/inspect");
+    expect(JSON.parse(String(init?.body))).toEqual({ threadId: fleet.id, ...expectedOptions });
+    return permitted ? Response.json({ ok: true, value: { thread: fleet, pending: [] } })
+      : Response.json({ ok: false, error: { code: "unavailable", message: "Source fleet route exceeds the existing gateway ceiling" } }, { status: 403 });
+  }) as CoreGatewayFetch);
+  expect((await client.inspectScope("fleet:one", fleet.id)).ok).toBe(true);
+  expectedOptions = { inputReceipts: { workIds: ["retained-meeting-receipt"] } };
+  expect((await client.inspectScope("fleet:one", fleet.id, expectedOptions)).ok).toBe(true);
+  expectedOptions = { context: "omit" };
+  permitted = false;
+  expect(await client.inspectScope("fleet:one", fleet.id)).toMatchObject({ ok: false });
+  expect(await client.inspectScope("../another", fleet.id)).toMatchObject({ ok: false });
+  client.close();
+});
+
 test("native proxy preserves capability and exact message identity without changing delivery", async () => {
   const body = { threadId: thread.id, requestId: "original-admission", text: "original text" };
   const client = new CoreClient(config, createThreadClient, (async (_peer, input, init) => {

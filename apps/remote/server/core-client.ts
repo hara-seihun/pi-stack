@@ -37,7 +37,7 @@ export class CoreClient {
   private readonly transport: Fetch;
   private readonly caller = new AsyncLocalStorage<{ token: string | null }>();
 
-  constructor(config: CoreClientConfig, threadClient: ThreadClientFactory, fetcher: CoreGatewayFetch, private feedback: (message: string | null) => void = () => {}) {
+  constructor(config: CoreClientConfig, private readonly threadClient: ThreadClientFactory, fetcher: CoreGatewayFetch, private feedback: (message: string | null) => void = () => {}) {
     if (!/^[a-zA-Z0-9_.:-]+$/.test(config.gatewayId) || config.socketPath !== `/run/pi-stack/gateways/${config.gatewayId}.sock` || !Number.isSafeInteger(config.coreUid) || config.coreUid < 0) throw new Error("Core client requires its explicit registered Unix gateway socket");
     this.serviceUrl = config.url;
     this.base = `${config.url}/v1/scopes/${encodeURIComponent(config.scopeId)}`;
@@ -95,6 +95,19 @@ export class CoreClient {
   live(id: string): Record<string, unknown> { return this.projection?.live[id] ?? { text: "", thinking: "", tools: [] }; }
   managerThreadId(): string | null { return this.projection?.managerThreadId ?? null; }
   subscribe(listener: (change: Change) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
+
+  async inspectScope(scopeId: string, threadId: string, options: Parameters<ThreadApi["inspect"]>[1] = { context: "omit" }): Promise<Result<ThreadInspection>> {
+    if (!/^[a-zA-Z0-9_.:-]+$/.test(scopeId) || [".", ".."].includes(scopeId)) return failure("Callback inspection requires a canonical registered source scope");
+    try {
+      const client = this.threadClient(`${this.serviceUrl}/v1/scopes/${encodeURIComponent(scopeId)}/thread-owner`, this.transport);
+      const inspected = await client.inspect(threadId, options);
+      if (inspected.ok) {
+        if (inspected.value.thread.id !== threadId) return failure("Callback inspection returned another source thread");
+        this.remember(inspected.value.thread);
+      }
+      return inspected;
+    } catch (cause) { return failure(`Scoped callback inspection unavailable: ${String(cause)}`); }
+  }
 
   async managerReplies(input: ManagerRepliesInput): Promise<Result<ManagerReplies>> {
     try {
