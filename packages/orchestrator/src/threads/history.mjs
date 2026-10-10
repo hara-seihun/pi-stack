@@ -473,6 +473,123 @@ export function indexedThreadHistory(path, leafId, options) {
   });
 }
 
+// Watermarks observe bytes, not the entry graph. Historic bodies never enter memory.
+function validWatermark(value) {
+  const integer = n => Number.isSafeInteger(n) && n >= 0;
+  const sha = s => typeof s === "string" && /^[a-f0-9]{64}$/.test(s);
+  return value?.kind === "native-jsonl-watermark" && value.version === 1
+    && typeof value.revision === "string" && typeof value.device === "string" && /^\d+$/.test(value.device)
+    && typeof value.inode === "string" && /^\d+$/.test(value.inode)
+    && integer(value.size) && integer(value.closedOffset) && value.closedOffset <= value.size
+    && integer(value.nextLine) && value.nextLine >= 1 && sha(value.prefixDigest)
+    && (value.lastOffset === -1 && value.lastLength === 0 && value.lastLine === 0 && value.lastDigest === ""
+      || integer(value.lastOffset) && integer(value.lastLength) && value.lastLength > 0
+        && integer(value.lastLine) && value.lastLine >= 1 && value.lastLine < value.nextLine
+        && value.lastOffset + value.lastLength < value.closedOffset && sha(value.lastDigest));
+}
+
+function watermarkProof(value) {
+  return { stat: { dev: BigInt(value.device), ino: BigInt(value.inode) },
+    revision: value.closedOffset === value.size ? value.revision : "closed-prefix",
+    size: value.closedOffset, digest: value.prefixDigest };
+}
+
+/** Fixed captured prefix; even a valid JSON object without LF belongs to the next observation. */
+function* watermarkLines(fd, path, stat, start, firstLine, prefixHash, previous, bodies, outcome) {
+  const chunk = Buffer.allocUnsafe(SCAN_CHUNK_BYTES);
+  let position = start, recordStart = start, line = firstLine, length = 0, nonblank = false;
+  let parts = [], recordHash = createHash("sha256"), oversized = false;
+  let closedOffset = start, closedDigest = prefixHash.copy().digest("hex");
+  let lastOffset = previous?.lastOffset ?? -1, lastLength = previous?.lastLength ?? 0,
+    lastLine = previous?.lastLine ?? 0, lastDigest = previous?.lastDigest ?? "";
+  const size = Number(stat.size);
+  while (position < size) {
+    const bytes = readSync(fd, chunk, 0, Math.min(chunk.length, size - position), position);
+    if (!bytes) { outcome.error = failure("stale-source", path, "Session changed during watermark capture").error; return; }
+    let begin = 0;
+    while (begin < bytes) {
+      const found = chunk.subarray(0, bytes).indexOf(10, begin);
+      const end = found < 0 ? bytes : found;
+      const part = chunk.subarray(begin, end);
+      prefixHash.update(part); recordHash.update(part); length += part.length;
+      if (!nonblank) for (const byte of part) if (byte !== 32 && byte !== 13 && byte !== 9) { nonblank = true; break; }
+      if (bodies && !oversized) {
+        if (length > MAX_HISTORY_RECORD_BYTES) { oversized = true; parts = []; }
+        else if (part.length) parts.push(Buffer.from(part));
+      }
+      if (found < 0) break;
+      prefixHash.update(chunk.subarray(end, end + 1));
+      closedOffset = position + end + 1; closedDigest = prefixHash.copy().digest("hex");
+      const digest = recordHash.digest("hex");
+      const descriptor = Object.freeze({ offset: recordStart, length, line, digest });
+      if (nonblank) {
+        lastOffset = recordStart; lastLength = length; lastLine = line; lastDigest = digest;
+        if (bodies) {
+          if (oversized) yield { kind: "uncertain", descriptor, error: failure("oversized-record", path,
+            `New session record exceeds ${MAX_HISTORY_RECORD_BYTES} bytes; effects and image acceptance are uncertain`,
+            { line, offset: recordStart, limit: MAX_HISTORY_RECORD_BYTES }).error };
+          else {
+            const parsed = parseRecord(parts.length === 1 ? parts[0] : Buffer.concat(parts, length), path, line, recordStart);
+            yield parsed.ok ? { kind: "record", descriptor, entry: parsed.value } : { kind: "uncertain", descriptor, error: parsed.error };
+          }
+        }
+      }
+      recordStart = closedOffset; line++; length = 0; nonblank = false; parts = []; oversized = false;
+      recordHash = createHash("sha256"); begin = end + 1;
+    }
+    position += bytes;
+  }
+  outcome.watermark = Object.freeze({ kind: "native-jsonl-watermark", version: 1,
+    revision: stamp(stat), size, device: String(stat.dev), inode: String(stat.ino), prefixDigest: closedDigest,
+    lastOffset, lastLength, lastLine, lastDigest, closedOffset, nextLine: line });
+}
+
+/** Raw SHA256 and offsets only, bounded independently of historic record length. */
+export function captureNativeHistoryWatermark(path) {
+  path = resolve(path);
+  return withSource(path, fd => {
+    const stat = fstatSync(fd, { bigint: true });
+    if (!stat.isFile() || stat.size > BigInt(Number.MAX_SAFE_INTEGER)) return failure("io", path, "Session source must be a seekable, safely addressable file");
+    const outcome = {};
+    for (const _ of watermarkLines(fd, path, stat, 0, 1, createHash("sha256"), undefined, false, outcome)) { /* metadata only */ }
+    if (outcome.error) return { ok: false, error: outcome.error };
+    const verified = verifyPrefix(fd, path, watermarkProof(outcome.watermark));
+    return verified.ok ? ok(outcome.watermark) : verified;
+  });
+}
+
+/** Projection sees only complete NEW lines after a trusted prefix; no historic JSON parse. */
+export function withNativeHistorySuffix(path, watermark, project) {
+  path = resolve(path);
+  if (!validWatermark(watermark)) return failure("invalid-watermark", path, "Native suffix requires a complete trusted byte-prefix watermark");
+  return withSource(path, fd => {
+    const stat = fstatSync(fd, { bigint: true });
+    if (!stat.isFile() || stat.size > BigInt(Number.MAX_SAFE_INTEGER)) return failure("io", path, "Session source must be a seekable, safely addressable file");
+    const named = statSync(path, { bigint: true }), proof = watermarkProof(watermark);
+    if (!sameFile(proof.stat, stat) || !sameFile(stat, named) || stat.size < BigInt(watermark.closedOffset) || named.size < BigInt(watermark.closedOffset))
+      return failure("stale-source", path, "Native watermark source was replaced or truncated");
+    const prefixHash = createHash("sha256"), prefix = {};
+    for (const _ of watermarkLines(fd, path, { ...stat, size: BigInt(watermark.closedOffset) }, 0, 1, prefixHash, undefined, false, prefix)) { /* raw prefix proof */ }
+    if (prefix.error) return { ok: false, error: prefix.error };
+    for (const key of ["prefixDigest", "closedOffset", "nextLine", "lastOffset", "lastLength", "lastLine", "lastDigest"])
+      if (prefix.watermark[key] !== watermark[key]) return failure("stale-source", path, "Native watermark prefix or boundary record was rewritten");
+    const outcome = {};
+    const records = watermarkLines(fd, path, stat, watermark.closedOffset, watermark.nextLine, prefixHash, watermark, true, outcome);
+    let active = true;
+    const scoped = { *[Symbol.iterator]() {
+      if (!active) throw new Error("Native suffix iterable expired outside its synchronous projection");
+      while (active) { const next = records.next(); if (next.done) return; yield next.value; }
+    } };
+    let value;
+    try { value = project(scoped); }
+    finally { active = false; records.return(); }
+    if (outcome.error) return { ok: false, error: outcome.error };
+    if (!outcome.watermark) return failure("invalid-descriptor", path, "Native suffix projection must consume the complete captured suffix synchronously");
+    const after = verifyPrefix(fd, path, watermarkProof(outcome.watermark));
+    return after.ok ? ok({ value, watermark: outcome.watermark }) : after;
+  });
+}
+
 export function readThreadHistory(path, leafId) {
   if (!existsSync(path)) return [];
   return activePath(parseSession(readFileSync(path, "utf8")), leafId);
