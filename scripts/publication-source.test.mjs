@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { publicationConfig } from "./publication-fixture.mjs";
+import { progressBudgetExhausted } from '../deploy/publication-control.mjs';
 
 const publication = new URL("../deploy/publication", import.meta.url).href;
 
@@ -231,6 +232,7 @@ function integrationFixture(t) {
 
 for (const timing of ["before-refresh", "during-push"]) test(`main movement ${timing} retains proof and queues rechecking without overwriting either writer`, t => {
   const f = integrationFixture(t);
+  f.request.attemptLimit = f.request.attempt;
   if (timing === "before-refresh") f.git(f.remote, "update-ref", "refs/heads/main", f.contender);
   else writeFileSync(join(f.checkout, ".git/hooks/pre-push"), `#!/bin/sh\ngit -C '${f.remote}' update-ref refs/heads/main ${f.contender}\n`, { mode: 0o700 });
   assert.equal(f.git(f.checkout, "rev-parse", "origin/main"), f.commit);
@@ -238,6 +240,7 @@ for (const timing of ["before-refresh", "during-push"]) test(`main movement ${ti
   assert.deepEqual(result, { ok: false, kind: "main-moved", remoteMain: f.contender });
   assert.equal(request.status, "queued");
   assert.equal(request.step, "main-moved-recheck-required");
+  assert.equal(progressBudgetExhausted(request), false, 'retained passed integration gets a bounded contention recheck even on the final source-repair attempt');
   for (const key of ["checks", "integrationSha", "baseSha", "android", "hosts", "integratedAt"]) assert.equal(request[key], undefined);
   assert.equal(request.sourceSha, f.integrationSha);
   assert.equal(request.sourceRef, f.request.sourceRef);
