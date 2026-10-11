@@ -19,7 +19,10 @@ export function withSessionWriterConfiguration(config, callback) {
   return configuration.run(Object.freeze({ directory: config.directory, scope: config.scope }), callback);
 }
 export function sessionWriterConfiguration() {
-  return configuration.getStore() ?? Object.freeze({ directory: process.env.PI_SESSION_WRITER_DIRECTORY, scope: process.env.PI_SESSION_WRITER_SCOPE });
+  const explicit = configuration.getStore();
+  if (explicit) return explicit;
+  const environment = globalThis[Symbol.for("pi-stack.session-environment")]?.getStore() ?? process.env;
+  return Object.freeze({ directory: environment.PI_SESSION_WRITER_DIRECTORY, scope: environment.PI_SESSION_WRITER_SCOPE });
 }
 const trackingKey = Symbol.for("pi.stack.session-writer.pending");
 const tracking = globalThis[trackingKey] ??= new AsyncLocalStorage();

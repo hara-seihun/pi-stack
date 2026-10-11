@@ -12,6 +12,7 @@ import { parseArgs } from "node:util";
 import { probeBrowser, settleBrowserProofs } from "./browser-probe.mjs";
 import { probeTabRestoration } from "./browser-tab-restore-probe.mjs";
 import { createManagedAgentSession } from "./managed-agent.mjs";
+import { withSessionWriterConfiguration } from "./session-writer.mjs";
 
 const { values } = parseArgs({ options: { help: { type: "boolean", short: "h" }, "worker-release": { type: "string" }, "session-file": { type: "string" } } });
 if (values.help) {
@@ -126,10 +127,10 @@ try {
   const modelRuntime = await ModelRuntime.create({ authPath: join(directory, "auth.json"), modelsPath: join(directory, "models.json"), allowModelNetwork: false });
   const model = modelRuntime.getModel("openai-codex", "gpt-6-luna");
   assert.ok(model, "browser doctor requires its explicit offline catalog model; no inference is dispatched");
-  const opened = managed = await createManagedAgentSession(() => createAgentSession({
+  const opened = managed = await withSessionWriterConfiguration({ directory, scope: `doctor:browser:${title}` }, () => createManagedAgentSession(() => createAgentSession({
     cwd: directory, agentDir, resourceLoader, settingsManager, modelRuntime, model, thinkingLevel: "off", tools: ["agent_browser"],
     sessionManager: SessionManager.open(sessionFile, undefined, directory),
-  }), { cwd: directory });
+  }), { cwd: directory }));
   session = opened.session;
   const setupRepair = "restore exactly one browser entrypoint with the host's pi-stack-release command, not pi install npm";
   assert.deepEqual(opened.extensionsResult.errors, [], `configured extensions must load; ${setupRepair}`);

@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import { AsyncLocalStorage } from "node:async_hooks";
 import assert from "node:assert/strict";
 import { copyFileSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -6,7 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { acquireSessionWriter, requireSessionWriter, withSessionWriterConfiguration, withSessionWriterScope, writeSessionBytes } from "./session-writer.mjs";
+import { acquireSessionWriter, requireSessionWriter, sessionWriterConfiguration, withSessionWriterConfiguration, withSessionWriterScope, writeSessionBytes } from "./session-writer.mjs";
 import { patchAgentSessionWriterDisposal, patchSessionDurability, patchSessionFactoryWriter, patchSessionRuntimeWriter } from "./patch-session-durability.mjs";
 
 const base = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
@@ -31,6 +32,31 @@ async function fixture(t) {
 }
 const user = { role: "user", content: "synthetic user", timestamp: 1 };
 const assistant = { role: "assistant", content: [{ type: "text", text: "synthetic response" }], timestamp: 2 };
+
+test("canonical core environment binds writer configuration before manager construction without process-global leakage", async t => {
+  const key = Symbol.for("pi-stack.session-environment"), previous = globalThis[key];
+  const environment = new AsyncLocalStorage(); globalThis[key] = environment;
+  t.after(() => { if (previous === undefined) delete globalThis[key]; else globalThis[key] = previous; });
+  const outside = sessionWriterConfiguration();
+  const { SessionManager } = await fixture(t);
+  const scopes = await Promise.all(["remote:first", "remote:second"].map(scope => environment.run({
+    PI_SESSION_WRITER_DIRECTORY: directory(t), PI_SESSION_WRITER_SCOPE: scope,
+  }, async () => {
+    await Promise.resolve();
+    const config = sessionWriterConfiguration();
+    const owner = requireSessionWriter(acquireSessionWriter({ ...config, identity: "same-native-id" }));
+    requireSessionWriter(owner.release());
+    const manager = SessionManager.create(config.directory, config.directory, { id: "same-native-id" });
+    manager.appendMessage(user); manager.appendMessage(assistant); manager.dispose();
+    return config.scope;
+  })));
+  assert.deepEqual(scopes, ["remote:first", "remote:second"]);
+  assert.deepEqual(sessionWriterConfiguration(), outside);
+  environment.run({}, () => {
+    assert.equal(acquireSessionWriter({ ...sessionWriterConfiguration(), identity: "known" }).error.code, "SESSION_WRITER_CONFIGURATION");
+    withSessionWriterConfiguration({ directory: directory(t), scope: "explicit" }, () => assert.equal(sessionWriterConfiguration().scope, "explicit"));
+  });
+});
 
 test("explicit physical custody and same-process exclusive ownership", t => {
   assert.equal(acquireSessionWriter({}).error.code, "SESSION_WRITER_CONFIGURATION");
