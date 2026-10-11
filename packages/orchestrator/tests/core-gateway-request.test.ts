@@ -1,4 +1,8 @@
 import { expect, test } from "bun:test";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { gatewayRequest, gatewayRequestStdin } from "../src/core/gateway-request.js";
 
 const env = { PI_CORE_URL: "http://core.test:2470", PI_CORE_GATEWAY_SOCKET: "/run/pi-stack/gateways/original.sock", PI_CORE_GATEWAY_UID: "0", PI_THREAD_TOKEN: "sender" };
@@ -26,6 +30,28 @@ test("gateway request never invents authentication, routes or peer identity", as
   expect(await gatewayRequest(input, env, async () => { throw new Error("peer mismatch"); })).toMatchObject({ ok: false, error: { code: "transport-unconfirmed" } });
   expect(await gatewayRequest(input, env, async () => new Response("not JSON"))).toMatchObject({ ok: false, error: { code: "transport-unconfirmed" } });
 });
+test("CLI executes through selected-release symlinks and imports stay silent", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-gateway-cli-"));
+  try {
+    const entry = join(root, "gateway.mjs"), selected = join(root, "selected.mjs");
+    const build = await Bun.build({ entrypoints: [new URL("../src/core/gateway-request.ts", import.meta.url).pathname],
+      target: "node", format: "esm", outdir: root, naming: "gateway.mjs" });
+    expect(build.success).toBe(true);
+    symlinkSync(entry, selected);
+    for (const runtime of [process.execPath, "/usr/bin/node"]) {
+      for (const path of [entry, selected]) {
+        const result = Bun.spawnSync([runtime, path], { stdin: Buffer.from("not JSON"), env: {}, timeout: 5000 });
+        expect(result.exitCode).toBe(0);
+        expect(JSON.parse(result.stdout.toString())).toMatchObject({ ok: false, error: { code: "invalid-request" } });
+      }
+      const imported = Bun.spawnSync([runtime, "--input-type=module", "-e", `await import(${JSON.stringify(pathToFileURL(selected).href)})`],
+        { stdin: Buffer.from("not JSON"), env: {}, timeout: 5000 });
+      expect(imported.exitCode).toBe(0);
+      expect(imported.stdout.toString()).toBe("");
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("CLI stdin is finite and typed, without interpreting a malformed input as an empty request", async () => {
   async function* stream(text: string) { yield Buffer.from(text); }
   expect(await gatewayRequestStdin(stream("not JSON"), env)).toMatchObject({ ok: false, error: { code: "invalid-request" } });
