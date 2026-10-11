@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -9,12 +9,21 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 
 const linux = process.platform === "linux";
+const rootCustody = process.env.PI_TEST_ROOT_CUSTODY === "1";
 const unpatchedReproduction = process.env.PI_TEST_BASH_CANCELLATION_UNPATCHED === "1";
 const applyPatch = !unpatchedReproduction && process.env.PI_TEST_BASH_CANCELLATION_PATCH !== "0";
 const tokens = new Set();
 let directory;
 let gnuTimeout;
 let ownerModule;
+let ownerHelpers = [];
+
+function writableFixture(path) {
+  const stat = lstatSync(path);
+  if (stat.isSymbolicLink()) return;
+  chmodSync(path, stat.mode | 0o200);
+  if (stat.isDirectory()) for (const entry of readdirSync(path)) writableFixture(join(path, entry));
+}
 
 function processIdentity(pid) {
   try {
@@ -58,7 +67,7 @@ function ownedProcesses(token) {
 function signalPinned(records) {
   if (records.length === 0) return;
   // Pin before checking identity: no raw PID or group signal can hit a reused peer.
-  const cleanup = spawnSync("/usr/bin/python3", ["-c", String.raw`
+  const cleanup = spawnSync(rootCustody ? "/usr/bin/sudo" : "/usr/bin/python3", [...(rootCustody ? ["-n", "--", "/usr/bin/python3"] : []), "-I", "-B", "-c", String.raw`
 import json, os, signal, sys
 from pathlib import Path
 for record in json.load(sys.stdin):
@@ -105,6 +114,7 @@ from pathlib import Path
 
 folder = Path(sys.argv[1])
 mode = sys.argv[2]
+os.umask(0o022)
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
 def record(name, pid=None):
@@ -210,12 +220,14 @@ if (linux) {
   mkdirSync(dirname(base), { recursive: true });
   cpSync(dirname(originalBase), dirname(base), { recursive: true });
   cpSync(join(dirname(dirname(originalBase)), "pi-agent-core"), core, { recursive: true });
+  writableFixture(modules);
   symlinkSync(dirname(dirname(dirname(originalBase))), join(directory, "node_modules"));
   writeFileSync(join(directory, "fixture.py"), fixtureSource);
   const patchBashCancellationCopies = applyPatch
     ? (await import("./patch-bash-cancellation.mjs")).patchBashCancellationCopies : undefined;
   if (applyPatch) patchBashCancellationCopies(modules);
   ownerModule = join(base, "pi-shell-owner.mjs");
+  ownerHelpers = [base, join(core, "dist")].map(path => join(path, "pi-shell-owner.py"));
   if (!unpatchedReproduction) {
     const paths = [join(base, "core/tools/bash.js"), join(base, "utils/shell.js"), join(base, "core/bash-executor.js"),
       join(core, "dist/harness/env/nodejs.js"),
@@ -252,10 +264,11 @@ if (linux) {
 
 if (!linux) test("Bash descendant cancellation requires Linux /proc and subreaping", { skip: "Linux-only process lifecycle contract" }, () => {});
 
-for (const backend of backends) {
+for (const privilege of rootCustody ? ["user", "root"] : ["user"]) for (const backend of backends) {
   for (const mode of ["abort", "timeout"]) {
-    test(`${backend.name}: ${mode} reaps escaped descendants without killing sibling execution`, { timeout: 12000 }, async () => {
+    test(`${backend.name}: ${privilege} ${mode} reaps escaped descendants without killing sibling execution`, { timeout: 12000 }, async () => {
       const victim = makeFixture("tree");
+      if (privilege === "root") victim.command = `exec sudo -n -- /usr/bin/env PI_BASH_CANCELLATION_TEST_TOKEN=${shellQuote(victim.token)} PI_BASH_CANCELLATION_GNU_TIMEOUT=${shellQuote(gnuTimeout)} /usr/bin/python3 -I -B ${shellQuote(join(directory, "fixture.py"))} ${shellQuote(victim.folder)} tree`;
       const sibling = makeFixture("sibling");
       const controller = new AbortController();
       const siblingController = new AbortController();
@@ -325,6 +338,39 @@ for (const backend of backends) {
         await Promise.race([Promise.allSettled([victimRun, siblingRun].filter(Boolean)), delay(1000)]);
         const failures = cleanup.filter(result => result.status === "rejected");
         if (failures.length) throw new AggregateError(failures.map(result => result.reason), "fixture cleanup failed");
+      }
+    });
+  }
+}
+
+if (linux && rootCustody && !unpatchedReproduction) {
+  for (const backend of backends) for (const mode of ["abort", "timeout", "exit"]) {
+    test(`${backend.name}: denied root cleanup retains ${mode} and explicit cleanup failure`, { timeout: 8000 }, async () => {
+      const victim = makeFixture("tree");
+      const elevated = `sudo -n -- /usr/bin/env PI_BASH_CANCELLATION_TEST_TOKEN=${shellQuote(victim.token)} PI_BASH_CANCELLATION_GNU_TIMEOUT=${shellQuote(gnuTimeout)} /usr/bin/python3 -I -B ${shellQuote(join(directory, "fixture.py"))} ${shellQuote(victim.folder)}`;
+      victim.command = mode === "exit" ? `${elevated} daemon; exit 17` : `exec ${elevated} tree`;
+      const originals = ownerHelpers.map(path => readFileSync(path, "utf8"));
+      const controller = new AbortController();
+      let run;
+      try {
+        ownerHelpers.forEach((path, index) => writeFileSync(path, originals[index].replace(
+          "def mediate_owned_signal(fd, deadline):", 'def mediate_owned_signal(fd, deadline):\n    raise OwnershipError("test denied existing sudo authority")')));
+        run = backend.run(victim.command, controller.signal, mode === "timeout" ? 1 : 5);
+        await until(() => existsSync(join(victim.folder, mode === "exit" ? "daemon.json" : "ready")), 2000, "root fixture did not become ready");
+        if (mode === "abort") controller.abort();
+        const result = await run;
+        assert.equal(result.kind, "error", "cleanup denial cannot become successful cancellation");
+        assert.match(result.error.cleanupError, /test denied existing sudo authority/);
+        if (mode === "exit") assert.equal(result.error.commandExitCode, 17);
+        else {
+          assert.match(result.error.message, mode === "abort" ? /aborted/i : /timeout/i);
+          assert.equal(result.error.code, mode === "abort" ? "aborted" : "timeout");
+        }
+      } finally {
+        controller.abort();
+        ownerHelpers.forEach((path, index) => writeFileSync(path, originals[index]));
+        await cleanFixture(victim);
+        if (run) await run;
       }
     });
   }

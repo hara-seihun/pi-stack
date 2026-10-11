@@ -307,11 +307,21 @@ concurrent peer tools are untouched. Ordinary command completion also closes
 remaining descendants before returning the command's original exit status.
 
 Cleanup stops and kills only the subreaper's direct children through pidfds,
-reaps them, and repeats for newly adopted descendants. Parent validation prevents
-stale PID observations from signalling unrelated work. Cleanup has a two-second
-budget and returns an explicit failure with residual PIDs if they cannot exit;
-missing cleanup receipts are failures, never successful cancellation. The
-supervisor's receipt pipe is not inherited by shell descendants. Linux needs
+reaps them, and repeats for newly adopted descendants. Parent validation and live
+pidfd identity checks prevent stale PID observations from signalling unrelated
+work. If an owned child elevated its UID and signalling returns EPERM, the
+subreaper invokes the same immutable helper through existing noninteractive sudo
+authority (`/usr/bin/python3 -I -B`, `--privileged-cleanup`). A private socket passes
+the actual owner and target pidfds with SCM_RIGHTS. The root helper matches the
+socket's kernel peer PID/UID to the pinned owner and sudo caller, validates the
+pinned target's direct parent, then sends only STOP/KILL through that descriptor.
+There is no numeric-PID signal route, new sudo grant, root shell executor or host
+service. Callers without this sudo authority receive an explicit cleanup error;
+timeout/abort remains the primary outcome with the cleanup failure attached,
+and a completed command retains its recorded original exit status in the error.
+Cleanup has a two-second budget; missing cleanup receipts are failures, never
+successful cancellation. The supervisor's receipt pipe is not inherited by shell
+descendants. Linux needs
 `/usr/bin/python3` with pidfd support and readable `/proc`; capability failures
 prevent command launch. Other platforms retain their existing native executor.
 No shared runner cgroup, service or publication lifecycle is changed.
@@ -320,8 +330,21 @@ The patch and both helpers participate in the immutable dependency hash.
 [`bash-cancellation.test.mjs`](bash-cancellation.test.mjs) covers parallel GNU
 timeout children, signal-resistant session escapes, double forks, exact PID
 absence, concurrent sibling survival and runner-parent death. Its disposable
-fixtures never change installed runtime code. `deploy/runtime` runs the same
-proof against copied installed source without patching it:
+fixtures never change installed runtime code. With `PI_TEST_ROOT_CUSTODY=1`, the
+same test also covers root-owned descendant abort/timeout and unchanged ordinary
+siblings using existing sudo. `PI_TEST_ROOT_CUSTODY=1 python3 -B
+packages/runtime/pi-shell-owner.test.py` checks privileged peer rejection, exited
+pidfd identity, root session escapes and the independent worker's original timeout
+receipt. No privileged cases run without that explicit test flag.
+SDK delivery prepares a new immutable dependency closure containing the helper
+and patch. A resident shell factory keeps its original module URL and helper
+path: switching the source checkout or runtime selector does not change that
+factory. New consumers of the selected SDK use the repair; resident Core/native
+shell-tool consumers need their owning routine release adoption. Never edit a
+selected dependency closure to activate this change.
+
+`deploy/runtime` runs the same proof against copied installed source without
+patching it:
 
 ```sh
 PI_TEST_RUNTIME_ENTRY=file:///srv/pi/runtime/node_modules/@earendil-works/pi-coding-agent/dist/index.js \
