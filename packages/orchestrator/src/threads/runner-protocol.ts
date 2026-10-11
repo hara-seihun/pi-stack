@@ -1,6 +1,7 @@
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import type { PiSessionOptions } from "./contracts.js";
+import { RunnerOwnershipError, type NativeRunnerOwner } from "./runner-ownership.js";
 
 const sequence = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER });
 const frame = Type.Union([
@@ -41,6 +42,13 @@ export function requireFactoryStatus(value: unknown): Static<typeof factoryStatu
 const ownerIdentity = Type.Object({
   version: Type.Literal(1), dataDir: Type.String(), uid: sequence, control: Type.String(), pid: sequence, startTicks: Type.String({ pattern: "^[0-9]+$" }),
 });
+const ownedFactoryStatus = Type.Intersect([factoryStatus, Type.Object({ pid: sequence, nativeOwner: ownerIdentity })]);
+export function requireOwnedFactoryStatus(value: unknown, owner: NativeRunnerOwner): Static<typeof ownedFactoryStatus> {
+  if (!Check(ownedFactoryStatus, value)) throw new RunnerOwnershipError("ownership-uncertain", "Native factory status lacks exact process/storage ownership");
+  if (value.pid !== owner.pid || Object.keys(ownerIdentity.properties).some(key => value.nativeOwner[key as keyof NativeRunnerOwner] !== owner[key as keyof NativeRunnerOwner]))
+    throw new RunnerOwnershipError("ownership-conflict", "Native factory status belongs to a different process/storage owner");
+  return value;
+}
 const control = Type.Union([
   Type.Object({ type: Type.Literal("upgrade_factory"), protocol: Type.Literal("native-future-factory-v1"),
     owner: ownerIdentity, expected: factoryIdentity, candidate: factoryIdentity }),

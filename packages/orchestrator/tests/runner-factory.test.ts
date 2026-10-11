@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { expect, test, vi } from "vitest";
 import { bindRunnerEnvironments, RunnerFutureFactory, RUNNER_FACTORY_PROTOCOL, type RunnerFactoryBinding, type RunnerFactoryIdentity } from "../src/threads/runner-factory.js";
-import { requireRunnerControlRequest } from "../src/threads/runner-protocol.js";
+import { requireOwnedFactoryStatus, requireRunnerControlRequest } from "../src/threads/runner-protocol.js";
 
 function binding(name: string): RunnerFactoryBinding {
   const identity: RunnerFactoryIdentity = { entryPath: `/releases/${name}/dist/threads/pi-session.js`, entrySha256: name.repeat(64), sdkDirectory: `/dependencies/${name}`, sourceCommit: name.repeat(40) };
@@ -45,6 +45,52 @@ test("failed preparation, stale predecessor, and lease loss never alter the curr
   const lost = new RunnerFutureFactory(old, () => { if (!owned) throw new Error("physical lease changed"); }, async () => { owned = false; return { ok: true, value: next }; });
   expect(await lost.upgrade(old.identity, next.identity)).toMatchObject({ ok: false, error: { code: "ownership-conflict" } });
   expect(lost.snapshot()).toBe(old);
+});
+
+test("same-target stale and overlapping upgrades acknowledge selected custody without replacing residents", async () => {
+  const old = binding("a"), next = binding("b"), other = binding("c");
+  let releases: Array<() => void> = [], owned = true;
+  const load = vi.fn(() => new Promise<{ ok: true; value: RunnerFactoryBinding }>(resolve => { releases.push(() => resolve({ ok: true, value: next })); }));
+  const factory = new RunnerFutureFactory(old, () => { if (!owned) throw new Error("lease lost"); }, load), resident = factory.snapshot();
+  const first = factory.upgrade(old.identity, next.identity), second = factory.upgrade(old.identity, next.identity);
+  expect(load).toHaveBeenCalledTimes(2);
+  releases[0]!(); expect(await first).toMatchObject({ ok: true, value: { previous: old.identity, current: next.identity } });
+  releases[1]!(); expect(await second).toMatchObject({ ok: true, value: { previous: next.identity, current: next.identity } });
+  expect(await factory.upgrade(old.identity, next.identity)).toMatchObject({ ok: true, value: { previous: next.identity, current: next.identity } });
+  expect(load).toHaveBeenCalledTimes(2); expect(factory.snapshot()).toBe(next); expect(resident).toBe(old);
+  expect(await factory.upgrade(old.identity, other.identity)).toMatchObject({ ok: false, error: { code: "factory-conflict" } });
+  owned = false;
+  expect(await factory.upgrade(old.identity, next.identity)).toMatchObject({ ok: false, error: { code: "ownership-conflict" } });
+  expect(next.module.openPiSession).not.toHaveBeenCalled(); expect(old.module.openPiSession).not.toHaveBeenCalled();
+});
+
+test("different-target winner and lease loss during same-target preparation remain conflicts", async () => {
+  const old = binding("a"), next = binding("b"), other = binding("c");
+  let release!: () => void, owned = true;
+  const load = vi.fn((identity: RunnerFactoryIdentity) => identity === next.identity
+    ? new Promise<{ ok: true; value: RunnerFactoryBinding }>(resolve => { release = () => resolve({ ok: true, value: next }); })
+    : Promise.resolve({ ok: true as const, value: other }));
+  const factory = new RunnerFutureFactory(old, () => { if (!owned) throw new Error("lease lost"); }, load);
+  const pending = factory.upgrade(old.identity, next.identity);
+  expect(await factory.upgrade(old.identity, other.identity)).toMatchObject({ ok: true });
+  release(); expect(await pending).toMatchObject({ ok: false, error: { code: "factory-conflict" } });
+  expect(factory.snapshot()).toBe(other);
+  const same = new RunnerFutureFactory(old, () => { if (!owned) throw new Error("lease lost"); }, load);
+  const waiting = same.upgrade(old.identity, next.identity);
+  owned = false; release();
+  expect(await waiting).toMatchObject({ ok: false, error: { code: "ownership-conflict" } });
+  expect(same.snapshot()).toBe(old);
+});
+
+test("same-candidate status requires every exact owner field and the responding process", () => {
+  const owner = { version: 1 as const, dataDir: "/data", uid: 1000, control: "/control", pid: 12, startTicks: "42" };
+  const status = { ok: true, factoryProtocol: RUNNER_FACTORY_PROTOCOL, futureFactory: binding("b").identity, pid: owner.pid, nativeOwner: owner };
+  expect(requireOwnedFactoryStatus(status, owner)).toEqual(status);
+  for (const changed of [{ uid: 1001 }, { dataDir: "/other" }, { control: "/other" }, { pid: 13 }, { startTicks: "43" }]) {
+    expect(() => requireOwnedFactoryStatus({ ...status, nativeOwner: { ...owner, ...changed } }, owner)).toThrow("different process/storage owner");
+  }
+  expect(() => requireOwnedFactoryStatus({ ...status, pid: 13 }, owner)).toThrow("different process/storage owner");
+  expect(() => requireOwnedFactoryStatus({ ...status, nativeOwner: undefined }, owner)).toThrow("lacks exact process/storage ownership");
 });
 
 test("upgrade wire rejects missing exact identity and has no implicit protocol selection", () => {

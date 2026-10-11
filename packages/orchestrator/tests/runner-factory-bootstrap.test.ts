@@ -72,6 +72,13 @@ test("finite additive bootstrap intercepts fragmented/coalesced upgrades while p
     expect(resident.close).not.toHaveBeenCalled(); expect(resident.command).not.toHaveBeenCalled();
     current.socket.write('{"type":"status"}\n');
     expect(await current.read()).toMatchObject({ futureFactory: next.identity, residentFactories: facts });
+    current.socket.write(request);
+    expect(await current.read()).toMatchObject({ ok: true, previous: next.identity, current: next.identity });
+    expect(options.load).toHaveBeenCalledTimes(1);
+    current.socket.write(JSON.stringify({ type: "upgrade_factory", protocol: RUNNER_FACTORY_PROTOCOL, owner: { ...options.owner, startTicks: "43" }, expected: old.identity, candidate: next.identity }) + "\n");
+    expect(await current.read()).toMatchObject({ ok: false, errorCode: "ownership-conflict" });
+    current.socket.write(JSON.stringify({ type: "upgrade_factory", protocol: RUNNER_FACTORY_PROTOCOL, owner: options.owner, expected: old.identity, candidate: old.identity }) + "\n");
+    expect(await current.read()).toMatchObject({ ok: false, errorCode: "factory-conflict" });
     current.socket.write('{"type":"upgrade_factory","candidate":null}\n');
     expect(await current.read()).toMatchObject({ ok: false, errorCode: "factory-contract-invalid" });
     owned = false;
