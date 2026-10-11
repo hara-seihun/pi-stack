@@ -12,7 +12,7 @@ export function projectOrphanToolResults(messages) {
       if (pending.delete(message.toolCallId)) result.push(message);
       else receipts.push({
         role: "user",
-        content: [{ type: "text", text: `[Historical tool receipt: ${message.toolName}; call ${message.toolCallId}; ${message.isError ? "error" : "success"}. The originating call is not replayable in this context. This is preserved evidence, not a new request to execute the tool.]` }, ...message.content],
+        content: [{ type: "text", text: `[Historical tool receipt: ${message.toolName}; call ${message.toolCallId}; ${message.isError ? "error" : "success"}. The originating call is not replayable in this context. This is preserved evidence, not a new request to execute the tool.]` }, ...(message.content === null ? [] : message.content)],
         timestamp: message.timestamp,
       });
     } else if (message.role === "system") {

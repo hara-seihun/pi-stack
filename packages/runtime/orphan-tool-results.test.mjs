@@ -4,7 +4,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { patchOrphanToolResults } from "./patch-orphan-tool-results.mjs";
-import { projectOrphanToolResults } from "./orphan-tool-results.mjs";
+import { projectOrphanToolResults } from "../orchestrator/src/threads/orphan-tool-results.mjs";
 
 const modules = process.env.PI_TEST_NODE_MODULES;
 const provider = modules ? join(modules, "@earendil-works/pi-ai/dist/api/anthropic-messages.js")
@@ -34,7 +34,7 @@ for (const path of paths) test(`${path.endsWith("transform-messages.js") ? "SDK"
     const start = patched.indexOf("var NON_VISION_USER_IMAGE_PLACEHOLDER");
     const ending = "return closePendingToolCalls(),result}";
     const end = patched.indexOf(ending, patched.indexOf("function transformMessages(")) + ending.length;
-    transform = new Function(readFileSync(new URL("./orphan-tool-results.mjs", import.meta.url), "utf8").replace("export function", "function")
+    transform = new Function(readFileSync(new URL("../orchestrator/src/threads/orphan-tool-results.mjs", import.meta.url), "utf8").replace("export function", "function")
       + "\n" + patched.slice(start, end) + "; return transformMessages;")();
   }
   const image = { type: "image", mimeType: "image/png", data: "aGVsbG8=" };

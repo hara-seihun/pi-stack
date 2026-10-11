@@ -4,6 +4,8 @@ This package supplies the shared host engine: permission-separated thread custod
 
 Kenaznia dispatches work; native code owns accepted input, execution and result transitions. A kena can create kenatian; a kenatia cannot create agents. Threads are identified by task titles and immutable IDs. Exact native Pi JSONL remains history authority. Explicit Close cancels and archives only the selected conversation.
 
+[Native future factory](docs/runner-factory.md) owns immutable creator upgrades, retained adapter environments, writer custody and created-session historical receipt projection.
+
 ## Provider custody
 
 [`ProviderController`](src/provider-controller.ts) borrows the existing [`Store`](src/store.ts), samples provider meters, reconciles filesystem completion receipts, admits exact model requests and reconnects the independent completion host. Core supplies its explicit auth path, agent directory, meter freshness and automatic-reset policy. Core owns reconciliation and observation timers; each declared ledger has one controller inside that process.

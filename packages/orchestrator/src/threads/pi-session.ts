@@ -1,6 +1,6 @@
 import { assertNever, requireRuntimeEvent, requireAssistantStopReason } from "./runtime-events.js";
-import { existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createAgentSessionRuntime, createBashTool,
   getAgentDir, getPackageDir, SessionManager, type AgentSessionRuntime, type CreateAgentSessionRuntimeFactory } from "@earendil-works/pi-coding-agent";
@@ -36,8 +36,19 @@ import { isRoomSession, assertRoomTools, ROOM_TOOLS, roomSessionInstructions } f
 import { createThreadClient } from "./http.js";
 import { createExecutionActivity, executionActivitySnapshot, observeExecutionActivity, settleExecutionActivity } from "./execution-activity.js";
 import { TELEPHONE_CONTEXT_ARGUMENT, isTelephoneContext, telephoneModelContext } from "./telephone-context.js";
+import { installOrphanReceiptProjection } from "./pi-orphan-projection.js";
 
 export const piEnvironmentScope = coreSessionEnvironment;
+export const runnerFactoryProtocol = "native-future-factory-v1";
+export const runnerSdkDirectory = realpathSync(getPackageDir());
+export function runnerProjectionContinuity(): boolean {
+  const sdk = join(dirname(runnerSdkDirectory), "pi-ai/dist/api/transform-messages.js");
+  const chunks = join(runnerSdkDirectory, "dist/bundle/chunks");
+  const transforms = readdirSync(chunks).filter(name => name.endsWith(".js"))
+    .map(name => readFileSync(join(chunks, name), "utf8")).filter(source => source.includes("function transformMessages("));
+  return transforms.length === 2 && [readFileSync(sdk, "utf8"), ...transforms]
+    .every(source => source.includes("projectOrphanToolResults(normalizedMessages)"));
+}
 type SharedRpc = (runtime: AgentSessionRuntime, io: { output(event: PiEvent): void; exit(code?: number): void }) => Promise<PiSession>;
 const inputCommands = new Set(["input_batch", "prompt", "steer", "follow_up"]);
 const retry = { enabled: true, maxRetries: 6, baseDelayMs: 5_000 };
@@ -186,6 +197,7 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
       if (telephone && created.session.agent.state.tools.length !== 0) throw new RunnerStartupError("Telephone sessions cannot expose host tools");
       retainNativeThinking(created.session);
       installMessageDelivery(created.session, env);
+      installOrphanReceiptProjection(created.session.agent);
       observeProviderRequests(created.session, output);
       const enforceRole = () => {
         const allowed = new Set(roleTools(role, created.session.agent.state.tools.map(tool => tool.name)));

@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const helper = readFileSync(new URL("./orphan-tool-results.mjs", import.meta.url), "utf8").replace("export function", "function");
+const helper = readFileSync(new URL("../orchestrator/src/threads/orphan-tool-results.mjs", import.meta.url), "utf8").replace("export function", "function");
 const marker = "projectOrphanToolResults(normalizedMessages)";
 
 export function patchOrphanToolResults(source) {

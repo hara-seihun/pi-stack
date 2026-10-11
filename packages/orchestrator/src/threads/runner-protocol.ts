@@ -29,7 +29,21 @@ const options = Type.Object({
   threadId: Type.String(), cwd: Type.String(), sessionFile: Type.String(), socketPath: Type.String(),
   args: Type.Array(Type.String()), env: Type.Record(Type.String(), Type.String()), priority: Type.Optional(Type.Boolean()),
 });
+export const factoryIdentity = Type.Object({
+  entryPath: Type.String({ minLength: 1 }), entrySha256: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+  sdkDirectory: Type.String({ minLength: 1 }), sourceCommit: Type.Union([Type.String({ pattern: "^[a-f0-9]{40}$" }), Type.Null()]),
+});
+const factoryStatus = Type.Object({ ok: Type.Literal(true), factoryProtocol: Type.Literal("native-future-factory-v1"), futureFactory: factoryIdentity });
+export function requireFactoryStatus(value: unknown): Static<typeof factoryStatus> {
+  if (!Check(factoryStatus, value)) throw new Error("Native status does not identify its future-factory contract");
+  return value;
+}
+const ownerIdentity = Type.Object({
+  version: Type.Literal(1), dataDir: Type.String(), uid: sequence, control: Type.String(), pid: sequence, startTicks: Type.String({ pattern: "^[0-9]+$" }),
+});
 const control = Type.Union([
+  Type.Object({ type: Type.Literal("upgrade_factory"), protocol: Type.Literal("native-future-factory-v1"),
+    owner: ownerIdentity, expected: factoryIdentity, candidate: factoryIdentity }),
   Type.Object({ type: Type.Literal("open"), options }),
   Type.Object({ type: Type.Literal("close"), socketPath: Type.String() }),
   Type.Object({ type: Type.Literal("activity"), socketPath: Type.String(), active: Type.Boolean() }),

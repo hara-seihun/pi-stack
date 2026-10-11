@@ -90,7 +90,7 @@ requires dependency constraints on Anthropic and both OpenAI APIs.
 ## Orphan tool-result projection
 
 [`patch-orphan-tool-results.mjs`](patch-orphan-tool-results.mjs) applies
-[`orphan-tool-results.mjs`](orphan-tool-results.mjs) at the common provider history
+[`orphan-tool-results.mjs`](../orchestrator/src/threads/orphan-tool-results.mjs) at the common provider history
 transform in the SDK and both bundled copies. An errored/aborted assistant is not
 replayable, and a recovered or late tool receipt may no longer have an adjacent
 replayable call. Those receipts become attributed user evidence, preserving their

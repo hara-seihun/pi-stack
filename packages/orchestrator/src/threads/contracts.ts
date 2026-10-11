@@ -459,6 +459,7 @@ export interface ThreadInputBatch {
 }
 export type PiCommand = Record<string, unknown> & { type: string; id?: string };
 export interface PiSession {
+  nativeOwnership?: { kind: "fresh" } | { kind: "retained"; reference: PiRunnerReference; pid: number; startTicks: string };
   /** Reserve execution capacity, or release it while retaining an idle native session. */
   setActive?(active: boolean): Promise<void>;
   command(command: PiCommand): Promise<void>;

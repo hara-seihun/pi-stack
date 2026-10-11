@@ -19,7 +19,11 @@ import { RunnerStartupError } from "./runner-startup.js";
 import { isolatePiEnvironment } from "./pi-environment.js";
 import { prepareRunnerSlices, managerCommand, newRunnerUnit, RUNNER_MEMORY, RUNNER_HEAP_MB } from "./runner-resources.js";
 import { assertNever, requireRuntimeEvent } from "./runtime-events.js";
-import { requireRunnerFrame, type RunnerFrame } from "./runner-protocol.js";
+import { requireRunnerFrame, requireFactoryStatus, type RunnerFrame } from "./runner-protocol.js";
+import { identifyRunnerFactory, sameFactory, RUNNER_FACTORY_PROTOCOL, isFactoryErrorCode, type FactoryError } from "./runner-factory.js";
+export class RunnerFactoryError extends Error {
+  constructor(readonly code: FactoryError["code"], message: string) { super(message); this.name = "RunnerFactoryError"; }
+}
 
 interface Connection { send(command: PiCommand): void; detach(): void }
 const starts = new Map<string, Promise<void>>();
@@ -41,7 +45,7 @@ function runnerRequest(path: string, value: unknown, timeout = 5000, signal?: Ab
       const end = input.indexOf("\n");
       if (end < 0) return;
       clearTimeout(timer); socket.end();
-      try { const response = JSON.parse(input.slice(0, end)); response.error ? reject(response.nativeNotReady === true ? new RunnerStartupError(response.error) : new Error(response.error)) : resolve(response); }
+      try { const response = JSON.parse(input.slice(0, end)); response.error ? reject(response.errorCode ? new RunnerFactoryError(isFactoryErrorCode(response.errorCode) ? response.errorCode : "factory-contract-invalid", response.error) : response.nativeNotReady === true ? new RunnerStartupError(response.error) : new Error(response.error)) : resolve(response); }
       catch (error) { reject(error); }
     });
     socket.on("error", error => { clearTimeout(timer); reject(error); });
@@ -343,7 +347,7 @@ export function createSharedPiSessionOpener({ dataDir, durable = false, custody,
     if (dirname(control) !== join(socketDir, "thread-runners") || dirname(socketPath) !== join(socketDir, "thread-sockets")) throw new Error("Recorded runner is outside this execution boundary");
     return { control, socketPath };
   }
-  async function attach({ control, socketPath }: PiRunnerReference, output: (event: PiEvent) => void, exit: (code: number) => void, residency = true): Promise<PiSession> {
+  async function attach({ control, socketPath }: PiRunnerReference, output: (event: PiEvent) => void, exit: (code: number) => void, residency = true, nativeOwnership?: PiSession["nativeOwnership"]): Promise<PiSession> {
     let connection: Connection | undefined;
     let exited = false;
     connection = await connect(socketPath, output, code => { exited = true; if (connection) connections.delete(connection); exit(code); }, () => output({ type: "runner_attached", control, socketPath }), observation.signal, connector);
@@ -351,6 +355,7 @@ export function createSharedPiSessionOpener({ dataDir, durable = false, custody,
     if (!exited) connections.add(attached);
     controls.set(control, residency);
     return {
+      nativeOwnership,
       command: async command => { attached.send(command); },
       setActive: async active => { if (residency) await request(control, { type: "activity", socketPath, active }); },
       close: async () => {
@@ -448,8 +453,9 @@ export function createSharedPiSessionOpener({ dataDir, durable = false, custody,
     const group = boundary(options, custody);
     const currentControl = join(socketDir, "thread-runners", `${group}.sock`);
     const owner = nativeStorageOwner(dataDir, custody?.uid ?? process.getuid!());
+    let ownerStatus: any;
     if (owner) {
-      await request(owner.control, { type: "status" });
+      ownerStatus = await request(owner.control, { type: "status" });
       const generation = owner.control.slice(owner.control.lastIndexOf("/") + 1, -5);
       retained = validate({ control: owner.control, socketPath: join(socketDir, "thread-sockets", `${generation}.${hash(options.threadId)}.sock`) });
     } else {
@@ -458,7 +464,15 @@ export function createSharedPiSessionOpener({ dataDir, durable = false, custody,
     const control = retained?.control ?? currentControl;
     const socketPath = retained?.socketPath ?? join(socketDir, "thread-sockets", `${group}.${hash(options.threadId)}.sock`);
     const reference = validate({ control, socketPath });
+    const nativeOwnership: PiSession["nativeOwnership"] = owner ? { kind: "retained", reference, pid: owner.pid, startTicks: owner.startTicks } : { kind: "fresh" };
     output({ type: "runner_attached", control, socketPath });
+    if (owner && ownerStatus.factoryProtocol !== undefined && ownerStatus.factoryProtocol !== RUNNER_FACTORY_PROTOCOL)
+      throw new RunnerFactoryError("factory-contract-invalid", `Unsupported native factory protocol: ${String(ownerStatus.factoryProtocol)}`);
+    if (owner && ownerStatus.factoryProtocol === undefined) {
+      if (present(socketPath))
+        return attach(reference, output, exit, typeof ownerStatus.activeSessions === "number", nativeOwnership);
+      throw new RunnerFactoryError("finite-bootstrap-required", "Registered predecessor has no future-factory upgrade API; accepted residents remain owned and must be attached or finitely bootstrapped before future opens");
+    }
     const launchResources = retained ? routes.get(control) : resources;
     if (launchResources) routes.set(control, launchResources);
     if (launchResources) {
@@ -475,11 +489,22 @@ export function createSharedPiSessionOpener({ dataDir, durable = false, custody,
       starts.set(key, starting);
     }
     await starting;
+    if (owner) {
+      const status = requireFactoryStatus(await request(control, { type: "status" }));
+      const candidate = identifyRunnerFactory(fileURLToPath(new URL("./pi-session.js", import.meta.url)));
+      if (!candidate.ok) throw new RunnerFactoryError(candidate.error.code, candidate.error.message);
+      if (!sameFactory(status.futureFactory, candidate.value)) {
+        const upgraded = await request(control, { type: "upgrade_factory", protocol: RUNNER_FACTORY_PROTOCOL,
+          owner, expected: status.futureFactory, candidate: candidate.value }, 35_000);
+        if (upgraded?.ok !== true || !upgraded.current || !sameFactory(upgraded.current, candidate.value))
+          throw new RunnerFactoryError("factory-conflict", "Native future factory upgrade did not acknowledge the exact candidate");
+      }
+    }
     const { threads: _threads, ...serializable } = options;
     if (!options.env.PI_THREAD_API_URL) throw new Error("Shared Pi sessions require their owning PI_THREAD_API_URL");
     await request(control, { type: "open", options: { ...serializable, socketPath, priority: options.env.PI_THREAD_ADMISSION !== "background" } }, 35_000);
     const status = retained ? await request(control, { type: "status" }) : undefined;
-    return attach(reference, output, exit, !status || typeof status.activeSessions === "number");
+    return attach(reference, output, exit, !status || typeof status.activeSessions === "number", nativeOwnership);
   };
   return { openSession, attachSession, recoverSession, detach() {
     observation.abort(new Error("Runner controller detached; accepted execution remains native-owned"));
