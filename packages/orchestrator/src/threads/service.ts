@@ -22,6 +22,7 @@ import { threadRole, childRole, canSpawnRole } from "./roles.js";
 import { threadSettingsMetadata } from "./settings-metadata.js";
 import { isTelephoneContext, TELEPHONE_CONTEXT_ARGUMENT } from "./telephone-context.js";
 import { inputReceipts } from "./pi-input-receipts.js";
+import { operationCompletionInput } from "./operation-completion.js";
 import { nativeProtocol } from "./native-protocol.js";
 import type { InputStatus } from "./pi-input-status.js";
 import { measureJsonBytes } from "./json-size.js";
@@ -3032,14 +3033,14 @@ export class ThreadService implements ThreadApi {
     if (event.type === "agent_end" || event.type === "agent_settled") projection.live.tools = [];
     if (event.type === "thread_landed" && Array.isArray(event.workIds)) this.adoptLanded(id, { landedWorkIds: event.workIds });
     if (event.type === "tool_operation_result") {
-      const workId = event.workId;
-      if (typeof workId !== "string" || typeof event.message !== "string") {
-        this.sql("UPDATE thread SET metadata=json_set(metadata,'$.executionError',?) WHERE id=?").run("Invalid tool operation result receipt", id);
-      } else if (!this.sql("SELECT 1 FROM thread_work WHERE id=?").get(workId)) {
+      const input = operationCompletionInput(event);
+      if (!input.ok) {
+        this.sql("UPDATE thread SET metadata=json_set(metadata,'$.executionError',?) WHERE id=?").run(input.error, id);
+      } else if (!this.sql("SELECT 1 FROM thread_work WHERE id=?").get(input.value.workId)) {
         const thread = this.get(id)!;
         this.transaction(() => {
-          this.insertMessage(workId, { requestId: workId, threadId: id, senderId: id, text: event.message as string, source: "notification", delivery: "pending" }, thread.settings);
-          this.recordRequest(workId, { operationId: event.operationId, outcome: event.outcome }, "tool-operation-result", workId);
+          this.insertMessage(input.value.workId, { requestId: input.value.workId, threadId: id, senderId: id, text: input.value.message, images: input.value.images, source: "notification", delivery: "pending" }, thread.settings);
+          this.recordRequest(input.value.workId, { operationId: event.operationId, outcome: event.outcome }, "tool-operation-result", input.value.workId);
           if (!thread.held && !thread.metadata?.archived) this.sql("UPDATE thread SET state='running' WHERE id=?").run(id);
         });
         this.changed(id); this.wake(id);

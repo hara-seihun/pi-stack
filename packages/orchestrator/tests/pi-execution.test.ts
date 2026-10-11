@@ -1,20 +1,21 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { SessionManager, type AgentSession } from "@earendil-works/pi-coding-agent";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PiExecution, type OperationCompletion } from "../src/threads/pi-execution.js";
 import { seedPiSession, checkpointPiSession } from "../src/threads/pi-session-file.js";
 
-const roots: string[] = [];
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+const roots: string[] = [], managers: SessionManager[] = [];
+afterEach(() => { managers.splice(0).forEach(manager => manager.dispose()); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const gate = () => { let resolve!: (value?: any) => void; const promise = new Promise<any>(done => { resolve = done; }); return { promise, resolve }; };
 const result = { content: [{ type: "text" as const, text: "done" }], details: {} };
 function fixture(execute: any, manager?: SessionManager) {
   const root = mkdtempSync(join(tmpdir(), "pi-operation-")); roots.push(root);
   const path = join(root, "session.jsonl");
   if (!manager) { seedPiSession(path, root); manager = SessionManager.open(path); }
+  managers.push(manager);
   const agent = new Agent({ initialState: { tools: [{ name: "fixture", label: "Fixture", description: "fixture", parameters: { type: "object" }, execute }] }, streamFn: () => { throw new Error("No provider in operation fixture"); } });
   const session = { agent, sessionManager: manager, sessionId: manager.getSessionId(), sessionFile: manager.getSessionFile(),
     abort: vi.fn(async () => {}), abortBash: vi.fn(), isIdle: true, isBashRunning: false } as unknown as AgentSession;
@@ -73,13 +74,15 @@ it("fences replay after restart and reports owner loss as uncertainty", async ()
   const f = fixture(raw);
   const observing = f.tool.execute("call", {}, undefined);
   await started.promise; f.execution.releaseObservations(); const running = await observing;
+  const snapshotBytes = readFileSync(f.session.sessionFile!);
+  finish.resolve(); await f.execution.halt(f.session, 1000);
+  f.session.sessionManager.dispose();
+  writeFileSync(f.session.sessionFile!, snapshotBytes);
   const restarted = fixture(raw, SessionManager.open(f.session.sessionFile!));
   const snapshot = restarted.execution.inspect((running.details as any).operationId);
   expect(snapshot).toMatchObject({ ok: true, value: { state: "terminal", outcome: { kind: "uncertain" } } });
   await restarted.tool.execute("call", {}, undefined);
   expect(raw).toHaveBeenCalledTimes(1);
-  finish.resolve();
-  await f.execution.halt(f.session, 1000);
 });
 
 it("adopts a predecessor dangling call as uncertain without executing it", async () => {
@@ -88,6 +91,7 @@ it("adopts a predecessor dangling call as uncertain without executing it", async
     api: "openai-completions", provider: "fixture", model: "fixture", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "toolUse", timestamp: Date.now() });
   checkpointPiSession(original.session.sessionManager);
   const raw = vi.fn(async () => result);
+  original.session.sessionManager.dispose();
   const adopted = fixture(raw, SessionManager.open(original.session.sessionFile!));
   const repaired = adopted.session.agent.state.messages.at(-1);
   expect(repaired).toMatchObject({ role: "toolResult", toolCallId: "old-call", isError: true });
