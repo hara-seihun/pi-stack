@@ -54,6 +54,24 @@ def inspect_owner(data_dir, candidate, now_ms, restore_after_ms):
     return {'action': 'restore', 'candidate': candidate}
 
 
+def supervised_owner(unit):
+    observed = subprocess.check_output(
+        ['systemctl', 'show', unit, '-p', 'RefuseManualStart', '-p', 'MainPID',
+         '-p', 'ActiveState', '-p', 'SubState'], text=True, timeout=3)
+    fields = dict(line.split('=', 1) for line in observed.splitlines())
+    if set(fields) != {'RefuseManualStart', 'MainPID', 'ActiveState', 'SubState'}:
+        raise ValueError('Incomplete supervised owner observation')
+    if fields['RefuseManualStart'] not in ('yes', 'no'):
+        raise ValueError('Unknown manual-start fence state')
+    if not fields['MainPID'].isdigit():
+        raise ValueError('Owner namespace has no valid PID')
+    if fields['RefuseManualStart'] == 'yes':
+        return {'action': 'none', 'reason': 'migration-fenced'}
+    if fields['ActiveState'] != 'active' or fields['SubState'] != 'running' or int(fields['MainPID']) == 0:
+        return {'action': 'none', 'reason': 'supervised-owner-not-running'}
+    return {'action': 'inspect', 'pid': fields['MainPID']}
+
+
 def run():
     if len(sys.argv) == 6 and sys.argv[1] == '--inspect-owner':
         print(json.dumps(inspect_owner(sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5]))))
@@ -71,16 +89,16 @@ def run():
             or not isinstance(owner.get('dataDir'), str) or not Path(owner['dataDir']).is_absolute()
             or type(owner.get('restoreAfterMs')) is not int or owner['restoreAfterMs'] <= 0):
         raise ValueError('Invalid explicit availability owner declaration')
+    supervision = supervised_owner(owner['unit'])
+    if supervision['action'] == 'none':
+        print(json.dumps(supervision))
+        return
     remote = Path('/srv/pi/pi-remote').resolve()
     base = Path('/srv/pi/.pi-stack-maintenance/native-history')
     if base not in remote.parents:
         return
     stage = remote.parent
-    pid = subprocess.check_output(['systemctl', 'show', owner['unit'], '-p', 'MainPID', '--value'], text=True).strip()
-    if pid == '0':
-        return
-    if not pid.isdigit() or int(pid) <= 0:
-        raise ValueError('Owner namespace has no valid PID')
+    pid = supervision['pid']
     observed = subprocess.run(['nsenter', '-t', pid, '-m', '--', 'runuser', '-u', owner['user'], '--',
                                '/usr/bin/python3', str(Path(__file__).resolve()), '--inspect-owner',
                                owner['dataDir'], stage.name, str(time.time_ns() // 1_000_000), str(owner['restoreAfterMs'])],
@@ -90,6 +108,9 @@ def run():
         return
     if decision != {'action': 'restore', 'candidate': stage.name}:
         raise ValueError('Owner supplied an invalid restoration decision')
+    current = supervised_owner(owner['unit'])
+    if current != supervision:
+        raise ValueError('Supervised owner changed during availability observation')
     source = stage / 'source'
     subprocess.run(['/usr/local/bin/node', str(source / 'deploy/native-history-coordinator.mjs'),
                     host_file, str(source), stage.name, '--restore'], check=True, timeout=45)
