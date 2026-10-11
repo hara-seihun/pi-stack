@@ -10,16 +10,18 @@ import urllib.request
 sys.dont_write_bytecode = True
 
 
-def protected(path):
+def protected(path, owner_uid):
     p = Path(path)
     s = p.lstat()
-    if not p.is_absolute() or p.resolve() != p or not stat.S_ISREG(s.st_mode) or s.st_uid != 0 or s.st_mode & 0o022:
+    if not isinstance(owner_uid, int) or isinstance(owner_uid, bool) or owner_uid < 0:
+        raise ValueError('explicit source publisher UID required')
+    if not p.is_absolute() or p.resolve() != p or not stat.S_ISREG(s.st_mode) or s.st_uid != owner_uid or s.st_mode & 0o022:
         raise ValueError('protected canonical root file required')
     return p
 
 
 def admit(path):
-    plan = json.loads(protected(path).read_bytes())
+    plan = json.loads(protected(path, 0).read_bytes())
     if plan.get('version') != 1 or plan.get('protocol') != 'pi-core-thin-client-admission-v1' or plan.get('state') != 'selected':
         raise ValueError('explicit selected thin-client admission required')
     release = plan['releaseCommit']
@@ -28,14 +30,15 @@ def admit(path):
     remote = Path('/srv/pi/.pi-stack-releases/remote') / release
     if Path('/srv/pi/pi-remote').resolve() != remote or (remote / '.pi-stack-commit').read_text().strip() != release:
         raise ValueError('selected Remote differs from admitted thin client')
+    source_owner = plan['sourceOwnerUid']
     for name in ('main.ts', 'server.ts', 'core-client.ts'):
-        source = protected(remote / 'server' / name)
+        source = protected(remote / 'server' / name, source_owner)
         if hashlib.sha256(source.read_bytes()).hexdigest() != plan['sourceSha256'][name]:
             raise ValueError('thin-client source identity changed')
     source = (remote / 'server/server.ts').read_text()
     if 'new CoreClient(' not in source or 'createThreadService(' in source:
         raise ValueError('selected Remote does not have the declared external core owner')
-    config = json.loads(protected('/etc/pi-stack/core.json').read_bytes())
+    config = json.loads(protected('/etc/pi-stack/core.json', 0).read_bytes())
     scope = next(s for s in config['scopes'] if s['id'] == plan['scopeId'])
     if config['releaseCommit'] != release or scope['custody']['uid'] != plan['uid'] or scope['custody']['dataDir'] != plan['dataDir'] or scope['availability']['kind'] != 'adopt':
         raise ValueError('client custody differs from the adopted scope')
