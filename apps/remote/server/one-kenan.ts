@@ -42,6 +42,9 @@ export async function custodyVerify(config: OneKenanConfig, user: string, key: s
       if (value.ok === true && Object.keys(value).length === 1) return { ok: true };
       if (value.ok === false && [400, 403, 503].includes(value.status as number) && typeof value.error === "string" && value.error.length > 0 && Object.keys(value).length === 3) return { ok: false, status: value.status as number, error: value.error.replaceAll(key, "[redacted]") };
       return unavailable();
-    } finally { clearTimeout(deadline); }
+    } finally {
+      clearTimeout(deadline);
+      if (child.exitCode === null) { child.kill("SIGKILL"); await child.exited; }
+    }
   } catch { return unavailable(); }
 }
