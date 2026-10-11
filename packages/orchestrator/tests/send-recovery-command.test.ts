@@ -57,7 +57,7 @@ it("selected CLI reconciles an unchanged retained native tool send through the s
     expect(JSON.parse(String(log.mock.calls.at(-1)?.[0]))).toMatchObject({ ok: true, value: { waitRegistration: { status: "registered" } } });
     await dispatch(["wait-recover", "--request-id", "sender:old-wait", "--input", JSON.stringify({ ...waitInput, fromThreadId: "other" })]);
     expect(JSON.parse(String(log.mock.calls.at(-1)?.[0]))).toMatchObject({ ok: false, error: { code: "conflict" } });
-    expect(owner.get("sender")?.metadata?.agentWait?.fromThreadId).toBe("recipient");
+    expect(owner.get("sender")?.metadata?.agentWait).toMatchObject({ fromThreadId: "recipient" });
     expect(fetcher).toHaveBeenCalledTimes(4);
   } finally { await owner.detach(); }
 });

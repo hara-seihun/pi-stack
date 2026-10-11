@@ -67,8 +67,9 @@ it("wait recovery reuses its original durable registration after the request bud
   expect(recovered.details).toMatchObject({ ok: true, value: { status: "registered" } });
   expect(recovered).toMatchObject({ terminate: true });
   for (const body of f.bodies) expect(JSON.parse(body)).toEqual(JSON.parse(f.bodies[0]));
-  const since = f.owner.get("sender")?.metadata?.agentWait?.since;
+  const registration = f.owner.get("sender")?.metadata?.agentWait;
+  expect(registration).toMatchObject({ since: expect.any(Number) });
   expect((await tool.execute("altered", { ...recovery, fromThreadId: "other" }, undefined, undefined, {} as never)).details).toMatchObject({ ok: false, error: { code: "conflict" } });
-  expect(f.owner.get("sender")?.metadata?.agentWait?.since).toBe(since);
+  expect(f.owner.get("sender")?.metadata?.agentWait).toEqual(registration);
   expect((await tool.execute("foreign", { ...recovery, requestId: "recipient:original-wait" }, undefined, undefined, {} as never)).details).toMatchObject({ ok: false, error: { code: "invalid_request" } });
 });

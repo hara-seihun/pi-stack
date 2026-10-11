@@ -36,7 +36,7 @@ test("an open worker controller's detached owned capability never routes back th
     const unbind = service.setWatchList({ watch: async () => ({ ok: true, value: { items: [] } }) });
     expect(await directory.watch(input)).toEqual({ ok: true, value: { items: [] } });
     unbind();
-    const detached = { ok: false, error: { code: "unavailable", message: "This scope has no adopted watch custodian" } };
+    const detached = { ok: false, error: { code: "unavailable", message: "This scope has no adopted watch custodian" } } as const;
     expect(await directory.watch(input)).toEqual(detached);
     expect(await service.watch(input)).toEqual(detached);
   } finally { await service.detach(); rmSync(root, { recursive: true, force: true }); }

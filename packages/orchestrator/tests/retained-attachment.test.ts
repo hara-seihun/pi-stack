@@ -66,7 +66,7 @@ it("cancellation crosses a pending retained attachment before issuing native RPC
   const f = await fixture(false, true);
   const attaching = f.owner.attach(f.thread.id);
   let settled = false;
-  const cancelling = f.service.control({ threadId: f.thread.id, action: "cancel", descendants: false }).then(value => { settled = true; return value; });
+  const cancelling = f.service.control({ threadId: f.thread.id, action: "cancel" }).then(value => { settled = true; return value; });
   await new Promise<void>(resolve => setImmediate(resolve));
   expect(settled).toBe(false);
   expect(f.commands).toEqual([]);
