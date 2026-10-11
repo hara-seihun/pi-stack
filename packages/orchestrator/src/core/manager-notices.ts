@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { serializeThreadSettlementNotification } from "../threads/message-format.js";
 import type { Result, SendThread, ThreadApi } from "../threads/contracts.js";
 
 type NoticeApi = Pick<ThreadApi, "settlements" | "attentionEvents" | "questionEvents" | "list">;
@@ -85,7 +86,7 @@ export class CoreManagerNotices {
         if ("executionId" in receipt) {
           if (receipt.assignmentPending || receipt.notificationOnly || !receipt.finalMessage && receipt.outcome === "complete") continue;
           requestId = `manager-notice:${this.config.notificationOwnerId}:settlement:${receipt.executionId}`;
-          text = JSON.stringify({ type: "thread_settled", threadId: thread.id, title: thread.title, outcome: receipt.outcome, finalMessage: receipt.finalMessage, error: receipt.error });
+          text = serializeThreadSettlementNotification({ threadId: thread.id, title: thread.title, outcome: receipt.outcome, finalMessage: receipt.finalMessage, error: receipt.error });
         } else if ("summary" in receipt) {
           requestId = `manager-notice:${this.config.notificationOwnerId}:attention:${receipt.seq}`;
           text = `Attention from ${thread.title} (${thread.id}): ${receipt.summary}\nOnly your explicit thread_attention notifies the person.`;
