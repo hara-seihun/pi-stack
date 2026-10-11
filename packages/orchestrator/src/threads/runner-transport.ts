@@ -19,7 +19,7 @@ import { RunnerStartupError } from "./runner-startup.js";
 import { isolatePiEnvironment } from "./pi-environment.js";
 import { prepareRunnerSlices, managerCommand, newRunnerUnit, RUNNER_MEMORY, RUNNER_HEAP_MB } from "./runner-resources.js";
 import { assertNever, requireRuntimeEvent } from "./runtime-events.js";
-import { requireRunnerFrame, requireFactoryStatus, type RunnerFrame } from "./runner-protocol.js";
+import { requireRunnerFrame, requireOwnedFactoryStatus, type RunnerFrame } from "./runner-protocol.js";
 import { identifyRunnerFactory, sameFactory, RUNNER_FACTORY_PROTOCOL, isFactoryErrorCode, type FactoryError } from "./runner-factory.js";
 export class RunnerFactoryError extends Error {
   constructor(readonly code: FactoryError["code"], message: string) { super(message); this.name = "RunnerFactoryError"; }
@@ -490,14 +490,20 @@ export function createSharedPiSessionOpener({ dataDir, durable = false, custody,
     }
     await starting;
     if (owner) {
-      const status = requireFactoryStatus(await request(control, { type: "status" }));
+      const status = requireOwnedFactoryStatus(await request(control, { type: "status" }), owner);
       const candidate = identifyRunnerFactory(fileURLToPath(new URL("./pi-session.js", import.meta.url)));
       if (!candidate.ok) throw new RunnerFactoryError(candidate.error.code, candidate.error.message);
       if (!sameFactory(status.futureFactory, candidate.value)) {
-        const upgraded = await request(control, { type: "upgrade_factory", protocol: RUNNER_FACTORY_PROTOCOL,
-          owner, expected: status.futureFactory, candidate: candidate.value }, 35_000);
-        if (upgraded?.ok !== true || !upgraded.current || !sameFactory(upgraded.current, candidate.value))
-          throw new RunnerFactoryError("factory-conflict", "Native future factory upgrade did not acknowledge the exact candidate");
+        try {
+          const upgraded = await request(control, { type: "upgrade_factory", protocol: RUNNER_FACTORY_PROTOCOL,
+            owner, expected: status.futureFactory, candidate: candidate.value }, 35_000);
+          if (upgraded?.ok !== true || !upgraded.current || !sameFactory(upgraded.current, candidate.value))
+            throw new RunnerFactoryError("factory-conflict", "Native future factory upgrade did not acknowledge the exact candidate");
+        } catch (error) {
+          if (!(error instanceof RunnerFactoryError) || error.code !== "factory-conflict") throw error;
+          const observed = requireOwnedFactoryStatus(await request(control, { type: "status" }), owner);
+          if (!sameFactory(observed.futureFactory, candidate.value)) throw error;
+        }
       }
     }
     const { threads: _threads, ...serializable } = options;

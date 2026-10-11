@@ -86,12 +86,13 @@ export class RunnerFutureFactory {
   async upgrade(expected: RunnerFactoryIdentity, candidate: RunnerFactoryIdentity): Promise<FactoryResult<{ previous: RunnerFactoryIdentity; current: RunnerFactoryIdentity }>> {
     try { this.assertLease(); }
     catch (cause) { return { ok: false, error: { code: "ownership-conflict", message: String(cause) } }; }
+    if (sameFactory(this.current.identity, candidate)) return { ok: true, value: { previous: this.current.identity, current: this.current.identity } };
     if (!sameFactory(this.current.identity, expected)) return { ok: false, error: { code: "factory-conflict", message: "Current future factory differs from expected predecessor" } };
-    if (sameFactory(expected, candidate)) return { ok: true, value: { previous: expected, current: expected } };
     const loaded = await this.load(candidate);
     if (!loaded.ok) return loaded;
     try { this.assertLease(); }
     catch (cause) { return { ok: false, error: { code: "ownership-conflict", message: String(cause) } }; }
+    if (sameFactory(this.current.identity, candidate)) return { ok: true, value: { previous: this.current.identity, current: this.current.identity } };
     if (!sameFactory(this.current.identity, expected)) return { ok: false, error: { code: "factory-conflict", message: "Future factory changed during preparation" } };
     const previous = this.current.identity;
     this.current = this.seal(loaded.value);
