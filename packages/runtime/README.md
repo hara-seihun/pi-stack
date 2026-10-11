@@ -87,6 +87,26 @@ checks registered agent tools, explicit zero-argument exceptions and affected
 operations; [`thread-wait-schema.test.ts`](../orchestrator/tests/thread-wait-schema.test.ts)
 requires dependency constraints on Anthropic and both OpenAI APIs.
 
+## Orphan tool-result projection
+
+[`patch-orphan-tool-results.mjs`](patch-orphan-tool-results.mjs) applies
+[`orphan-tool-results.mjs`](orphan-tool-results.mjs) at the common provider history
+transform in the SDK and both bundled copies. An errored/aborted assistant is not
+replayable, and a recovered or late tool receipt may no longer have an adjacent
+replayable call. Those receipts become attributed user evidence, preserving their
+text, images, timestamp and success/error status without inventing a tool call or
+replaying an effect. Valid adjacent result batches retain native tool pairing;
+unmatched receipts follow the batch so they cannot interrupt its valid pairs.
+Duplicate results also become evidence instead of duplicate protocol results.
+Native JSONL and genuine tool-operation details remain untouched. Deployment hashes
+both files into its immutable dependency identity.
+
+[`orphan-tool-results.test.mjs`](orphan-tool-results.test.mjs) checks actual SDK and
+bundled transforms against Anthropic's conversion, including aborted/error calls,
+late/duplicate results, mixed valid/orphan batches, system updates, images,
+cross-provider IDs and missing content. It checks adjacency, complete result-content
+preservation, idempotence and native-history immutability without network calls.
+
 ## Anthropic error tool-result content
 
 [`patch-anthropic-error-content.mjs`](patch-anthropic-error-content.mjs) normalizes
