@@ -1,4 +1,5 @@
 import type { CoreResult } from "./config.js";
+import type { DutyCustodyError } from "./duties-runtime.js";
 
 type ComponentHealth = "ready" | "failed" | "disabled";
 export type RootReconciliationHealth =
@@ -6,13 +7,13 @@ export type RootReconciliationHealth =
   | { state: "delivery-degraded"; retainedDeliveryErrors: number };
 export type CoreReconciliationHealth =
   | { state: "pending" }
-  | { state: "observed"; provider: ComponentHealth; duties: "ready" | "failed"; root: RootReconciliationHealth };
+  | { state: "observed"; provider: ComponentHealth; duties: "ready" | "failed" | "custody-degraded"; dutyCustodyErrors: DutyCustodyError[]; root: RootReconciliationHealth };
 
 export function observeCoreReconciliation(
   provider: PromiseSettledResult<void | undefined>,
   root: PromiseSettledResult<{ errors: number } | undefined>,
   duties: PromiseSettledResult<CoreResult<void>>,
-  configured: { provider: boolean; root: boolean },
+  configured: { provider: boolean; root: boolean; dutyCustodyErrors: DutyCustodyError[] },
 ): CoreReconciliationHealth {
   let rootHealth: RootReconciliationHealth;
   if (!configured.root) rootHealth = { state: "disabled" };
@@ -21,7 +22,8 @@ export function observeCoreReconciliation(
   return {
     state: "observed",
     provider: !configured.provider ? "disabled" : provider.status === "fulfilled" ? "ready" : "failed",
-    duties: duties.status === "fulfilled" && duties.value.ok ? "ready" : "failed",
+    duties: duties.status === "fulfilled" && duties.value.ok ? configured.dutyCustodyErrors.length ? "custody-degraded" : "ready" : "failed",
+    dutyCustodyErrors: configured.dutyCustodyErrors,
     root: rootHealth,
   };
 }
@@ -30,6 +32,6 @@ export function coreReadiness(started: boolean, stopping: boolean, reconciliatio
   if (!started || stopping || reconciliation.state === "pending") return { ready: false, degraded: false };
   return {
     ready: reconciliation.provider !== "failed" && reconciliation.duties !== "failed" && reconciliation.root.state !== "failed",
-    degraded: reconciliation.root.state === "delivery-degraded",
+    degraded: reconciliation.duties === "custody-degraded" || reconciliation.root.state === "delivery-degraded",
   };
 }

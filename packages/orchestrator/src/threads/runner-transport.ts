@@ -356,6 +356,7 @@ export function createSharedPiSessionOpener({ dataDir, durable = false, custody,
     controls.set(control, residency);
     return {
       nativeOwnership,
+      detach: () => { attached.detach(); connections.delete(attached); },
       command: async command => { attached.send(command); },
       setActive: async active => { if (residency) await request(control, { type: "activity", socketPath, active }); },
       close: async () => {

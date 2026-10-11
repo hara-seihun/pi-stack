@@ -2,14 +2,14 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, mock, spyOn } from "bun:test";
 import { ThreadService } from "../src/threads/service.js";
 import { WatchList } from "../src/threads/watch-list.js";
 import { adoptMarkdownDuties } from "../src/core/duties.js";
 
 it("writes exact held duty custody before retirement and resumes a partially retired import idempotently", async () => {
   const root = mkdtempSync(join(tmpdir(), "markdown-duties-"));
-  const service = new ThreadService({ databasePath: join(root, "threads.sqlite"), sessionsDir: root, capacity: { mode: "unmanaged" }, openSession: vi.fn() });
+  const service = new ThreadService({ databasePath: join(root, "threads.sqlite"), sessionsDir: root, capacity: { mode: "unmanaged" }, openSession: mock() });
   const db = new DatabaseSync(join(root, "threads.sqlite"));
   try {
     const ids: string[] = [];
@@ -25,7 +25,7 @@ it("writes exact held duty custody before retirement and resumes a partially ret
     const path = join(root, "notes", "duties.md");
     const original = service.adoptWakeDuty.bind(service);
     let calls = 0;
-    vi.spyOn(service, "adoptWakeDuty").mockImplementation((id, receipt) => {
+    spyOn(service, "adoptWakeDuty").mockImplementation((id, receipt) => {
       expect(readFileSync(path, "utf8")).toContain(receipt);
       if (++calls === 2) return { ok: false, error: { code: "unavailable", message: "Simulated interrupted retirement" } };
       return original(id, receipt);
@@ -48,9 +48,9 @@ it("writes exact held duty custody before retirement and resumes a partially ret
 describe("watch Markdown adoption", () => {
   it("preserves existing notes, watch requests and pending spool without dispatch", async () => {
     const root = mkdtempSync(join(tmpdir(), "markdown-watch-"));
-    const service = new ThreadService({ databasePath: join(root, "threads.sqlite"), sessionsDir: root, capacity: { mode: "unmanaged" }, openSession: vi.fn() });
-    const spawn = vi.fn();
-    const watch = new WatchList({ databasePath: join(root, "watch.sqlite"), threads: { spawn, list: vi.fn(), questions: vi.fn() }, placement: vi.fn(), checkOutcome: vi.fn(), onError: vi.fn() });
+    const service = new ThreadService({ databasePath: join(root, "threads.sqlite"), sessionsDir: root, capacity: { mode: "unmanaged" }, openSession: mock() });
+    const spawn = mock();
+    const watch = new WatchList({ databasePath: join(root, "watch.sqlite"), threads: { spawn, list: mock(), questions: mock() }, placement: mock(), checkOutcome: mock(), onError: mock() });
     const db = new DatabaseSync(join(root, "watch.sqlite"));
     try {
       db.prepare("INSERT INTO watch_item(id,body) VALUES(?,?)").run("watch-3", JSON.stringify({ id: "watch-3", what: "Check exchange", why: "Needed", nextDueAt: 3, addedBy: "unknown", createdAt: 1, updatedAt: 1 }));
@@ -68,4 +68,32 @@ describe("watch Markdown adoption", () => {
       expect(readFileSync(path, "utf8")).toBe(body);
     } finally { db.close(); await watch.close(); await service.close(); rmSync(root, { recursive: true, force: true }); }
   });
+});
+
+
+it("edits current notes without changing the custody receipt and refuses malformed historical evidence without mutation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "markdown-boundary-"));
+  const service = new ThreadService({ databasePath: join(root, "threads.sqlite"), sessionsDir: root, capacity: { mode: "unmanaged" }, openSession: mock() });
+  try {
+    const path = join(root, "duties.md"), input = { service, path, uid: process.getuid!(), gid: process.getgid!() };
+    const adopted = adoptMarkdownDuties(input);
+    if (!adopted.ok) throw new Error(adopted.error.message);
+    const original = readFileSync(path, "utf8");
+    const current = original.replace("## Current recurring duties — editable", "## Current recurring duties — editable\n\nHeld: cleaning stays stopped.");
+    writeFileSync(path, current);
+    expect(adoptMarkdownDuties(input)).toEqual(adopted);
+    expect(readFileSync(path, "utf8")).toBe(current);
+    const variants = [
+      current.replace('"owners":{}', '"owners":{"changed":null}'),
+      current.replace("<!-- pi-stack-duties-custody:start -->", "<!-- missing-start -->"),
+      current.replace("<!-- pi-stack-duties-custody:end -->", "<!-- missing-end -->"),
+      current.replace('"snapshot":{', '"snapshot":broken{'),
+    ];
+    for (const malformed of variants) {
+      writeFileSync(path, malformed);
+      expect(adoptMarkdownDuties(input).ok).toBe(false);
+      expect(readFileSync(path, "utf8")).toBe(malformed);
+      expect(malformed).toContain(adopted.value.receipt);
+    }
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
 });

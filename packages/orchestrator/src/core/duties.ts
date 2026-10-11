@@ -64,6 +64,37 @@ function snapshot(input: MarkdownDutyAdoption): DutySnapshot {
   return { version: 1, wakes, watches, owners };
 }
 
+function parseCustody(existing: string): Result<{ snapshot: DutySnapshot; receipt: string }> {
+  try {
+    const start = existing.indexOf(START);
+    if (start < 0) return invalid("Markdown duty custody block is missing");
+    if (existing.indexOf(START, start + START.length) >= 0) return invalid("Multiple duty custody blocks in the owning Markdown file");
+    const end = existing.indexOf(END, start + START.length);
+    if (end < 0 || existing.indexOf(END, end + END.length) >= 0) return invalid("Incomplete or multiple Markdown duty custody end markers");
+    const block = existing.slice(start + START.length, end);
+    const match = block.match(/```json\n(\{[^\n]+\})\n```/);
+    if (!match) return invalid("Markdown duty custody snapshot is missing");
+    const record = JSON.parse(match[1]!) as { receipt: string; snapshot: DutySnapshot };
+    if (!record || !record.snapshot || record.snapshot.version !== 1 || !Array.isArray(record.snapshot.wakes)
+      || typeof record.receipt !== "string" || record.receipt !== `markdown-duties:${digest(JSON.stringify(record.snapshot))}`) return invalid("Markdown duty custody receipt does not match its snapshot");
+    const adopted = record.snapshot;
+    if (!adopted.owners || typeof adopted.owners !== "object" || Array.isArray(adopted.owners)
+      || adopted.wakes.some(wake => !wake || typeof wake.threadId !== "string" || typeof wake.generation !== "string"
+        || !wake.schedule || !Array.isArray(wake.pendingMessageIds) || wake.pendingMessageIds.some(id => typeof id !== "string"))
+      || adopted.watches !== null && (!adopted.watches || !Array.isArray(adopted.watches.items) || !Array.isArray(adopted.watches.pendingOccurrences))) return invalid("Malformed Markdown duty custody snapshot");
+    return { ok: true, value: { snapshot: adopted, receipt: record.receipt } };
+  } catch (error) { return invalid(`Malformed Markdown duty custody snapshot: ${error instanceof Error ? error.message : String(error)}`); }
+}
+
+export function validateMarkdownDutyCustody(path: string, expectedReceipt: string): Result<void> {
+  try {
+    const parsed = parseCustody(readFileSync(path, "utf8"));
+    if (!parsed.ok) return parsed;
+    if (parsed.value.receipt !== expectedReceipt) return { ok: false, error: { code: "conflict", message: "Markdown duty custody receipt changed after adoption" } };
+    return { ok: true, value: undefined };
+  } catch (error) { return { ok: false, error: { code: "unavailable", message: error instanceof Error ? error.message : String(error) } }; }
+}
+
 /** The owning scope supplies the path and unlocked owners. Adoption never dispatches, ticks or releases a stop. */
 export function adoptMarkdownDuties(input: MarkdownDutyAdoption): Result<MarkdownDutyReceipt> {
   if (!isAbsolute(input.path) || !Number.isSafeInteger(input.uid) || input.uid < 0 || !Number.isSafeInteger(input.gid) || input.gid < 0) return invalid("Markdown duty adoption requires an explicit absolute owning path and UID/GID");
@@ -72,24 +103,21 @@ export function adoptMarkdownDuties(input: MarkdownDutyAdoption): Result<Markdow
     let adopted: DutySnapshot, receipt: string;
     const start = existing.indexOf(START);
     if (start >= 0) {
-      if (existing.indexOf(START, start + START.length) >= 0) return invalid("Multiple duty custody blocks in the owning Markdown file");
-      const end = existing.indexOf(END, start + START.length);
-      if (end < 0) return invalid("Incomplete Markdown duty custody block");
-      const block = existing.slice(start + START.length, end);
-      const match = block.match(/```json\n(\{[^\n]+\})\n```/);
-      if (!match) return invalid("Markdown duty custody snapshot is missing");
-      const record = JSON.parse(match[1]!) as { receipt: string; snapshot: DutySnapshot };
-      if (!record || !record.snapshot || record.snapshot.version !== 1 || !Array.isArray(record.snapshot.wakes)
-        || typeof record.receipt !== "string" || record.receipt !== `markdown-duties:${digest(JSON.stringify(record.snapshot))}`) return invalid("Markdown duty custody receipt does not match its snapshot");
-      adopted = record.snapshot; receipt = record.receipt;
+      const parsed = parseCustody(existing);
+      if (!parsed.ok) return parsed;
+      adopted = parsed.value.snapshot; receipt = parsed.value.receipt;
     } else {
+      if (existing.includes(END) || existing.includes("markdown-duties:")) return invalid("Duty custody start marker is missing from existing receipt-bound evidence");
       adopted = snapshot(input);
       receipt = `markdown-duties:${digest(JSON.stringify(adopted))}`;
       const notes = [
-        existing.trimEnd(), "", "## Adopted recurring duties", "",
+        existing.trimEnd(), "", "## Current recurring duties — editable", "",
+        "Edit current duty rows, holds, instructions and next actions in this section or elsewhere outside the custody markers. Current instructions may supersede historical instructions without changing the adoption record.", "",
         "Kenaznia owns timing and dispatch. Judge local day/date, business hours, weekends and holidays before acting. Workers leave their state and next action in their owning Markdown notes and finish.", "",
-        "The custody snapshot below is source data, not permission to resume work. Held or archived owners remain stopped. An unknown owner state is unresolved, not actionable. Accepted pending occurrences retain their exact IDs and receipts; do not regenerate or replay them.", "",
-        START, "```json", JSON.stringify({ receipt, snapshot: adopted }), "```", END, "",
+        "## Immutable adoption custody — do not edit", "",
+        "Everything between the custody start/end markers, including the JSON snapshot and receipt, is immutable historical evidence. Do not update its duty text, holds, schedules or owner states; do not recompute its checksum. Put changes to current instructions above this section. A mismatch isolates this duty scope with an explicit custody error and leaves its accepted spool intact; repair from the original receipt-bound evidence.", "",
+        "This snapshot is not permission to resume work. Held or archived owners remain stopped. An unknown owner state is unresolved, not actionable. Accepted pending occurrences retain their exact IDs and receipts; do not regenerate or replay them.", "",
+        START, "IMMUTABLE RECEIPT-BOUND SNAPSHOT — current instructions belong outside these markers.", "```json", JSON.stringify({ receipt, snapshot: adopted }), "```", END, "",
       ].join("\n");
       durableWrite(input.path, notes, input);
     }

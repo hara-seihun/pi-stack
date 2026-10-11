@@ -465,6 +465,9 @@ export interface PiSession {
   /** Reserve execution capacity, or release it while retaining an idle native session. */
   setActive?(active: boolean): Promise<void>;
   command(command: PiCommand): Promise<void>;
+  /** Stop this controller's observation/reconnect loop only; retain native execution and history.
+   * Absent on in-process sessions that own no independently reconnecting observer. */
+  detach?(): void;
   close(): Promise<void>;
 }
 export interface PiSessionOptions {

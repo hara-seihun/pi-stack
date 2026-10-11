@@ -21,6 +21,19 @@ printf '%s' '{"id":"ACTION_ID"}' | env -u PI_THREAD_TOKEN pi-actions inspect
 
 Replace the fixture identities, revision and evidence with the inspected record. Confirm `ok: true` and `resolved: true` in the readback. This resolves only the purpose: it neither resends the delivered request nor lifts recipient holds. Active or uncertain effects require their own provider-evidence reconciliation and cannot be resolved into a new contact.
 
+### Reconcile decisions
+
+Every reconciliation requires the exact inspected `expectedRevision`, an explicit `actor`, and evidence for the chosen decision. Actor text alone grants no authority. An `inflight` action cannot be reconciled.
+
+| Decision | Required state/evidence | Result |
+| --- | --- | --- |
+| `effect-confirmed` | `uncertain` with `provider-receipt` evidence | `succeeded`; purpose remains unresolved |
+| `no-effect-confirmed` | `uncertain`, `held`, `accepted`, or `failed-before-effect` with `provider-rejection` evidence | `failed-before-effect`; purpose resolved |
+| `resolve-purpose` | `succeeded` or `failed-before-effect`, with supporting evidence | Purpose resolved; no effect replay |
+| `hold` | Explicit recipient-hold evidence | Recipient hold retained; an `accepted` action becomes `held` |
+
+Use the revision returned by `effect-confirmed` for any subsequent `resolve-purpose` request; the previous revision is stale. Neither purpose resolution nor effect reconciliation lifts recipient holds or sends the request again.
+
 ## Installed proof
 
 `acceptance.ts` is safe installed behavior proof. It exercises installed core/HTTP/telephone modules using temporary synthetic owners, fake effects and twelve independent HTTP clients. It additionally makes one real canonical-owner **read-only** query for a fresh nonexistent synthetic ID, never submits a live action or contacts a recipient. Run as the registered owning Unix account; Remote and Runtime must have matching release markers.

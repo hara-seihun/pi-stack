@@ -188,6 +188,7 @@ export class ThreadService implements ThreadApi {
   private readonly listeners = new Set<(event: ThreadServiceEvent) => void>();
   private readonly awaiting = new Set<() => void>();
   private timer?: ReturnType<typeof setInterval>;
+  private scheduledWakesSuspended = false;
   private started = false;
   private closed = false;
   private suspended = false;
@@ -1412,7 +1413,9 @@ export class ThreadService implements ThreadApi {
     this.changed(threadId);
     return good(undefined);
   }
+  suspendScheduledWakes(): void { this.scheduledWakesSuspended = true; }
   private deliverScheduledWakes(): void {
+    if (this.scheduledWakesSuspended) return;
     const now = Date.now();
     const due = this.sql(`SELECT s.thread_id,s.generation,s.data FROM thread_wake s JOIN thread t ON t.id=s.thread_id
       WHERE json_extract(s.data,'$.nextDueAt')<=? AND t.held=0 AND json_extract(t.metadata,'$.role')='kenaznia'
@@ -2973,7 +2976,11 @@ export class ThreadService implements ThreadApi {
       return runtime;
     } catch (error) {
       if (!this.suspended) {
-        this.runtimes.delete(id);
+        // Discarding the controller does not close uncertain/active native work.
+        // Its observation must stop before another controller attaches, otherwise
+        // the orphan reconnect loop steals the peer and acknowledges ignored output.
+        runtime.session?.detach?.();
+        if (this.runtimes.get(id) === runtime) this.runtimes.delete(id);
         try { if (runtime.session && !runtime.busy) await runtime.session.close(); }
         finally { await recoveredAdmission?.release(); }
       }

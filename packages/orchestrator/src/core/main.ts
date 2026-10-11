@@ -177,7 +177,7 @@ export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningC
       if (reconciliation || shutdown.signal.aborted) return;
       reconciliation = (async () => {
         const results = await Promise.allSettled([provider?.reconcile(), root?.reconcile(), duties.tick()] as const);
-        reconciliationHealth = observeCoreReconciliation(...results, { provider: provider !== undefined, root: root !== null });
+        reconciliationHealth = observeCoreReconciliation(...results, { provider: provider !== undefined, root: root !== null, dutyCustodyErrors: duties.errors() });
         for (const result of results) if (result.status === "rejected") console.error(`Core reconciliation failed: ${String(result.reason)}`);
       })().finally(() => { reconciliation = undefined; });
     };

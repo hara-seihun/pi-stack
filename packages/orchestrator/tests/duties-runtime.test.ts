@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, existsSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { CoreDuties, parseCoreDutiesConfig, WATCH_CUSTODY_TABLES } from "../src/core/duties-runtime.js";
 import { ThreadService } from "../src/threads/service.js";
 import type { CoreScope } from "../src/core/contracts.js";
@@ -30,7 +30,7 @@ function fixture(input: { spool?: "hold" | "drain"; granted?: boolean; inactive?
   writeFileSync(receiptPath, JSON.stringify({ version: 1, state: "detached", scopeId: `${scopeId}:watch`, databasePath: watchPath,
     databaseIdentity: { dev: String(identity.dev), ino: String(identity.ino) }, tableNames: WATCH_CUSTODY_TABLES,
     previousOwner: { identity: "original-supervisor", detachedAt: "2026-10-10T20:00:00Z" } }), { mode: 0o600 });
-  const service = new ThreadService({ databasePath: join(root, "threads.sqlite"), sessionsDir: root, capacity: { mode: "unmanaged" }, openSession: vi.fn() });
+  const service = new ThreadService({ databasePath: join(root, "threads.sqlite"), sessionsDir: root, capacity: { mode: "unmanaged" }, openSession: mock() });
   services.push(service);
   const resource = { id: `${scopeId}-threads`, kind: "thread", owner: scopeId, privacy: "private", subjects: [scopeId], consent: "not-required" } as const;
   const scope: CoreScope = { id: scopeId, principalId: scopeId, availability: input.inactive ? { kind: "unavailable", reason: "inactive" } : { kind: "adopt" }, resource,
@@ -40,7 +40,7 @@ function fixture(input: { spool?: "hold" | "drain"; granted?: boolean; inactive?
   const principal: Principal = { kind: "person", id: scopeId, person: scopeId };
   const policy: PermissionPolicy = { revision: 1, grants: input.granted === false ? [] : [{ id: `${scopeId}-dispatch`, principal: scopeId, resource: { kind: "exact", id: resource.id },
     actions: ["dispatch"], effect: "allow", validFrom: 0, validUntil: null, issuedBy: scopeId, source: "test grant" }], consents: [] };
-  const owner = vi.fn(() => ({ ok: true as const, value: { threads: service, runtime: { path: (logical: string) => {
+  const owner = mock(() => ({ ok: true as const, value: { threads: service, runtime: { path: (logical: string) => {
     if (logical !== root && !logical.startsWith(root + "/")) throw new Error("Unregistered resource path"); return logical;
   } } } }));
   const config = { kind: "configured" as const, entries: [{ scopeId, path,
@@ -89,14 +89,15 @@ describe("existing duty custody", () => {
           const parent = join(root, "file"); writeFileSync(parent, "not a directory");
           config.entries[0]!.path = join(parent, "duties.md");
         } else scope.manager = { kind: "existing", threadId: "missing-manager" };
-        expect((await plugin.start()).ok).toBe(false);
+        expect((await plugin.start()).ok).toBe(true);
+        expect(plugin.errors()).toMatchObject([{ stage: failure === "markdown" ? "markdown" : "manager-pointer" }]);
         expect(await service.watch({ action: "list", threadId: "manager" })).toMatchObject({ ok: false, error: { code: "unavailable" } });
         expect(db.prepare("SELECT id FROM watch_wake").get()).toMatchObject({ id: occurrence.id });
         expect(service.snapshot()).toEqual([]);
       } finally { db.close(); }
     }
   });
-  it("keeps each scope's reader isolated and rolls back earlier bindings if a later scope fails", async () => {
+  it("keeps each scope's reader isolated when a later scope fails", async () => {
     const first = fixture({ scopeId: "first" }), second = fixture({ scopeId: "second" });
     const combined = () => {
       const plugin = new CoreDuties({ kind: "configured", entries: [...first.config.entries, ...second.config.entries] }, {
@@ -114,18 +115,19 @@ describe("existing duty custody", () => {
       expect(await second.service.watch({ action: "list", threadId: "manager" })).toMatchObject({ ok: true, value: { items: [{ id: "second-duty" }] } });
       await success.close();
       second.scope.manager = { kind: "existing", threadId: "missing-manager" };
-      expect((await combined().start()).ok).toBe(false);
-      for (const fixture of [first, second]) {
-        expect(await fixture.service.watch({ action: "list", threadId: "manager" })).toMatchObject({ ok: false, error: { code: "unavailable" } });
-        expect(fixture.db.prepare("SELECT id FROM watch_wake").get()).toMatchObject({ id: fixture.occurrence.id });
-      }
+      const partial = combined();
+      expect((await partial.start()).ok).toBe(true);
+      expect(partial.errors()).toMatchObject([{ scopeId: "second", stage: "manager-pointer" }]);
+      expect(await first.service.watch({ action: "list", threadId: "manager" })).toMatchObject({ ok: true });
+      expect(await second.service.watch({ action: "list", threadId: "manager" })).toMatchObject({ ok: false, error: { code: "unavailable" } });
+      for (const fixture of [first, second]) expect(fixture.db.prepare("SELECT id FROM watch_wake").get()).toMatchObject({ id: fixture.occurrence.id });
     } finally { first.db.close(); second.db.close(); }
   });
   it("releases only its own API binding when another provider has replaced it", async () => {
     const { db, plugin, service } = fixture();
     try {
       expect((await plugin.start()).ok).toBe(true);
-      const replacement = { watch: vi.fn(async () => ({ ok: true as const, value: { items: [] } })) };
+      const replacement = { watch: mock(async () => ({ ok: true as const, value: { items: [] } })) };
       const unbind = service.setWatchList(replacement);
       await plugin.close();
       expect(await service.watch({ action: "list", threadId: "manager" })).toEqual({ ok: true, value: { items: [] } });
@@ -155,7 +157,8 @@ describe("existing duty custody", () => {
       try {
         expect((await plugin.start()).ok).toBe(true);
         const tick = await plugin.tick();
-        expect(tick.ok).toBe(input.granted !== false);
+        expect(tick.ok).toBe(true);
+        expect(plugin.errors()).toHaveLength(input.granted === false ? 1 : 0);
         expect(service.get(occurrence.id)).toBeNull();
         expect(db.prepare("SELECT id FROM watch_wake").get()).toMatchObject({ id: occurrence.id });
       } finally { db.close(); }
@@ -186,7 +189,8 @@ describe("existing duty custody", () => {
     const corrupt = fixture();
     try {
       corrupt.db.exec("DROP TABLE watch_wake");
-      expect((await corrupt.plugin.start()).ok).toBe(false);
+      expect((await corrupt.plugin.start()).ok).toBe(true);
+      expect(corrupt.plugin.errors()).toMatchObject([{ stage: "resources" }]);
       expect(corrupt.db.prepare("SELECT 1 FROM sqlite_master WHERE name='watch_wake'").get()).toBeUndefined();
       expect(existsSync(corrupt.path)).toBe(false);
     } finally { corrupt.db.close(); }
@@ -206,8 +210,58 @@ describe("existing duty custody", () => {
     try {
       const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
       writeFileSync(receiptPath, JSON.stringify({ ...receipt, tableNames: ["unrelated_images"] }), { mode: 0o600 });
-      expect((await plugin.start()).ok).toBe(false);
+      expect((await plugin.start()).ok).toBe(true);
+      expect(plugin.errors()).toMatchObject([{ stage: "watch-owner" }]);
       expect(db.prepare("SELECT id FROM watch_wake").get()).toMatchObject({ id: "occurrence-13" });
     } finally { db.close(); }
   });
+});
+
+
+it("isolates an edited snapshot at startup, keeps original accepted work, and drains only the valid scope", async () => {
+  for (const badFirst of [true, false]) {
+    const bad = fixture({ scopeId: "bad" }), good = fixture({ scopeId: "good" });
+    try {
+      expect((await bad.plugin.start()).ok).toBe(true);
+      const originalReceipt = bad.plugin.receipts()[0]!.receipt;
+      await bad.plugin.close();
+      const tampered = readFileSync(bad.path, "utf8").replace('"what":"Check exchange"', '"what":"Edited hold"');
+      writeFileSync(bad.path, tampered);
+      const failures = spyOn(bad.service, "adoptWakeDuty");
+      const plugin = new CoreDuties({ kind: "configured", entries: badFirst ? [...bad.config.entries, ...good.config.entries] : [...good.config.entries, ...bad.config.entries] }, {
+        scopes: [bad.scope, good.scope], principals: [bad.principal, good.principal],
+        policy: { revision: 1, grants: [...bad.policy.grants, ...good.policy.grants], consents: [] },
+        owner: id => id === "bad" ? bad.owner() : good.owner(), enabled: () => true,
+      }); plugins.push(plugin);
+      expect((await plugin.start()).ok).toBe(true);
+      expect(plugin.errors()).toMatchObject([{ scopeId: "bad", path: bad.path, stage: "markdown", error: { code: "invalid_request", message: expect.stringContaining("receipt does not match") } }]);
+      expect(plugin.receipts().map(receipt => receipt.path)).toEqual([good.path]);
+      expect(readFileSync(bad.path, "utf8")).toBe(tampered);
+      expect(tampered).toContain(originalReceipt);
+      expect(failures).not.toHaveBeenCalled();
+      expect(await bad.service.watch({ action: "list", threadId: "manager" })).toMatchObject({ ok: false });
+      expect(await good.service.watch({ action: "list", threadId: "manager" })).toMatchObject({ ok: true });
+      expect((await plugin.tick()).ok).toBe(true);
+      expect(bad.db.prepare("SELECT id FROM watch_wake").get()).toMatchObject({ id: bad.occurrence.id });
+      expect(bad.service.snapshot()).toEqual([]);
+      expect(good.service.pending(good.occurrence.id).map(message => message.id)).toEqual([good.occurrence.requestId]);
+      expect(good.db.prepare("SELECT count(*) n FROM watch_wake").get()).toMatchObject({ n: 0 });
+    } finally { bad.db.close(); good.db.close(); }
+  }
+});
+
+it("checks immutable custody again before draining and never rechecksums a later edit", async () => {
+  const { db, plugin, path, service, occurrence } = fixture();
+  try {
+    expect((await plugin.start()).ok).toBe(true);
+    const receipt = plugin.receipts()[0]!.receipt;
+    const tampered = readFileSync(path, "utf8").replace('"what":"Check exchange"', '"what":"Changed after startup"');
+    writeFileSync(path, tampered);
+    expect((await plugin.tick()).ok).toBe(true);
+    expect(plugin.errors()).toMatchObject([{ stage: "markdown" }]);
+    expect(readFileSync(path, "utf8")).toBe(tampered);
+    expect(readFileSync(path, "utf8")).toContain(receipt);
+    expect(service.get(occurrence.id)).toBeNull();
+    expect(db.prepare("SELECT id FROM watch_wake").get()).toMatchObject({ id: occurrence.id });
+  } finally { db.close(); }
 });
