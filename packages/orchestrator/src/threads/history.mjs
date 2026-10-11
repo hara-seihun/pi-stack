@@ -85,10 +85,13 @@ function withSource(path, use) {
   return result;
 }
 
-function parseRecord(raw, path, line, offset) {
-  let entry;
-  try { entry = JSON.parse(decoder.decode(raw)); }
-  catch (error) { return failure("invalid-record", path, `Invalid session JSONL at line ${line}: ${error.message}`, { line, offset }); }
+function parseRecord(raw, path, line, offset, closed) {
+  let entry, text;
+  const evidence = () => ({ line, offset, length: raw.length, digest: createHash("sha256").update(raw).digest("hex"), ...(closed === undefined ? {} : { closed }) });
+  try { text = decoder.decode(raw); }
+  catch { return failure("invalid-record", path, `Invalid session UTF-8 at line ${line}`, { ...evidence(), syntax: "utf8" }); }
+  try { entry = JSON.parse(text); }
+  catch { return failure("invalid-record", path, `Invalid session JSONL at line ${line}: invalid JSON`, { ...evidence(), syntax: "json" }); }
   if (!entry || typeof entry !== "object" || Array.isArray(entry) || !nonempty(entry.type)) {
     return failure("invalid-record", path, `Invalid session entry at line ${line}`, { line, offset });
   }
@@ -200,10 +203,10 @@ function scanRecords(fd, path, size, start, firstLine, hash, hashFrom, initialMe
   const chunk = Buffer.allocUnsafe(SCAN_CHUNK_BYTES);
   const records = [];
   let parts = [], length = 0, recordStart = start, line = firstLine, position = start, estimatedBytes = initialMetadataBytes;
-  const consume = () => {
+  const consume = closed => {
     const raw = parts.length === 1 ? parts[0] : Buffer.concat(parts, length);
     if (raw.toString("utf8").trim()) {
-      const parsed = parseRecord(raw, path, line, recordStart);
+      const parsed = parseRecord(raw, path, line, recordStart, closed);
       if (!parsed.ok) return parsed;
       const metadata = recordMetadata(parsed.value, raw, path, line, recordStart);
       if (!metadata.ok) return metadata;
@@ -228,7 +231,7 @@ function scanRecords(fd, path, size, start, firstLine, hash, hashFrom, initialMe
       if (length > MAX_HISTORY_RECORD_BYTES) return failure("oversized-record", path, `Session record exceeds ${MAX_HISTORY_RECORD_BYTES} bytes`, { line, offset: recordStart, limit: MAX_HISTORY_RECORD_BYTES });
       if (part.length) parts.push(Buffer.from(part));
       if (end < bytes) {
-        const consumed = consume();
+        const consumed = consume(true);
         if (!consumed.ok) return consumed;
         line++; recordStart = position + end + 1;
       }
@@ -244,7 +247,7 @@ function scanRecords(fd, path, size, start, firstLine, hash, hashFrom, initialMe
     try { if (raw.toString("utf8").trim()) JSON.parse(decoder.decode(raw)); }
     catch { complete = false; }
     if (complete) {
-      const consumed = consume();
+      const consumed = consume(false);
       if (!consumed.ok) return consumed;
     }
   }
@@ -529,7 +532,7 @@ function* watermarkLines(fd, path, stat, start, firstLine, prefixHash, previous,
             `New session record exceeds ${MAX_HISTORY_RECORD_BYTES} bytes; effects and image acceptance are uncertain`,
             { line, offset: recordStart, limit: MAX_HISTORY_RECORD_BYTES }).error };
           else {
-            const parsed = parseRecord(parts.length === 1 ? parts[0] : Buffer.concat(parts, length), path, line, recordStart);
+            const parsed = parseRecord(parts.length === 1 ? parts[0] : Buffer.concat(parts, length), path, line, recordStart, true);
             yield parsed.ok ? { kind: "record", descriptor, entry: parsed.value } : { kind: "uncertain", descriptor, error: parsed.error };
           }
         }
@@ -590,6 +593,57 @@ export function withNativeHistorySuffix(path, watermark, project) {
   });
 }
 
+/** Observation only: preserve corrupt raw bytes at the source and expose every gap explicitly.
+ * Stored order is not an active branch and must never be used to resume execution. */
+export function quarantinedThreadHistoryPage(path, request) {
+  path = resolve(path);
+  const { offset, limit, entryId } = request;
+  if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 100
+    || entryId !== undefined && !nonempty(entryId)) return failure("invalid-descriptor", path, "Invalid quarantined native page");
+  return withSource(path, fd => {
+    const stat = fstatSync(fd, { bigint: true });
+    if (!stat.isFile() || stat.size > BigInt(Number.MAX_SAFE_INTEGER)) return failure("io", path, "Session source must be a seekable, safely addressable file");
+    const outcome = {}, gaps = [], entries = [];
+    let ordinal = 0, found = false, selectedBytes = 0;
+    for (const record of watermarkLines(fd, path, stat, 0, 1, createHash("sha256"), undefined, true, outcome)) {
+      let entry;
+      if (record.kind === "record") {
+        const raw = record.entry;
+        const checked = recordMetadata(raw, Buffer.alloc(0), path, record.descriptor.line, record.descriptor.offset);
+        if (!checked.ok) { record.kind = "uncertain"; record.error = checked.error; }
+        else if (raw.type === "message" || raw.type === "custom_message") entry = raw;
+        else continue;
+      }
+      if (record.kind === "uncertain") {
+        const gap = Object.freeze({ ...record.descriptor, code: record.error.code, message: record.error.message });
+        gaps.push(gap);
+        if (gaps.length * 1024 > MAX_HISTORY_INDEX_BYTES) return failure("oversized-index", path, "Quarantined gap metadata exceeds bounded index", { limit: MAX_HISTORY_INDEX_BYTES });
+        entry = { type: "custom_message", id: `native-gap:${gap.offset}:${gap.digest}`, customType: "native_history_gap",
+          content: [{ type: "text", text: `Native history gap at line ${gap.line}: ${gap.length} original bytes remain in ${path} at offset ${gap.offset}; SHA256 ${gap.digest}. Missing native content is unknown; execution must not resume from this partial projection.` }],
+          display: true, details: gap };
+      }
+      const selected = entryId !== undefined ? entry.id === entryId : ordinal >= offset && ordinal < offset + limit;
+      if (selected) {
+        found = true;
+        selectedBytes += Buffer.byteLength(JSON.stringify(entry));
+        if (selectedBytes > MAX_HISTORY_RECORD_BYTES) return failure("oversized-record", path, "Quarantined page exceeds bounded body budget", { limit: MAX_HISTORY_RECORD_BYTES });
+        entries.push(entry);
+      }
+      ordinal++;
+    }
+    if (outcome.error) return { ok: false, error: outcome.error };
+    const verified = verifyPrefix(fd, path, watermarkProof(outcome.watermark));
+    if (!verified.ok) return verified;
+    if (entryId !== undefined && !found) return failure("invalid-descriptor", path, "Quarantined transcript entry not found", { entryId });
+    const watermark = outcome.watermark;
+    return ok({ entries, ...(entryId === undefined && offset + entries.length < ordinal ? { nextCursor: String(offset + entries.length) } : {}),
+      integrity: { kind: "partial", traversal: "stored-order", ancestry: "unproven", resumeAllowed: false,
+        source: { path, revision: watermark.revision, size: watermark.size, device: watermark.device, inode: watermark.inode,
+          prefixDigest: watermark.prefixDigest, closedOffset: watermark.closedOffset },
+        gaps, unclosedTailBytes: watermark.size - watermark.closedOffset } });
+  });
+}
+
 export function readThreadHistory(path, leafId) {
   if (!existsSync(path)) return [];
   return activePath(parseSession(readFileSync(path, "utf8")), leafId);
@@ -618,7 +672,7 @@ export function parseSession(text) {
       entries.push(JSON.parse(line));
     } catch (error) {
       if (index === lines.length - 1) break;
-      throw new Error(`Invalid session JSONL at line ${index + 1}: ${error.message}`);
+      throw new Error(`Invalid session JSONL at line ${index + 1}: invalid JSON`);
     }
   }
   return entries;

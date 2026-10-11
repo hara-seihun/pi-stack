@@ -8,6 +8,11 @@ export type ThreadHistoryError = {
   offset?: number;
   entryId?: string;
   limit?: number;
+  /** Exact raw line evidence; no record body or engine parser snippet is disclosed. */
+  length?: number;
+  digest?: string;
+  closed?: boolean;
+  syntax?: "utf8" | "json";
 };
 export type HistoryBlockDescriptor = Readonly<{
   index: number;
@@ -107,6 +112,18 @@ export function captureNativeHistoryWatermark(path: string): ThreadHistoryResult
  * Prefix and boundary proofs detect edits/replacement while allowing append. Oversized/invalid new lines
  * yield per-record uncertainty without replay or preventing observation of later complete records. */
 export function withNativeHistorySuffix<T>(path: string, watermark: NativeHistoryWatermark, project: (records: Iterable<NativeHistorySuffixRecord>) => T): ThreadHistoryResult<{ value: T; watermark: NativeHistoryWatermark }>;
+export type NativeHistoryQuarantineIntegrity = Readonly<{
+  kind: "partial";
+  traversal: "stored-order";
+  ancestry: "unproven";
+  resumeAllowed: false;
+  source: Readonly<{ path: string; revision: string; size: number; device: string; inode: string; prefixDigest: string; closedOffset: number }>;
+  gaps: readonly (NativeHistoryLineDescriptor & { code: ThreadHistoryError["code"]; message: string })[];
+  unclosedTailBytes: number;
+}>;
+export function quarantinedThreadHistoryPage(path: string, request: { offset: number; limit: number; entryId?: string }): ThreadHistoryResult<{
+  entries: SessionEntry[]; nextCursor?: string; integrity: NativeHistoryQuarantineIntegrity;
+}>;
 export function parseSession(text: string): SessionEntry[];
 export function activePath(entries: SessionEntry[], leafId?: string): SessionEntry[];
 export function timestampMs(value: unknown): number | undefined;
