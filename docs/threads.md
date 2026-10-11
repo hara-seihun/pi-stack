@@ -401,8 +401,8 @@ compaction/branch messages receive their own delivery records.
 
 The trusted owner launcher declares `PI_PERSON_TIMEZONE_FILE` as
 `/var/lib/pi-timezones/USER/timezone.json`. The owning Remote publishes this
-narrow projection from its canonical `settings.json` after CalendarStore migration,
-then fences every timezone setting write with `state: "updating"` before publishing
+narrow projection from its canonical `settings.json`,
+and fences every timezone setting write with `state: "updating"` before publishing
 `state: "ready"`. Projection files are own-UID, reader-group mode0640 even under
 UMask0077; directories inherit the host-owned `pi-timezones-readers` group. Host
 provisioning creates directories, never timezone values. Fleet/terminal sessions
