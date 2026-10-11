@@ -257,13 +257,13 @@ def assemble(directory, inputs_path, output_path):
                             scope[key] = list(unique.values())
                         else:
                             scope[key].update(patch[key])
-    bind_worker_gateways(config, runtime['uid'])
     if runtime.get('version') != 1 or runtime.get('uid') != 0 or runtime.get('gid') != 0:
         raise ValueError('prepared common runtime must retain exact root custodian')
     pending = unresolved(config)
     if pending:
         publish(output_path.with_suffix('.pending.json'), {'version': 1, 'state': 'incomplete', 'pending': pending})
         return {'state': 'incomplete', 'pendingCount': len(pending), 'writtenConfig': False}
+    bind_worker_gateways(config, runtime['uid'])
     publish(output_path, config)
     return {'state': 'assembled', 'scopeCount': len(scopes), 'writtenConfig': True, 'activationPermitted': False}
 
