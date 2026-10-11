@@ -1,4 +1,6 @@
 import { Type } from "typebox";
+import { Check } from "typebox/value";
+import { ActionHttpClient } from "kenan-memory/action-http-client";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { resolveDelivery, THINKING_LEVELS, THREAD_AWAIT_TIMEOUT_MS, type PiSessionOptions, type Result, type ThreadApi } from "./contracts.js";
 import { createThreadClient } from "./http.js";
@@ -13,6 +15,16 @@ import { threadWaitParameters } from "./wait-contract.js";
 import { agentMessageView, agentSettlementView, agentThreadView, agentWaitView, agentWakeView, mapResult } from "./agent-results.js";
 import { BACKGROUND_ATTENTION_POLICY } from "./attention-policy.js";
 import { QUESTION_AUTHORING_POLICY, QUESTION_TEXT_DESCRIPTION, QUESTION_SUGGESTION_DESCRIPTION } from "./question-policy.js";
+
+const purposeResolution = Type.Object({
+  id: Type.String({ minLength: 1, maxLength: 1000, pattern: "\\S" }),
+  expectedRevision: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+  evidence: Type.Object({
+    kind: Type.Union([Type.Literal("provider-receipt"), Type.Literal("provider-rejection"), Type.Literal("operator-observation")]),
+    reference: Type.String({ minLength: 1, maxLength: 1000, pattern: "\\S" }),
+    detail: Type.String({ minLength: 1, maxLength: 1000, pattern: "\\S" }),
+  }, { additionalProperties: false }),
+}, { additionalProperties: false });
 
 const questionInput = Type.Object({
   question: Type.String({ minLength: 1, description: QUESTION_TEXT_DESCRIPTION }),
@@ -45,6 +57,25 @@ export function threadTools(options: PiSessionOptions) {
     return createThreadClient(url, fetch, { signal, token: options.env.PI_THREAD_TOKEN });
   }
   return [
+    defineTool({
+      name: "external_action_resolve_purpose", label: "Resolve a confirmed action purpose",
+      description: "Resolve only an existing confirmed settled action's purpose (succeeded or failed-before-effect) at its exact inspected revision, with accountable evidence. Uses your authenticated managing-thread capability; actor text cannot confer authority. This does not send/replay anything, settle an uncertain effect, release a recipient hold or grant future contact. If the response is unavailable, reconcile the original action/revision before another attempt; never create a replacement action.",
+      parameters: purposeResolution,
+      execute: async (_id, input, signal) => {
+        signal?.throwIfAborted();
+        const failed = (error: string, message: string) => ({ content: [{ type: "text" as const, text: JSON.stringify({ ok: false, error, message }) }], details: { ok: false, error, message }, isError: true });
+        if (!Check(purposeResolution, input)) return failed("invalid-input", "Exact action identity, revision and evidence are required; no operation or actor override is accepted");
+        if (!options.env.PI_REMOTE_SERVER_URL || !options.env.PI_THREAD_TOKEN) return failed("unavailable", "Authenticated own-thread action authority is not configured; no operator fallback");
+        let authority: ActionHttpClient;
+        try { authority = new ActionHttpClient(options.env); }
+        catch { return failed("unavailable", "Configured action authority is not an own loopback supervisor/router"); }
+        const resolved = await authority.reconcile(input.id, input.expectedRevision, "resolve-purpose", input.evidence, options.threadId);
+        if (!resolved.ok) return failed(resolved.error, resolved.message);
+        const { id, revision, state, resolved: purposeResolved } = resolved.value;
+        const value = { ok: true, value: { id, revision, state, resolved: purposeResolved } };
+        return { content: [{ type: "text" as const, text: JSON.stringify(value) }], details: value, isError: false };
+      },
+    }),
     defineTool({
       name: "thread_attention", label: "Notify the person",
       description: `Send an explicit notification from your own thread, including while background or scheduled work is running. Attention only notifies: the human opens an agent to place it in the foreground. Durable receipt acceptance is not proof the person's device displayed it. ${BACKGROUND_ATTENTION_POLICY}`,

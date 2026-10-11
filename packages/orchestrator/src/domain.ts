@@ -2,7 +2,7 @@ import type { AccountReservation } from "./account-reservation.js";
 export type BudgetClass = "background" | "force" | "live";
 export type RunSource = "direct" | "lane";
 export type RunExecution = "user" | "root-repair";
-export const ISOLATED_TOOLS = ["read", "write", "edit", "bash", "grep", "find", "ls", "agent_browser"] as const;
+export const ISOLATED_TOOLS = ["read", "write", "append", "edit", "bash", "grep", "find", "ls", "agent_browser"] as const;
 export type RunContext = { readonly tools: readonly string[]; readonly extensions?: readonly string[] };
 export type RunState = "queued" | "starting" | "running" | "done" | "failed" | "aborted";
 export type LeaseKind = "fleet" | "interactive" | "voice";

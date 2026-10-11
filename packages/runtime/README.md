@@ -2,6 +2,8 @@
 
 Reusable extensions for [Pi](https://pi.dev). The [stack manifest](../../package.json) pins Pi and the browser packages every host runs.
 
+[Guarded write and exact append](file-write.md) owns destructive-overwrite refusal, deliberate full rewrites, exact append, retained local-tool adoption and synthetic installed acceptance.
+
 ## Packages
 
 - `bash-timeout-guard` requires explicit bounded bash calls and forbids detached work. Canonical managers have a hard five-second maximum, including Converge bash; workers retain 30 minutes with a UI, 55 seconds autonomously, or their host-configured ceiling.

@@ -7,6 +7,25 @@ pi-actions --help
 printf '%s' '{"id":"ACTION_ID"}' | pi-actions inspect
 ```
 
+## Shell-less manager purpose resolution
+
+Kenaznia has `external_action_resolve_purpose({ id, expectedRevision, evidence })`. Use the exact inspected action ID/revision and supporting original receipt. It invokes only `reconcile` / `resolve-purpose` through the configured own loopback supervisor/router and authenticated `PI_THREAD_TOKEN`. The server derives managing authority from that capability; callers cannot supply an operation, decision, actor, owner or thread override. Missing token/endpoint refuses without operator fallback. Returned metadata is only action ID, revision, state and resolved status.
+
+This resolves a confirmed settled purpose (`succeeded` or `failed-before-effect`); it sends/replays nothing, does not settle an active/uncertain effect, and does not lift recipient holds. An unavailable response remains unconfirmed: inspect/reconcile the original action rather than create a new purpose or invent a revision. A worker's existing authenticated own-succeeded-action route remains unchanged.
+
+For a retained manager, use its original current `ExtensionAPI.registerTool` with the candidate tool definition built from that manager's original `PiSessionOptions`/environment references. The SDK refreshes that same session's registry and active tool list in place. Its existing `PiExecution.setToolAdmission` must additionally admit this one name while preserving the original admission predicate for every other name. Bind the API to the exact session's current extension runtime and the execution owner to its `boundSession`; missing/ambiguous bindings refuse adoption. Keep session, history, inputs, environment and token references unchanged; do not reload, replace the session or serialize credentials. Read back the registered definition, prior active names plus this tool, and admission metadata without invoking an action. The synthetic retained-SDK case below proves both required updates and continued refusal of shell tools.
+
+`packages/orchestrator/tests/manager-purpose-tool.test.ts` proves the actual registered tool against a temporary synthetic owner and authenticated existing server route; it never queries a live authority. For sealed/installed acceptance bind all three exact immutable consumer roots explicitly:
+
+```sh
+PI_PURPOSE_PROBE_ORCHESTRATOR=/srv/pi/.pi-stack-releases/orchestrator/COMMIT/dist \
+PI_PURPOSE_PROBE_REMOTE=/srv/pi/.pi-stack-releases/remote/COMMIT \
+PI_PURPOSE_PROBE_SDK=/absolute/selected/node_modules/@earendil-works/pi-coding-agent \
+bun test /absolute/retained-source/packages/orchestrator/tests/manager-purpose-tool.test.ts
+```
+
+The Remote path binds unchanged authorization source; the orchestrator path imports actual installed tool/caller modules; the SDK path binds retained dynamic registration to the selected dependency closure. The test injects only a synthetic transport and never changes installed files or native objects.
+
 ## Owning-operator reconciliation
 
 Run `pi-actions` as the registered owning Unix account against its configured loopback router. For an explicitly authorized operator action, omit `PI_THREAD_TOKEN`: the router authenticates the process's owning UID. A supplied thread token selects thread authority instead; actor text does not grant operator or managing-thread authority.

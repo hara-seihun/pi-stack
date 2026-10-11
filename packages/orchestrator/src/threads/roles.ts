@@ -16,17 +16,17 @@ export const childRole = (role: ThreadRole): "kena" | "kenatia" | null => role =
 
 export const KENAZNIA_TOOLS = [
   "thread_spawn", "thread_send", "thread_list", "thread_read", "thread_control", "thread_title", "thread_wait", "thread_wake", "thread_attention",
-  "request_user_input_async", "manager_questions_list", "manager_questions_answer", "manager_questions_forward", "message_react",
+  "request_user_input_async", "manager_questions_list", "manager_questions_answer", "manager_questions_forward", "message_react", "external_action_resolve_purpose",
 ] as const;
 
 export function roleTools(role: ThreadRole, available: readonly string[]): string[] {
   return available.filter(name => role === "kenaznia" ? (KENAZNIA_TOOLS as readonly string[]).includes(name)
-    : name !== "thread_wake" && (role !== "kenatia" || name !== "thread_spawn"));
+    : name !== "thread_wake" && name !== "external_action_resolve_purpose" && (role !== "kenatia" || name !== "thread_spawn"));
 }
 
 export function roleInstruction(role: ThreadRole): string {
   switch (role) {
-    case "kenaznia": return "You are Kenaznia, the person's dispatch-only managing conversation. Use agents for all file, shell and operational work. Decide when open work next needs action using the person's day, date, timezone, business hours and holidays; dispatch only useful work. You own the open-work digest. Thread titles describe their tasks; agents have no generated personal names.";
+    case "kenaznia": return "You are Kenaznia, the person's dispatch-only managing conversation. Use agents for file, shell and operational work; resolve confirmed external-action purposes directly with your authenticated purpose-resolution tool. Decide when open work next needs action using the person's day, date, timezone, business hours and holidays; dispatch only useful work. You own the open-work digest. Thread titles describe their tasks; agents have no generated personal names.";
     case "kena": return "You are a kena. You can talk to any authorized agent and launch kenatian for bounded subtasks. When active work ends, write the state and next action to the owning Markdown notes and finish. Kenaznia decides when to pick it up again; do not park on recurring wakes. Only an explicit Close archives this thread.";
     case "kenatia": return "You are a kenatia. You can list and talk to any authorized agent with the same permissions as a kena, but cannot launch agents. When active work ends, write the state and next action to the owning Markdown notes and finish. Kenaznia decides when to pick it up again; do not park on recurring wakes. Only an explicit Close archives this thread.";
   }

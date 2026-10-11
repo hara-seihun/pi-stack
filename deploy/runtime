@@ -261,6 +261,7 @@ dependency_hash=$({
   sha256sum deploy/runtime packages/orchestrator/package.json
   sha256sum packages/runtime/patch-compaction-fallback.mjs packages/runtime/compaction-fallback.js packages/runtime/compaction-fallback-history.js
   sha256sum packages/runtime/patch-bash-cancellation.mjs packages/runtime/pi-shell-owner.mjs packages/runtime/pi-shell-owner.py packages/runtime/pi-bash-worker.py packages/runtime/resident-shell-adoption.mjs
+  sha256sum packages/runtime/patch-file-write.mjs packages/runtime/file-write-guard.mjs packages/runtime/resident-write-adoption.mjs
   sha256sum packages/runtime/stack-pi.mjs packages/runtime/native-host.mjs packages/runtime/native-recovery.mjs packages/runtime/native-guardian.mjs packages/runtime/managed-agent.mjs packages/runtime/patch-managed-cli.mjs
   find packages/orchestrator/src -type f -print0 | sort -z | xargs -0 sha256sum
   sha256sum packages/runtime/patch-orphan-tool-results.mjs packages/orchestrator/src/threads/orphan-tool-results.mjs packages/orchestrator/src/threads/orphan-tool-results.d.mts
@@ -320,6 +321,7 @@ if [[ ! -x $dependency_release/node_modules/.bin/pi ]]; then
   node "$runtime_source/patch-compaction-fallback.mjs" "$stage/node_modules"
   node "$runtime_source/patch-bash-spill.mjs" "$stage/node_modules"
   node "$runtime_source/patch-bash-cancellation.mjs" "$stage/node_modules"
+  node "$runtime_source/patch-file-write.mjs" "$stage/node_modules"
   node "$runtime_source/patch-session-durability.mjs" "$stage/node_modules"
   node "$runtime_source/patch-shared-custody.mjs" "$stage/node_modules"
   node "$runtime_source/patch-shared-rpc.mjs" "$stage/node_modules"
