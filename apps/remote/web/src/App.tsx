@@ -54,7 +54,7 @@ import { createLiveText, visibleLiveText, type LiveTextStore } from "./features/
 import { ThreadDirectoryProvider, type ThreadDirectory } from "./features/conversation/thread-chips";
 import { ThreadDiscovery } from "./thread-discovery";
 import { entriesFromHeads, WAITING_ENTRY } from "./features/conversation/transcript-entries";
-import { applyTranscriptEvent, EARLIER_PAGE_SIZE, hasEarlier, hasNewer, loadNewer, loadLatest, type VisibleTranscriptRange, type TranscriptWindow } from "./features/conversation/transcript-store";
+import { applyTranscriptEvent, EARLIER_PAGE_SIZE, hasEarlier, hasNewer, loadNewer, loadLatest, mergeHeads, type VisibleTranscriptRange, type TranscriptWindow } from "./features/conversation/transcript-store";
 import { conversationCount, conversationHead, loadVisibleEarlier } from "./features/conversation/visible-history";
 import type { QueueAction } from "./features/queue/QueueSheet";
 import { threadStatus } from "./features/status/thread-status";
@@ -927,7 +927,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
         const latest = stateRef.current.transcript;
         if (latest?.generation !== window.generation && latest?.generation !== page.generation) { controller.abort(); return; }
         const updated = latest?.generation === page.generation
-          ? { ...page, total: Math.max(latest.total, page.total), items: page.items.map(item => latest.items.find(current => current.seq === item.seq) ?? item) }
+          ? { ...page, total: Math.max(latest.total, page.total), items: mergeHeads(page.items, latest.items) }
           : reset ? page : latest;
         if (!updated) return;
         cache.rememberThread(id, { transcript: updated });

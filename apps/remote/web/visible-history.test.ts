@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { TranscriptItemHead } from "../server/protocol";
-import { applyTranscriptEvent, hasEarlier, type TranscriptWindow } from "./src/features/conversation/transcript-store";
+import { applyTranscriptEvent, hasEarlier, mergeHeads, type TranscriptWindow } from "./src/features/conversation/transcript-store";
 import { conversationCount, conversationHead, loadVisibleEarlier } from "./src/features/conversation/visible-history";
 import { entriesFromHeads } from "./src/features/conversation/transcript-entries";
 import { buildStableTranscript, messengerWork } from "./src/features/conversation/transcript-model";
@@ -139,4 +139,28 @@ test("gapped or repeated cursor responses preserve the held page and report a re
     expect(result).toMatchObject({ ok: false, window: f.initial, error: { kind: "unavailable" } });
     expect(hasEarlier(result.window)).toBe(true);
   }
+});
+
+test("an earlier page accepted after concurrent SSE preserves newer heads and overlapping corrections in the selected view", async () => {
+  const f = fixture(Array.from({ length: 180 }, (_, seq) => seq < 120 ? human(seq) : hidden(seq)));
+  let selected = f.initial;
+  const correction = { ...hidden(179), id: "corrected179", text: "updated native receipt" };
+  const newAnswer: TranscriptItemHead = { seq: 180, id: "answer180", kind: "assistant", size: 20, text: "The deployment completed." };
+  const appended = [newAnswer, hidden(181), human(182)];
+  const result = await loadVisibleEarlier("thread", f.initial, {
+    ...options(async path => {
+      const response = await f.fetcher(path);
+      selected = applyTranscriptEvent(selected, { generation: "g", total: 183, items: [correction, ...appended] }, null, head => conversationHead(head, true));
+      return response;
+    }),
+    onPage: page => {
+      selected = { ...page, total: Math.max(selected.total, page.total), items: mergeHeads(page.items, selected.items) };
+    },
+  });
+  expect(result.ok).toBe(true);
+  expect(selected.total).toBe(183);
+  expect(selected.items.map(head => head.seq)).toEqual(Array.from({ length: 123 }, (_, n) => 60 + n));
+  expect(selected.items.find(head => head.seq === 179)).toEqual(correction);
+  expect(selected.items.slice(-3)).toEqual(appended);
+  expect(conversationCount(selected, true)).toBe(62);
 });
