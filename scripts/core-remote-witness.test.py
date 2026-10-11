@@ -52,6 +52,14 @@ class WitnessTests(unittest.TestCase):
             fields[12]=['S','11'];status.stdout='MainPID=99\nActiveState=active\nInvocationID='+('a'*32)+'\n'
             with self.assertRaisesRegex(ValueError,'invocation changed'):witness.verify_live(plan)
 
+    def test_explicit_renamed_native_binary_never_uses_mutable_front_launcher(self):
+        plan={'unit':'pi-remote@kenan.service','invocationId':'a'*32,'wrapper':{'pid':11,'startTicks':'101'},'nativeChild':{'pid':12,'startTicks':'102'},'nativeExecutable':{'path':'/usr/local/bin/bun.real'}}
+        status=Mock(stdout='MainPID=11\nActiveState=active\nInvocationID='+('a'*32)+'\n')
+        with patch.object(witness,'birth',side_effect=lambda identity:['S','11']),patch.object(witness.os,'readlink',return_value='/usr/local/bin/bun.real'),patch.object(witness.subprocess,'run',return_value=status):
+            witness.verify_live(plan)
+        with patch.object(witness,'birth',side_effect=lambda identity:['S','11']),patch.object(witness.os,'readlink',return_value='/wrong/native'),patch.object(witness.subprocess,'run',return_value=status):
+            with self.assertRaisesRegex(ValueError,'must be Bun'):witness.verify_live(plan)
+
     def test_actual_kernel_wait4_format(self):
         if not Path('/usr/bin/strace').exists():self.skipTest('strace missing')
         with tempfile.TemporaryDirectory() as folder:

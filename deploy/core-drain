@@ -80,7 +80,7 @@ def native_exit_custody(plan, invocation_id, after=False):
         raise ValueError('native child has no affirmative kernel attachment/normal exit proof')
     if not after:return {'kind':'supervised','planPath':str(witness_path),'planSha256':digest}
     proof = trusted(proof_path)
-    if proof.get('protocol') != 'pi-core-native-child-exit-v1' or proof.get('unit') != plan['unit'] or proof.get('invocationId') != invocation_id or proof.get('wrapper') != witness['wrapper'] or proof.get('nativeChild') != witness['nativeChild'] or proof.get('exit') != {'kind':'normal','code':0} or proof.get('sourceProof') != witness['sourceProof'] or proof.get('unitOwner') != witness.get('unitOwner'):
+    if proof.get('protocol') != 'pi-core-native-child-exit-v1' or proof.get('unit') != plan['unit'] or proof.get('invocationId') != invocation_id or proof.get('wrapper') != witness['wrapper'] or proof.get('nativeChild') != witness['nativeChild'] or proof.get('exit') != {'kind':'normal','code':0} or proof.get('sourceProof') != witness['sourceProof'] or proof.get('unitOwner') != witness.get('unitOwner') or proof.get('nativeExecutable') != witness.get('nativeExecutable'):
         raise ValueError('native child normal exit receipt does not match the registered witness')
     return {'kind':'supervised','path':str(proof_path),'sha256':hashlib.sha256(proof_path.read_bytes()).hexdigest(),'planSha256':digest}
 
