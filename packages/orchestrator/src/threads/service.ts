@@ -664,7 +664,7 @@ export class ThreadService implements ThreadApi {
           const read = history!.read(source.descriptor);
           if (!read.ok) return historyFailure(read.error);
           const entry = read.value;
-          message = entry.type === "message" ? entry.message : { role: "custom", content: entry.content, customType: entry.customType, details: entry.details };
+          message = entry.type === "message" ? entry.message : { role: "custom", content: entry.content, customType: entry.customType, details: entry.details, timestamp: timestampMs(entry.timestamp) };
         }
         const accepted = append(message); if (!accepted.ok) return accepted;
       }
@@ -764,7 +764,7 @@ export class ThreadService implements ThreadApi {
       }
       const inputState = inputId === undefined ? undefined : this.inputReceipt(thread.id, inputId);
       const message = entry.type === "message" ? inputId !== undefined && entry.message?.role === "user" ? { ...entry.message, inputId, ...(inputState ? { inputState } : {}) } : entry.message
-        : entry.type === "custom_message" ? { role: "custom", content: entry.content, customType: entry.customType, details: entry.details }
+        : entry.type === "custom_message" ? { role: "custom", content: entry.content, customType: entry.customType, details: entry.details, timestamp: timestampMs(entry.timestamp) }
         : { role: "notice", content: entry, timestamp: timestampMs(entry.timestamp) };
       const record = { index, entryId: entry.id, message: this.nativeMessageIdentity(thread, entry, message), ...(includeEntries ? { entry } : {}) };
       const measured = measureJsonBytes(record, CONTEXT_WINDOW_MAX_BYTES - bytes);
@@ -857,7 +857,7 @@ export class ThreadService implements ThreadApi {
     const start = Math.max(0, before - request.limit);
     const records: ThreadContextWindow["records"] = [];
     let bytes = Buffer.byteLength(JSON.stringify(records));
-    const message = (entry: Json): Json => entry.type === "message" ? entry.message : { role: "custom", content: entry.content, customType: entry.customType, details: entry.details };
+    const message = (entry: Json): Json => entry.type === "message" ? entry.message : { role: "custom", content: entry.content, customType: entry.customType, details: entry.details, timestamp: timestampMs(entry.timestamp) };
     let low = 0, high = window.length;
     while (low < high) {
       const middle = (low + high) >>> 1;
@@ -879,6 +879,9 @@ export class ThreadService implements ThreadApi {
         const entry = history.read(descriptor);
         if (!entry.ok) return historyFailure(entry.error);
         sourceMessage = message(entry.value);
+        if (sourceMessage.customType === "thread_input_batch" && Array.isArray(sourceMessage.details?.workIds)) {
+          sourceMessage = { ...sourceMessage, inputStates: Object.fromEntries(sourceMessage.details.workIds.map((workId: string) => [workId, this.inputReceipt(thread.id, workId)])) };
+        }
         if (descriptor.inputOrigin) sourceMessage = { ...sourceMessage, inputOrigin: descriptor.inputOrigin };
         const inputId = (descriptor as MessageRecordDescriptor & { inputId?: string }).inputId;
         if (inputId !== undefined && sourceMessage.role === "user") {

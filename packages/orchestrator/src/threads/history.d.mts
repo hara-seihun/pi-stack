@@ -1,3 +1,4 @@
+export { inputBatchPresentation } from "./input-batch-presentation.mjs";
 export type SessionEntry = Record<string, any>;
 export type ThreadHistoryResult<T> = { ok: true; value: T } | { ok: false; error: ThreadHistoryError };
 export type ThreadHistoryError = {

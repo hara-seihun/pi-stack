@@ -4,6 +4,8 @@ import { resolve } from "node:path";
 import { TextDecoder } from "node:util";
 import { projectAnthropicNarrationMessage } from "./anthropic-narration.mjs";
 import { isSilentAssistant } from "./manager-turn.mjs";
+import { inputBatchPresentation } from "./input-batch-presentation.mjs";
+export { inputBatchPresentation } from "./input-batch-presentation.mjs";
 
 export const MAX_HISTORY_RECORD_BYTES = 8 * 1024 * 1024;
 export const MAX_HISTORY_INDEX_BYTES = 64 * 1024 * 1024;
@@ -130,6 +132,8 @@ function recordMetadata(entry, raw, path, line, offset) {
   if (typeof message.content !== "string" && !Array.isArray(message.content) && message.content != null) {
     return failure("invalid-record", path, `Invalid session message content at line ${line}`, { line, offset });
   }
+  const batch = inputBatchPresentation({ ...message, customType: entry.customType, details: entry.details });
+  if (!batch.ok) return failure("invalid-record", path, batch.error, { line, offset });
   const timestamp = message.timestamp ?? entry.timestamp;
   if (timestamp != null && ((typeof timestamp !== "string" && typeof timestamp !== "number") || timestampMs(timestamp) === undefined)) {
     return failure("invalid-record", path, `Invalid session timestamp at line ${line}`, { line, offset });
@@ -153,10 +157,12 @@ function recordMetadata(entry, raw, path, line, offset) {
       ...(block.namespace != null ? { namespace: block.namespace } : {}),
     }));
   }
-  const displayedItemCount = message.role === "assistant" && Array.isArray(message.content)
+  const displayedItemCount = batch.value ? batch.value.length : message.role === "assistant" && Array.isArray(message.content)
     ? blocks.filter(block => block.displayed).length + Number(blocks.length === 0 && Boolean(message.errorMessage))
     : message.role === "assistant" && typeof message.content === "string" && !message.content.trim() ? 0 : 1;
-  return ok(Object.freeze({ ...base, role: message.role, timestamp: timestampMs(timestamp) ?? null,
+  return ok(Object.freeze({ ...base, role: batch.value ? "user" : message.role, timestamp: timestampMs(timestamp) ?? null,
+    ...(batch.value?.some(input => input.inputOrigin === "human") ? { inputOrigin: "human" }
+      : batch.value?.every(input => input.inputOrigin === "machine") ? { inputOrigin: "machine" } : {}),
     blocks: Object.freeze(blocks), toolCallIds: Object.freeze(blocks.filter(block => block.type === "toolCall").map(block => block.toolCallId)),
     toolResultId: message.role === "toolResult" ? message.toolCallId ?? null : null, displayedItemCount,
     ...(typeof message.rootConsent === "boolean" ? { rootConsent: message.rootConsent } : {}),
