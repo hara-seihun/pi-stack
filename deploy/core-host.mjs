@@ -92,11 +92,17 @@ export function nativeStorageConfiguration(config, scope) {
   if (!isAbsolute(scope.custody.dataDir ?? '')) return failure('native-storage-owner-invalid', 'Native storage needs its exact registered absolute data directory');
   return { ok: true, value: { ...writer.value, directory: `/run/pi-stack/native-runner-locks/${writer.value.uid}`, dataDir: scope.custody.dataDir } };
 }
+export function writerParentPreparation(path, local, host, filesystem) {
+  const mode = local.mode & 0o777;
+  if (!local.isDirectory() || local.isSymbolicLink() || local.uid !== 0 || local.gid !== 0 || local.dev !== host.dev || local.ino !== host.ino || filesystem.type !== 0x01021994 || !(mode === 0o755 || path === '/run/pi-stack' && mode === 0o700)) return failure('session-writer-parent-untrusted', 'Writer parent must be the root-owned physical host tmpfs directory, mode0755 or the protected /run/pi-stack mode0700');
+  return { ok: true, value: { normalize: mode === 0o700 } };
+}
 function prepareSessionWriters(config) {
   for (const path of ['/run/pi-stack', '/run/pi-stack/session-writers', '/run/pi-stack/native-runner-locks']) {
     try { lstatSync(path); } catch (error) { if (error.code !== 'ENOENT') throw error; mkdirSync(path, { mode: 0o755 }); }
-    const metadata = lstatSync(path);
-    if (!metadata.isDirectory() || metadata.isSymbolicLink() || metadata.uid !== 0 || (metadata.mode & 0o777) !== 0o755 || statfsSync(path).type !== 0x01021994) return failure('session-writer-parent-untrusted', 'Physical writer parent must be root-owned mode0755 on host tmpfs');
+    const preparation = writerParentPreparation(path, lstatSync(path), statSync(`/proc/1/root${path}`), statfsSync(path));
+    if (!preparation.ok) return preparation;
+    if (preparation.value.normalize) chmodSync(path, 0o755);
   }
   const prepared = new Map();
   for (const scope of config.scopes) {
@@ -125,6 +131,8 @@ export async function coreHost(operation, artifact, configPath, bindingPath, req
     if (operation === 'prepare-writers') return prepareSessionWriters(config);
     if (operation === 'provision') {
       if (!isAbsolute(bindingPath ?? '') || typeof requestId !== 'string' || !requestId) return failure('invalid-registration', 'Explicit protected registration path and stable request ID required');
+      const prepared = prepareSessionWriters(config);
+      if (!prepared.ok) return prepared;
       const { provisionRegisteredAccount } = await import(pathToFileURL(join(artifact, 'dist/core/provision-command.js')));
       return provisionRegisteredAccount({ configPath, registrationPath: bindingPath, requestId });
     }

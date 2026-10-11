@@ -47,6 +47,18 @@ class ResourceAdditions(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     keeper.key_handle(generation)
 
+    def test_fresh_bootstrap_requires_writer_preparation_before_any_uid_worker(self):
+        namespace = {'kind': 'pinned', 'path': '/run/pi-stack/namespaces/target', 'mountNamespaceInode': '42'}
+        registration = Path('/registered/new-account.json')
+        with patch.object(activation, 'host', side_effect=[{'activated': False}, {'scopeId': 'remote:new'}]) as host:
+            self.assertEqual(activation.provision_fresh(namespace, registration, 'stable-id'), {'scopeId': 'remote:new'})
+            self.assertEqual(host.call_args_list[0].args, (namespace, 'prepare-writers', activation.CONFIG))
+            self.assertEqual(host.call_args_list[1].args, (namespace, 'provision', registration, 'stable-id'))
+        with patch.object(activation, 'host', side_effect=ValueError('physical fence unavailable')) as host:
+            with self.assertRaises(ValueError):
+                activation.provision_fresh(namespace, registration, 'stable-id')
+            self.assertEqual(host.call_count, 1)
+
     def test_remote_unit_identity_is_its_actual_user_not_root(self):
         class Result:
             stdout = '42\n'

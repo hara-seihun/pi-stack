@@ -101,6 +101,11 @@ def host(namespace, operation, argument, request_id=None):
     return result['value']
 
 
+def provision_fresh(namespace, registration_path, request_id):
+    host(namespace, 'prepare-writers', CONFIG)
+    return host(namespace, 'provision', registration_path, request_id)
+
+
 def activate(user):
     identity = pwd.getpwnam(user)
     folder = Path('/etc/pi-stack/users') / user
@@ -162,7 +167,7 @@ def activate(user):
         registration['scope'] = next_scope
         registration_path = folder / 'core-registration.json'
         publish(registration_path, {'version': 1, 'registration': registration})
-        receipt = host(namespace, 'provision', registration_path, enrollment['requestId'])
+        receipt = provision_fresh(namespace, registration_path, enrollment['requestId'])
         publish(enrollment_path, {**enrollment, 'state': 'adopted', 'registration': registration, 'provisionReceipt': receipt})
         publish(binding_path, binding)
     host(namespace, 'bind-person', binding_path)

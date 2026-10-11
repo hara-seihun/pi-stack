@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { gatewayBinding, nativeModelBinding, sessionWriterConfiguration, nativeStorageConfiguration, validateSessionWriterMetadata } from '../deploy/core-host.mjs';
+import { gatewayBinding, nativeModelBinding, sessionWriterConfiguration, nativeStorageConfiguration, validateSessionWriterMetadata, writerParentPreparation } from '../deploy/core-host.mjs';
 
 const config = {
   host: '127.0.0.1', port: 2470, root: { kind: 'disabled' },
@@ -32,6 +32,17 @@ test('writer custody rejects a FUSE alias, replaced inode, wrong Unix owner and 
   for (const update of [{ uid: 0 }, { gid: 0 }, { mode: 0o40755 }, { isSymbolicLink: () => true }]) assert.equal(validateSessionWriterMetadata(expected, { ...local, ...update }, host, { type: 0x01021994 }).ok, false);
   assert.equal(validateSessionWriterMetadata(expected, local, { ...host, ino: 56 }, { type: 0x01021994 }).ok, false);
   for (const type of [0x65735546, 0xEF53]) assert.equal(validateSessionWriterMetadata(expected, local, host, { type }).ok, false);
+});
+
+test('only the exact protected host parent may be normalized without replacing fence inodes', () => {
+  const local = { uid: 0, gid: 0, mode: 0o40700, dev: 28, ino: 55, isDirectory: () => true, isSymbolicLink: () => false };
+  const host = { dev: 28, ino: 55 }, filesystem = { type: 0x01021994 };
+  assert.deepEqual(writerParentPreparation('/run/pi-stack', local, host, filesystem).value, { normalize: true });
+  assert.deepEqual(writerParentPreparation('/run/pi-stack', { ...local, mode: 0o40755 }, host, filesystem).value, { normalize: false });
+  assert.equal(writerParentPreparation('/run/pi-stack/session-writers', local, host, filesystem).ok, false);
+  for (const change of [{ uid: 1000 }, { gid: 1000 }, { mode: 0o40777 }, { isSymbolicLink: () => true }]) assert.equal(writerParentPreparation('/run/pi-stack', { ...local, ...change }, host, filesystem).ok, false);
+  assert.equal(writerParentPreparation('/run/pi-stack', local, { ...host, ino: 56 }, filesystem).ok, false);
+  assert.equal(writerParentPreparation('/run/pi-stack', local, host, { type: 0x65735546 }).ok, false);
 });
 
 test('person transport binds exact kernel peer, principal, scope and reverse callback', () => {
