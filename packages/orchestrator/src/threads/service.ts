@@ -5,7 +5,7 @@ import { RunnerStartupError, isPooledStartupWait } from "./runner-startup.js";
 import { parseRuntimeEvent, requireAssistantStopReason, assertNever } from "./runtime-events.js";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
-import { indexedThreadHistory, withIndexedThreadHistory, timestampMs, type IndexedThreadHistory, type MessageRecordDescriptor, type RecordDescriptor, type ThreadHistoryError } from "pi-orchestrator/history";
+import { indexedThreadHistory, quarantinedThreadHistoryPage, withIndexedThreadHistory, timestampMs, type IndexedThreadHistory, type MessageRecordDescriptor, type RecordDescriptor, type ThreadHistoryError } from "pi-orchestrator/history";
 import { contentText } from "@earendil-works/pi-ai";
 import { dirname, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -132,6 +132,15 @@ const historyFailure = (error: ThreadHistoryError): Result<never> => {
     case "missing": case "io": case "invalid-record": case "invalid-branch": return bad("unavailable", error.message);
   }
 };
+function visibleNativeEntry(entry: Json): Json {
+  if (entry.message?.role !== "assistant" || !Array.isArray(entry.message.content)) return entry;
+  const projected = projectAnthropicNarrationMessage(entry.message);
+  const content = (projected.content as Json[]).filter(block => block.type !== "thinking").map(block => {
+    const { thinkingSignature, textSignature, encrypted_content, encryptedContent, thoughtSignature, ...visible } = block;
+    return visible;
+  });
+  return { ...entry, message: { ...entry.message, content } };
+}
 const canonical = (value: any): any => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().filter(key => value[key] !== undefined).map(key => [key, canonical(value[key])])) : value;
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
 const resultExecutionId = (id: string, recipientId: string): string | null => {
@@ -2065,6 +2074,15 @@ export class ThreadService implements ThreadApi {
       const indexed = indexedThreadHistory(thread.sessionFile);
       let history: IndexedThreadHistory | undefined;
       if (!indexed.ok) {
+        if (indexed.error.code === "invalid-record" || indexed.error.code === "invalid-branch") {
+          // An observational page remains available with explicit byte gaps; native resume
+          // and input reconciliation keep using the strict authoritative reader above.
+          const quarantined = quarantinedThreadHistoryPage(thread.sessionFile, { offset, limit, ...(input.entryId ? { entryId: input.entryId } : {}) });
+          if (!quarantined.ok) return historyFailure(quarantined.error);
+          const page = { ...quarantined.value, entries: quarantined.value.entries.map(visibleNativeEntry) };
+          const measured = measureJsonBytes(good(page), CONTEXT_WINDOW_MAX_BYTES);
+          return measured.ok ? good(page) : measured;
+        }
         if (indexed.error.code !== "missing" || thread.metadata?.nativeHistoryRequired === true) return historyFailure(indexed.error);
       } else history = indexed.value;
       const metadata = history ? this.nativeContextMetadata(thread, history) : undefined;
@@ -2089,14 +2107,7 @@ export class ThreadService implements ThreadApi {
           if (!read.ok) return historyFailure(read.error);
           entry = read.value;
         }
-        if (entry.message?.role === "assistant" && Array.isArray(entry.message.content)) {
-          const projectedMessage = projectAnthropicNarrationMessage(entry.message);
-          const content = (projectedMessage.content as Json[]).filter((block: Json) => block.type !== "thinking").map((block: Json) => {
-            const { thinkingSignature, textSignature, encrypted_content, encryptedContent, thoughtSignature, ...visible } = block;
-            return visible;
-          });
-          entry = { ...entry, message: { ...entry.message, content } };
-        }
+        entry = visibleNativeEntry(entry);
         const measured = measureJsonBytes(entry, CONTEXT_WINDOW_MAX_BYTES - bytes - Number(entries.length > 0));
         if (!measured.ok) return measured;
         bytes += measured.value + Number(entries.length > 0);

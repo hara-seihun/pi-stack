@@ -187,7 +187,7 @@ export type ArchivedThreadsQuery = { kind: "count" } | {
 };
 export type ArchivedThreadsResult = { kind: "count"; total: number } | { kind: "page"; total: number; revision: string; threads: Thread[] };
 export interface ThreadRead { threadId: string; cursor?: string; limit?: number; entryId?: string; offset?: number }
-export interface ThreadHistory { entries: Record<string, unknown>[]; nextCursor?: string }
+export interface ThreadHistory { entries: Record<string, unknown>[]; nextCursor?: string; integrity?: import("pi-orchestrator/history").NativeHistoryQuarantineIntegrity }
 export interface ThreadSettlement {
   seq: number;
   executionId: string;
