@@ -10,7 +10,7 @@ import { once } from "node:events";
 import { acquireSessionWriter, requireSessionWriter, sessionWriterConfiguration, withSessionWriterConfiguration, withSessionWriterScope, writeSessionBytes } from "./session-writer.mjs";
 import { patchAgentSessionWriterDisposal, patchSessionDurability, patchSessionFactoryWriter, patchSessionRuntimeWriter } from "./patch-session-durability.mjs";
 
-const base = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
+const base = dirname(fileURLToPath(process.env.PI_TEST_RUNTIME_ENTRY ?? import.meta.resolve("@earendil-works/pi-coding-agent")));
 const helper = new URL("./session-writer.mjs", import.meta.url).href;
 function directory(t) {
   const dir = mkdtempSync(join(tmpdir(), "pi-writer-"));
@@ -26,7 +26,7 @@ async function fixture(t) {
   const candidate = join(dir, "session-manager.mjs");
   writeFileSync(candidate, source);
   copyFileSync(new URL("./session-writer.mjs", import.meta.url), join(dir, "session-writer.mjs"));
-  symlinkSync(resolve("node_modules"), join(dir, "node_modules"));
+  symlinkSync(resolve(base, "../../.."), join(dir, "node_modules"));
   const { SessionManager } = await import(pathToFileURL(candidate).href);
   return { SessionManager, dir, candidate, config: { directory: dir, scope: "test-source" } };
 }
@@ -241,14 +241,21 @@ test("native runtime replacement retains injected config and releases failed can
   }
   const path = join(dir, "runtime.mjs");
   writeFileSync(path, source);
-  const { AgentSessionRuntime } = await import(pathToFileURL(path).href);
+  assert.equal(patchSessionRuntimeWriter(source), source);
+  const { AgentSessionRuntime, createAgentSessionRuntime } = await import(pathToFileURL(path).href);
   const fake = manager => ({ sessionManager: manager, get sessionFile() { return manager.getSessionFile(); },
     extensionRunner: { hasHandlers: () => false }, abort: async () => {}, dispose: () => manager.dispose() });
   const initial = withSessionWriterConfiguration(config, () => SessionManager.create(dir, dir));
   initial.appendMessage(user); initial.appendMessage(assistant);
   const services = { cwd: dir, agentDir: dir };
+  const originalError = new Error("No eligible pooled account advertising ultrafast");
+  const initialPath = initial.getSessionFile();
+  await assert.rejects(createAgentSessionRuntime(async () => { throw originalError; },
+    { cwd: dir, sessionManager: initial }), error => error === originalError);
+  assert.throws(() => initial.appendMessage(user), { code: "SESSION_WRITER_RELEASED" });
+  const recoveredInitial = withSessionWriterConfiguration(config, () => SessionManager.open(initialPath));
   let failFactory = false, candidateFile;
-  const runtime = new AgentSessionRuntime(fake(initial), services, async options => {
+  const runtime = new AgentSessionRuntime(fake(recoveredInitial), services, async options => {
     candidateFile = options.sessionManager.getSessionFile();
     if (failFactory) throw new Error("candidate rejected");
     return { session: fake(options.sessionManager), services, diagnostics: [] };

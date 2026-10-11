@@ -290,8 +290,20 @@ export function patchAgentSessionWriterDisposal(source) {
   return replaceOnce(source, "        cleanupSessionResources(this.sessionId);", "        cleanupSessionResources(this.sessionId);\n        this.sessionManager.dispose();", "SDK writer disposal");
 }
 
+function patchInitialRuntimeWriter(source) {
+  if (source.includes("// PiStack initial runtime writer custody")) return source;
+  return replaceOnce(source, `    assertSessionCwdExists(options.sessionManager, options.cwd);
+    const result = await createRuntime(options);
+    return new AgentSessionRuntime(result.session, result.services, createRuntime, result.diagnostics, result.modelFallbackMessage);`, `    // PiStack initial runtime writer custody
+    try {
+        assertSessionCwdExists(options.sessionManager, options.cwd);
+        const result = await createRuntime(options);
+        return new AgentSessionRuntime(result.session, result.services, createRuntime, result.diagnostics, result.modelFallbackMessage);
+    } catch (error) { options.sessionManager.dispose(); throw error; }`, "SDK initial runtime failed factory cleanup");
+}
+
 export function patchSessionRuntimeWriter(source) {
-  if (source.startsWith("// PiStack canonical writer runtime v1\n")) return source;
+  if (source.startsWith("// PiStack canonical writer runtime v1\n")) return patchInitialRuntimeWriter(source);
   source = replaceOnce(source, 'import { SessionManager } from "./session-manager.js";', 'import { SessionManager } from "./session-manager.js";\nimport { withSessionWriterConfiguration, withSessionWriterScope } from "./session-writer.mjs";', "SDK runtime scope import");
   for (const method of ["switchSession", "newSession", "fork", "importFromJsonl"]) {
     source = replaceOnce(source, `    async ${method}(`, `    async _owned_${method}(`, `SDK runtime ${method} scope`);
@@ -338,7 +350,7 @@ export function patchSessionRuntimeWriter(source) {
         }
         const sessionManager = SessionManager.open(destinationPath, sessionDir, cwdOverride);`, `        const sessionManager = sourceAlreadyStored ? SessionManager.open(destinationPath, sessionDir, cwdOverride)
             : SessionManager.importFile(resolvedPath, destinationPath, sessionDir, cwdOverride);`, "SDK runtime imported file custody");
-  return "// PiStack canonical writer runtime v1\n" + source;
+  return "// PiStack canonical writer runtime v1\n" + patchInitialRuntimeWriter(source);
 }
 
 export function patchSessionFactoryWriter(source) {
