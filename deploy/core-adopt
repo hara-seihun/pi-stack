@@ -105,6 +105,45 @@ def transfer(plan):
 REBIND_SNAPSHOT = SNAPSHOT.replace("**file(wal)", "**file(wal),'identity':{'dev':str(wal.stat().st_dev),'ino':str(wal.stat().st_ino)}")
 
 
+def rebind_group(plan):
+    if plan.get('version') != 1 or not isinstance(plan.get('plans'), list):
+        raise ValueError('versioned physical rebinding group required')
+    return rebind_many(plan['plans'])
+
+
+def rebind_many(plans):
+    if not plans:
+        raise ValueError('explicit nonempty physical rebinding group required')
+    views = plans[0]
+    for plan in plans:
+        if plan.get('version') != 1 or not isinstance(plan.get('scopeId'), str) or any(plan[role] != views[role] for role in ('source', 'target')):
+            raise ValueError('physical rebinding group must share exact source and target executors')
+        receipt = trusted(absolute(plan['adoptionReceiptPath']))
+        if receipt.get('state') != 'detached' or receipt.get('scopeId') != plan['scopeId'] or receipt.get('databasePath') != plan['databasePath'] or not isinstance(receipt.get('previousOwner'), dict):
+            raise ValueError('group rebinding requires affirmative exact original owner detachment')
+    paths = [str(absolute(plan['databasePath'])) for plan in plans]
+    program = REBIND_SNAPSHOT.replace('p=Path(sys.argv[1])', 'paths=json.loads(sys.argv[1])').replace("s=p.stat(); wal=Path(str(p)+'-wal')\nprint(json.dumps(", "result={}\nfor name in paths:\n p=Path(name);s=p.stat();wal=Path(str(p)+'-wal')\n result[name]=").replace("}}))", "}}\nprint(json.dumps(result))")
+    observations = {}
+    for _ in range(2):
+        current = {}
+        for role in ('source', 'target'):
+            view = views[role]
+            if type(view.get('uid')) is not int or type(view.get('gid')) is not int or min(view['uid'], view['gid']) < 0:
+                raise ValueError('exact rebinding executor required')
+            namespace_path(view['namespace'])
+            current[role] = json.loads(enter(view['namespace'], ['/usr/bin/python3', '-c', program, json.dumps(paths)], view['uid'], view['gid'], timeout=30))
+        if current['source'] != current['target'] or observations and observations != current:
+            raise ValueError('group physical database/WAL changed across namespace rebinding')
+        observations = current
+    for plan in plans:
+        path = absolute(plan['adoptionReceiptPath']);receipt = trusted(path);database = plan['databasePath']
+        if observations['target'][database]['databaseIdentity'] != receipt['databaseIdentity']:
+            raise ValueError('physical rebinding differs from original detached identity')
+        receipt['namespaceRebinding'] = {'version': 1, 'kind': 'same-physical-object', 'source': {'namespace': plan['source']['namespace'], **observations['source'][database]}, 'target': {'namespace': plan['target']['namespace'], **observations['target'][database]}, 'retainedRunnerNamespace': plan['source']['namespace']}
+        publish(path, receipt)
+    return {'ok': True, 'scopeCount': len(plans), 'copied': False}
+
+
 def rebind(plan):
     if plan.get('version') != 1 or not isinstance(plan.get('scopeId'), str):
         raise ValueError('explicit same-object scope rebinding plan required')
@@ -360,9 +399,9 @@ def initialize_capability(plan):
 
 
 def main():
-    actions = {'pin': pin, 'transfer': transfer, 'rebind': rebind, 'retain-fuse': retain_fuse, 'initialize-capability': initialize_capability, 'reconcile-capability': reconcile_capability}
+    actions = {'pin': pin, 'transfer': transfer, 'rebind': rebind, 'rebind-group': rebind_group, 'retain-fuse': retain_fuse, 'initialize-capability': initialize_capability, 'reconcile-capability': reconcile_capability}
     if os.geteuid() != 0 or len(sys.argv) != 3 or sys.argv[1] not in actions:
-        raise ValueError('usage: root core-adopt pin|retain-fuse|transfer|rebind|initialize-capability|reconcile-capability ABSOLUTE_ROOT_PLAN')
+        raise ValueError('usage: root core-adopt pin|retain-fuse|transfer|rebind|rebind-group|initialize-capability|reconcile-capability ABSOLUTE_ROOT_PLAN')
     plan = trusted(absolute(sys.argv[2]))
     print(json.dumps(actions[sys.argv[1]](plan)))
 

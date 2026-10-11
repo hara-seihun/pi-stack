@@ -78,7 +78,7 @@ class Adoption(unittest.TestCase):
                     'encryptedMountpoint': str(folder), 'receiptPath': str(root / 'receipt.json'),
                     'sourceProof': {'kind': 'owner-source-no-capability', 'path': str(source), 'sha256': hashlib.sha256(source.read_bytes()).hexdigest()}}
             execute = lambda namespace, command, uid, gid: subprocess.run(command, check=True, capture_output=True, text=True).stdout
-            with patch.object(adopt, 'trusted', side_effect=lambda path: json.loads(path.read_text())), patch.object(adopt, 'mount_identity'), patch.object(adopt, 'enter', side_effect=execute):
+            with patch.object(adopt, 'trusted', side_effect=lambda path: json.loads(path.read_text())), patch.object(adopt, 'mount_identity'), patch.object(adopt, 'namespace_path', return_value=Path('/proc/self/ns/mnt')), patch.object(adopt, 'enter', side_effect=execute):
                 first = adopt.initialize_capability(plan)
                 second = adopt.initialize_capability(plan)
                 self.assertEqual(first, second)
@@ -87,6 +87,26 @@ class Adoption(unittest.TestCase):
                 Path(plan['keyPath']).write_bytes(b'changed unknown key')
                 with self.assertRaises(subprocess.CalledProcessError):
                     adopt.initialize_capability(plan)
+
+    def test_group_rebind_observes_actual_files_without_per_store_processes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); plans = []
+            for n in range(2):
+                database = root / f'{n}.sqlite'; database.write_bytes(b'adopted store'); Path(str(database)+'-wal').write_bytes(b'wal')
+                receipt = root / f'{n}.receipt.json'; stat = database.stat()
+                receipt.write_text(json.dumps({'state':'detached','scopeId':str(n),'databasePath':str(database),'databaseIdentity':{'dev':str(stat.st_dev),'ino':str(stat.st_ino)},'previousOwner':{'identity':'closed original owner'}}))
+                plans.append({'version':1,'scopeId':str(n),'databasePath':str(database),'adoptionReceiptPath':str(receipt),'source':{'namespace':{'kind':'host'},'uid':os.getuid(),'gid':os.getgid()},'target':{'namespace':{'kind':'pinned','path':'declared'},'uid':os.getuid(),'gid':os.getgid()}})
+            execute = lambda namespace, command, uid, gid, **kwargs: subprocess.run(command, check=True, capture_output=True, text=True).stdout
+            with patch.object(adopt,'trusted',side_effect=lambda path:json.loads(path.read_text())), patch.object(adopt,'namespace_path'), patch.object(adopt,'enter',side_effect=execute) as entered:
+                result = adopt.rebind_group({'version':1,'plans':plans})
+                self.assertEqual(result['scopeCount'],2); self.assertEqual(entered.call_count,4)
+                for plan in plans:
+                    proof=json.loads(Path(plan['adoptionReceiptPath']).read_text())['namespaceRebinding']
+                    self.assertEqual(proof['source']['files'],proof['target']['files'])
+                    self.assertEqual(proof['retainedRunnerNamespace'],plan['source']['namespace'])
+                changed={**plans[1],'source':{**plans[1]['source'],'uid':os.getuid()+1}}
+                with self.assertRaisesRegex(ValueError,'share exact'):
+                    adopt.rebind_many([plans[0],changed])
 
     def test_unregistered_cipher_is_not_an_adoption(self):
         with tempfile.TemporaryDirectory() as directory:
