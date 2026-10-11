@@ -3201,7 +3201,7 @@ export class ThreadService implements ThreadApi {
           const previous = this.get(id)?.metadata?.preparationWait as Json | undefined;
           const now = Date.now();
           const wait = { dependency: "message-preparation", workId: item.id, code: prepared.error.code, message: prepared.error.message,
-            since: previous?.workId === item.id ? previous.since : now, lastActivityAt: now, retryAt: prepared.error.retryAt ?? now + 1_000 };
+            since: previous && previous.workId === item.id ? previous.since : now, lastActivityAt: now, retryAt: prepared.error.retryAt ?? now + 1_000 };
           this.sql("UPDATE thread SET metadata=json_set(metadata,'$.preparationWait',json(?)) WHERE id=?").run(JSON.stringify(wait), id);
           this.changed(id);
           return;

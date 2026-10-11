@@ -49,7 +49,7 @@ it.each([true, false])("delayed completion survives Core and native restart into
     expect((await observed).details).toMatchObject({ state: "running" });
     finish.resolve(); const event = await terminal.promise;
     expect(event.workId).toBe(`operation:${event.operationId}:terminal`);
-    const originalReceipt = readFileSync(file, "utf8").trim().split("\n").map(line => JSON.parse(line)).findLast(entry => entry.customType === "tool_operation");
+    const originalReceipt = readFileSync(file, "utf8").trim().split("\n").map(line => JSON.parse(line)).reverse().find(entry => entry.customType === "tool_operation");
     expect(originalReceipt.data.outcome.result).toEqual(result);
     emit(JSON.parse(JSON.stringify(event))); emit(JSON.parse(JSON.stringify(event)));
     const pending = core.pending("fixture-thread");
@@ -94,7 +94,7 @@ it.each([true, false])("delayed completion survives Core and native restart into
     expect(inbox.accept(input.value, { commandId: "original-completion-batch", batchId: "original-batch" })).toEqual({ ok: true });
     inbox.reconcileIdleAdmission();
     await settled.promise; await session.agent.waitForIdle();
-    expect(session.messages.findLast(message => message.role === "assistant")).toMatchObject({ stopReason: "stop" });
+    expect([...session.messages].reverse().find(message => message.role === "assistant")).toMatchObject({ stopReason: "stop" });
     expect(requests).toHaveLength(1);
     const delivered = requests[0].filter(message => message.role === "user").at(-1);
     expect(delivered.content.filter((part: any) => part.type === "image")).toEqual(withImage ? result.content.filter(part => part.type === "image") : []);
