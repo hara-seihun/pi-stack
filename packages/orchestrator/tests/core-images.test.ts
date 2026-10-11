@@ -82,6 +82,26 @@ async function fixture(native?: { watermarked: boolean; baselineTag?: boolean; n
   return { root, service, options, spec, source, request, seen, nativeText, emit: (text: string) => listener?.({ threadId: related ? "fleet-id" : "thread", event: { type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } } }), allow: () => { allowed = true; } };
 }
 
+test("captured absent legacy history stays explicitly unknown without opening an unregistered path", async () => {
+  const f = await fixture({ watermarked: true, noSuffix: true });
+  const path = join(f.root, "native.jsonl");
+  const receipt = JSON.parse(readFileSync(f.spec.adoptionReceiptPath, "utf8"));
+  receipt.nativeImageSources = [{ threadId: "thread", path, revision: "unstarted", lastOffset: -1, lastDigest: "", priorSource: { kind: "absent", observedAt: new Date().toISOString() } }];
+  writeFileSync(f.spec.adoptionReceiptPath, JSON.stringify(receipt));
+  rmSync(path);
+  const original = f.options.scope;
+  f.options.scope = id => {
+    const r = original(id);
+    if (r.ok && r.value) r.value.runtime.path = value => { if (value === path) throw new Error("Unregistered core resource path"); return value; };
+    return r;
+  };
+  expect((await f.service.start()).ok).toBe(true);
+  const db = new Database(f.spec.databasePath, { readonly: true });
+  expect(db.query("SELECT error FROM core_image_ingress_errors WHERE thread_id='thread' AND message_key='source-missing'").get()).toMatchObject({ error: expect.stringContaining("historical effects remain unknown") });
+  expect(db.query("SELECT last_offset FROM core_image_sources WHERE thread_id='thread'").get()).toEqual({ last_offset: -1 });
+  db.close();
+});
+
 test("images require explicit configuration and cannot infer filesystem grants", () => {
   expect(parseCoreImagesConfig(undefined).ok).toBe(false);
   expect(parseCoreImagesConfig({ kind: "disabled" })).toEqual({ ok: true, value: { kind: "disabled" } });

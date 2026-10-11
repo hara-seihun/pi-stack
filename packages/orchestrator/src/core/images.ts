@@ -233,6 +233,17 @@ export class CoreImages {
 
   private recoverNative(registry: Registry, thread: Thread, source: CoreImageScope): CoreResult<void> {
     const previous = registry.db.query("SELECT source_path,watermark_json FROM core_image_sources WHERE thread_id=?").get(thread.id) as { source_path: string; watermark_json: string | null } | null;
+    if (previous?.source_path === thread.sessionFile && previous.watermark_json !== null) {
+      const proof: unknown = JSON.parse(previous.watermark_json);
+      if (trustedEmptySource(proof) && record(proof) && record(proof.priorSource) && proof.priorSource.kind === "absent") {
+        try { statSync(thread.sessionFile); }
+        catch (cause) {
+          if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
+          registry.db.query("INSERT INTO core_image_ingress_errors VALUES(?,?,?) ON CONFLICT(thread_id,message_key) DO UPDATE SET error=excluded.error").run(thread.id, "source-missing", "Original source remains absent at its captured path; historical effects remain unknown and were not generated.");
+          return { ok: true, value: undefined };
+        }
+      }
+    }
     const path = source.runtime.path(thread.sessionFile);
     const checkpoint = (watermark: NativeHistoryWatermark) => registry.db.query(`INSERT INTO core_image_sources(thread_id,source_path,revision,last_offset,last_digest,watermark_json) VALUES(?,?,?,?,?,?)
       ON CONFLICT(thread_id) DO UPDATE SET source_path=excluded.source_path,revision=excluded.revision,last_offset=excluded.last_offset,last_digest=excluded.last_digest,watermark_json=excluded.watermark_json`).run(thread.id, thread.sessionFile, watermark.revision, watermark.lastOffset, watermark.lastDigest, JSON.stringify(watermark));
