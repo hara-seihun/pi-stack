@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { setTimeout as delay } from "node:timers/promises";
 import { validateInspectOptions, type Result, type ThreadApi } from "./contracts.js";
 import { THREAD_TOKEN_HEADER, type AdmissionResult } from "./caller.js";
+import { spawnRequest } from "./spawn-receipt.js";
 
 type ThreadRequestContext = { lifetime: "active" | "finished"; deadline: number; signal: AbortSignal };
 const requestContext = new AsyncLocalStorage<ThreadRequestContext>();
@@ -77,7 +78,11 @@ export function createThreadClient(baseUrl: string, fetcher: ThreadFetch = fetch
   diagnosticUrl.hash = "";
   const ownerEndpoint = diagnosticUrl.toString().replace(/\/$/, "");
   async function call<T>(operation: Operation, input: unknown, callSignal?: AbortSignal): Promise<Result<T>> {
-    const body = JSON.stringify(input ?? {});
+    const fields = input as { requestId?: string; id?: string } | undefined;
+    const spawnIdentity = operation === "spawn" && typeof fields?.requestId === "string" && fields.requestId.trim()
+      ? spawnRequest(input as Parameters<ThreadApi["spawn"]>[0]) : undefined;
+    const body = JSON.stringify(spawnIdentity ?? input ?? {});
+    const uncertainSpawn = spawnIdentity ? { requestId: spawnIdentity.requestId, threadId: spawnIdentity.id!, state: "unconfirmed" as const } : undefined;
     const requestId = (["send", "spawn", "ask", "managerQuestions", "managerQuestionCustody", "watch", "agentWait", "wakeSchedule", "attention"].includes(operation)) ? (input as { requestId?: string })?.requestId : undefined;
     const replayable = typeof requestId === "string" && !!requestId.trim() || ["list", "archived", "read", "inspect", "questions", "managerThread", "managerNotificationPolicy", "questionOrigin", "pendingQuestions", "questionState", "questionEvents", "attentionEvents", "answer", "settlements"].includes(operation) || ["watch", "wakeSchedule", "managerQuestions"].includes(operation) && (input as { action?: string })?.action === "list";
     const terminal = (value: Result<T>): Result<T> => value.ok ? value
@@ -94,13 +99,19 @@ export function createThreadClient(baseUrl: string, fetcher: ThreadFetch = fetch
         const response = await fetcher(`${base}/${operation}`, { method: "POST",
           headers: { "content-type": "application/json", [deadlineHeader]: String(deadline), ...(options.token ? { [THREAD_TOKEN_HEADER]: options.token } : {}) }, body, signal });
         if ([502, 503, 504].includes(response.status)) {
+          if (operation === "spawn") {
+            try {
+              const receipt = await response.clone().json() as Result<T>;
+              if (receipt.ok === false && receipt.error?.spawnReceipt) { await response.body?.cancel(); return terminal(receipt); }
+            } catch { /* Gateway activation errors need not be JSON owner receipts. */ }
+          }
           await response.body?.cancel();
           lastError = `Thread owner returned HTTP ${response.status}`;
           retry = true;
         } else {
           const value = await response.json() as Result<T>;
           if (typeof value?.ok !== "boolean" || (!value.ok && (!value.error || typeof value.error.message !== "string"))) {
-            return terminal(failure(`Thread owner returned an invalid response (${response.status}); acceptance is unconfirmed`));
+            return terminal({ ok: false, error: { code: "unavailable", message: `Thread owner returned an invalid response (${response.status}); acceptance is unconfirmed`, ...(uncertainSpawn ? { spawnReceipt: uncertainSpawn } : {}) } });
           }
           if (!response.ok) return terminal(value.ok ? failure(`Thread owner returned HTTP ${response.status}`) : value);
           if (value.ok || !value.error.retryable) return terminal(value);
@@ -117,7 +128,7 @@ export function createThreadClient(baseUrl: string, fetcher: ThreadFetch = fetch
     }
     const reason = callSignal?.aborted || options.signal?.aborted || inherited?.signal.aborted && Date.now() < deadline ? "cancelled"
       : Date.now() >= deadline || signal.aborted ? "deadline expired" : "failed";
-    return { ok: false, error: { code: "unavailable", retryable: false, ...(requestId ? { requestId } : {}),
+    return { ok: false, error: { code: "unavailable", retryable: false, ...(requestId ? { requestId } : {}), ...(uncertainSpawn ? { spawnReceipt: uncertainSpawn } : {}),
       message: `Thread ${operation} ${reason} at ${ownerEndpoint}/${operation}: ${lastError}.${requestId ? ` Acceptance is unconfirmed for request ${requestId}; reconcile this identity rather than issuing a new instruction.` : ""}` } };
   }
   return {

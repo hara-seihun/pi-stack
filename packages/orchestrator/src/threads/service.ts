@@ -4,6 +4,7 @@ import { isRunnerCapacityFailure } from "./runner-capacity.js";
 import { RunnerStartupError, isPooledStartupWait } from "./runner-startup.js";
 import { parseRuntimeEvent, requireAssistantStopReason, assertNever } from "./runtime-events.js";
 import { createHash, randomUUID } from "node:crypto";
+import { spawnReceiptInput, spawnThreadId } from "./spawn-receipt.js";
 import { mkdirSync } from "node:fs";
 import { indexedThreadHistory, quarantinedThreadHistoryPage, withIndexedThreadHistory, timestampMs, type IndexedThreadHistory, type MessageRecordDescriptor, type RecordDescriptor, type ThreadHistoryError } from "pi-orchestrator/history";
 import { contentText } from "@earendil-works/pi-ai";
@@ -1413,11 +1414,24 @@ export class ThreadService implements ThreadApi {
     return this.message(this.sql("SELECT * FROM thread_work WHERE id=?").get(id) as Json);
   }
   async spawn(input: SpawnThread): Promise<Result<Thread>> {
+    if (!input || typeof input.requestId !== "string" || !input.requestId.trim()) return bad("invalid_request", "Spawn requires its stable caller requestId");
+    const { createdBy } = input;
+    const receipt = spawnReceiptInput(input);
+    const lookup = () => {
+      const prior = this.request(input.requestId, receipt, "spawn");
+      if (prior.ok || input.id !== spawnThreadId(input.requestId)) return prior;
+      const { createdBy: _creator, ...original } = input;
+      return this.request(input.requestId, original, "spawn");
+    };
+    let effect: import("./contracts.js").SpawnReceipt | undefined;
     try {
-      // The creator is the owner's verification of this caller, not part of the request's identity.
-      const { createdBy, ...receipt } = input;
-      const prior = this.request(input.requestId, receipt, "spawn"); if (!prior.ok) return prior;
-      if (prior.value) return good(this.get(prior.value)!);
+      const prior = lookup(); if (!prior.ok) return prior;
+      if (prior.value) {
+        effect = { requestId: input.requestId, threadId: prior.value, state: "accepted" };
+        const thread = this.get(prior.value);
+        if (!thread) throw new Error("Accepted spawn receipt has no accessible thread");
+        return good(thread);
+      }
       if (!input.cwd || typeof input.cwd !== "string" || input.message !== undefined && (typeof input.message !== "string" || !input.message.trim())) return bad("invalid_request", "cwd and a nonempty assignment when supplied are required");
       if (input.title !== undefined && (typeof input.title !== "string" || !input.title.trim())) return bad("invalid_request", "The task title must be nonempty");
       const title = input.title?.trim() ?? input.message?.trim().split(/\r?\n/)[0]?.slice(0, 80) ?? (input.metadata?.manager === true ? "Kenaznia" : undefined);
@@ -1427,8 +1441,13 @@ export class ThreadService implements ThreadApi {
         const found = await this.directory.list({ id: input.parentId, limit: 1 });
         if (!found.ok) return found;
         parent = found.value.threads[0] ?? null;
-        const accepted = this.request(input.requestId, receipt, "spawn"); if (!accepted.ok) return accepted;
-        if (accepted.value) return good(this.get(accepted.value)!);
+        const accepted = lookup(); if (!accepted.ok) return accepted;
+        if (accepted.value) {
+          effect = { requestId: input.requestId, threadId: accepted.value, state: "accepted" };
+          const thread = this.get(accepted.value);
+          if (!thread) throw new Error("Accepted spawn receipt has no accessible thread");
+          return good(thread);
+        }
       }
       if (input.parentId && !parent) return bad("not_found", "Parent thread is not accessible to this service");
       if (input.metadata && "manager" in input.metadata && input.metadata.manager !== true) return bad("invalid_request", "Manager metadata must be true when present");
@@ -1436,7 +1455,12 @@ export class ThreadService implements ThreadApi {
         if (this.options.workersOnly || input.parentId || input.ephemeral || input.metadata.raw || input.metadata.sandbox || input.metadata.context || input.metadata.execution || input.metadata.archived || input.metadata.mode)
           return bad("invalid_request", "A manager is a persistent full-context person-owned root thread");
         const manager = this.manager();
-        if (manager) { this.recordRequest(input.requestId, receipt, "spawn", manager.id); return good(manager); }
+        if (manager) {
+          effect = { requestId: input.requestId, threadId: manager.id, state: "unconfirmed" };
+          this.recordRequest(input.requestId, receipt, "spawn", manager.id);
+          effect.state = "accepted";
+          return good(manager);
+        }
       }
       if (input.ephemeral !== undefined && typeof input.ephemeral !== "boolean") return bad("invalid_request", "ephemeral must be a boolean");
       if (parent && !canSpawnRole(threadRole(parent.metadata ?? {}))) return bad("invalid_request", "A kenatia cannot launch agents");
@@ -1468,11 +1492,12 @@ export class ThreadService implements ThreadApi {
       if (metadata.telephoneContext !== undefined && (!isTelephoneContext(metadata.telephoneContext) || metadata.raw !== true || metadata.sandbox !== undefined || metadata.meetingId != null || metadata.room !== undefined)) return bad("invalid_request", "Telephone threads require a valid fixed raw boundary");
       if (input.admission !== undefined && !["force", "background"].includes(input.admission)) return bad("invalid_request", "Invalid admission policy");
       const admission = threadMode(metadata.mode)?.admission ?? (input.parentId ? "force" : input.admission ?? "force");
-      const id = input.id ?? randomUUID();
+      const id = input.id ?? spawnThreadId(input.requestId);
       if (input.parentId === id) return bad("invalid_request", "A thread cannot be its own parent");
       if (typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(id)) return bad("invalid_request", "Thread ID must be a nonempty filename-safe identifier");
       if (this.get(id)) return bad("conflict", "Thread ID already exists");
       const cwd = input.cwd;
+      effect = { requestId: input.requestId, threadId: id, state: "unconfirmed" };
       this.transaction(() => {
         const now = Date.now();
         this.sql("INSERT INTO thread(id,parent_id,title,cwd,session_file,settings,admission,state,created_at,updated_at,metadata) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
@@ -1482,8 +1507,32 @@ export class ThreadService implements ThreadApi {
           text: input.message, images: input.images, delivery: resolveDelivery({ senderId: input.parentId }) }, settings.value, false, parent?.title);
         this.recordRequest(input.requestId, receipt, "spawn", id);
       });
-      this.changed(id); this.wake(id); return good(this.get(id)!);
-    } catch (error) { return bad("unavailable", errorText(error)); }
+      effect.state = "accepted";
+      this.changed(id); this.wake(id);
+      const thread = this.get(id);
+      if (!thread) throw new Error("Accepted spawn has no accessible thread");
+      return good(thread);
+    } catch (error) {
+      let diagnostic = errorText(error);
+      if (effect) {
+        try {
+          const accepted = lookup();
+          if (accepted.ok && accepted.value) {
+            effect = { requestId: input.requestId, threadId: accepted.value, state: "accepted" };
+            const thread = this.get(accepted.value);
+            if (thread) {
+              console.error(`Spawn ${input.requestId} was accepted as ${thread.id}; post-acceptance observation failed: ${errorText(error)}`);
+              this.wake(thread.id);
+              return good(thread);
+            }
+          }
+        } catch (recovery) { diagnostic += `; receipt recovery failed: ${errorText(recovery)}`; }
+        return { ok: false, error: { code: "unavailable", requestId: input.requestId, retryable: false, spawnReceipt: effect,
+          message: `Spawn ${effect.state} for thread ${effect.threadId}: ${diagnostic}. Reconcile or retry the exact requestId ${input.requestId}; do not issue a new spawn.` } };
+      }
+      return { ok: false, error: { code: "unavailable", requestId: input.requestId, retryable: false,
+        message: `${errorText(error)}. Reconcile the exact spawn requestId ${input.requestId}; do not issue a new spawn.` } };
+    }
   }
   async attention(input: import("./contracts.js").ThreadAttentionRequest): Promise<Result<import("./contracts.js").ThreadAttentionReceipt>> {
     if (this.closed || this.suspended) return bad("unavailable", "Thread controller is suspended");

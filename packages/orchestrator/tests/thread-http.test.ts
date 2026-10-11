@@ -116,7 +116,7 @@ it("deduplicates overlapping spawn retries after asynchronous parent discovery",
   const parentOwner = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(root, "parent.sqlite3"), sessionsDir: join(root, "parent"),
     openSession: async () => { throw new Error("No model execution"); } });
   cleanups.push(async () => { expect(await parentOwner.close()).toMatchObject({ ok: true }); });
-  expect(await parentOwner.spawn({ requestId: "create-parent", id: "parent", cwd: root })).toMatchObject({ ok: true });
+  expect(await parentOwner.spawn({ requestId: "create-parent", id: "parent", title: "Parent task", cwd: root })).toMatchObject({ ok: true });
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
   const list = parentOwner.list.bind(parentOwner);

@@ -120,13 +120,18 @@ export function threadTools(options: PiSessionOptions) {
     defineTool({
       name: "thread_spawn", label: "Start a thread",
       description: `${DELEGATION_POLICY}\n\nStart a fresh agent peer with its own context. Kenaznia spawns kenan; a kena can spawn kenatian; a kenatia cannot spawn. parentId records creator provenance only. It returns immediately; assignment replies arrive as ordinary agent messages. Creating a peer is not a dependency: use thread_wait or explicit dependencies when you rely on its result. Workers finish by writing their state and next action to the owning Markdown notes. Threads remain open until explicit Close; completion never archives them. To continue an existing conversation use thread_send instead. ${spawnDefaults(options.env.PI_THREAD_MODE)} Explicit settings may select any available installed model. ${SUBAGENT_MODEL_DESCRIPTIONS}`,
-      parameters: Type.Object({ message: Type.String(), title: Type.Optional(Type.String()), cwd: Type.Optional(Type.String()), settings: Type.Optional(Type.Object({
+      parameters: Type.Object({ message: Type.String(), title: Type.Optional(Type.String()), cwd: Type.Optional(Type.String()),
+        requestId: Type.Optional(Type.String({ minLength: 1, description: "Recovery only: reuse the exact requestId from an accepted/unconfirmed spawn receipt with the unchanged original payload. Never use a new ID to retry uncertain creation." })), settings: Type.Optional(Type.Object({
         ...settings.properties,
         model: Type.Optional(Type.String({ description: "Defaults to Sol; any available installed model may be selected." })),
       })) }),
-      execute: async (id, input, signal) => result(mapResult(await api(signal).spawn({ ...input, requestId: `${options.threadId}:${id}`, parentId: options.threadId,
-        cwd: input.cwd ?? options.cwd, admission: "force", settings: input.settings as Parameters<ThreadApi["spawn"]>[0]["settings"] }),
-        thread => ({ id: thread.id, title: thread.title, role: thread.role }))),
+      execute: async (id, input, signal) => {
+        const requestId = input.requestId ?? `${options.threadId}:${id}`;
+        if (!requestId.startsWith(`${options.threadId}:`) || requestId.length <= options.threadId.length + 1) return result({ ok: false, error: { code: "invalid_request", message: "Spawn recovery requires this caller's original requestId" } });
+        return result(mapResult(await api(signal).spawn({ ...input, requestId, parentId: options.threadId,
+          cwd: input.cwd ?? options.cwd, admission: "force", settings: input.settings as Parameters<ThreadApi["spawn"]>[0]["settings"] }),
+          thread => ({ id: thread.id, title: thread.title, role: thread.role, requestId })));
+      },
     }),
     defineTool({
       name: "thread_send", label: "Send to a thread",

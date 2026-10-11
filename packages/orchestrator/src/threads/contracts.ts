@@ -4,7 +4,8 @@ import type { ExecutionActivitySnapshot } from "./execution-activity.js";
 import type { ThreadLifecycle } from "./lifecycle.js";
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: ThreadError };
-export type ThreadError = { code: "not_found" | "invalid_request" | "conflict" | "no_pending_messages" | "unavailable" | "cancellation_failed" | "oversized"; message: string; retryable?: boolean; retryAt?: number; requestId?: string };
+export type SpawnReceipt = { requestId: string; threadId: string; state: "accepted" | "unconfirmed" };
+export type ThreadError = { code: "not_found" | "invalid_request" | "conflict" | "no_pending_messages" | "unavailable" | "cancellation_failed" | "oversized"; message: string; retryable?: boolean; retryAt?: number; requestId?: string; spawnReceipt?: SpawnReceipt };
 export type Delivery = "pending" | "queue" | "steer" | "hardSteer";
 export type PendingDelivery = "pending";
 export type { ThreadRole } from "./roles.js";
