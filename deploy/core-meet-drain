@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""Source-bound existing Meet idle release with positive kernel exit acknowledgement."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+from core_namespace import absolute, enter, publish, trusted
+
+REQUEST = """import http.client,socket,json,sys
+c=http.client.HTTPConnection('localhost',timeout=3);s=socket.socket(socket.AF_UNIX);s.settimeout(3);s.connect(sys.argv[1]);c.sock=s
+c.request(sys.argv[2],sys.argv[3],body=None if sys.argv[2]=='GET' else sys.argv[4],headers={'content-type':'application/json'});r=c.getresponse();assert r.status==200;print(r.read().decode())
+"""
+
+
+def request(plan, method, route, body=None):
+    result = json.loads(enter(plan['namespace'], ['/usr/bin/python3', '-c', REQUEST, plan['socketPath'], method, route, json.dumps(body)], plan['uid'], plan['gid']))
+    if result.get('ok') is not True:
+        raise ValueError('existing Meet runtime rejected its owning release operation')
+    return result['value']
+
+
+def normal_exit(trace):
+    return bool(re.search(r'^exit_group\(0\)\s*=\s*\?\s*$' , trace, re.M)) and '+++ exited with 0 +++' in trace
+
+
+def drain(path):
+    plan = trusted(path)
+    if plan.get('version') != 1 or type(plan.get('pid')) is not int or not isinstance(plan.get('startTicks'), str) or min(plan['uid'], plan['gid']) < 0:
+        raise ValueError('explicit existing Meet resource identity required')
+    source = absolute(plan['sourceProof']['path'])
+    if hashlib.sha256(source.read_bytes()).hexdigest() != plan['sourceProof']['sha256']:
+        raise ValueError('existing Meet idle-release source changed')
+    text = source.read_text()
+    for token in ['if (meet.liveRooms().length)', 'if (inFlight)', 'phase = "releasing"', 'db.close();', 'process.exit(0);']:
+        if token not in text:
+            raise ValueError('source lacks explicit idle admission and database-close acknowledgement')
+    state_path, proof_path, trace_path = [absolute(plan[key]) for key in ['statePath', 'proofPath', 'tracePath']]
+    if len({state_path.parent, proof_path.parent, trace_path.parent}) != 1:
+        raise ValueError('Meet release evidence needs one protected custody directory')
+    digest = hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    state = trusted(state_path) if state_path.exists() else None
+    if state is not None and state['planSha256'] != digest:
+        raise ValueError('another existing Meet instance owns this release receipt')
+    if state is None:
+        proc = Path('/proc') / str(plan['pid'])
+        if proc.joinpath('stat').read_text().rsplit(')',1)[1].split()[19] != plan['startTicks'] or proc.joinpath('exe').resolve() != Path('/usr/local/bin/bun').resolve():
+            raise ValueError('existing Meet process birth or executable differs')
+        status = request(plan, 'GET', '/runtime/status')
+        if status.get('protocol') != 'meet-runtime-v1' or status.get('pid') != plan['pid'] or status.get('phase') != 'serving':
+            raise ValueError('socket belongs to another Meet runtime generation')
+        if status.get('rooms') != [] or status.get('requestsInFlight') != 0:
+            return {'state':'pending','waiting':'accepted-meet-work','pid':plan['pid']}
+        fd = os.open(trace_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600);os.close(fd)
+        observer = subprocess.Popen(['/usr/bin/strace','-e','trace=exit_group','-p',str(plan['pid']),'-o',str(trace_path)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        deadline = time.monotonic()+3
+        while time.monotonic()<deadline:
+            fields = dict(line.split(':',1) for line in proc.joinpath('status').read_text().splitlines() if ':' in line)
+            if fields.get('TracerPid','').strip() == str(observer.pid):break
+            if observer.poll() is not None:raise ValueError('kernel Meet exit observer could not attach')
+            time.sleep(.01)
+        else:raise ValueError('kernel Meet exit observer did not acknowledge attachment')
+        state = {'version':1,'planSha256':digest,'state':'attached','instance':status['instance'],'observerPid':observer.pid,'idleStatus':status}
+        publish(state_path,state)
+        released = request(plan,'POST','/runtime/release',{'instance':status['instance']})
+        state = {**state,'releaseAcknowledgement':released,'state':'release-acknowledged' if released.get('released') is True else 'pending'}
+        publish(state_path,state)
+        if released.get('released') is not True:
+            observer.terminate();observer.wait(timeout=3)
+            return {'state':'pending','waiting':released.get('reason'),'pid':plan['pid']}
+        try:observer.wait(timeout=4)
+        except subprocess.TimeoutExpired:return {'state':'pending','waiting':'kernel-normal-exit','pid':plan['pid']}
+    if state.get('releaseAcknowledgement',{}).get('released') is not True or not normal_exit(trace_path.read_text()):
+        return {'state':'pending','waiting':'kernel-normal-exit','pid':plan['pid']}
+    receipt = {'version':1,'protocol':'pi-core-meet-resource-drain-v1','state':'closed','pid':plan['pid'],'startTicks':plan['startTicks'],'instance':state['instance'],'idleStatus':state['idleStatus'],'releaseAcknowledgement':state['releaseAcknowledgement'],'planSha256':digest,'sourceProof':plan['sourceProof'],'namespace':plan['namespace'],'databasePath':plan['databasePath'],'exit':{'kind':'normal','code':0},'trace':{'path':str(trace_path),'sha256':hashlib.sha256(trace_path.read_bytes()).hexdigest()}}
+    publish(proof_path,receipt)
+    return {'state':'closed','pid':plan['pid'],'proofPath':str(proof_path)}
+
+
+if __name__=='__main__':
+    try:
+        if os.geteuid()!=0 or len(sys.argv)!=2:raise ValueError('usage: root core-meet-drain ROOT_PLAN')
+        print(json.dumps({'ok':True,'value':drain(absolute(sys.argv[1]))}))
+    except (OSError,ValueError,KeyError,TypeError,subprocess.SubprocessError) as error:
+        print(json.dumps({'ok':False,'error':{'code':'meet-resource-drain-unconfirmed','message':str(error)}}));sys.exit(75)

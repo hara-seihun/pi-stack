@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""Durable, source-bound exact adoption batch; each completed receipt keeps custody."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import runpy
+import sys
+from core_namespace import absolute, publish, trusted
+
+
+def batch(path):
+    plan = trusted(path)
+    if plan.get('version') != 1 or not isinstance(plan.get('entries'), list):
+        raise ValueError('explicit closed adoption batch required')
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    state_path = absolute(plan['statePath'])
+    state = trusted(state_path) if state_path.exists() else {'version':1,'planSha256':digest,'completed':{}}
+    if state.get('planSha256') != digest:
+        raise ValueError('another batch owns the durable adoption record')
+    module = runpy.run_path(str(Path(__file__).with_name('core-adopt')))
+    for entry in plan['entries']:
+        if entry.get('operation') not in ('rebind','transfer'):
+            raise ValueError('only declared existing-store transfer or rebinding permitted')
+        item_path = absolute(entry['planPath']);item = trusted(item_path)
+        item_sha = hashlib.sha256(item_path.read_bytes()).hexdigest()
+        receipt_path = absolute(item['adoptionReceiptPath'])
+        previous = state['completed'].get(item['scopeId'])
+        if previous is not None:
+            if previous['planSha256'] != item_sha or previous['receiptSha256'] != hashlib.sha256(receipt_path.read_bytes()).hexdigest():
+                raise ValueError('completed adoption custody changed')
+            continue
+        result = module[entry['operation']](item)
+        if result.get('ok') is not True:raise ValueError('scope adoption has no completed receipt')
+        state['completed'][item['scopeId']] = {'planSha256':item_sha,'receiptSha256':hashlib.sha256(receipt_path.read_bytes()).hexdigest()}
+        publish(state_path,{**state,'state':'running'})
+    publish(state_path,{**state,'state':'complete'})
+    return {'state':'complete','receiptCount':len(state['completed'])}
+
+
+if __name__=='__main__':
+    try:
+        if os.geteuid()!=0 or len(sys.argv)!=2:raise ValueError('usage: root core-adopt-batch ROOT_PLAN')
+        print(json.dumps({'ok':True,'value':batch(absolute(sys.argv[1]))}))
+    except (OSError,ValueError,KeyError,TypeError) as error:
+        print(json.dumps({'ok':False,'error':{'code':'batch-adoption-unconfirmed','message':str(error)}}));sys.exit(75)
