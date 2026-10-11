@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""Seal source-attested existing provider ledgers after positive original controller exits."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+from core_namespace import absolute, enter, publish, trusted
+
+
+def digest(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def source(plan, name, tokens):
+    proof = plan[name]
+    path = absolute(proof['path'])
+    if digest(path) != proof['sha256']:
+        raise ValueError('original provider source binding changed')
+    text = path.read_text()
+    if not all(token in text for token in tokens):
+        raise ValueError('original provider source lacks the declared store-open/close contract')
+    return proof
+
+
+def acknowledged(path, kind):
+    plan = trusted(absolute(path))
+    state = trusted(absolute(plan['statePath']))
+    expected = hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    if plan['kind'] != kind or state.get('state') != 'detached' or state.get('planSha256') != expected:
+        raise ValueError('original provider controller has no positively sealed detachment')
+    receipts = [trusted(absolute(row['receiptPath'])) for row in plan['scopes']]
+    for receipt in receipts:
+        evidence = receipt.get('detachmentEvidence', {})
+        if receipt.get('state') != 'detached' or evidence.get('planSha256') != expected or not (evidence.get('exitCode') == 0 or kind == 'fleet' and evidence.get('fleetExitEvidence', {}).get('kind') == 'closed-controller-systemd-success'):
+            raise ValueError('original provider controller has no normal zero-exit store-close acknowledgement')
+    return plan, receipts[0], {'planPath':str(path),'planSha256':digest(path),'receiptPaths':[row['receiptPath'] for row in plan['scopes']]}
+
+
+def identity(plan):
+    path = str(absolute(plan['databasePath']))
+    code = "import os,stat,json,sys;s=os.stat(sys.argv[1]);assert stat.S_ISREG(s.st_mode);print(json.dumps({'dev':str(s.st_dev),'ino':str(s.st_ino)}))"
+    old = json.loads(enter(plan['namespace'], ['/usr/bin/python3','-c',code,path], plan['uid'], plan['gid']))
+    now = os.stat(path)
+    current = {'dev':str(now.st_dev),'ino':str(now.st_ino)}
+    if old != current:
+        raise ValueError('provider ledger is not the exact same physical database in the common view')
+    return current
+
+
+def adopt(path):
+    plan = trusted(absolute(path))
+    if plan.get('version') != 1 or plan.get('kind') not in ('fleet-ledger','broker-cohort') or not isinstance(plan.get('id'), str) or min(plan['uid'],plan['gid']) < 0:
+        raise ValueError('explicit existing provider ledger custody required')
+    receipt_path = absolute(plan['receiptPath'])
+    plan_sha = digest(path)
+    if receipt_path.exists():
+        prior = trusted(receipt_path)
+        if prior.get('providerAdoption',{}).get('planSha256') != plan_sha or prior.get('databaseIdentity') != identity(plan):
+            raise ValueError('another provider adoption owns this receipt')
+        return {'state':'detached','receiptPath':str(receipt_path),'reconciled':True}
+    evidence = []
+    if plan['kind'] == 'fleet-ledger':
+        old, receipt, proof = acknowledged(plan['ownerPlanPath'],'fleet')
+        binding = trusted(absolute(plan['sourceBindingPath']))
+        rows = [row for row in binding['scopes'] if row['id'] == plan['ownerScopeId']]
+        if len(rows) != 1 or rows[0]['oldOwnerUnit'] != old['unit'] or rows[0]['environmentReferences'].get('PI_ORCHESTRATOR_LEDGER') != plan['databasePath']:
+            raise ValueError('original measured controller environment does not bind this ledger')
+        commands = source(plan,'commandsSource', ['const store = Store.open(ledgerPath());','const retirement = await new Daemon(store, loadConfig()).start();','store.close();','process.exit(retirement.edges.some(edge => edge.state === "error") ? 1 : 0);','process.env.PI_ORCHESTRATOR_LEDGER ||'])
+        if Path(commands['path']).parent != Path(old['sourceProof']['path']).parent:
+            raise ValueError('ledger entrypoint belongs to another original source generation')
+        evidence = [proof, {'sourceBindingPath':plan['sourceBindingPath'],'sourceBindingSha256':digest(plan['sourceBindingPath']),'commandsSource':commands}]
+        previous = receipt['previousOwner']
+    else:
+        fleet = trusted(absolute(plan['fleetReceiptPath']))
+        if fleet.get('state') != 'detached' or fleet.get('databasePath') != plan['databasePath'] or fleet.get('scopeId') != plan['id']:
+            raise ValueError('common ledger requires its earlier fleet controller detachment')
+        if not isinstance(plan.get('ownerPlanPaths'),list) or not plan['ownerPlanPaths']:
+            raise ValueError('exact original broker controller cohort required')
+        broker_source = source(plan,'brokerSource',['const store = Store.open(config.ledgerPath);','await broker.close();','store.close();'])
+        owners = []
+        configs = []
+        for owner_path in plan['ownerPlanPaths']:
+            owner, receipt, proof = acknowledged(owner_path,'broker')
+            if owner['sourceProof'] != broker_source or owner['scopes'][0]['databasePath'] != plan['databasePath']:
+                raise ValueError('broker cohort source or physical ledger differs')
+            owners.append(receipt['previousOwner']); evidence.append(proof)
+            config_path = owner['originalConfigPath']; config = trusted(absolute(config_path))
+            if config['ledgerPath'] != plan['databasePath']:
+                raise ValueError('broker original configuration binds another ledger')
+            configs.append(config_path)
+        if sorted(configs) != sorted(plan['originalConfigPaths']) or len(set(configs)) != len(configs):
+            raise ValueError('broker controller cohort is incomplete or duplicated')
+        previous = {'identity':'provider-cohort:'+'|'.join(owner['identity'] for owner in owners),'detachedAt':max(owner['detachedAt'] for owner in owners)}
+        evidence.append({'fleetReceiptPath':plan['fleetReceiptPath'],'fleetReceiptSha256':digest(plan['fleetReceiptPath'])})
+    receipt = {'version':1,'state':'detached','scopeId':plan['id'],'databasePath':plan['databasePath'],'databaseIdentity':identity(plan),'previousOwner':previous,'providerAdoption':{'protocol':'pi-core-source-provider-adoption-v1','planSha256':plan_sha,'kind':plan['kind'],'evidence':evidence,'acceptedCompletionResources':'retained-independent'}}
+    publish(receipt_path,receipt)
+    return {'state':'detached','receiptPath':str(receipt_path),'databaseIdentity':receipt['databaseIdentity']}
+
+
+if __name__ == '__main__':
+    try:
+        if os.geteuid()!=0 or len(sys.argv)!=2:
+            raise ValueError('usage: root core-provider-adopt ROOT_PLAN')
+        print(json.dumps({'ok':True,'value':adopt(sys.argv[1])}))
+    except (OSError,ValueError,KeyError,TypeError) as error:
+        print(json.dumps({'ok':False,'error':{'code':'provider-adoption-unconfirmed','message':str(error)}}));sys.exit(75)
