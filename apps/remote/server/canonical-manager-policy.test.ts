@@ -38,3 +38,18 @@ test("projection preserves the one canonical manager; errors and classic/other-m
   expect(validateManagerPolicyResponse({ ok: true, value: { view: "mono", managerThreadId: "original-manager" } }, "original-manager")).toEqual({ ok: true, value: { view: "mono", managerThreadId: "original-manager" } });
   for (const v of [{ ok: true, value: { view: "classic" } }, { ok: true, value: { view: "mono", managerThreadId: "replacement" } }, { ok: true, value: { view: "mono", managerThreadId: "original-manager", extra: true } }, { ok: false, error: { message: "unavailable" } }, null]) expect(validateManagerPolicyResponse(v, "original-manager").ok).toBe(false);
 });
+
+import { validateManagerNotice, validateManagerNoticeReceipt, managerNoticeCapability } from "./canonical-manager-policy";
+test("explicit notice capability retains the enrolled binding without widening policy read", () => {
+  expect(managerNoticeCapability(binding)).toEqual({ version: 1, purpose: "canonical-notification", binding });
+  expect(admitManagerPolicyRead({ ...envelope, input: {} }, token, binding, "local").ok).toBe(false);
+});
+test("original notice is preserved exactly and only canonical notification sends pass", () => {
+  const notice = { threadId: binding.target.managerThreadId, senderId: "original-worker", requestId: "manager-notice:fleet:settlement:original", source: "notification", text: "Actual work outcome" };
+  expect(validateManagerNotice(notice, binding)).toEqual({ ok: true, value: notice });
+  for (const changed of [{ threadId: "another-manager" }, { source: "explicit" }, { senderId: "" }, { requestId: "new-send" }, { delivery: "pending" }, { humanActivity: true }, { images: [] }, { text: "" }])
+    expect(validateManagerNotice({ ...notice, ...changed }, binding).ok).toBe(false);
+  expect(validateManagerNoticeReceipt({ ok: true, value: { id: notice.requestId, threadId: notice.threadId, text: notice.text } }, notice)).toEqual({ ok: true, value: { id: notice.requestId, threadId: notice.threadId } });
+  for (const v of [{ ok: true, value: { id: "another", threadId: notice.threadId } }, { ok: true, value: { id: notice.requestId, threadId: "other" } }, { ok: false, error: { message: "unconfirmed" } }, null])
+    expect(validateManagerNoticeReceipt(v, notice).ok).toBe(false);
+});

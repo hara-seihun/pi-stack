@@ -1,9 +1,12 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { hostname } from "node:os";
+import { isDeepStrictEqual } from "node:util";
 import { authorize, type PermissionPolicy, type Principal, type Resource } from "pi-orchestrator/permissions";
 
 export const MANAGER_POLICY_PATH = "/v1/canonical-manager-policy";
+export const MANAGER_NOTICE_PATH = "/v1/canonical-manager-notice";
+export const MANAGER_NOTICE_BYTES = 1024 * 1024;
 const TOKEN_HEADER = "x-pi-canonical-manager-policy";
 const STORE = "/etc/pi-stack/canonical-manager-policy.json";
 type Identity = { host: string; environment: string; scopeId: string; user: string; uid: number };
@@ -52,13 +55,13 @@ export function admitManagerPolicyRead(input: unknown, presented: string | null,
   if (!presented || !/^[a-f0-9]{64}$/.test(presented) || !timingSafeEqual(createHash("sha256").update(presented).digest(), Buffer.from(binding.credentialSha256, "hex"))) return bad("forbidden", "Enrolled manager-policy credential required");
   return { ok: true, value: undefined };
 }
-async function boundedBody(body: ReadableStream<Uint8Array> | null): Promise<string> {
+async function boundedBody(body: ReadableStream<Uint8Array> | null, maximum = 4096): Promise<string> {
   if (body === null) throw new Error("Manager policy metadata is absent");
   const reader = body.getReader(); const chunks: Uint8Array[] = []; let bytes = 0;
   const deadline = AbortSignal.timeout(5000); const cancel = () => { void reader.cancel().catch(() => {}); };
   deadline.addEventListener("abort", cancel, { once: true });
   try {
-    for (;;) { const chunk = await reader.read(); if (deadline.aborted) throw new Error("Manager policy metadata deadline expired"); if (chunk.done) break; bytes += chunk.value.length; if (bytes > 4096) throw new Error("Manager policy metadata exceeds bound"); chunks.push(chunk.value); }
+    for (;;) { const chunk = await reader.read(); if (deadline.aborted) throw new Error("Manager policy metadata deadline expired"); if (chunk.done) break; bytes += chunk.value.length; if (bytes > maximum) throw new Error("Manager metadata exceeds bound"); chunks.push(chunk.value); }
     return Buffer.concat(chunks).toString("utf8");
   } finally { deadline.removeEventListener("abort", cancel); await reader.cancel(); reader.releaseLock(); }
 }
@@ -131,4 +134,80 @@ export async function incomingManagerPolicy(request: Request, localEnvironment: 
     const text = await boundedBody(response.body);
     const result = validateManagerPolicyResponse(JSON.parse(text), binding.target.managerThreadId); return Response.json(result, { status: result.ok ? 200 : 503 });
   } catch { return Response.json(bad("unavailable", "Existing manager policy projection unavailable"), { status: 503 }); }
+}
+
+export function managerNoticeCapability(binding: ManagerPolicyBinding) {
+  return { version: 1, purpose: "canonical-notification", binding };
+}
+function noticeAuthority(binding: ManagerPolicyBinding): Result<void> {
+  const current = authority(binding); if (!current.ok) return current;
+  try {
+    const value = JSON.parse(protectedRead(`/etc/pi-stack/manager-policy/${binding.id}/notices.json`));
+    return isDeepStrictEqual(value, managerNoticeCapability(binding)) ? { ok: true, value: undefined }
+      : bad("forbidden", "Notice capability differs from the enrolled canonical identity");
+  } catch { return bad("forbidden", "Explicit canonical notification enrollment required"); }
+}
+export function validateManagerNotice(input: unknown, binding: ManagerPolicyBinding): Result<Record<string, unknown>> {
+  if (!object(input) || input.threadId !== binding.target.managerThreadId || input.source !== "notification"
+      || typeof input.senderId !== "string" || !atom(input.senderId)
+      || typeof input.requestId !== "string" || !/^manager-notice:[a-zA-Z0-9_.:-]+$/.test(input.requestId)
+      || typeof input.text !== "string" || !input.text.trim() || Buffer.byteLength(input.text) > MANAGER_NOTICE_BYTES - 4096
+      || input.delivery !== undefined && input.delivery !== "steer"
+      || Object.keys(input).some(key => !["threadId", "senderId", "requestId", "source", "text", "delivery"].includes(key)))
+    return bad("invalid_request", "One original notification to the enrolled canonical manager required");
+  return { ok: true, value: input };
+}
+export function validateManagerNoticeReceipt(value: unknown, input: Record<string, unknown>): Result<{ id: string; threadId: string }> {
+  if (object(value) && value.ok === true && object(value.value) && value.value.id === input.requestId
+      && value.value.threadId === input.threadId)
+    return { ok: true, value: { id: value.value.id as string, threadId: value.value.threadId as string } };
+  if (object(value) && value.ok === false && object(value.error) && typeof value.error.message === "string")
+    return bad("unavailable", value.error.message.slice(0, 512));
+  return bad("conflict", "Original canonical notice acceptance is unconfirmed; retain its identity");
+}
+export async function outgoingManagerNotice(user: string, uid: number, sourceEnvironment: string, targetEnvironment: string,
+  input: unknown, signal: AbortSignal): Promise<Response | undefined> {
+  const configured = bindings(); if (!configured.ok) return Response.json(configured, { status: 503 });
+  const selected = configured.value.filter(b => b.direction === "outgoing" && b.source.user === user && b.source.uid === uid
+    && b.source.environment === sourceEnvironment && b.target.environment === targetEnvironment);
+  if (!selected.length) return undefined;
+  if (selected.length !== 1) return Response.json(bad("conflict", "Ambiguous canonical notice route"), { status: 503 });
+  const binding = selected[0]!, admitted = validateManagerNotice(input, binding);
+  if (!admitted.ok) return Response.json(admitted, { status: 400 });
+  const allowed = noticeAuthority(binding); if (!allowed.ok) return Response.json(allowed, { status: 403 });
+  const token = secret(binding); if (!token.ok) return Response.json(token, { status: 503 });
+  try {
+    const response = await fetch(`${binding.origin}${MANAGER_NOTICE_PATH}`, { method: "POST", redirect: "error",
+      headers: { "content-type": "application/json", [TOKEN_HEADER]: token.value },
+      body: JSON.stringify({ version: 1, id: binding.id, source: binding.source, target: binding.target, input: admitted.value }),
+      signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]) });
+    const result = validateManagerNoticeReceipt(JSON.parse(await boundedBody(response.body, MANAGER_NOTICE_BYTES)), admitted.value);
+    return Response.json(result, { status: response.ok && result.ok ? 200 : 503 });
+  } catch { return Response.json(bad("unavailable", "Canonical notice transport unconfirmed; retain original request identity"), { status: 503 }); }
+}
+export async function incomingManagerNotice(request: Request, localEnvironment: string,
+  person: (user: string) => { user: string; port: number } | undefined,
+  deliver: (owner: { user: string; port: number }, input: Record<string, unknown>, sourceEnvironment: string, signal: AbortSignal) => Promise<Response>): Promise<Response> {
+  const url = new URL(request.url);
+  if (request.method !== "POST" || url.pathname !== MANAGER_NOTICE_PATH || url.search)
+    return Response.json(bad("forbidden", "Only enrolled canonical notifications are admitted"), { status: 403 });
+  const configured = bindings(); if (!configured.ok) return Response.json(configured, { status: 503 });
+  let envelope: unknown;
+  try { envelope = JSON.parse(await boundedBody(request.body, MANAGER_NOTICE_BYTES)); }
+  catch { return Response.json(bad("invalid_request", "Bounded canonical notice envelope required"), { status: 400 }); }
+  if (!object(envelope) || !keys(envelope, ["version", "id", "source", "target", "input"]))
+    return Response.json(bad("invalid_request", "Exact canonical notice envelope required"), { status: 400 });
+  const selected = configured.value.filter(b => b.direction === "incoming" && b.id === envelope.id && b.target.environment === localEnvironment);
+  if (selected.length !== 1) return Response.json(bad("forbidden", "No enrolled canonical notice route"), { status: 403 });
+  const binding = selected[0]!, { input, ...identityEnvelope } = envelope;
+  const authenticated = admitManagerPolicyRead(identityEnvelope, request.headers.get(TOKEN_HEADER), binding, localEnvironment);
+  if (!authenticated.ok) return Response.json(authenticated, { status: 403 });
+  const allowed = noticeAuthority(binding); if (!allowed.ok) return Response.json(allowed, { status: 403 });
+  const admitted = validateManagerNotice(input, binding); if (!admitted.ok) return Response.json(admitted, { status: 400 });
+  const owner = person(binding.target.user); if (!owner) return Response.json(bad("unavailable", "Canonical manager person unavailable"), { status: 503 });
+  try {
+    const response = await deliver(owner, admitted.value, binding.source.environment, AbortSignal.any([request.signal, AbortSignal.timeout(5000)]));
+    const result = validateManagerNoticeReceipt(JSON.parse(await boundedBody(response.body, MANAGER_NOTICE_BYTES)), admitted.value);
+    return Response.json(result, { status: response.ok && result.ok ? 200 : 503 });
+  } catch { return Response.json(bad("unavailable", "Original canonical notice acceptance unconfirmed; retain its identity"), { status: 503 }); }
 }

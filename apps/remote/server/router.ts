@@ -21,7 +21,7 @@ import { handleAgentRooms, roomPersonUids } from "./agent-rooms";
 import { handleAgentSignal, isSignalProductPath } from "./agent-signal";
 import { handleAgentActions } from "./agent-actions";
 import { handleAgentManager } from "./agent-manager";
-import { incomingManagerPolicy, outgoingManagerPolicy, MANAGER_POLICY_PATH } from "./canonical-manager-policy";
+import { incomingManagerPolicy, outgoingManagerPolicy, incomingManagerNotice, outgoingManagerNotice, MANAGER_NOTICE_PATH, MANAGER_POLICY_PATH } from "./canonical-manager-policy";
 import { oneKenanEnabled } from "kenan-memory/config";
 import { oneKenanConfig, custodyAuthenticate, custodyStatus, custodyVerify } from "./one-kenan";
 import { EditorAccess, editorOriginAllowed, editorSocket } from "./editor-access";
@@ -487,6 +487,11 @@ async function oauthRoute(req: Request, url: URL): Promise<Response> {
 const consentBridge = rootConsentHandler({ capability: rootConsentCapability, persons: listPersons,
   roomsOrigin: process.env.PI_REMOTE_ROOMS_OWNER_URL });
 async function route(req: Request, url: URL, peer?: { uid: number }): Promise<Response> {
+  if (url.pathname === MANAGER_NOTICE_PATH) return incomingManagerNotice(req, ENVIRONMENT_ID, user => byUser.get(user), (person, input, sourceEnvironment, signal) => {
+    const origin = `http://127.0.0.1:${person.port}`;
+    const target = new URL("/v1/manager-relay/send", origin);
+    return proxy(person, origin, new Request(req.url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input), signal }), target, signal, undefined, sourceEnvironment);
+  });
   if (url.pathname === MANAGER_POLICY_PATH) return incomingManagerPolicy(req, ENVIRONMENT_ID, user => byUser.get(user), (person, signal) => {
     const origin = `http://127.0.0.1:${person.port}`;
     const target = new URL("/v1/manager-relay/managerNotificationPolicy", origin);
@@ -495,7 +500,7 @@ async function route(req: Request, url: URL, peer?: { uid: number }): Promise<Re
   if (/^\/v1\/agent-rooms(?:\/|$)/.test(url.pathname)) return handleAgentRooms(req, peer, roomPeople, activeRooms());
   if (/^\/v1\/agent-manager(?:\/|$)/.test(url.pathname)) return handleAgentManager(req, peer, roomPeople, user => byUser.get(user),
     user => grants.get(user) ?? [], ENVIRONMENT_ID,
-    (person, origin, request, target, upstream, sourceEnvironment) => proxy(person, origin, request, target, request.signal, upstream, sourceEnvironment), outgoingManagerPolicy);
+    (person, origin, request, target, upstream, sourceEnvironment) => proxy(person, origin, request, target, request.signal, upstream, sourceEnvironment), outgoingManagerPolicy, outgoingManagerNotice);
   if (/^\/v1\/(?:manager-relay|remotes\/[^/]+\/v1\/manager-relay)(?:\/|$)/.test(url.pathname)) return Response.json({ error: "Use the account-bound manager relay" }, { status: 403 });
   if (url.pathname === "/v1/external-actions") return handleAgentActions(req, peer, roomPeople, user => byUser.get(user),
     user => grants.get(user) ?? [], ENVIRONMENT_ID,
