@@ -54,7 +54,7 @@ export function parseCoreDutiesConfig(value: unknown): CoreResult<CoreDutiesConf
 
 type AdoptedDuty = {
   spec: CoreDutySpec; scope: CoreScope; owner: CoreDutyScope; principal: Principal;
-  watch: WatchList | null; ownership: ScopeOwnership | null; receipt: MarkdownDutyReceipt;
+  watch: WatchList | null; unbindWatch: (() => void) | null; ownership: ScopeOwnership | null; receipt: MarkdownDutyReceipt;
 };
 
 /** The main clock calls tick. This adapter adopts old duties and drains only their original accepted spool. */
@@ -106,7 +106,8 @@ export class CoreDuties {
             return unavailable(`Kenaznia duty pointer ${scope.id}: ${pointed.error.message}`);
           }
         }
-        this.adopted.set(scope.id, { spec, scope, owner, principal, watch, ownership, receipt: { ...adopted.value, path: spec.path } });
+        const unbindWatch = watch ? owner.threads.setWatchList(watch) : null;
+        this.adopted.set(scope.id, { spec, scope, owner, principal, watch, unbindWatch, ownership, receipt: { ...adopted.value, path: spec.path } });
       } catch (error) {
         await watch?.close(); ownership?.close(); await this.close();
         return unavailable(`Duty custody ${scope.id}: ${error instanceof Error ? error.message : String(error)}`);
@@ -156,7 +157,7 @@ export class CoreDuties {
   async close(): Promise<void> {
     if (this.state === "closed") return;
     this.state = "closed";
-    for (const duty of this.adopted.values()) duty.watch?.stop();
+    for (const duty of this.adopted.values()) { duty.unbindWatch?.(); duty.watch?.stop(); }
     await this.ticking;
     for (const duty of this.adopted.values()) {
       await duty.watch?.close(); duty.ownership?.close();

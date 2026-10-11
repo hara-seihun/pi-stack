@@ -198,7 +198,10 @@ export class ThreadService implements ThreadApi {
     this.managerWatchdog = { observe, onError };
   }
   private watchList?: import("./watch-list.js").WatchApi;
-  setWatchList(watchList: import("./watch-list.js").WatchApi): void { this.watchList = watchList; }
+  setWatchList(watchList: import("./watch-list.js").WatchApi): () => void {
+    this.watchList = watchList;
+    return () => { if (this.watchList === watchList) this.watchList = undefined; };
+  }
   async watch(input: import("./watch-list.js").WatchRequest): Promise<Result<import("./watch-list.js").WatchResponse>> {
     if (this.closed || this.suspended) return bad("unavailable", "Thread controller is suspended");
     if (this.watchList) return this.watchList.watch(input);
