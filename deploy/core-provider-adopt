@@ -83,8 +83,10 @@ def adopt(path):
         configs = []
         for owner_path in plan['ownerPlanPaths']:
             owner, receipt, proof = acknowledged(owner_path,'broker')
-            if owner['sourceProof'] != broker_source or owner['scopes'][0]['databasePath'] != plan['databasePath']:
-                raise ValueError('broker cohort source or physical ledger differs')
+            owner_source = source(owner, 'sourceProof', ['const store = Store.open(config.ledgerPath);','await broker.close();','store.close();'])
+            if owner['scopes'][0]['databasePath'] != plan['databasePath']:
+                raise ValueError('broker cohort physical ledger differs')
+            proof['sourceProof'] = owner_source
             owners.append(receipt['previousOwner']); evidence.append(proof)
             config_path = owner['originalConfigPath']; config = trusted(absolute(config_path))
             if config['ledgerPath'] != plan['databasePath']:

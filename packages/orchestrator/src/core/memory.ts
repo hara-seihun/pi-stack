@@ -157,7 +157,6 @@ export async function createCoreMemory(options: {
         if (supervisor.timezoneFile === undefined) continue;
         if (!absolute(supervisor.timezoneFile)) return reject("Authenticated timezone files must be canonical absolute paths");
         allowed.add(supervisor.timezoneFile);
-        path(supervisor.timezoneFile);
       }
     }
     if (config.roomAudience.kind === "registry") path(config.roomAudience.databasePath);
