@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, chownSync, fsyncSync, closeSync, openSync, readFileSync, writeFileSync, renameSync, mkdirSync, statSync, lstatSync, statfsSync } from 'node:fs';
 import { dirname, join, resolve, isAbsolute } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 
 const failure = (code, message) => ({ ok: false, error: { code, message } });
 function trustedJson(path) {
@@ -227,6 +227,8 @@ export async function coreHost(operation, artifact, configPath, bindingPath, req
         if (!directory.isDirectory() || directory.uid !== 0 || directory.mode & 0o022) return failure('gateway-directory-untrusted', 'Gateway parent must be root-owned and protected');
         chmodSync(config.gatewayTransport.socketDir, 0o755);
       }
+      const helperSource = dirname(fileURLToPath(import.meta.url));
+      for (const name of ['core-host.mjs', 'core_namespace.py', 'core-adopt', 'core-person-activate']) atomic(`/usr/local/libexec/pi-stack-core-host/${name}`, readFileSync(join(helperSource, name), 'utf8'), name.endsWith('.mjs') || name.endsWith('.py') ? 0o644 : 0o755);
       for (const name of ['pi-stack-core.service', 'pi-stack-core-custody.service']) atomic(`/etc/systemd/system/${name}`, readFileSync(join(artifact, 'host', name), 'utf8'), 0o644);
     } else {
       if (!isAbsolute(bindingPath ?? '')) return failure('invalid-binding', 'A root-owned binding file is required');

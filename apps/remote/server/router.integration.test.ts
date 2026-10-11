@@ -112,7 +112,7 @@ console.log(JSON.stringify({ok:true,value:{protocol:'pi-core-person-activation-v
 `);
   writeFileSync(join(root, "activation-preload.mjs"), `
 const spawn = Bun.spawn.bind(Bun);
-Bun.spawn = (command, options) => Array.isArray(command) && command[0] === '/srv/pi/pi-orchestrator/host/core-person-activate'
+Bun.spawn = (command, options) => Array.isArray(command) && command[0] === '/usr/local/libexec/pi-stack-core-host/core-person-activate'
   ? spawn([process.execPath, ${JSON.stringify(join(root, "activation-fixture.mjs"))}, ...command.slice(1)], options)
   : spawn(command, options);
 `);

@@ -92,7 +92,7 @@ def keeper_prepare(user, identity, registry, source):
 
 
 def host(namespace, operation, argument, request_id=None):
-    command = ['/usr/local/bin/bun', str(ARTIFACT / 'host/core-host.mjs'), operation, str(ARTIFACT), str(CONFIG), str(argument)]
+    command = ['/usr/local/bin/bun', str(Path(__file__).with_name('core-host.mjs')), operation, str(ARTIFACT), str(CONFIG), str(argument)]
     if request_id is not None:
         command.append(request_id)
     raw = enter(namespace, command, 0, 0, timeout=25)
@@ -125,7 +125,7 @@ def activate(user):
     registry = trusted(Path(f'/var/lib/pi-remote/persons/{user}.json'))
     if registry.get('user') != user:
         raise ValueError('folder registry user differs')
-    source = mounted_source(user, registry)
+    source = mounted_source(user, registry) if registry.get('unlock') is not None else None
     fresh = enrollment is not None and enrollment.get('state') in ('prepared', 'adopted')
     if enrollment is not None and (enrollment.get('version') != 1 or enrollment.get('user') != user or not fresh):
         raise ValueError('explicit prepared or adopted root enrollment required')
@@ -135,10 +135,14 @@ def activate(user):
             raise ValueError('enrollment differs from canonical scope authority, storage or manager')
     if scope['availability']['kind'] == 'adopt':
         namespace = trusted(RUNTIME)['namespace']
-        if scope['custody']['namespace'] != namespace or adoption.mount_identity(namespace, registry['unlock']['mountpoint'])['source'] != registry['unlock']['cipherDir']:
+        if scope['custody']['namespace'] != namespace:
             raise ValueError('already-adopted scope lost its exact prepared registered data view')
+        if registry.get('unlock') is not None and adoption.mount_identity(namespace, registry['unlock']['mountpoint'])['source'] != registry['unlock']['cipherDir']:
+            raise ValueError('already-adopted encrypted scope lost its registered ciphertext view')
         target_receipt = None
     else:
+        if source is None:
+            raise ValueError('unavailable unencrypted scope requires its explicit physical custody plan')
         namespace, target_receipt = keeper_prepare(user, identity, registry, source)
     next_scope = copy.deepcopy(scope)
     if scope['availability']['kind'] == 'unavailable':
@@ -161,8 +165,11 @@ def activate(user):
     if CONFIG.read_bytes() != config_bytes:
         raise ValueError('canonical configuration changed during preparation; retry same plan')
     config['scopes'] = [next_scope if item['id'] == scope['id'] else item for item in config['scopes']]
-    # Configuration and registration keep all original authority, managers and stores.
-    publish(CONFIG, config)
+    # Equal already-adopted projection startup does not rewrite/reload Core.
+    # Its stores, native sessions and expensive original-prefix verification stay owned.
+    changed = next_scope != scope
+    if changed:
+        publish(CONFIG, config)
     if fresh:
         registration = copy.deepcopy(enrollment['registration'])
         registration['scope'] = next_scope
@@ -174,7 +181,8 @@ def activate(user):
     host(namespace, 'bind-person', binding_path)
     host(namespace, 'check', CONFIG)
     pid = unit_pid('pi-stack-core.service')
-    os.kill(pid, signal.SIGHUP)
+    if changed or fresh and enrollment.get('state') == 'prepared':
+        os.kill(pid, signal.SIGHUP)
     return {'protocol': 'pi-core-person-activation-v1', 'user': user, 'scopeId': scope['id'], 'state': 'prepared'}
 
 

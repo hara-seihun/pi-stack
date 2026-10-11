@@ -1,4 +1,4 @@
-export const CORE_PERSON_ACTIVATION = "/srv/pi/pi-orchestrator/host/core-person-activate";
+export const CORE_PERSON_ACTIVATION = "/usr/local/libexec/pi-stack-core-host/core-person-activate";
 export type CorePrepared = { protocol: "pi-core-person-activation-v1"; user: string; scopeId: string; state: "prepared" };
 export type CoreReadinessResult = { ok: true; value: CorePrepared } | { ok: false; error: string; status: 503 };
 export type ActivationExecution = { code: number; stdout: string };
