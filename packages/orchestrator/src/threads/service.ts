@@ -2060,7 +2060,7 @@ export class ThreadService implements ThreadApi {
         senderName = sender.value.threads[0]?.title;
         const accepted = this.request(input.requestId, input, "send"); if (!accepted.ok) return accepted;
         if (accepted.value) return good(this.message(this.sql("SELECT * FROM thread_work WHERE id=?").get(accepted.value) as Json));
-        if (this.get(thread.id)?.metadata?.archived || this.halts.has(thread.id)) return bad("conflict", "Recipient closed during sender lookup");
+        if (this.get(thread.id)?.metadata?.archived && input.source !== "notification" || this.halts.has(thread.id)) return bad("conflict", "Recipient closed during sender lookup");
       }
       let waitResult: WaitResultEvidence | undefined;
       const recipient = this.get(thread.id)!;
@@ -2073,13 +2073,13 @@ export class ThreadService implements ThreadApi {
         waitResult = { wait, settlement: current.value.settlement };
         const accepted = this.request(input.requestId, input, "send"); if (!accepted.ok) return accepted;
         if (accepted.value) return good(this.message(this.sql("SELECT * FROM thread_work WHERE id=?").get(accepted.value) as Json));
-        if (this.get(thread.id)?.metadata?.archived || this.halts.has(thread.id)) return bad("conflict", "Recipient closed during result correlation");
+        if (this.get(thread.id)?.metadata?.archived && input.source !== "notification" || this.halts.has(thread.id)) return bad("conflict", "Recipient closed during result correlation");
       }
       const message = this.transaction(() => {
-        const held = !!this.row(thread.id)?.held, explicit = input.source !== "notification";
+        const held = !!this.row(thread.id)?.held, explicit = input.source !== "notification", current = this.get(thread.id)!;
         const result = this.insertMessage(input.requestId, input, thread.settings, explicit && held, senderName, waitResult);
         if (explicit && held) this.sql("UPDATE thread SET held=0,state='running',metadata=json_remove(metadata,'$.archiveInterruption','$.watchStopped') WHERE id=?").run(thread.id);
-        else if (!held && !thread.metadata?.archived && thread.state !== "running") this.sql("UPDATE thread SET state='running' WHERE id=?").run(thread.id);
+        else if (!held && !current.metadata?.archived && current.state !== "running") this.sql("UPDATE thread SET state='running' WHERE id=?").run(thread.id);
         this.recordRequest(input.requestId, input, "send", result.id); return result;
       });
       this.changed(thread.id);
