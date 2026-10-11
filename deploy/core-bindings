@@ -81,6 +81,62 @@ def bind_writers(config_path, bindings_path, output_path):
     return {'scopeCount': len(bindings['scopes']), 'writerFenceDeclared': True, 'liveEffects': False}
 
 
+PATH_METADATA = "import json,os,sys;from pathlib import Path;out={}\nfor p in json.load(sys.stdin):\n try:\n  s=os.stat(p);out[p]={'kind':'directory' if Path(p).is_dir() else 'file','dev':str(s.st_dev),'ino':str(s.st_ino),'resolvedPath':os.path.realpath(p)}\n except OSError as e:out[p]={'error':e.errno}\nprint(json.dumps(out))"
+
+
+def exact_file_targets(resources, observations):
+    """Extend an existing exact-file declaration, never a directory ceiling."""
+    result = copy.deepcopy(resources)
+    evidence = []
+    for resource in resources:
+        if resource['kind'] != 'file':
+            continue
+        info = observations[resource['path']]
+        if 'error' in info or info['kind'] != 'file':
+            raise ValueError('registered exact file is unavailable or no longer a file: ' + resource['path'])
+        target = str(absolute(info['resolvedPath']))
+        if target == resource['path']:
+            continue
+        declaration = {'path': target, 'kind': 'file'}
+        existing = [entry for entry in result if entry['path'] == target]
+        if existing and existing != [declaration]:
+            raise ValueError('resolved exact file conflicts with another resource kind: ' + target)
+        if not existing:
+            result.append(declaration)
+        evidence.append({'path': resource['path'], 'resolvedPath': target, 'dev': info['dev'], 'ino': info['ino']})
+    return result, evidence
+
+
+def resolve_files(bindings_path, output_path):
+    bindings = copy.deepcopy(trusted(bindings_path))
+    views = {}
+    for scope in bindings['scopes']:
+        if scope['custody']['namespace']['kind'] == 'host':
+            # Locked scopes retain their declarations without observing an underlay.
+            continue
+        view = json.dumps(scope['custody']['namespace'], sort_keys=True)
+        views.setdefault(view, set()).update(entry['path'] for entry in scope['resources'] if entry['kind'] == 'file')
+    from core_namespace import namespace_path
+    observations = {}
+    for view, paths in views.items():
+        descriptor = os.open(namespace_path(json.loads(view)), os.O_RDONLY)
+        try:
+            response = subprocess.run(['/usr/bin/nsenter', f'--mount=/proc/self/fd/{descriptor}', '--', '/usr/bin/python3', '-B', '-c', PATH_METADATA], input=json.dumps(sorted(paths)), text=True, capture_output=True, pass_fds=(descriptor,), check=True, timeout=15)
+            observations[view] = json.loads(response.stdout)
+        finally:
+            os.close(descriptor)
+    evidence = []
+    for scope in bindings['scopes']:
+        view = json.dumps(scope['custody']['namespace'], sort_keys=True)
+        if view not in observations:
+            continue
+        scope['resources'], targets = exact_file_targets(scope['resources'], observations[view])
+        evidence.extend({'scopeId': scope['id'], 'namespace': scope['custody']['namespace'], **target} for target in targets)
+    bindings.setdefault('metadata', {})['exactFileTargets'] = evidence
+    publish(output_path, bindings)
+    return {'scopeCount': len(bindings['scopes']), 'resolvedFileCount': len(evidence), 'writtenPath': str(output_path), 'privateContentRead': False}
+
+
 def collect(directory, runtime_path, output_path):
     original = trusted(directory / 'manifest.json')
     base = trusted(directory / 'activation/core-config.projection.json')['config']
@@ -148,7 +204,7 @@ def collect(directory, runtime_path, output_path):
             view = json.dumps(scope['custody']['namespace'], sort_keys=True)
             views.setdefault(view, set()).update(item['path'] for item in scope['resources'])
     path_info = {}
-    program = "import json,os,sys;from pathlib import Path;out={}\nfor p in json.load(sys.stdin):\n try:\n  s=os.stat(p);out[p]={'kind':'directory' if Path(p).is_dir() else 'file','dev':str(s.st_dev),'ino':str(s.st_ino)}\n except OSError as e:out[p]={'error':e.errno}\nprint(json.dumps(out))"
+    program = PATH_METADATA
     from core_namespace import namespace_path
     for view, paths in views.items():
         descriptor = os.open(namespace_path(json.loads(view)), os.O_RDONLY)
@@ -170,7 +226,8 @@ def collect(directory, runtime_path, output_path):
                 (pending if entry['path'] in required else absent).append(evidence)
                 continue
             registered.append({'path': entry['path'], 'kind': info['kind']})
-        scope['resources'] = registered
+        scope['resources'], targets = exact_file_targets(registered, path_info[view])
+        scope['exactFileTargets'] = targets
     indexed = {item['id']:item for item in result}
     source = Path('/srv/pi/pi-remote/server/server.ts').resolve()
     raw = source.read_bytes()
@@ -201,9 +258,16 @@ def collect(directory, runtime_path, output_path):
 
 if __name__ == '__main__':
     try:
-        if os.geteuid() != 0 or len(sys.argv) not in (4, 5) or len(sys.argv) == 5 and sys.argv[1] != 'writer-env':
-            raise ValueError('usage: root core-bindings MIGRATION_DIRECTORY RUNTIME_JSON OUTPUT_JSON | writer-env CONFIG_JSON BINDINGS_JSON OUTPUT_JSON')
-        result = bind_writers(*(absolute(path) for path in sys.argv[2:])) if len(sys.argv) == 5 else collect(*(absolute(path) for path in sys.argv[1:]))
+        if os.geteuid() != 0:
+            raise ValueError('root core-bindings required')
+        if len(sys.argv) == 4 and sys.argv[1] == 'resolve-files':
+            result = resolve_files(*(absolute(path) for path in sys.argv[2:]))
+        elif len(sys.argv) == 5 and sys.argv[1] == 'writer-env':
+            result = bind_writers(*(absolute(path) for path in sys.argv[2:]))
+        elif len(sys.argv) == 4:
+            result = collect(*(absolute(path) for path in sys.argv[1:]))
+        else:
+            raise ValueError('usage: root core-bindings MIGRATION_DIRECTORY RUNTIME_JSON OUTPUT_JSON | writer-env CONFIG_JSON BINDINGS_JSON OUTPUT_JSON | resolve-files BINDINGS_JSON OUTPUT_JSON')
         print(json.dumps({'ok': True, 'value': result}))
     except (OSError, KeyError, ValueError, TypeError, subprocess.SubprocessError) as error:
         print(json.dumps({'ok': False, 'error': {'code': 'core-bindings-unavailable', 'message': str(error)}}))
