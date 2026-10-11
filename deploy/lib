@@ -121,6 +121,18 @@ pi_stack_dependency_key() {
   )
 }
 
+pi_stack_prepare_source_sdk() {
+  local root=$1
+  if [[ ! -d $root/packages/runtime ]]; then return 0; fi
+  if [[ -L $root/node_modules ]]; then
+    echo "Source SDK preparation requires an isolated owning dependency tree: $root" >&2
+    return 65
+  fi
+  node "$root/packages/runtime/patch-session-durability.mjs" "$root/node_modules" || return
+  node "$root/packages/runtime/patch-shared-custody.mjs" "$root/node_modules" || return
+  node "$root/packages/runtime/patch-shared-rpc.mjs" "$root/node_modules" || return
+}
+
 pi_stack_prepare_dependencies() {
   local root=$1 key stamp hidden_lock hidden_hash expected
   key=$(pi_stack_dependency_key "$root") || return
@@ -145,6 +157,7 @@ process.exit(Object.entries(lock.packages ?? {}).every(([name, spec]) =>
 ) ? 0 : 1);
 JS
     then
+      pi_stack_prepare_source_sdk "$root" || exit
       exit 0
     fi
   fi
@@ -154,6 +167,7 @@ JS
   fi
   rm -f "$stamp" || exit
   (cd "$root" && npm ci --ignore-scripts --prefer-offline --no-audit --no-fund) || exit
+  pi_stack_prepare_source_sdk "$root" || exit
   hidden_hash=$(sha256sum "$hidden_lock" | cut -d' ' -f1) || exit
   printf '%s %s\n' "$key" "$hidden_hash" > "$stamp" || exit
   ) || return
