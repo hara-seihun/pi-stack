@@ -6,7 +6,7 @@ import re
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 root = Path(__file__).resolve().parents[1]
 import sys
@@ -38,6 +38,19 @@ class WitnessTests(unittest.TestCase):
         with self.assertRaises(ValueError):witness.wait4_exit(text,417)
         text = 'wait4(-1, {WIFEXITED(s) && WEXITSTATUS(s) == 0}, 0, NULL) = 417\n'
         with self.assertRaises(ValueError):witness.wait4_exit(text+text,417)
+
+    def test_nested_wrapper_binds_exact_unit_owner_and_direct_child(self):
+        plan={'unit':'pi-remote@kenan.service','invocationId':'a'*32,'unitOwner':{'pid':10,'startTicks':'100'},'wrapper':{'pid':11,'startTicks':'101'},'nativeChild':{'pid':12,'startTicks':'102'}}
+        fields={10:['S','1'],11:['S','10'],12:['S','11']}
+        status=Mock(stdout='MainPID=10\nActiveState=active\nInvocationID='+('a'*32)+'\n')
+        with patch.object(witness,'birth',side_effect=lambda identity:fields[identity['pid']]),patch.object(witness.os,'readlink',return_value='/usr/local/bin/bun'),patch.object(witness.subprocess,'run',return_value=status):
+            witness.verify_live(plan)
+            fields[11]=['S','99']
+            with self.assertRaisesRegex(ValueError,'exact unit owner'):witness.verify_live(plan)
+            fields[11]=['S','10'];fields[12]=['S','99']
+            with self.assertRaisesRegex(ValueError,'no longer belongs'):witness.verify_live(plan)
+            fields[12]=['S','11'];status.stdout='MainPID=99\nActiveState=active\nInvocationID='+('a'*32)+'\n'
+            with self.assertRaisesRegex(ValueError,'invocation changed'):witness.verify_live(plan)
 
     def test_actual_kernel_wait4_format(self):
         if not Path('/usr/bin/strace').exists():self.skipTest('strace missing')

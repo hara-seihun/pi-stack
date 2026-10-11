@@ -70,7 +70,8 @@ def native_exit_custody(plan, invocation_id, after=False):
     module = runpy.run_path(str(Path(__file__).with_name('core-remote-witness')))
     witness_path = absolute(mode['witnessPlanPath'])
     witness, digest = module['plan_at'](witness_path)
-    if witness['unit'] != plan['unit'] or witness['invocationId'] != invocation_id or witness['wrapper'] != {'pid':plan['pid'],'startTicks':plan['startTicks']}:
+    owner = witness['unitOwner'] if 'unitOwner' in witness else witness['wrapper']
+    if witness['unit'] != plan['unit'] or witness['invocationId'] != invocation_id or owner != {'pid':plan['pid'],'startTicks':plan['startTicks']}:
         raise ValueError('native child witness belongs to another original invocation')
     proof_path = absolute(witness['proofPath'])
     if after and not proof_path.exists():return None
@@ -79,7 +80,7 @@ def native_exit_custody(plan, invocation_id, after=False):
         raise ValueError('native child has no affirmative kernel attachment/normal exit proof')
     if not after:return {'kind':'supervised','planPath':str(witness_path),'planSha256':digest}
     proof = trusted(proof_path)
-    if proof.get('protocol') != 'pi-core-native-child-exit-v1' or proof.get('unit') != plan['unit'] or proof.get('invocationId') != invocation_id or proof.get('wrapper') != witness['wrapper'] or proof.get('nativeChild') != witness['nativeChild'] or proof.get('exit') != {'kind':'normal','code':0} or proof.get('sourceProof') != witness['sourceProof']:
+    if proof.get('protocol') != 'pi-core-native-child-exit-v1' or proof.get('unit') != plan['unit'] or proof.get('invocationId') != invocation_id or proof.get('wrapper') != witness['wrapper'] or proof.get('nativeChild') != witness['nativeChild'] or proof.get('exit') != {'kind':'normal','code':0} or proof.get('sourceProof') != witness['sourceProof'] or proof.get('unitOwner') != witness.get('unitOwner'):
         raise ValueError('native child normal exit receipt does not match the registered witness')
     return {'kind':'supervised','path':str(proof_path),'sha256':hashlib.sha256(proof_path.read_bytes()).hexdigest(),'planSha256':digest}
 
