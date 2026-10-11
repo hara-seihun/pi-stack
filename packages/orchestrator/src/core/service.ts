@@ -95,7 +95,8 @@ export class CoreService {
           return grant.ok ? { ok: true, value: undefined } : failure("unavailable", grant.error.message);
         });
       }
-      const directory = new ThreadDirectory(this.directoryOwner(owner), scopes.filter(candidate => candidate !== owner).map(candidate => this.directoryOwner(candidate)), owner.relay?.managerOwner, owner.relay?.questionOwner);
+      const directory = new ThreadDirectory(this.directoryOwner(owner), scopes.filter(candidate => candidate !== owner).map(candidate => this.directoryOwner(candidate)), owner.relay?.managerOwner, owner.relay?.questionOwner,
+        owner.relay ? () => owner.relay!.workSummary() : undefined);
       owner.directory = directory;
       owner.threads.setDirectory(directory);
       if (owner.scope.managerRouting.kind === "configured") owner.notices = new CoreManagerNotices({ ...owner.scope.managerRouting.notices, scopeId: owner.scope.id, subscribe: listener => owner.threads.subscribe(listener), feedback: message => { if (message) console.error(`Core notices ${owner.scope.id}: ${message}`); } }, owner.metadata, owner.threads, {

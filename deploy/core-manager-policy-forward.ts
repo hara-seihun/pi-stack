@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { MANAGER_POLICY_PATH, MANAGER_NOTICE_PATH, MANAGER_NOTICE_BYTES } from "../apps/remote/server/canonical-manager-policy";
+import { MANAGER_CONTEXT_PATH, MANAGER_CONTEXT_BYTES } from "../apps/remote/server/canonical-manager-context";
 const tokenHeader = "x-pi-canonical-manager-policy";
 const failure = (message: string, status: number) => Response.json({ ok: false, error: { code: "unavailable", message } }, { status });
 async function bounded(body: ReadableStream<Uint8Array> | null, signal: AbortSignal, maximum: number): Promise<Uint8Array> {
@@ -13,12 +14,12 @@ async function bounded(body: ReadableStream<Uint8Array> | null, signal: AbortSig
 }
 export async function forwardManagerPolicy(request: Request, transport: typeof fetch = fetch): Promise<Response> {
   const url = new URL(request.url);
-  if (request.method !== "POST" || ![MANAGER_POLICY_PATH, MANAGER_NOTICE_PATH].includes(url.pathname) || url.search || url.hash) return failure("Only the exact enrolled policy read is forwarded", 403);
+  if (request.method !== "POST" || ![MANAGER_POLICY_PATH, MANAGER_NOTICE_PATH, MANAGER_CONTEXT_PATH].includes(url.pathname) || url.search || url.hash) return failure("Only the exact enrolled policy read is forwarded", 403);
   const token = request.headers.get(tokenHeader);
   if (!token || !/^[a-f0-9]{64}$/.test(token)) return failure("Enrolled policy credential required", 403);
   const signal = AbortSignal.any([request.signal, AbortSignal.timeout(5000)]);
   try {
-    const maximum = url.pathname === MANAGER_NOTICE_PATH ? MANAGER_NOTICE_BYTES : 4096;
+    const maximum = url.pathname === MANAGER_NOTICE_PATH ? MANAGER_NOTICE_BYTES : url.pathname === MANAGER_CONTEXT_PATH ? MANAGER_CONTEXT_BYTES : 4096;
     const body = await bounded(request.body, signal, maximum);
     const response = await transport(`http://127.0.0.1:8788${url.pathname}`, { method: "POST", redirect: "error", signal, headers: { "content-type": "application/json", [tokenHeader]: token }, body });
     const output = await bounded(response.body, signal, maximum);

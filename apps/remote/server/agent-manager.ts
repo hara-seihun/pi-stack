@@ -69,7 +69,8 @@ export async function handleAgentManager(req: Request, peer: { uid: number } | u
   endpoints: (user: string) => readonly EnvironmentEndpoint[], localEnvironment: string,
   proxy: (person: Person, origin: string, req: Request, target: URL, upstream: string | undefined, sourceEnvironment: string) => Promise<Response>,
   canonicalPolicy?: (user: string, uid: number, sourceEnvironment: string, targetEnvironment: string, signal: AbortSignal) => Promise<Response | undefined>,
-  canonicalNotice?: (user: string, uid: number, sourceEnvironment: string, targetEnvironment: string, input: unknown, signal: AbortSignal) => Promise<Response | undefined>): Promise<Response> {
+  canonicalNotice?: (user: string, uid: number, sourceEnvironment: string, targetEnvironment: string, input: unknown, signal: AbortSignal) => Promise<Response | undefined>,
+  canonicalContext?: (user: string, uid: number, sourceEnvironment: string, targetEnvironment: string, operation: string, input: unknown, signal: AbortSignal) => Promise<Response | undefined>): Promise<Response> {
   const actor = peer && people.get(peer.uid);
   const owner = actor ? person(actor) : undefined;
   if (!owner) return Response.json({ ok: false, error: { code: "unavailable", message: "Manager relay requires your own registered Unix identity" } }, { status: 403 });
@@ -78,6 +79,10 @@ export async function handleAgentManager(req: Request, peer: { uid: number } | u
   const body = await req.json().catch(() => null);
   if (!body || !body.input || typeof body.input !== "object" || Array.isArray(body.input)
     || Object.keys(body).some(key => !["input", "environmentId"].includes(key))) return Response.json({ ok: false, error: { code: "invalid_request", message: "Expected a manager relay envelope" } }, { status: 400 });
+  if (canonicalContext && peer && typeof body.environmentId === "string") {
+    const projected = await canonicalContext(owner.user, peer.uid, localEnvironment, body.environmentId, operation, body.input, req.signal);
+    if (projected !== undefined) return projected;
+  }
   if (operation === "managerWorkSummary") {
     if (body.environmentId !== undefined || Object.keys(body.input).length !== 0)
       return Response.json({ ok: false, error: { code: "invalid_request", message: "Work summary requires all granted environments and an empty input" } }, { status: 400 });
