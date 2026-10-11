@@ -52,6 +52,10 @@ Provider samplers own deterministic quota observations. Explicit automatic Codex
 
 Usage is component-aware (`input`, `output`, `cacheRead`, `cacheWrite`) and recorded once by the provider owner. [`person-usage.ts`](src/person-usage.ts) projects principal-local subscription dollars and unpriced usage. Broker `/v1/usage` filters meters/accounts and spending to its verified principal, aggregating each declared retained ledger once with its original frozen rates. An optional weekly allowance refuses new work without cancelling accepted requests.
 
+## Host readiness
+
+`/health` and `/v1/health` report `ready`, `degraded`, and explicit subsystem `reconciliation` states. Startup, shutdown, an unobserved first reconciliation, thrown reconciliation failures and failed duties remain HTTP503. Root's returned delivery-error count describes retained durable outbox work: it reports `delivery-degraded` and its count without disabling unrelated host scopes. A locked or unreachable recipient does not make the shared engine unavailable. The original outbox retains its identity, error and retry; readiness neither acknowledges delivery nor suppresses that failure.
+
 ## Operations
 
 ```text

@@ -16,6 +16,7 @@ import { createCoreRootIntegration, type CoreRootPlugin } from "./root.js";
 import { webRequest, writeResponse } from "./http.js";
 import { startCallbackTransports, type CallbackTransports } from "./callback-transports.js";
 import { startGatewayTransports, type GatewayTransports } from "./gateway-transport.js";
+import { coreReadiness, observeCoreReconciliation, type CoreReconciliationHealth } from "./health.js";
 
 export type RunningCore = { service: CoreService; close(): Promise<CoreResult<void>> };
 export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningCore>> {
@@ -27,7 +28,8 @@ export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningC
   let gateways: GatewayTransports | undefined;
   let server: Server | undefined, clock: ReturnType<typeof setInterval> | undefined;
   let reconciliation: Promise<void> | undefined, closing: Promise<CoreResult<void>> | undefined;
-  let healthy = true, ready = false;
+  let ready = false;
+  let reconciliationHealth: CoreReconciliationHealth = { state: "pending" };
   const close = (): Promise<CoreResult<void>> => {
     if (closing) return closing;
     closing = (async (): Promise<CoreResult<void>> => {
@@ -138,7 +140,8 @@ export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningC
         const request = webRequest(req, core.url, abort.signal, brokerRoute ? "unread" : "stream");
         let response: Response | undefined;
         if (path === "/health" || path === "/v1/health") {
-          response = Response.json({ ok: ready && healthy && !shutdown.signal.aborted, service: "pi-stack-core", releaseCommit: config.releaseCommit, scopeCount: config.scopes.length }, { status: ready && healthy && !shutdown.signal.aborted ? 200 : 503 });
+          const health = coreReadiness(ready, shutdown.signal.aborted, reconciliationHealth);
+          response = Response.json({ ok: health.ready, ...health, reconciliation: reconciliationHealth, service: "pi-stack-core", releaseCommit: config.releaseCommit, scopeCount: config.scopes.length }, { status: health.ready ? 200 : 503 });
         } else if (brokerRoute || path.startsWith("/v1/providers")) {
           const principal = core.authenticate(request);
           if (!principal.ok) response = Response.json(principal, { status: 401 });
@@ -173,8 +176,8 @@ export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningC
       provider?.tick();
       if (reconciliation || shutdown.signal.aborted) return;
       reconciliation = (async () => {
-        const results = await Promise.allSettled([provider?.reconcile(), root?.reconcile(), duties.tick()]);
-        healthy = results.every(result => result.status === "fulfilled" && (!result.value || (!("errors" in result.value) || result.value.errors === 0) && (!("ok" in result.value) || result.value.ok)));
+        const results = await Promise.allSettled([provider?.reconcile(), root?.reconcile(), duties.tick()] as const);
+        reconciliationHealth = observeCoreReconciliation(...results, { provider: provider !== undefined, root: root !== null });
         for (const result of results) if (result.status === "rejected") console.error(`Core reconciliation failed: ${String(result.reason)}`);
       })().finally(() => { reconciliation = undefined; });
     };
