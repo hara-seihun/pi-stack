@@ -107,7 +107,7 @@ export function nativeStorageConfiguration(config, scope) {
 }
 export function writerParentPreparation(path, local, host, filesystem) {
   const mode = local.mode & 0o777;
-  if (!local.isDirectory() || local.isSymbolicLink() || local.uid !== 0 || local.gid !== 0 || local.dev !== host.dev || local.ino !== host.ino || filesystem.type !== 0x01021994 || !(mode === 0o755 || path === '/run/pi-stack' && mode === 0o700)) return failure('session-writer-parent-untrusted', 'Writer parent must be the root-owned physical host tmpfs directory, mode0755 or the protected /run/pi-stack mode0700');
+  if (!local.isDirectory() || local.isSymbolicLink() || local.uid !== 0 || local.gid !== 0 || local.dev !== host.dev || local.ino !== host.ino || filesystem.type !== 0x01021994 || !(mode === 0o755 || ['/run/pi-stack', '/run/pi-stack/session-writers', '/run/pi-stack/native-runner-locks'].includes(path) && mode === 0o700)) return failure('session-writer-parent-untrusted', 'Writer parent must be the root-owned physical host tmpfs directory, mode0755 or the protected /run/pi-stack mode0700');
   return { ok: true, value: { normalize: mode === 0o700 } };
 }
 function prepareSessionWriters(config) {

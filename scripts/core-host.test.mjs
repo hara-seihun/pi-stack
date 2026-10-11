@@ -57,7 +57,8 @@ test('only the exact protected host parent may be normalized without replacing f
   const host = { dev: 28, ino: 55 }, filesystem = { type: 0x01021994 };
   assert.deepEqual(writerParentPreparation('/run/pi-stack', local, host, filesystem).value, { normalize: true });
   assert.deepEqual(writerParentPreparation('/run/pi-stack', { ...local, mode: 0o40755 }, host, filesystem).value, { normalize: false });
-  assert.equal(writerParentPreparation('/run/pi-stack/session-writers', local, host, filesystem).ok, false);
+  for (const parent of ['/run/pi-stack/session-writers', '/run/pi-stack/native-runner-locks']) assert.deepEqual(writerParentPreparation(parent, local, host, filesystem).value, { normalize: true });
+  for (const unrelated of ['/run/pi-stack/session-writers/1000', '/run/pi-stack/native-runner-locks/1000', '/run/pi-stack/other']) assert.equal(writerParentPreparation(unrelated, local, host, filesystem).ok, false);
   for (const change of [{ uid: 1000 }, { gid: 1000 }, { mode: 0o40777 }, { isSymbolicLink: () => true }]) assert.equal(writerParentPreparation('/run/pi-stack', { ...local, ...change }, host, filesystem).ok, false);
   assert.equal(writerParentPreparation('/run/pi-stack', local, { ...host, ino: 56 }, filesystem).ok, false);
   assert.equal(writerParentPreparation('/run/pi-stack', local, host, { type: 0x65735546 }).ok, false);
