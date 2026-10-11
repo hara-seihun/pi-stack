@@ -34,17 +34,31 @@ function preparingSource(args, output, previous) {
   return identity;
 }
 
+function pendingFailureOutput(args, error) {
+  if (args[0] !== "create" || (error.status !== 75 && error.code !== 75) || typeof error.stdout !== "string") return null;
+  const output = error.stdout.trim();
+  let receipt;
+  try { receipt = JSON.parse(output); } catch { return null; }
+  return receipt?.state === "preparing" ? output : null;
+}
+
 function run(args, env, cwd) {
   const deadline = Date.now() + 30_000;
   let preparing = null;
   while (true) {
     assert.ok(Date.now() < deadline, `source preparation did not finish within 30s: ${JSON.stringify(preparing)}`);
-    const output = execFileSync(entry, args, {
-      cwd,
-      env: { ...process.env, ...env },
-      encoding: "utf8",
-      timeout: Math.max(1, deadline - Date.now()),
-    }).trim();
+    let output;
+    try {
+      output = execFileSync(entry, args, {
+        cwd,
+        env: { ...process.env, ...env },
+        encoding: "utf8",
+        timeout: Math.max(1, deadline - Date.now()),
+      }).trim();
+    } catch (error) {
+      output = pendingFailureOutput(args, error);
+      if (output === null) throw error;
+    }
     preparing = preparingSource(args, output, preparing);
     if (preparing === null) return output;
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(50, Math.max(1, deadline - Date.now())));
@@ -62,7 +76,12 @@ async function runAsync(args, env, cwd) {
         env: { ...process.env, ...env },
         encoding: "utf8",
         timeout: Math.max(1, deadline - Date.now()),
-      }, (error, stdout) => error ? reject(error) : resolve(stdout.trim()));
+      }, (error, stdout) => {
+        if (!error) return resolve(stdout.trim());
+        const pending = pendingFailureOutput(args, error);
+        if (pending === null) reject(error);
+        else resolve(pending);
+      });
     });
     preparing = preparingSource(args, output, preparing);
     if (preparing === null) return output;
@@ -1380,7 +1399,17 @@ process.exit(result.status ?? 1);
     const env = { ...f.env, PATH: `${bin}:${process.env.PATH}` };
     const args = ["create", "--root", f.workspaces, "--name", "durable-import", "--repo", `file://${f.remote}`,
       "--ref", git(f.source, "rev-parse", "HEAD"), "--min-free-gib", "0"];
-    const callOnce = () => execFileSync(entry, args, { env: { ...process.env, ...env }, encoding: "utf8", timeout: 10_000 }).trim();
+    const callOnce = () => {
+      try {
+        execFileSync(entry, args, { env: { ...process.env, ...env }, encoding: "utf8", timeout: 10_000 });
+      } catch (error) {
+        assert.equal(error.status, 75, "preparing is temporary-unavailable, never a successful active checkout");
+        const output = pendingFailureOutput(args, error);
+        assert.notEqual(output, null, "exit 75 must carry a JSON preparing receipt");
+        return output;
+      }
+      assert.fail("gated source preparation must exit 75");
+    };
     const started = Date.now();
     const first = JSON.parse(callOnce());
     progressPath = first.progressPath;

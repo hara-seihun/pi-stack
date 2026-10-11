@@ -2449,6 +2449,7 @@ function createWorkspace(database, args, statePath) {
       prepareCreationSource(database, args, { statePath, root, destination, repository, ref, upstream, mirror, intent, sparsePatterns }));
     if (preparation.state !== "ready") {
       print({ ok: true, state: "preparing", jobId: preparation.jobId, progressPath: preparation.progressPath, nextAction: "Repeat this exact create request after source preparation completes" }, true);
+      process.exitCode = 75;
       return;
     }
     const { sourceCommit, plan } = preparation.value;
@@ -3062,6 +3063,14 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
       });
       if ([124, 137].includes(result.status) || result.error?.code === "ETIMEDOUT") {
         fail("creation budget exhausted; any pending checkout is retained, not active; repeat the same create command to resume, optionally increasing --creation-timeout-seconds (maximum 900)");
+      }
+      if (result.status === 75 && result.stdout) {
+        const pending = JSON.parse(result.stdout);
+        if (pending.state === "preparing" && pending.jobId && pending.progressPath) {
+          process.stdout.write(`${result.stdout}\n`);
+          process.exitCode = 75;
+          return;
+        }
       }
       if (result.status === 75) throw new ResourceBusyError(result.stderr);
       if (result.status !== 0) fail(result.stderr || result.error?.message ||
