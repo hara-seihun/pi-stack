@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 sys.dont_write_bytecode = True
 from core_namespace import absolute, publish
+from core_worker_environment import bind_worker_gateways
 
 
 def read(path):
@@ -256,6 +257,7 @@ def assemble(directory, inputs_path, output_path):
                             scope[key] = list(unique.values())
                         else:
                             scope[key].update(patch[key])
+    bind_worker_gateways(config, runtime['uid'])
     if runtime.get('version') != 1 or runtime.get('uid') != 0 or runtime.get('gid') != 0:
         raise ValueError('prepared common runtime must retain exact root custodian')
     pending = unresolved(config)
