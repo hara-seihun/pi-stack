@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import { AsyncLocalStorage } from "node:async_hooks";
 import assert from "node:assert/strict";
-import { copyFileSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chownSync, copyFileSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -67,6 +67,17 @@ test("explicit physical custody and same-process exclusive ownership", t => {
   assert.equal(first.assertOwned().error.code, "SESSION_WRITER_RELEASED");
   const second = requireSessionWriter(acquireSessionWriter(config));
   requireSessionWriter(second.release());
+});
+
+test("root-created session locks remain usable by their registered directory owner", { skip: process.getuid?.() !== 0 }, t => {
+  const dir = directory(t); chownSync(dir, 65534, 65534);
+  const owner = requireSessionWriter(acquireSessionWriter({ directory: dir, scope: "registered", identity: "native" }));
+  const lock = join(dir, readdirSync(dir)[0]);
+  assert.equal(statSync(lock).uid, 65534);
+  const probe = () => spawnSync("/usr/bin/setpriv", ["--reuid=65534", "--regid=65534", "--clear-groups", "/usr/bin/flock", "--nonblock", "--conflict-exit-code", "73", lock, "/usr/bin/true"]).status;
+  assert.equal(probe(), 73);
+  requireSessionWriter(owner.release());
+  assert.equal(probe(), 0);
 });
 
 test("independent processes share custody and kernel releases crashed owners", { timeout: 3_000 }, async t => {

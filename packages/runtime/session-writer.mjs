@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { closeSync, fchownSync, fstatSync, openSync, realpathSync, statfsSync, statSync } from "node:fs";
+import { closeSync, constants, fchownSync, fstatSync, openSync, realpathSync, statfsSync, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 
 export class SessionWriterError extends Error {
@@ -44,23 +44,20 @@ export function acquireSessionWriter({ directory, scope, identity }) {
   let fd;
   try {
     const physical = realpathSync(directory);
-    if (!statSync(physical).isDirectory() || !localFilesystems.has(statfsSync(physical).type)) {
+    const directoryOwner = statSync(physical);
+    if (!directoryOwner.isDirectory() || (directoryOwner.mode & 0o022) || !localFilesystems.has(statfsSync(physical).type)) {
       return failure("SESSION_WRITER_DIRECTORY", "Session writer directory must be a precreated local physical filesystem directory outside FUSE");
     }
     const key = createHash("sha256").update(JSON.stringify([scope, identity])).digest("hex");
     const path = join(physical, `${key}.lock`);
-    fd = openSync(path, "a+", 0o600);
+    fd = openSync(path, constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW, 0o600);
     if (!fstatSync(fd).isFile()) {
       closeSync(fd);
       fd = undefined;
       return failure("SESSION_WRITER_DIRECTORY", "Session writer lock must be a regular physical file");
     }
-    const owner = process.env.PI_ORCHESTRATOR_OWNER_UID;
-    const group = process.env.PI_ORCHESTRATOR_OWNER_GID;
-    if (owner !== undefined || group !== undefined) {
-      if (!/^\d+$/.test(owner ?? "") || !/^\d+$/.test(group ?? "")) throw new SessionWriterError("SESSION_WRITER_CONFIGURATION", "Session writer custody UID/GID must both be explicit integers");
-      if (process.getuid() === 0) fchownSync(fd, Number(owner), Number(group));
-    }
+    if (process.getuid() === 0) fchownSync(fd, directoryOwner.uid, directoryOwner.gid);
+    if (fstatSync(fd).uid !== directoryOwner.uid) throw new SessionWriterError("SESSION_WRITER_DIRECTORY", "Session writer lock does not belong to its physical custody directory owner");
     // flock locks the inherited open-file description; the parent keeps it alive.
     const result = spawnSync("/usr/bin/flock", ["--exclusive", "--nonblock", "--conflict-exit-code", "73", "3"], { stdio: ["ignore", "pipe", "pipe", fd], timeout: 2_000 });
     if (result.status !== 0) {
