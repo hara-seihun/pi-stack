@@ -6,6 +6,10 @@ It resolves physical paths before registering the tool. Changing `/srv/pi/runtim
 
 Shared runners host several Pi sessions on one dependency generation. An SDK application needing simultaneous sessions on different dependency generations must give them separate processes because executable resolution uses the process environment.
 
+## Executable preparation
+
+The npm archive normalizes the native binary's mode to0644. Runtime dependency installation intentionally skips third-party lifecycle scripts, so `packages/runtime/browser-executable.mjs` explicitly prepares the bundled platform/architecture binary before the dependency tree is frozen. It never downloads or selects another binary. Unknown platforms, missing/nonregular binaries and unavailable execution permissions produce errors. The helper participates in immutable dependency identity; runtime preparation, activation verification and links-only reconciliation check the actual native binary, not only the executable JavaScript launcher. Verification never changes a frozen artifact. Removing write permissions preserves prepared execute bits.
+
 ## Durable runner browser resources
 
 On Linux durable runners, `PI_THREAD_RESOURCE_BOUNDARY` selects the release-owned [`bin/agent-browser`](bin/agent-browser) ahead of the pinned dependency bin. The entrypoint retains that physical upstream executable in the child environment, not a mutable runtime symlink. The launcher creates a foreground systemd scope under the runner's existing tooling slice, with `BindsTo`/`After` its controller service and `OOMPolicy=kill`. Its CLI, daemon and Chromium descendants inherit the caller's UID, mount namespace, cwd, argv and stdin. They share the existing 3 GiB tooling budget with bash; the controller stays in its sibling 4 GiB cgroup under the unchanged 8 GiB aggregate. No second browser runtime or manager-spawned service is introduced.
