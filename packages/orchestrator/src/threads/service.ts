@@ -2930,7 +2930,12 @@ export class ThreadService implements ThreadApi {
         const works = this.sql("SELECT * FROM thread_work WHERE execution_id=? AND status!='done' ORDER BY ordinal").all(execution.id) as Json[];
         const last = state.lastAssistantMessage;
         const capacityFailure = last?.stopReason === "error" && (isTransientFailure(last.errorMessage ?? "") || last.errorMessage?.startsWith(POOLED_ACCOUNT_WAIT));
-        if (!runtime.busy && completed.has(execution.work_id) && works.every(work => completed.has(work.id)) && (!providerWait || !capacityFailure)) {
+        const recovery = thread.metadata?.finalResultRecovery as Json | undefined;
+        if (!runtime.busy && recovery?.executionId === execution.id && state.finalResultRecovery?.commandId === recovery?.commandId
+          && (!works.every(work => completed.has(work.id)) || capacityFailure)) {
+          await this.finish(id, runtime, "failed", capacityFailure ? last : null, capacityFailure ? last.errorMessage
+            : "Final result recovery was accepted but ended without a native settlement; original work will not be replayed");
+        } else if (!runtime.busy && completed.has(execution.work_id) && works.every(work => completed.has(work.id)) && (!providerWait || !capacityFailure)) {
           await this.finish(id, runtime, settledWorkOutcome(undefined, last), last ?? null);
         } else if (!runtime.busy && works.length && !this.row(id)?.held && !this.halts.has(id)) {
           const landed = new Set<string>(state.landedWorkIds ?? []);
@@ -3144,6 +3149,17 @@ export class ThreadService implements ThreadApi {
       }
       if (this.get(id)?.metadata?.acknowledgementWait) return;
     }
+    const recovery = this.get(id)?.metadata?.finalResultRecovery as Json | undefined;
+    if (runtime && execution && recovery?.executionId === execution.id && !runtime.busy) {
+      const state = await this.rpc(runtime, { type: "get_state" });
+      this.adoptReference(id, state); runtime.busy = this.busy(state);
+      const works = this.sql("SELECT id FROM thread_work WHERE execution_id=? AND status!='done'").all(execution.id) as { id: string }[];
+      if (!runtime.busy && state.completedWorkIds?.includes(execution.work_id) && works.every(work => state.completedWorkIds.includes(work.id)))
+        await this.finish(id, runtime, settledWorkOutcome(undefined, state.lastAssistantMessage), state.lastAssistantMessage ?? null);
+      else if (!runtime.busy && state.finalResultRecovery?.commandId === recovery?.commandId)
+        await this.finish(id, runtime, "failed", null, "Final result recovery was accepted but ended without a native settlement; original work will not be replayed");
+      execution = this.execution(id);
+    }
     const batch = this.sql("SELECT * FROM thread_work WHERE thread_id=? AND status='queued' ORDER BY ordinal").all(id) as Json[];
     const work = batch[0];
     if (!work) { if (!execution && !runtime?.busy) { this.state(id, "idle"); if (runtime) await this.park(id, runtime); } return; }
@@ -3339,12 +3355,15 @@ export class ThreadService implements ThreadApi {
     if (cancellation === "close" || cancellation === "cancel") { outcome = "cancelled"; finalMessage = null; error = undefined; }
     const failure=error??finalMessage?.errorMessage??"";
     const execution = this.execution(id); if (!execution || runtime && runtime.executionId !== execution.id) return;
-    if(outcome==="failed"&&!this.row(id)?.held&&(isTransientFailure(failure)||failure.startsWith(POOLED_ACCOUNT_WAIT))){
+    const finalRecovery = this.get(id)?.metadata?.finalResultRecovery as Json | undefined;
+    if(outcome==="failed"&&finalRecovery?.executionId!==execution.id&&!this.row(id)?.held&&(isTransientFailure(failure)||failure.startsWith(POOLED_ACCOUNT_WAIT))){
       await this.waitForProvider(id,runtime,execution,failure);return;
     }
     this.phase(id, "finishing", "Saving turn receipts and notifying dependents");
+    let nativeState: Json | undefined;
     if (runtime && outcome === "complete") {
       const state = await this.rpc(runtime, { type: "get_state" });
+      nativeState = state;
       this.adoptReference(id, state);
       if (this.busy(state) || this.execution(id)?.id !== execution.id || this.runtimes.get(id) !== runtime || runtime.executionId !== execution.id || this.closed || this.suspended) return;
       const works = this.sql("SELECT id FROM thread_work WHERE thread_id=? AND execution_id=?").all(id, execution.id) as { id: string }[];
@@ -3358,8 +3377,33 @@ export class ThreadService implements ThreadApi {
     const incompleteResult = outcome === "complete" && !assignmentPending
       && !(finalMessage?.role === "assistant" && finalText(finalMessage)?.trim());
     if (incompleteResult) {
+      if (nativeState?.backgroundOperationCount > 0) return;
+      const commandId = `thread-final-result:${execution.id}`;
+      if (runtime && !this.row(id)?.held && !this.halts.has(id) && nativeState?.finalResultRecovery?.commandId !== commandId) {
+        const workIds = (this.sql("SELECT id FROM thread_work WHERE thread_id=? AND execution_id=? ORDER BY ordinal").all(id, execution.id) as { id: string }[]).map(work => work.id);
+        this.sql("UPDATE thread SET metadata=json_set(metadata,'$.finalResultRecovery',json(?)) WHERE id=?")
+          .run(JSON.stringify({ executionId: execution.id, commandId, workIds }), id);
+        runtime.busy = false;
+        const capacity = await this.acquireCapacity(id, execution.id, execution.work_id, "work");
+        if (!capacity.ok) { this.admissionWait(id, capacity.error); return; }
+        if (this.runtimes.get(id) !== runtime || this.execution(id)?.id !== execution.id || this.row(id)?.held || this.halts.has(id) || this.closed || this.suspended) return;
+        this.capacityLedger?.entered(id, execution.id);
+        this.clearAdmissionWait(id);
+        this.phase(id, "preparing", "Requesting the final result once from the original conversation");
+        try {
+          await this.rpc(runtime, { type: "recover_final_result", id: commandId, workIds });
+          if (this.runtimes.get(id) === runtime && this.execution(id)?.id === execution.id && !this.closed && !this.suspended) {
+            runtime.busy = true; runtime.finalMessage = undefined; runtime.outcome = undefined;
+            this.state(id, "running");
+          }
+          return;
+        } catch (failure) {
+          if (!(failure instanceof NativeRejection)) throw failure;
+          error = `Final result recovery rejected: ${failure.message}`;
+        }
+      }
       outcome = "failed";
-      error = "Native turn ended without a final result or a durable dependency wait";
+      error ??= "Native turn ended without a final result or a durable dependency wait";
     }
     const assignments = assignmentPending || thread.metadata?.manager === true ? [] : this.sql(`SELECT w.id,w.sender_id FROM thread_work w WHERE w.thread_id=? AND w.sender_id IS NOT NULL AND w.sender_id!=? AND w.source='explicit'
       AND (w.status='done' OR w.execution_id=?) AND w.landed_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM thread_assignment_reply r WHERE r.work_id=w.id)`).all(id, id, execution.id) as Array<{ id: string; sender_id: string }>;

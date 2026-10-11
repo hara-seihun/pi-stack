@@ -240,6 +240,11 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
         : [...entries].reverse().find(entry => entry.type === "message" && entry.message.role === "assistant");
       return entry?.type === "message" ? entry.message : null;
     }
+    function finalResultRecovery(commandId?: string) {
+      const entry = [...branch()].reverse().find(entry => entry.type === "custom" && entry.customType === "thread_final_result_recovery"
+        && (commandId === undefined || (entry.data as { commandId: string }).commandId === commandId));
+      return entry?.type === "custom" ? entry.data as { commandId: string; workIds: string[] } : null;
+    }
     function settle(cancelled = false): void {
       if (closed || replacing && !cancelled || executionStart === undefined && !activeWork.size) return;
       if (execution.active || !runtime.session.isIdle || runtime.session.isBashRunning) return;
@@ -321,7 +326,7 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
             return;
           }
           if (event.command === "get_state" && event.success) event = { ...event, data: { ...event.data as object, ...receipts(),
-            lastAssistantMessage: lastAssistant(), context: acceptedContext, historySource: "native-jsonl-v1", localTools: execution.active ? execution.activeTools : 0,
+            lastAssistantMessage: lastAssistant(), finalResultRecovery: finalResultRecovery(), context: acceptedContext, historySource: "native-jsonl-v1", localTools: execution.active ? execution.activeTools : 0,
             nativeProtocolVersion: "batch-operations-v1", backgroundOperationCount: execution.activeTools, pendingCommandCount: backgroundCommands.size,
             isStreaming: !runtime.session.isIdle || execution.active || executionStart !== undefined,
             cancellationFailed: execution.blocked } };
@@ -355,6 +360,43 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
             if (typeof command.operationId !== "string" || command.action !== "inspect" && command.action !== "cancel") { response(false, "Invalid tool operation request"); return; }
             const result = command.action === "inspect" ? execution.inspect(command.operationId) : execution.cancel(command.operationId);
             response(result.ok, result.ok ? undefined : result.error.message, result.ok ? result.value : undefined); return;
+          }
+          if (command.type === "recover_final_result") {
+            if (!command.id || !Array.isArray(command.workIds) || !command.workIds.length
+              || command.workIds.some(id => typeof id !== "string" || !id) || new Set(command.workIds).size !== command.workIds.length) {
+              response(false, "Final result recovery requires command identity and distinct workIds"); return;
+            }
+            const workIds = command.workIds as string[];
+            const prior = finalResultRecovery(command.id);
+            if (prior?.commandId === command.id) {
+              if (JSON.stringify(prior.workIds) !== JSON.stringify(command.workIds)) response(false, "Final result recovery identity belongs to different work");
+              else response(true, undefined, { alreadyAccepted: true });
+              return;
+            }
+            const known = receipts();
+            if (branch().some(entry => entry.type === "custom" && entry.customType === "thread_final_result_recovery"
+              && (entry.data as { workIds: string[] }).workIds.some(id => workIds.includes(id)))) {
+              response(false, "Final result recovery was already attempted for this work"); return;
+            }
+            if (command.workIds.some(id => !known.completedWorkIds.includes(id) || !known.landedWorkIds.includes(id))) {
+              response(false, "Final result recovery requires settled, landed native work"); return;
+            }
+            if (closed || replacing || execution.blocked || execution.active || execution.activeTools || !runtime.session.isIdle || runtime.session.isBashRunning || backgroundCommands.size) {
+              response(false, "Final result recovery requires confirmed native idleness"); return;
+            }
+            runtime.session.sessionManager.appendCustomEntry("thread_final_result_recovery", { commandId: command.id, workIds: command.workIds });
+            runtime.session.sessionManager.appendCustomEntry("thread_resume", { workIds: command.workIds });
+            checkpointPiSession(runtime.session.sessionManager);
+            for (const workId of command.workIds) activeWork.add(workId);
+            executionStart = runtime.session.sessionManager.getLeafId();
+            response(true, undefined, { accepted: true });
+            void runtime.session.sendCustomMessage({ customType: "thread_final_result_request", display: true,
+              content: "state your final result in one short message", details: { commandId: command.id, workIds: command.workIds } },
+              { triggerTurn: true, deliverAs: "steer" }).catch(error => {
+                output({ type: "extension_error", error: `Final result recovery failed: ${String(error)}` });
+                settle();
+              });
+            return;
           }
           if (command.type === "resume_pending") {
             if (!command.id || !Array.isArray(command.workIds) || !command.workIds.length || command.workIds.some(id => typeof id !== "string")) { response(false, "Recovery requires command identity and workIds"); return; }

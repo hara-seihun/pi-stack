@@ -42,6 +42,8 @@ class FakePiSession implements PiSession {
   readonly completedWorkIds = new Set<string>();
   isStreaming = false;
   pendingMessageCount = 0;
+  backgroundOperationCount = 0;
+  finalResultRecovery: { commandId: string; workIds: string[] } | null = null;
   lastAssistantMessage?: Record<string, unknown>;
   currentContext: Record<string, unknown> = { source: "runtime", systemPrompt: "", tools: [], messages: [] };
   closed = false;
@@ -51,6 +53,13 @@ class FakePiSession implements PiSession {
 
   async command(command: PiCommand): Promise<void> {
     this.commands.push(command);
+    if (command.type === "input_batch") {
+      for (const input of command.inputs as Array<{ workId: string }>) {
+        this.acceptedWorkIds.add(input.workId);
+        this.output({ type: "thread_landed", workIds: [input.workId], batchId: command.batchId });
+      }
+      if (!this.isStreaming) { this.isStreaming = true; this.output({ type: "agent_start" }); }
+    }
     if (command.type === "prompt" || command.type === "steer") {
       if (typeof command.workId === "string") this.acceptedWorkIds.add(command.workId);
       if (!this.isStreaming) {
@@ -58,17 +67,27 @@ class FakePiSession implements PiSession {
         this.output({ type: "agent_start" });
       }
     }
+    if (command.type === "recover_final_result" && this.finalResultRecovery?.commandId !== command.id) {
+      this.finalResultRecovery = { commandId: command.id!, workIds: command.workIds as string[] };
+      for (const workId of command.workIds as string[]) this.completedWorkIds.delete(workId);
+      this.isStreaming = true;
+      this.output({ type: "agent_start" });
+    }
     if (command.type === "abort") {
       this.isStreaming = false;
       this.pendingMessageCount = 0;
     }
     const data = command.type === "get_state" ? {
+      nativeProtocolVersion: "batch-operations-v1",
       isStreaming: this.isStreaming,
       pendingMessageCount: this.pendingMessageCount,
       sessionFile: this.options.sessionFile,
       acceptedWorkIds: [...this.acceptedWorkIds],
+      landedWorkIds: [...this.acceptedWorkIds],
       completedWorkIds: [...this.completedWorkIds],
       lastAssistantMessage: this.lastAssistantMessage,
+      finalResultRecovery: this.finalResultRecovery,
+      backgroundOperationCount: this.backgroundOperationCount,
     } : command.type === "get_input_status" ? {
       state: this.acceptedWorkIds.has(String(command.workId)) ? "accepted" : "in_flight", commandId: command.commandId, workId: command.workId,
     } : command.type === "get_context" ? this.currentContext : {};
@@ -1711,11 +1730,11 @@ describe("ThreadService", () => {
     expect(service.latestSettlement(child.id)?.finalMessage).toEqual(finalMessage);
   });
 
-  it.each([false, true].flatMap(ephemeral => [null, { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "" }] }].map(finalMessage => ({ ephemeral, finalMessage }))))("fails and archives an incomplete background result: %j", async ({ ephemeral, finalMessage }) => {
+  it.each([false, true].flatMap(ephemeral => [null, { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "" }] }].map(finalMessage => ({ ephemeral, finalMessage }))))("requests one final result before failing an incomplete background result: %j", async ({ ephemeral, finalMessage }) => {
     const f = fixture();
     const { directory } = f;
     let { service, sessions } = f;
-    const root = value(await service.spawn({ requestId: "root", cwd: directory }));
+    const root = value(await service.spawn({ requestId: "root", cwd: directory, title: "Coordinator" }));
     value(await service.control({ threadId: root.id, action: "placement", foreground: true }));
     const child = value(await service.spawn({ requestId: "empty-child", parentId: root.id, cwd: directory, message: "Finish the work", ephemeral }));
     value(await service.start());
@@ -1724,28 +1743,114 @@ describe("ThreadService", () => {
     native.completedWorkIds.add("empty-child");
     native.isStreaming = false;
     native.emit({ type: "agent_settled", workIds: ["empty-child"], outcome: "complete", lastAssistantMessage: finalMessage });
+    await waitFor(() => native.commands.some(command => command.type === "recover_final_result"));
+    expect(service.latestSettlement(child.id)).toBeNull();
+    expect(service.inputStates(child.id)[0]).toMatchObject({ id: "empty-child", state: "dispatched" });
+    native.settle("");
     await waitFor(() => !!service.latestSettlement(child.id));
+    expect(native.commands.filter(command => command.type === "recover_final_result")).toHaveLength(1);
     expect(service.latestSettlement(child.id)).toMatchObject({ outcome: "failed", error: "Native turn ended without a final result or a durable dependency wait" });
-    await waitFor(() => service.get(child.id)?.metadata?.archived === true);
     expect(service.get(child.id)?.metadata).toMatchObject({ incompleteResult: { error: expect.any(String) } });
-    await waitFor(() => sessions.some(session => session.options.threadId === root.id && session.commands.some(command => String(command.message).includes("Native turn ended without a final result"))));
-    expect(sessions.find(session => session.options.threadId === root.id)!.commands.filter(command => String(command.message).includes("Native turn ended without a final result"))).toHaveLength(1);
+    await waitFor(() => sessions.some(session => session.options.threadId === root.id && session.commands.some(command => JSON.stringify(command).includes("Native turn ended without a final result"))));
+    expect(sessions.find(session => session.options.threadId === root.id)!.commands.filter(command => JSON.stringify(command).includes("Native turn ended without a final result"))).toHaveLength(1);
     service.reconcile();
     await turn();
-    expect(service.get(child.id)?.metadata?.archived).toBe(true);
+    expect(native.commands.filter(command => command.type === "recover_final_result")).toHaveLength(1);
     await service.close();
     ({ service, sessions } = fixture(directory));
     value(await service.start());
     await turn();
-    expect(service.get(child.id)?.metadata?.archived).toBe(true);
-    expect(await service.send({ requestId: "late-result", threadId: child.id, text: "Return the finished result" })).toMatchObject({ ok: false, error: { code: "unavailable" } });
-    value(await service.control({ threadId: child.id, action: "reopen" }));
-    value(await service.send({ requestId: "repair-result", threadId: child.id, text: "Return the finished result" }));
-    await waitFor(() => sessions.some(session => session.options.threadId === child.id && session.commands.some(command => command.workId === "repair-result")));
-    [...sessions].reverse().find(session => session.options.threadId === child.id)!.settle("Finished result");
-    await waitFor(() => service.get(child.id)?.metadata?.archived === true);
-    expect(service.get(child.id)?.metadata?.incompleteResult).toBeUndefined();
-    expect(service.latestSettlement(child.id)?.outcome).toBe("complete");
+    expect(service.latestSettlement(child.id)?.outcome).toBe("failed");
+    expect(sessions.some(session => session.options.threadId === child.id)).toBe(false);
+  });
+
+  it("a substantive final result does not start recovery", async () => {
+    const { service, directory, sessions } = fixture();
+    const thread = value(await service.spawn({ requestId: "normal-final", cwd: directory, message: "Work" }));
+    value(await service.start()); await waitFor(() => sessions[0]?.isStreaming === true);
+    sessions[0]!.settle("Finished result");
+    await waitFor(() => !!service.latestSettlement(thread.id));
+    expect(service.latestSettlement(thread.id)?.outcome).toBe("complete");
+    expect(sessions[0]!.commands.some(command => command.type === "recover_final_result")).toBe(false);
+  });
+
+  it("recovers an empty final result under the original execution and work identity", async () => {
+    const { service, directory, sessions } = fixture();
+    const thread = value(await service.spawn({ requestId: "original-result-work", cwd: directory, message: "Complete the work" }));
+    value(await service.start());
+    await waitFor(() => sessions[0]?.isStreaming === true);
+    const native = sessions[0]!, original = service.inputStates(thread.id)[0]!;
+    const database = new DatabaseSync(join(directory, "threads.sqlite"));
+    const { execution_id: executionId } = database.prepare("SELECT execution_id FROM thread_work WHERE id=?").get(original.id) as { execution_id: string };
+    database.close();
+    native.settle("   ");
+    await waitFor(() => native.commands.some(command => command.type === "recover_final_result"));
+    expect(service.latestSettlement(thread.id)).toBeNull();
+    expect(service.inputStates(thread.id)[0]).toMatchObject({ id: original.id, state: "dispatched", landedAt: original.landedAt });
+    native.settle("Finished result");
+    await waitFor(() => !!service.latestSettlement(thread.id));
+    expect(service.latestSettlement(thread.id)).toMatchObject({ executionId, outcome: "complete", finalMessage: { content: [{ text: "Finished result" }] } });
+    expect(native.commands.filter(command => command.type === "input_batch")).toHaveLength(1);
+    expect(native.commands.filter(command => command.type === "recover_final_result")).toHaveLength(1);
+  });
+
+  it("a failed final recovery settles its provider error without another turn", async () => {
+    const { service, directory, sessions } = fixture();
+    const thread = value(await service.spawn({ requestId: "failed-recovery-work", cwd: directory, message: "Work" }));
+    value(await service.start()); await waitFor(() => sessions[0]?.isStreaming === true);
+    const native = sessions[0]!;
+    native.settle(""); await waitFor(() => !!native.finalResultRecovery);
+    native.settleMessage({ role: "assistant", stopReason: "error", errorMessage: "429 rate limit exceeded", content: [] });
+    await waitFor(() => !!service.latestSettlement(thread.id));
+    expect(service.latestSettlement(thread.id)).toMatchObject({ outcome: "failed", error: "429 rate limit exceeded" });
+    expect(service.get(thread.id)?.metadata?.providerWait).toBeUndefined();
+    expect(native.commands.filter(command => command.type === "recover_final_result")).toHaveLength(1);
+  });
+
+  it.each([true, false])("reconciles accepted final recovery after owner restart without another model request, settled=%s", async settled => {
+    const directory = mkdtempSync(join(tmpdir(), "final-recovery-restart-")); roots.push(directory);
+    let native!: FakePiSession;
+    const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(directory, "threads.sqlite"), sessionsDir: directory,
+      openSession: async (options, output) => {
+        native = new FakePiSession(options, output);
+        native.acceptedWorkIds.add("restart-work");
+        if (settled) native.completedWorkIds.add("restart-work");
+        native.finalResultRecovery = { commandId: "thread-final-result:restart-execution", workIds: ["restart-work"] };
+        native.lastAssistantMessage = { role: "assistant", content: [], stopReason: "stop" };
+        return native;
+      } });
+    services.push(service);
+    value(service.importThread({ id: "restart-thread", title: "Return result", cwd: directory, sessionFile: join(directory, "native.jsonl"),
+      settings: { model: "sol", thinkingLevel: "high", speed: "standard" }, metadata: { finalResultRecovery: { executionId: "restart-execution", commandId: "thread-final-result:restart-execution" } } }));
+    value(service.importMessage({ id: "restart-work", threadId: "restart-thread", text: "Original work", state: "dispatched", executionId: "restart-execution" }));
+    value(await service.start());
+    await waitFor(() => !!service.latestSettlement("restart-thread"));
+    expect(service.latestSettlement("restart-thread")).toMatchObject({ executionId: "restart-execution", outcome: "failed" });
+    expect(native.commands.some(command => ["recover_final_result", "resume_pending", "input_batch"].includes(command.type))).toBe(false);
+    expect(service.inputStates("restart-thread")[0]).toMatchObject({ id: "restart-work", state: "done", outcome: "failed", landedAt: expect.any(Number) });
+  });
+
+  it.each(["wait", "question", "operation"])("does not request an empty final result while %s owns continuation", async continuation => {
+    const { service, directory, sessions } = fixture();
+    const thread = value(await service.spawn({ requestId: "continuation-work", cwd: directory, message: "Work" }));
+    value(await service.start());
+    await waitFor(() => sessions[0]?.isStreaming === true);
+    const native = sessions[0]!;
+    if (continuation === "wait") value(await service.agentWait({ requestId: "accepted-wait", threadId: thread.id, action: "set", kind: "job", jobId: "owned-job" }));
+    if (continuation === "question") value(await service.ask({ requestId: "accepted-question", threadId: thread.id, questions: [{ question: "Which result?" }] }));
+    if (continuation === "operation") native.backgroundOperationCount = 1;
+    native.settle("");
+    await turn(); await turn();
+    expect(native.commands.some(command => command.type === "recover_final_result")).toBe(false);
+    if (continuation === "operation") {
+      expect(service.latestSettlement(thread.id)).toBeNull();
+      value(await service.agentWait({ requestId: "operation-wait", threadId: thread.id, action: "set", kind: "job", jobId: "owned-job" }));
+      native.backgroundOperationCount = 0;
+      native.settle("");
+    }
+    await waitFor(() => !!service.latestSettlement(thread.id));
+    expect(service.latestSettlement(thread.id)).toMatchObject({ outcome: "complete", assignmentPending: true });
+    expect(native.commands.some(command => command.type === "recover_final_result")).toBe(false);
   });
 
   it("ignores a previous native settlement while the current work has no completion receipt", async () => {

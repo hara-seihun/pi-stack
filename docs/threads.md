@@ -43,8 +43,14 @@ native startup is not proof that external resources have been released. Automati
 archive sweeps preserve that owner across restarts. Successful startup clears the
 failure; explicit Stop/close still takes effect and never resumes failed work.
 A native turn without nonempty final assistant text or a retained dependency/question
-returns a failed settlement with `Native turn ended without a final result or a durable
-dependency wait`. The failed result is delivered to its assignment requester and result
+requests `state your final result in one short message` once in the same native
+conversation before failing. The original work, execution, settings and capacity custody
+remain owned; the original input and completed tools are not replayed. An accepted
+background operation retains continuation ownership until its terminal transition lands.
+A second empty final returns a failed settlement with `Native turn ended without a final
+result or a durable dependency wait`. A durable native recovery receipt fences the one
+attempt across lost acknowledgements and owner restart; an interrupted accepted attempt
+fails explicitly rather than restarting the assignment. The failed result is delivered to its assignment requester and result
 subscribers, and a background thread archives just like any other settled assignment.
 `metadata.incompleteResult` records the failure; it is not ongoing work. Startup reconciles
 previously retained incomplete background results the same way. Foreground human conversations
