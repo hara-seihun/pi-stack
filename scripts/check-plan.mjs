@@ -58,7 +58,7 @@ const buildPolicies = {
 };
 
 const generatedRuntimeFixtures = new Set([
-  'anthropic-narration', 'anthropic-tool-schema', 'bash-cancellation', 'bash-spill', 'codex-service-recovery',
+  'anthropic-narration', 'anthropic-tool-schema', 'bash-cancellation', 'bash-spill', 'codex-service-recovery', 'compaction-fallback',
   'extensions/anthropic-beta-guard/guard', 'extensions/browser/browser', 'extensions/codex-compaction/lifecycle',
   'extensions/web-search/web-search', 'model-selection', 'patch-browser-batch-timeout', 'patch-browser-managed-close',
   'patch-browser-semantic-fill', 'session-thinking', 'stack-pi', 'summary-recovery',

@@ -161,7 +161,7 @@ On September 15, 2026, thread `fbd03453-7fd1-486d-ab6e-86051acd9124` received th
 
 On September 18, 2026, native sessions `d916c1a9-0dad-4198-83d5-1142b8bf12a8` and `73d1735e-aa4c-4794-9491-6b5c060856d1` received the `access_programs` rejection on Astra accounts 8 and 11 at 02:42:30 and 02:59:19 UTC. Neither failure contained output, usage or a response ID. The installed provider builders, request hooks and configuration contain no `access_programs` option. Both sessions subsequently succeeded on the same account and model at 02:42:55 and 02:59:40 without a configuration change. There is no local parameter to remove. The recovery handles that provider rejection without changing `service_tier`, refreshing credentials or rerouting accounts. Tests cover both transports, preserved priority, cancellation, partial output, repeated rejection and real authentication failures. The incident sessions remain unchanged; repair tests use synthetic requests only.
 
-[`patch-compaction-errors.mjs`](patch-compaction-errors.mjs) lets native compaction return a concrete failure through both Pi runtime copies. Failed between-turn compaction reaches the agent failure handler without aborting it. The context hook can return `{ error: string }` to reject a later request at its durable failure fence. Pi rejects that result outside extension exception logging, preserves the cause on the assistant and excludes both failures from ordinary chat retries. Actual cancellation retains its abort signal. The extension's [operation scope and durable attempt records](extensions/codex-compaction/operation.mjs) own progress deadlines and explicit recovery. The [incident and recovery contract](extensions/codex-compaction/README.md#september-12-timeout-incident) records the large-context replay.
+[`patch-compaction-errors.mjs`](patch-compaction-errors.mjs) lets native compaction return a concrete failure through both Pi runtime copies. If summary-only recovery also fails, failed between-turn compaction reaches the agent failure handler without aborting it. The context hook can return `{ error: string }` to reject a later request at its durable failure fence. Pi rejects that result outside extension exception logging, preserves the cause on the assistant and excludes both failures from ordinary chat retries. Actual cancellation retains its abort signal. The extension's [operation scope and durable attempt records](extensions/codex-compaction/operation.mjs) own progress deadlines and explicit recovery. The [incident and recovery contract](extensions/codex-compaction/README.md#september-12-timeout-incident) records the large-context replay.
 
 Pi 0.87.1 owns the companion cut-selection repair. When trailing tool results alone exceed `keepRecentTokens`, Pi keeps their preceding assistant call instead of retaining the entire transcript and declining compaction. [`compaction-cut.test.mjs`](compaction-cut.test.mjs) guards that upstream contract; the extension's lifecycle test runs a complete parallel tool batch, native compaction and continuation inside one Pi run.
 
@@ -187,8 +187,9 @@ recovery stops after 32 requests. Every attempt's usage contributes to the retur
 summary usage. The same helper covers ordinary history and split-turn prefixes;
 Codex's server-side checkpoint handler remains unchanged.
 
-Failed automatic prose compaction writes a native custom entry excluded from model
-context. Both automatic compaction and provider preparation honor that active-branch
+Automatic prose compaction that still fails after summary-only recovery writes a
+native custom entry excluded from model context. Both automatic compaction and
+provider preparation honor that active-branch
 failure fence, including after reload or an account-alias change. A successful manual
 `/compact` or compact RPC appends the compaction boundary that clears it. Another model
 can proceed independently. Operator cancellation does not install a failure fence.
@@ -216,6 +217,38 @@ or credentials:
 
 ```sh
 node --test packages/runtime/summary-recovery.test.mjs packages/runtime/compaction-errors.test.mjs packages/runtime/compaction-cut.test.mjs
+```
+
+## Cross-model compaction recovery
+
+[`patch-compaction-fallback.mjs`](patch-compaction-fallback.mjs) installs
+[`compaction-fallback.js`](compaction-fallback.js) and its
+[`portable history helper`](compaction-fallback-history.js) after prose-summary
+recovery in [`deploy/runtime`](../../deploy/runtime). The policy covers every model, profile
+and agent role on both maintained hosts, including native Codex, automatic, manual
+and overflow compaction. Any non-cancelled failure of the original compaction gets
+one alternate summary-only attempt with `openai-codex/gpt-6.1-sol`. If the original
+model is already Sol, it selects the next available installed model with a different
+model identity; another account alias for Sol is not an alternative. Cancellation
+never triggers this recovery, and an alternate failure cannot recurse.
+
+The alternate produces portable prose, not a model-bound encrypted checkpoint.
+Only the summary producer changes: the session retains its selected conversation
+model, profile and role. Diagnostics retain the original error and identify the
+actual summary producer. If no eligible producer is available or its summary fails,
+the compaction remains a failure and its existing failure handling applies. Original
+history is retained throughout; a complete alternate summary commits the ordinary
+compaction boundary and clears the failure fence.
+
+Deployment hashes the patch and both helpers into the immutable dependency identity.
+[`compaction-fallback.test.mjs`](compaction-fallback.test.mjs) and
+[`compaction-fallback-history.test.mjs`](compaction-fallback-history.test.mjs) are
+discovered by the owning runtime check runner. The fallback integration fixture has
+declared generated-fixture coverage in [`check-plan.mjs`](../../scripts/check-plan.mjs);
+the history helper uses ordinary import-closure coverage. Run their focused checks with:
+
+```sh
+node --test packages/runtime/compaction-fallback.test.mjs packages/runtime/compaction-fallback-history.test.mjs
 ```
 
 ## Shell output custody
