@@ -27,7 +27,9 @@ export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningC
   let callbacks: CallbackTransports | undefined;
   let gateways: GatewayTransports | undefined;
   let server: Server | undefined, clock: ReturnType<typeof setInterval> | undefined;
-  let reconciliation: Promise<void> | undefined, closing: Promise<CoreResult<void>> | undefined;
+  let reconciliation: Promise<void> | undefined, rootReconciliation: Promise<void> | undefined, closing: Promise<CoreResult<void>> | undefined;
+  let readinessResults: readonly [PromiseSettledResult<void | undefined>, PromiseSettledResult<CoreResult<void>>] | undefined;
+  let rootResult: PromiseSettledResult<{ errors: number } | undefined> | { status: "pending" } = { status: "pending" };
   let ready = false;
   let reconciliationHealth: CoreReconciliationHealth = { state: "pending" };
   const close = (): Promise<CoreResult<void>> => {
@@ -38,7 +40,7 @@ export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningC
       if (clock) clearInterval(clock);
       try {
         await root?.drain();
-        await reconciliation;
+        await Promise.all([reconciliation, rootReconciliation]);
         const transportDrains = Promise.allSettled([
           gateways?.close(), callbacks?.close(),
           server?.listening ? new Promise<void>((resolve, reject) => server!.close(error => error ? reject(error) : resolve())) : undefined,
@@ -172,13 +174,27 @@ export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningC
     if (!admittedGateways.ok) { await close(); return admittedGateways; }
     gateways = admittedGateways.value;
     ready = true;
+    const observeReconciliation = () => {
+      if (!readinessResults) return;
+      reconciliationHealth = observeCoreReconciliation(readinessResults[0], rootResult, readinessResults[1],
+        { provider: provider !== undefined, root: root !== null, dutyCustodyErrors: duties.errors() });
+    };
     const reconcile = () => {
+      if (shutdown.signal.aborted) return;
       provider?.tick();
-      if (reconciliation || shutdown.signal.aborted) return;
+      if (root && !rootReconciliation) {
+        rootReconciliation = Promise.resolve().then(() => root!.reconcile()).then(value => {
+          rootResult = { status: "fulfilled", value }; observeReconciliation();
+        }, reason => {
+          rootResult = { status: "rejected", reason }; observeReconciliation();
+          console.error(`Root reconciliation failed: ${String(reason)}`);
+        }).finally(() => { rootReconciliation = undefined; });
+      }
+      if (reconciliation) return;
       reconciliation = (async () => {
-        const results = await Promise.allSettled([provider?.reconcile(), root?.reconcile(), duties.tick()] as const);
-        reconciliationHealth = observeCoreReconciliation(...results, { provider: provider !== undefined, root: root !== null, dutyCustodyErrors: duties.errors() });
-        for (const result of results) if (result.status === "rejected") console.error(`Core reconciliation failed: ${String(result.reason)}`);
+        readinessResults = await Promise.allSettled([provider?.reconcile(), duties.tick()] as const);
+        observeReconciliation();
+        for (const result of readinessResults) if (result.status === "rejected") console.error(`Core reconciliation failed: ${String(result.reason)}`);
       })().finally(() => { reconciliation = undefined; });
     };
     clock = setInterval(reconcile, 1_000); reconcile();

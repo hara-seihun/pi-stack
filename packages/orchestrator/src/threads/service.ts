@@ -3133,6 +3133,8 @@ export class ThreadService implements ThreadApi {
     if (!await this.recoverUnassignedCapacity(id)) return;
     const admissionWait = thread.metadata?.admissionWait as Json | undefined;
     if (Number(admissionWait?.retryAt) > Date.now()) return;
+    const preparationWait = thread.metadata?.preparationWait as Json | undefined;
+    if (preparationWait && this.queuedWork(preparationWait.workId) && Number(preparationWait.retryAt) > Date.now()) return;
     const startup = thread.metadata?.startupFailure as Json | undefined;
     const nextWork = this.execution(id)?.work_id ?? this.pending(id)[0]?.id;
     if (startup && startup.workId === nextWork && Number(startup.retryAt) > Date.now()) return;
@@ -3192,12 +3194,25 @@ export class ThreadService implements ThreadApi {
     for (const item of batch) if (item.prepared === null) {
       if (!execution) this.phase(id, "preparing", "Preparing pending messages and attachments");
       const prepared = this.options.prepareMessage ? await this.options.prepareMessage(thread, this.message(item)) : good({ text: item.text as string, images: JSON.parse(item.images) as unknown[] });
-      if (!prepared.ok) throw new Error(prepared.error.message);
-      if (this.suspended || this.row(id)?.held || this.halts.has(id)) return;
+      if (this.suspended || this.closed || this.row(id)?.held || this.halts.has(id) || this.get(id)?.metadata?.archived) return;
+      if (!prepared.ok) {
+        if (prepared.error.code === "unavailable" && prepared.error.retryable === true) {
+          if (!this.queuedWork(item.id)) continue;
+          const previous = this.get(id)?.metadata?.preparationWait as Json | undefined;
+          const now = Date.now();
+          const wait = { dependency: "message-preparation", workId: item.id, code: prepared.error.code, message: prepared.error.message,
+            since: previous?.workId === item.id ? previous.since : now, lastActivityAt: now, retryAt: prepared.error.retryAt ?? now + 1_000 };
+          this.sql("UPDATE thread SET metadata=json_set(metadata,'$.preparationWait',json(?)) WHERE id=?").run(JSON.stringify(wait), id);
+          this.changed(id);
+          return;
+        }
+        throw new Error(prepared.error.message);
+      }
       if (!this.queuedWork(item.id)) continue;
       item.prepared = JSON.stringify(prepared.value);
       this.sql("UPDATE thread_work SET prepared=? WHERE id=? AND prepared IS NULL").run(item.prepared, item.id);
     }
+    if (this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.preparationWait') WHERE id=? AND json_extract(metadata,'$.preparationWait') IS NOT NULL").run(id).changes) this.changed(id);
     if (!stillNext()) { this.wake(id); return; }
     if (!execution) {
       const settings = JSON.parse(work.settings) as ThreadSettings, executionId = this.newExecutionId(id, work.id);

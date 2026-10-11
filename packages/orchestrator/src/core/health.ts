@@ -3,7 +3,7 @@ import type { DutyCustodyError } from "./duties-runtime.js";
 
 type ComponentHealth = "ready" | "failed" | "disabled";
 export type RootReconciliationHealth =
-  | { state: "disabled" | "ready" | "failed" }
+  | { state: "disabled" | "pending" | "ready" | "failed" }
   | { state: "delivery-degraded"; retainedDeliveryErrors: number };
 export type CoreReconciliationHealth =
   | { state: "pending" }
@@ -11,12 +11,13 @@ export type CoreReconciliationHealth =
 
 export function observeCoreReconciliation(
   provider: PromiseSettledResult<void | undefined>,
-  root: PromiseSettledResult<{ errors: number } | undefined>,
+  root: PromiseSettledResult<{ errors: number } | undefined> | { status: "pending" },
   duties: PromiseSettledResult<CoreResult<void>>,
   configured: { provider: boolean; root: boolean; dutyCustodyErrors: DutyCustodyError[] },
 ): CoreReconciliationHealth {
   let rootHealth: RootReconciliationHealth;
   if (!configured.root) rootHealth = { state: "disabled" };
+  else if (root.status === "pending") rootHealth = { state: "pending" };
   else if (root.status === "rejected" || !root.value || !Number.isSafeInteger(root.value.errors) || root.value.errors < 0) rootHealth = { state: "failed" };
   else rootHealth = root.value.errors === 0 ? { state: "ready" } : { state: "delivery-degraded", retainedDeliveryErrors: root.value.errors };
   return {
@@ -32,6 +33,6 @@ export function coreReadiness(started: boolean, stopping: boolean, reconciliatio
   if (!started || stopping || reconciliation.state === "pending") return { ready: false, degraded: false };
   return {
     ready: reconciliation.provider !== "failed" && reconciliation.duties !== "failed" && reconciliation.root.state !== "failed",
-    degraded: reconciliation.duties === "custody-degraded" || reconciliation.root.state === "delivery-degraded",
+    degraded: reconciliation.duties === "custody-degraded" || reconciliation.root.state === "pending" || reconciliation.root.state === "delivery-degraded",
   };
 }

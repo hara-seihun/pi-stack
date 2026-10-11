@@ -5,6 +5,10 @@ import { Readable } from "node:stream";
 import { kernelPeer } from "./gateway-transport.js";
 
 export type GatewayPeer = { socketPath: string; peerUid: number };
+export class GatewayPeerError extends Error {
+  constructor(readonly code: "peer-verification-unavailable" | "peer-mismatch" | "transport-closed", message: string,
+    readonly verificationError?: { code: string; message: string }) { super(message); }
+}
 export async function unixGatewayFetch(peer: GatewayPeer, input: Request | URL | string, init?: RequestInit): Promise<Response> {
   if (!isAbsolute(peer.socketPath) || resolve(peer.socketPath) !== peer.socketPath || peer.socketPath.includes("\0") || !Number.isSafeInteger(peer.peerUid) || peer.peerUid < 0) throw new Error("Invalid registered Unix gateway peer");
   const request = input instanceof Request && init === undefined ? input : new Request(input, init);
@@ -21,7 +25,11 @@ export async function unixGatewayFetch(peer: GatewayPeer, input: Request | URL |
   try {
     await new Promise<void>((done, reject) => { socket.once("connect", done); socket.once("error", reject); });
     const verified = await kernelPeer(socket);
-    if (!verified.ok || verified.value.uid !== peer.peerUid || socketError || socket.destroyed) throw socketError ?? new Error("Unix gateway server is not its configured kernel peer");
+    if (socketError) throw socketError;
+    request.signal.throwIfAborted();
+    if (socket.destroyed) throw new GatewayPeerError("transport-closed", "Unix gateway socket closed during kernel peer verification");
+    if (!verified.ok) throw new GatewayPeerError("peer-verification-unavailable", `Unix gateway kernel peer verification unavailable: ${verified.error.message}`, verified.error);
+    if (verified.value.uid !== peer.peerUid) throw new GatewayPeerError("peer-mismatch", `Unix gateway server is not its configured kernel peer: expected UID ${peer.peerUid}, observed UID ${verified.value.uid}`);
     request.signal.throwIfAborted();
     const agent = new Agent({ keepAlive: false });
     agent.createConnection = () => socket;

@@ -21,8 +21,8 @@
   "dependencies": {
     "@earendil-works/pi-ai": "file:vendor/pi/earendil-works-pi-ai-0.87.1.tgz",
     "@earendil-works/pi-coding-agent": "file:vendor/pi/earendil-works-pi-coding-agent-0.87.1-runtime.tgz",
-    "agent-browser": "https://github.com/hara-seihun/agent-browser/releases/download/browser-kernel-control-streaming-20261011-glibc235/agent-browser-0.37.1.tgz",
-    "pi-agent-browser-native": "0.6.6"
+    "agent-browser": "https://github.com/hara-seihun/agent-browser/releases/download/browser-private-export-20261011-glibc235/agent-browser-0.37.1.tgz",
+    "pi-agent-browser-native": "https://github.com/hara-seihun/pi-agent-browser-native/releases/download/browser-job-select-contract-20261011/pi-agent-browser-native-0.6.6.tgz"
   },
   "overrides": {
     "@earendil-works/pi-ai": "$@earendil-works/pi-ai",

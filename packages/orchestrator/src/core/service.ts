@@ -41,6 +41,22 @@ function operationAction(operation: string): PermissionAction {
   return "write";
 }
 
+export async function prepareCallbackMessage(callback: (input: string, init: RequestInit) => Promise<Response>, thread: Thread, message: import("../threads/contracts.js").ThreadMessage): Promise<Result<{ text: string; images?: unknown[] }>> {
+  try {
+    const response = await callback("http://pi-remote-callback/v1/core/prepare-message", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ thread, message }), signal: AbortSignal.timeout(30_000) });
+    const result = await response.json() as Result<{ text: string; images?: unknown[] }>;
+    if (typeof result?.ok !== "boolean") return failure("unavailable", `Message preparation returned an invalid HTTP ${response.status} receipt`);
+    if (!result.ok) {
+      if (!result.error || typeof result.error.message !== "string" || !["not_found", "invalid_request", "conflict", "no_pending_messages", "unavailable", "cancellation_failed", "oversized"].includes(result.error.code)
+        || result.error.retryAt !== undefined && (!Number.isSafeInteger(result.error.retryAt) || result.error.retryAt < 0)) return failure("invalid_request", "Message preparation returned an invalid typed error receipt");
+      return result.error.code === "unavailable" ? { ok: false, error: { ...result.error, retryable: true } } : result;
+    }
+    if (!result.value || typeof result.value.text !== "string" || result.value.images !== undefined && !Array.isArray(result.value.images)) return failure("invalid_request", "Message preparation returned an invalid prepared payload");
+    if (!response.ok) return { ok: false, error: { code: "unavailable", retryable: true, message: `Message preparation returned HTTP ${response.status}` } };
+    return result;
+  } catch (cause) { return { ok: false, error: { code: "unavailable", retryable: true, message: `Message preparation unavailable: ${cause instanceof Error ? cause.message : String(cause)}` } }; }
+}
+
 export class CoreService {
   private readonly owners = new Map<string, ScopeOwner>();
   private readonly listeners = new Map<string, Set<(event: CoreEvent) => void>>();
@@ -145,16 +161,7 @@ export class CoreService {
           ...(typeof thread.metadata?.bashTimeoutSeconds === "number" ? { PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS: String(thread.metadata.bashTimeoutSeconds) } : {}),
           ...(thread.metadata?.room ? { PI_REMOTE_ROOM_ID: thread.id } : {}),
         }),
-        ...(scope.callbackGateway.kind !== "none" ? { prepareMessage: async (thread, message) => {
-          try {
-            const response = await callback("http://pi-remote-callback/v1/core/prepare-message", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ thread, message }), signal: AbortSignal.timeout(30_000) });
-            const result = await response.json() as Result<{ text: string; images?: unknown[] }>;
-            if (typeof result?.ok !== "boolean") return failure("unavailable", `Message preparation returned an invalid HTTP ${response.status} receipt`);
-            if (!result.ok) return result;
-            if (!response.ok) return failure("unavailable", `Message preparation returned HTTP ${response.status}`);
-            return result;
-          } catch (cause) { return failure("unavailable", `Message preparation unavailable: ${cause instanceof Error ? cause.message : String(cause)}`); }
-        } } : {}),
+        ...(scope.callbackGateway.kind !== "none" ? { prepareMessage: (thread, message) => prepareCallbackMessage(callback, thread, message) } : {}),
         managerNotificationPolicy: () => {
           const relay = this.owners.get(scope.id)?.relay?.managerOwner;
           return relay ? relay.api.managerNotificationPolicy() : Promise.resolve({ ok: true as const, value: scope.manager.kind === "existing" ? { view: "mono" as const, managerThreadId: scope.manager.threadId } : { view: "classic" as const } });
