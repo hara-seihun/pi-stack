@@ -26,7 +26,7 @@ print(json.dumps({k:r[k] for k in ['ok','pid','sessions','activeSessions','threa
 
 
 def source_guard(host, adapter):
-    host_tokens = ['sessions.get(value.socketPath)?.close()', 'sessions.size', 'server.close()', 'remove(controlPath)']
+    host_tokens = ['sessions.get(value.socketPath)?.close()', 'sessions.size', 'sessions.delete(socketPath)', 'server.close()', 'remove(controlPath)']
     if not all(token in host for token in host_tokens):
         raise ValueError('original host lacks declared per-session close and host drain')
     close = adapter[adapter.index('close: () =>'):]
@@ -55,6 +55,11 @@ def request(plan, command):
 
 def normal_exit(trace):
     return bool(re.search(r'^exit_group\(0\)\s*=\s*\?\s*$', trace, re.M)) and '+++ exited with 0 +++' in trace
+
+
+def acknowledged_self_exit(before, closes, trace):
+    original = before.get('threadIds')
+    return isinstance(original, list) and len(set(original)) == len(original) and sorted(original) == sorted(item['threadId'] for item in closes) and all(item.get('acknowledgement', {}).get('ok') is True and item['acknowledgement'].get('pid') == before.get('pid') for item in closes) and normal_exit(trace)
 
 
 def retire(path):
@@ -116,13 +121,21 @@ def retire(path):
                 raise ValueError('original close acknowledgement lost native owner')
             state['closes'].append({**state.pop('claim'), 'acknowledgement': acknowledgement})
             publish(state_path, state)
-        after = request(plan, {'type': 'status'})
-        if after.get('pid') != plan['pid'] or after.get('threadIds') != [] or after.get('sessions') != 0 or after.get('activeSessions') != 0:
-            raise ValueError('native owner has not positively released all original sessions')
+        try:
+            after = request(plan, {'type': 'status'})
+        except (OSError, ValueError, subprocess.SubprocessError):
+            observer.wait(timeout=4)
+            if not acknowledged_self_exit(before, state['closes'], trace_path.read_text()):
+                raise ValueError('missing post-close control has no complete acknowledged normal self-exit proof')
+            after = {'state': 'source-closed', 'basis': 'all-original-close-acknowledgements-and-kernel-normal-exit'}
+            state['drainAcknowledgement'] = {'state': 'not-requested', 'reason': 'source-self-exited-after-final-acknowledged-close'}
+        else:
+            if after.get('pid') != plan['pid'] or after.get('threadIds') != [] or after.get('sessions') != 0 or after.get('activeSessions') != 0:
+                raise ValueError('native owner has not positively released all original sessions')
+            state['drainClaimed'] = True
+            publish(state_path, state)
+            state['drainAcknowledgement'] = request(plan, {'type': 'drain'})
         state['after'] = after
-        state['drainClaimed'] = True
-        publish(state_path, state)
-        state['drainAcknowledgement'] = request(plan, {'type': 'drain'})
         publish(state_path, state)
         observer.wait(timeout=4)
         trace = trace_path.read_text()

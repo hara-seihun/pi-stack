@@ -21,6 +21,15 @@ class NativeRetirement(unittest.TestCase):
             with self.assertRaises(ValueError):
                 retirement.source_guard(host, invalid)
 
+    def test_self_exit_requires_every_original_close_ack_and_kernel_success(self):
+        before = {'pid': 44, 'threadIds': ['original']}
+        closes = [{'threadId': 'original', 'acknowledgement': {'ok': True, 'pid': 44}}]
+        trace = 'exit_group(0) = ?\n+++ exited with 0 +++\n'
+        self.assertTrue(retirement.acknowledged_self_exit(before, closes, trace))
+        for changed in [[], [{'threadId': 'original', 'acknowledgement': {'ok': True, 'pid': 45}}], [{'threadId': 'other', 'acknowledgement': {'ok': True, 'pid': 44}}]]:
+            self.assertFalse(retirement.acknowledged_self_exit(before, changed, trace))
+        self.assertFalse(retirement.acknowledged_self_exit(before, closes, ''))
+
     def test_missing_pid_or_trace_is_not_a_positive_exit(self):
         self.assertTrue(retirement.normal_exit('exit_group(0) = ?\n+++ exited with 0 +++\n'))
         for trace in ['', '+++ exited with 0 +++', 'exit_group(0) = ?\n+++ killed by SIGTERM +++', 'exit_group(1) = ?\n+++ exited with 1 +++']:
