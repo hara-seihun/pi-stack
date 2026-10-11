@@ -28,7 +28,7 @@ test("invalid private fills never dispatch or echo supplied secrets", async () =
   const { tool, calls } = fixture();
   const secret = "synthetic-secret-do-not-echo";
   const cases = [null, [], {}, ...["provider", "item", "field", "selector", "target", "frame"].map(key => ({ ...credential, [key]: "" })),
-    { ...credential, field: "unknown" }, { ...credential, value: secret }, { ...credential, format: "unknown" }, { ...credential, format: "mm/yy" }, { ...credential, target: "x\0y" }];
+    { ...credential, field: "unknown" }, { ...credential, value: secret }, { ...credential, format: "unknown" }, { ...credential, format: "mm/yy" }, { ...credential, target: "x\0y" }, { ...credential, selector: "@e1" }];
   for (const privateCredential of cases) {
     const result = await tool.execute("invalid", { privateCredential });
     assert.equal(result.isError, true);
@@ -45,6 +45,10 @@ test("main frame and explicit expiration format compile; raw args remain unchang
   const compiled = compilePrivateCredential({ privateCredential: { ...credential, frame: "main", field: "expiration_date", format: "mm/yy" } });
   assert.equal(compiled.ok, true);
   assert.deepEqual(compiled.input.args.slice(-4), ["--frame", "main", "--format", "mm/yy"]);
+  const rawFormat = compilePrivateCredential({ privateCredential: { ...credential, format: "raw" } });
+  assert.equal(rawFormat.ok, true);
+  assert.deepEqual(rawFormat.input, compilePrivateCredential({ privateCredential: credential }).input);
+  assert.ok(!rawFormat.input.args.includes("--format"));
   const { tool, calls } = fixture();
   const raw = { args: ["auth", "fill", "--item", "Synthetic Card"] };
   await tool.execute("raw", raw);
