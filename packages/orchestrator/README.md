@@ -26,6 +26,12 @@ Configured provider fields are defined by [`CoreProviderConfig`](src/core/provid
 
 `GET /v1/providers/people-usage?period=day|week` aggregates trailing 24-hour or seven-day usage from each original ledger once, with frozen rates and no private account labels. Historical unscoped usage belongs to the declared original `ownerPrincipal`; subscription pools are deduplicated by declared OAuth custody. Its separate `peopleUsageResource` requires an actual read grant; declaring the resource grants nothing.
 
+## Internal room custody
+
+The shared `rooms` scope belongs only to its kernel-bound `pi-rooms` service. Person-facing room access remains in Remote's authenticated actor and current membership gateway, including history-return rechecks and event revocation. Scope custody is not an audience consent or a shared-scope person grant.
+
+[`deploy/core-room-custody.mjs`](../../deploy/core-room-custody.mjs) stages the finite correction from the original confidential room scope with missing custodian grants. Invoke `node deploy/core-room-custody.mjs ABS_CONFIG EXPECTED_CONFIG_SHA256 ABS_AUTHORITY_RECORD ABS_CANDIDATE` with protected root-owned inputs. It preserves subjects, privacy, gateway ceilings, credentials and existing exact-thread grants/consents, changes only internal scope consent to `not-required`, and adds the existing service's exact read/write/dispatch/control grant. Conflicting scope authority is a typed refusal. The receipt binds the original configuration and authority record hashes. Validate the candidate with the deployed Core parser under Bun and namespace preflight; apply it only in an ordinary Core handoff, since reload cannot change resource custody. No service is started by the projector.
+
 ## Adoption and shutdown
 
 The new owner uses the original ledgers, native runner boundaries, capability keys, session files, leases, immutable attempt receipts and accepted request IDs. Historical run sources/profile strings remain evidence, not admission inputs. Provider admission reads only durable completion requests; opening a ledger does not recreate work from historical producer rows.
