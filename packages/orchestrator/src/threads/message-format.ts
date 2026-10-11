@@ -47,7 +47,7 @@ function notificationPresentation(text: string): string {
   let notification: Record<string, unknown>;
   try { notification = JSON.parse(firstLine); }
   catch { return text; }
-  if (!notification || notification.type !== "thread_idle" || typeof notification.outcome !== "string") return text;
+  if (!notification || !isResultNotification(notification) || typeof notification.outcome !== "string") return text;
   const report = typeof notification.finalText === "string" ? notification.finalText : finalText(notification.finalMessage);
   const error = typeof notification.error === "string" ? notification.error : null;
   return [report || `Work ${notification.outcome}.`, error].filter(Boolean).join("\n\n") + (lineEnd < 0 ? "" : text.slice(lineEnd));
@@ -65,10 +65,24 @@ export function finalText(message: unknown): string | null {
   return text || null;
 }
 
-export function serializeThreadNotification(notification: Record<string, unknown>): string {
-  return JSON.stringify({ type: "thread_idle", ...(typeof notification.title === "string" ? { title: notification.title } : {}),
+const isResultNotification = (notification: Record<string, unknown>): boolean => notification.type === "thread_idle" || notification.type === "thread_settled";
+
+function resultNotification(notification: Record<string, unknown>, type: "thread_idle" | "thread_settled"): string {
+  const error = typeof notification.error === "string" ? notification.error
+    : notification.finalMessage && typeof notification.finalMessage === "object" && typeof (notification.finalMessage as Record<string, unknown>).errorMessage === "string"
+      ? (notification.finalMessage as Record<string, unknown>).errorMessage : undefined;
+  return JSON.stringify({ type, ...(typeof notification.threadId === "string" ? { threadId: notification.threadId } : {}),
+    ...(typeof notification.title === "string" ? { title: notification.title } : {}),
     outcome: notification.outcome, finalText: typeof notification.finalText === "string" ? notification.finalText : finalText(notification.finalMessage),
-    ...(notification.error ? { error: notification.error } : {}) });
+    ...(error ? { error } : {}) });
+}
+
+export function serializeThreadNotification(notification: Record<string, unknown>): string {
+  return resultNotification(notification, "thread_idle");
+}
+
+export function serializeThreadSettlementNotification(notification: Record<string, unknown>): string {
+  return resultNotification(notification, "thread_settled");
 }
 
 export function readableNotificationText(message: Pick<ThreadMessage, "source" | "text">, text = message.text): string {
@@ -76,9 +90,9 @@ export function readableNotificationText(message: Pick<ThreadMessage, "source" |
   let notification: Record<string, unknown> | null;
   try { notification = JSON.parse(message.text); }
   catch { return text; }
-  if (!notification || notification.type !== "thread_idle") return text;
+  if (!notification || !isResultNotification(notification)) return text;
   // Preparation may append meeting context. Replace only the persisted report body.
-  return text.replace(message.text, () => serializeThreadNotification(notification));
+  return text.replace(message.text, () => notification.type === "thread_settled" ? serializeThreadSettlementNotification(notification) : serializeThreadNotification(notification));
 }
 
 export function formatThreadMessage(message: ThreadMessage, text: string): string {

@@ -50,7 +50,7 @@ test("CLI executes through selected-release symlinks and imports stay silent", a
       for (const args of [["--input-type=module", "-e", program], ["--input-type=module", "-"]]) {
         const imported = Bun.spawnSync([runtime, ...args],
           { stdin: Buffer.from(args.at(-1) === "-" ? program : "not JSON"), env: {}, timeout: 5000 });
-        expect(imported.exitCode).toBe(0);
+        expect(imported.exitCode, JSON.stringify({ runtime, args, stderr: imported.stderr.toString() })).toBe(0);
         expect(imported.stdout.toString()).toBe("function\n");
       }
     }
