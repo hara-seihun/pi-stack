@@ -115,6 +115,10 @@ export class CoreProvisioner {
       const allowed = authorize(this.owners.policy, { principal, resource: scope.resource, action, now });
       if (!allowed.ok) return fail("unavailable", `New scope ${action}: ${allowed.error.message}`);
     }
+    const writerDirectory = `/run/pi-stack/session-writers/${scope.custody.uid}`, nativeDirectory = `/run/pi-stack/native-runner-locks/${scope.custody.uid}`;
+    if (scope.environment.PI_SESSION_WRITER_DIRECTORY !== writerDirectory || scope.environment.PI_SESSION_WRITER_SCOPE !== scope.id
+      || scope.environment.PI_NATIVE_RUNNER_DATA_DIR !== scope.custody.dataDir || scope.environment.PI_NATIVE_RUNNER_UID !== String(scope.custody.uid)
+      || ![writerDirectory, nativeDirectory].every(path => scope.resources.some(resource => resource.kind === "directory" && resource.path === path))) return fail("invalid-config", "Fresh account requires exact own-executor writer/native directories, scope and data directory before bootstrap");
     const paths = Object.values(scope.storage);
     if (paths.some(path => !canonical(path) || dirname(path) !== registration.directory) || new Set(paths).size !== paths.length
       || paths.some(path => [".core-provision.json", ".core-provision.lock"].includes(path.slice(registration.directory.length + 1)))) return fail("invalid-config", "Fresh storage descriptors must be distinct direct children of the exclusive registered directory");
@@ -275,7 +279,7 @@ export class CoreProvisioner {
       if (record.databaseIdentity && stable(record.databaseIdentity) !== stable(databaseIdentity) || record.keySha256 && record.keySha256 !== keySha256) return fail("ownership-conflict", "Reserved database or capability identity changed");
       record = { ...record, databaseIdentity, keySha256 };
       replaceRecord(recordPath, record, scope);
-      service = new ThreadService({ databasePath: database, sessionsDir: sessions, capacity: { mode: "unmanaged" }, openSession: async () => { throw new Error("Fresh account provisioning cannot execute a native session"); } });
+      service = new ThreadService({ databasePath: database, sessionsDir: sessions, environment: () => ({ ...scope.environment }), capacity: { mode: "unmanaged" }, openSession: async () => { throw new Error("Fresh account provisioning cannot execute a native session"); } });
       const current = await service.managerThread();
       if (!current.ok) return fail("unavailable", current.error.message);
       if (current.value && current.value.id !== value.managerThreadId) return fail("ownership-conflict", "Reserved scope has a different canonical manager");

@@ -20,7 +20,8 @@ function fixture() {
   const directory = join(root, "fresh-thread-owner");
   const principals: Principal[] = [{ id: "registrar", kind: "service" }, { id: "alice", kind: "person", person: "alice" }];
   const registration: CoreProvisionRegistration = { id: "account-alice-v1", requestId: "account-alice-create", creatorPrincipalId: "registrar", source: "Authenticated account creation registration", operation: { id: "register-alice", kind: "operation", owner: "registrar", privacy: "private", subjects: [], consent: "not-required" }, directory,
-    scope: { id: "alice-person", principalId: "alice", availability: { kind: "adopt" }, resource: { id: "alice-threads", kind: "thread", owner: "alice", privacy: "private", subjects: ["alice"], consent: "not-required" }, storage: { databasePath: join(directory, "threads.sqlite3"), sessionsDir: join(directory, "sessions"), capabilityKeyPath: join(directory, "capability.key"), adoptionReceiptPath: join(directory, "adoption.json") }, custody: { uid: process.getuid!(), gid: process.getgid!(), namespace: { kind: "host" }, retainedRunnerNamespace: { kind: "host" }, dataDir: directory, socketDir: root }, resources: [{ path: root, kind: "directory" }], environment: {}, callbackGateway: { kind: "none" }, manager: { kind: "existing", threadId: "alice-kenaznia" }, managerRouting: { kind: "none" } },
+    scope: { id: "alice-person", principalId: "alice", availability: { kind: "adopt" }, resource: { id: "alice-threads", kind: "thread", owner: "alice", privacy: "private", subjects: ["alice"], consent: "not-required" }, storage: { databasePath: join(directory, "threads.sqlite3"), sessionsDir: join(directory, "sessions"), capabilityKeyPath: join(directory, "capability.key"), adoptionReceiptPath: join(directory, "adoption.json") }, custody: { uid: process.getuid!(), gid: process.getgid!(), namespace: { kind: "host" }, retainedRunnerNamespace: { kind: "host" }, dataDir: directory, socketDir: root }, resources: [{ path: root, kind: "directory" }, { path: `/run/pi-stack/session-writers/${process.getuid!()}`, kind: "directory" }, { path: `/run/pi-stack/native-runner-locks/${process.getuid!()}`, kind: "directory" }],
+      environment: { PI_SESSION_WRITER_DIRECTORY: `/run/pi-stack/session-writers/${process.getuid!()}`, PI_SESSION_WRITER_SCOPE: "alice-person", PI_NATIVE_RUNNER_DATA_DIR: directory, PI_NATIVE_RUNNER_UID: String(process.getuid!()) }, callbackGateway: { kind: "none" }, manager: { kind: "existing", threadId: "alice-kenaznia" }, managerRouting: { kind: "none" } },
     manager: { cwd: root, settings: { model: "sol", thinkingLevel: "low", speed: "ultrafast" } }, markdown: { kind: "none" }, images: { kind: "none" } };
   const policy: PermissionPolicy = { revision: 1, consents: [], grants: [
     { id: "register-authority", principal: "registrar", resource: { kind: "exact", id: "register-alice" }, actions: ["execute"], effect: "allow", validFrom: 0, validUntil: null, issuedBy: "account-owner", source: "Explicit account creation grant" },
@@ -100,6 +101,17 @@ test("locked accounts, missing grants, wrong creator and wrong stable request do
   f.policy.grants = [];
   expect((await build().provision(f.input, "registrar")).ok).toBe(false);
   expect(touched).toBe(false); expect(existsSync(f.directory)).toBe(false);
+});
+
+test("fresh bootstrap rejects missing or wrong executor writer scope before touching storage", async () => {
+  for (const field of ["PI_SESSION_WRITER_DIRECTORY", "PI_SESSION_WRITER_SCOPE", "PI_NATIVE_RUNNER_DATA_DIR", "PI_NATIVE_RUNNER_UID"]) {
+    const f = fixture(); delete f.registration.scope.environment[field];
+    expect(await f.build().provision(f.input, "registrar")).toMatchObject({ ok: false, error: { code: "invalid-config" } }); expect(existsSync(f.directory)).toBe(false);
+  }
+  const f = fixture(); f.registration.scope.environment.PI_SESSION_WRITER_SCOPE = "foreign";
+  expect((await f.build().provision(f.input, "registrar")).ok).toBe(false); expect(existsSync(f.directory)).toBe(false);
+  const g = fixture(); g.registration.scope.resources = [{ path: g.root, kind: "directory" }];
+  expect((await g.build().provision(g.input, "registrar")).ok).toBe(false); expect(existsSync(g.directory)).toBe(false);
 });
 
 test("accepted missing storage is an error, never fresh reconstruction", async () => {

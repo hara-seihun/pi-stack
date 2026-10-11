@@ -19,7 +19,8 @@ test("fresh UID provisioned registry serves images through the canonical adoptio
     scope: { id: registry.scopeId, principalId: "alice", availability: { kind: "adopt" }, resource: { id: "alice-threads", kind: "thread", owner: "alice", privacy: "private", subjects: ["alice"], consent: "not-required" },
       storage: { databasePath: join(directory, "threads.sqlite3"), sessionsDir: join(directory, "sessions"), capabilityKeyPath: join(directory, "key"), adoptionReceiptPath: join(directory, "adoption.json") },
       custody: { uid: process.getuid!(), gid: process.getgid!(), namespace: { kind: "host" }, retainedRunnerNamespace: { kind: "host" }, dataDir: directory, socketDir: root },
-      resources: [{ path: root, kind: "directory" }], environment: {}, callbackGateway: { kind: "none" }, manager: { kind: "existing", threadId: "alice-manager" }, managerRouting: { kind: "none" } },
+      resources: [{ path: root, kind: "directory" }, { path: `/run/pi-stack/session-writers/${process.getuid!()}`, kind: "directory" }, { path: `/run/pi-stack/native-runner-locks/${process.getuid!()}`, kind: "directory" }],
+      environment: { PI_SESSION_WRITER_DIRECTORY: `/run/pi-stack/session-writers/${process.getuid!()}`, PI_SESSION_WRITER_SCOPE: registry.scopeId, PI_NATIVE_RUNNER_DATA_DIR: directory, PI_NATIVE_RUNNER_UID: String(process.getuid!()) }, callbackGateway: { kind: "none" }, manager: { kind: "existing", threadId: "alice-manager" }, managerRouting: { kind: "none" } },
     manager: { cwd: root, settings: { model: "sol", speed: "ultrafast", thinkingLevel: "low" } }, markdown: { kind: "none" }, images: { kind: "fresh", priorOwner: { kind: "none" }, registry } };
   const payload = { registration, input: { registrationId: registration.id, requestId: registration.requestId }, actor: "registrar", namespaceInode: statSync("/proc/self/ns/mnt", { bigint: true }).ino.toString(),
     principals: [{ id: "registrar", kind: "service" }, { id: "alice", kind: "person", person: "alice" }],
@@ -31,7 +32,7 @@ test("fresh UID provisioned registry serves images through the canonical adoptio
   let images: CoreImages | undefined, accounts: Store | undefined;
   try {
     const worker = fileURLToPath(new URL("../src/core/provision-worker.ts", import.meta.url));
-    const result = spawnSync(process.execPath, [worker], { input: JSON.stringify(payload), encoding: "utf8", timeout: 15_000 });
+    const result = spawnSync(process.execPath, [worker], { input: JSON.stringify(payload), encoding: "utf8", env: { ...process.env, ...registration.scope.environment }, timeout: 15_000 });
     expect(result.status).toBe(0); expect(JSON.parse(result.stdout).ok).toBe(true);
     expect(parseCoreImagesConfig({ kind: "configured", registries: [registry] }).ok).toBe(true);
     const native = join(registration.scope.storage.sessionsDir, "alice-manager.jsonl");
@@ -53,7 +54,9 @@ test("fresh UID provisioned registry serves images through the canonical adoptio
     const accepted = await images.handle(request); expect(accepted?.status).toBe(200);
     expect(await accepted?.json()).toMatchObject({ ok: true, value: { images: [{ id: "first-image" }] } });
     const adoptedInode = statSync(registry.databasePath).ino;
-    const retry = spawnSync(process.execPath, [worker], { input: JSON.stringify(payload), encoding: "utf8", timeout: 15_000 });
+    const retry = spawnSync(process.execPath, [worker], { input: JSON.stringify(payload), encoding: "utf8", env: { ...process.env, ...registration.scope.environment }, timeout: 15_000 });
     expect(retry.status).toBe(0); expect(statSync(registry.databasePath).ino).toBe(adoptedInode);
+    const wrongScope = spawnSync(process.execPath, [worker], { input: JSON.stringify(payload), encoding: "utf8", env: { ...process.env, ...registration.scope.environment, PI_SESSION_WRITER_SCOPE: "foreign" }, timeout: 15_000 });
+    expect(wrongScope.status).not.toBe(0); expect(JSON.parse(wrongScope.stdout).ok).toBe(false);
   } finally { await images?.close(); accounts?.close(); rmSync(root, { recursive: true, force: true }); }
 });

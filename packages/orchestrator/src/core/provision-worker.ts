@@ -41,7 +41,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   try {
     const text = readFileSync(0, "utf8");
     if (text.length > 2_000_000) throw new Error("Provision registration exceeds bounded input");
-    const result = await prepareRegisteredStorage(JSON.parse(text));
+    const payload = JSON.parse(text) as ProvisionWorkerInput;
+    const expected = payload.registration?.scope;
+    if (!expected || ["PI_SESSION_WRITER_DIRECTORY", "PI_SESSION_WRITER_SCOPE", "PI_NATIVE_RUNNER_DATA_DIR", "PI_NATIVE_RUNNER_UID"].some(key => typeof expected.environment[key] !== "string" || process.env[key] !== expected.environment[key])) throw new Error("Provision child environment must exactly bind the registered executor writer and native storage");
+    const result = await prepareRegisteredStorage(payload);
     process.stdout.write(JSON.stringify(result));
     if (!result.ok) process.exitCode = 1;
   } catch { process.stdout.write(JSON.stringify({ ok: false, error: { code: "invalid-config", message: "Malformed owning account provision payload" } })); process.exitCode = 1; }

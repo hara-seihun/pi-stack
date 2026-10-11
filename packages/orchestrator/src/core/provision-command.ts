@@ -57,7 +57,8 @@ export async function provisionRegisteredAccount(input: RegisteredAccountProvisi
     };
     const worker = fileURLToPath(new URL(import.meta.url.endsWith(".ts") ? "./provision-worker.ts" : "./provision-worker.js", import.meta.url));
     const command = resources.launch([process.execPath, worker]);
-    const child = spawnSync(command[0]!, command.slice(1), { input: JSON.stringify(payload), encoding: "utf8", env: { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C" }, timeout: 15_000, maxBuffer: 2_000_000 });
+    const child = spawnSync(command[0]!, command.slice(1), { input: JSON.stringify(payload), encoding: "utf8", env: { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C", PI_SESSION_WRITER_DIRECTORY: scope.environment.PI_SESSION_WRITER_DIRECTORY,
+      PI_SESSION_WRITER_SCOPE: scope.environment.PI_SESSION_WRITER_SCOPE, PI_NATIVE_RUNNER_DATA_DIR: scope.environment.PI_NATIVE_RUNNER_DATA_DIR, PI_NATIVE_RUNNER_UID: scope.environment.PI_NATIVE_RUNNER_UID }, timeout: 15_000, maxBuffer: 2_000_000 });
     if (child.error || child.signal) return { ok: false, error: { code: "unavailable", message: "Account preparation acknowledgement is uncertain; recover the same registration/request, never replace storage" } };
     const result = JSON.parse(child.stdout) as CoreResult<CoreProvisionReceipt>;
     if (typeof result?.ok !== "boolean" || result.ok && (child.status !== 0 || !isDeepStrictEqual(result.value?.scope, scope) || result.value.managerThreadId !== (scope.manager.kind === "existing" ? scope.manager.threadId : null))) throw new Error("Invalid account owner preparation receipt");
