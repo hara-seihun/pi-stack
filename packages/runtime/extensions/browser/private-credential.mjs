@@ -14,7 +14,7 @@ export const privateCredentialSchema = {
     provider: { type: "string", minLength: 1, maxLength: 128, description: "Configured credential plugin name, such as proton-pass." },
     item: { type: "string", minLength: 1, maxLength: 256, description: "Exact vault item reference; never the secret value." },
     field: { type: "string", enum: fields },
-    selector: { type: "string", minLength: 1, maxLength: 4096, description: "Selected frame's CSS selector or current @ref." },
+    selector: { type: "string", minLength: 1, maxLength: 4096, description: "Selected frame's CSS selector; @refs are unsupported for private fill." },
     target: { type: "string", minLength: 1, maxLength: 256, description: "Exact active CDP targetId from tab list." },
     frame: { type: "string", minLength: 1, maxLength: 256, description: "Exact selected frameId, or main for the top-level frame." },
     format: { type: "string", enum: ["raw", "mm/yy"] },
@@ -26,13 +26,14 @@ export function compilePrivateCredential(params) {
   if (!credential || typeof credential !== "object" || Array.isArray(credential)
       || Object.keys(credential).some(key => ![...required, "format"].includes(key))
       || !required.every(key => nonempty(credential[key], key === "selector" ? 4096 : key === "provider" ? 128 : 256))
+      || credential.selector.startsWith("@")
       || !fields.includes(credential.field)
       || credential.format !== undefined && !["raw", "mm/yy"].includes(credential.format)
       || credential.format === "mm/yy" && credential.field !== "expiration_date"
       || modes.some(key => params[key] !== undefined) || params.stdin !== undefined || params.sessionMode === "fresh") return { ok: false };
   const args = ["auth", "fill", "--credential-provider", credential.provider, "--item", credential.item,
     "--field", credential.field, "--selector", credential.selector, "--target", credential.target, "--frame", credential.frame];
-  if (credential.format !== undefined) args.push("--format", credential.format);
+  if (credential.format === "mm/yy") args.push("--format", credential.format);
   const { privateCredential: _credential, ...input } = params;
   return { ok: true, input: { ...input, args } };
 }
