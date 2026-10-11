@@ -26,15 +26,21 @@ async function configAt(artifact, path) {
   return parsed.value;
 }
 export function nativeModelBinding(config, binding, uid, readOriginal) {
+  const native = binding.nativeModel;
+  const scope = config.scopes.find(item => item.id === binding.scopeId);
+  if (['modelBrokerUrl', 'modelBrokerPrincipalId', 'modelBrokerUid'].some(key => Object.hasOwn(binding, key)) || !native || typeof native !== 'object' || Array.isArray(native)) return failure('native-model-binding-missing', 'Explicit closed none/configured native model binding required');
+  if (native.kind === 'none') {
+    if (Object.keys(native).length !== 1 || config.broker.kind !== 'configured' || scope?.principalId !== config.broker.ownerPrincipal || scope.custody.uid !== uid || !scope.environment || Object.hasOwn(scope.environment, 'PI_MODEL_BROKER_URL')) return failure('native-model-binding-denied', 'No native listener is valid only for the original direct-provider owner scope');
+    return { ok: true, value: { kind: 'none' } };
+  }
+  if (native.kind !== 'configured' || Object.keys(native).sort().join(',') !== 'kind,principalId,uid,url' || typeof native.url !== 'string' || typeof native.principalId !== 'string' || !native.principalId || !Number.isSafeInteger(native.uid) || native.uid < 0 || !Array.isArray(config.broker.freshListeners)) return failure('native-model-binding-invalid', 'Configured native binding requires only its exact origin, principal and UID');
   const listeners = config.broker.retainedListeners;
-  if (typeof binding.modelBrokerUrl !== 'string' || typeof binding.modelBrokerPrincipalId !== 'string' || !Number.isSafeInteger(binding.modelBrokerUid) || !Array.isArray(config.broker.freshListeners)) return failure('native-model-binding-missing', 'Explicit retained native principal, UID and listener origin required');
   let url;
-  try { url = new URL(binding.modelBrokerUrl); } catch { return failure('native-model-binding-invalid', 'Native model origin is invalid'); }
+  try { url = new URL(native.url); } catch { return failure('native-model-binding-invalid', 'Native model origin is invalid'); }
   if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || url.pathname !== '/' || url.search || url.hash || url.username || url.password || !url.port) return failure('native-model-binding-invalid', 'Exact retained loopback native model origin required');
   const port = Number(url.port);
   const declarations = [...(listeners.kind === 'uid-bound' ? listeners.bindings : []), ...config.broker.freshListeners.map(item => item.binding)];
-  const retained = declarations.find(item => item.principalId === binding.modelBrokerPrincipalId && item.port === port && item.uid === binding.modelBrokerUid);
-  const scope = config.scopes.find(item => item.id === binding.scopeId);
+  const retained = declarations.find(item => item.principalId === native.principalId && item.port === port && item.uid === native.uid);
   const rootScopeIds = config.root.kind === 'configured' ? [config.root.consultationScopeId, ...config.root.consultationOwners.map(item => item.scopeId)] : [];
   const callerUid = rootScopeIds.includes(scope?.id) ? 0 : uid;
   if (!retained || !retained.authorizedUids.includes(callerUid)) return failure('native-model-binding-denied', 'Native UID is not admitted by this exact retained principal listener');
@@ -45,7 +51,7 @@ export function nativeModelBinding(config, binding, uid, readOriginal) {
     return (!fresh || original.listeners.length === 1) && original.listeners.some(item => item.principal === retained.principalId && item.port === retained.port);
   });
   if (!matched) return failure('native-model-source-missing', 'Retained listener has no exact original configuration footprint');
-  return { ok: true, value: binding.modelBrokerUrl };
+  return { ok: true, value: { kind: 'configured', url: native.url } };
 }
 export function gatewayBinding(config, binding, uid, personOnly) {
   if (binding?.version !== 1 || !/^[a-z_][a-z0-9_-]{0,31}$/.test(binding.user) || !/^[a-zA-Z0-9_.:-]+$/.test(binding.scopeId ?? '') ||
@@ -255,7 +261,8 @@ export async function coreHost(operation, artifact, configPath, bindingPath, req
       if (!native.ok) return native;
       const prepared = prepareSessionWriters(config);
       if (!prepared.ok) return prepared;
-      const environment = `PI_NATIVE_RUNNER_DATA_DIR=${native.value.dataDir}\nPI_NATIVE_RUNNER_UID=${native.value.uid}\nPI_SESSION_WRITER_DIRECTORY=${writer.value.directory}\nPI_SESSION_WRITER_SCOPE=${writer.value.scope}\nPI_CORE_URL=${url}\nPI_CORE_SCOPE_ID=${scopeId}\nPI_CORE_PRINCIPAL_ID=${principalId}\nPI_CORE_GATEWAY_ID=${gatewayId}\nPI_CORE_GATEWAY_SOCKET=/run/pi-stack/gateways/${gatewayId}.sock\nPI_CORE_GATEWAY_UID=0\nPI_MODEL_BROKER_URL=${model.value}\n`
+      const environment = `PI_NATIVE_RUNNER_DATA_DIR=${native.value.dataDir}\nPI_NATIVE_RUNNER_UID=${native.value.uid}\nPI_SESSION_WRITER_DIRECTORY=${writer.value.directory}\nPI_SESSION_WRITER_SCOPE=${writer.value.scope}\nPI_CORE_URL=${url}\nPI_CORE_SCOPE_ID=${scopeId}\nPI_CORE_PRINCIPAL_ID=${principalId}\nPI_CORE_GATEWAY_ID=${gatewayId}\nPI_CORE_GATEWAY_SOCKET=/run/pi-stack/gateways/${gatewayId}.sock\nPI_CORE_GATEWAY_UID=0\n`
+        + (model.value.kind === 'configured' ? `PI_MODEL_BROKER_URL=${model.value.url}\n` : '')
         + (callbackSocket === null ? '' : `PI_CORE_CALLBACK_SOCKET=${callbackSocket}\nPI_CORE_CALLBACK_UID=0\n`);
       let providerEnvironment = '';
       if (binding.modelBrokerOwnerId !== undefined) {
@@ -265,7 +272,7 @@ export async function coreHost(operation, artifact, configPath, bindingPath, req
         providerEnvironment = `PI_CORE_PROVIDER_OWNER_ID=${owner.ownerId}\n`;
       }
       atomic(path, environment + providerEnvironment, 0o644);
-      if (operation === 'bind-person') atomic(`/etc/systemd/system/pi-remote@${user}.service.d/90-core.conf`, `[Unit]\nWants=pi-stack-core.service\nAfter=pi-stack-core.service\n[Service]\nEnvironmentFile=${path}\nUnsetEnvironment=PI_ORCHESTRATOR_URL PI_ORCHESTRATOR_FLEET_URL PI_ORCHESTRATOR_CONTROL_URL PI_CORE_TOKEN_FILE\n`, 0o644);
+      if (operation === 'bind-person') atomic(`/etc/systemd/system/pi-remote@${user}.service.d/90-core.conf`, `[Unit]\nWants=pi-stack-core.service\nAfter=pi-stack-core.service\n[Service]\nEnvironmentFile=${path}\nUnsetEnvironment=PI_ORCHESTRATOR_URL PI_ORCHESTRATOR_FLEET_URL PI_ORCHESTRATOR_CONTROL_URL PI_CORE_TOKEN_FILE${model.value.kind === 'none' ? ' PI_MODEL_BROKER_URL' : ''}\n`, 0o644);
     }
     const reload = spawnSync('systemctl', ['daemon-reload'], { encoding: 'utf8', timeout: 5_000 });
     if (reload.error || reload.status !== 0) return failure('unit-reload-failed', reload.error?.message ?? reload.stderr);

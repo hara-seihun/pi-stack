@@ -11,7 +11,7 @@ const config = {
   broker: { freshListeners: [], retainedListeners: { kind: 'uid-bound', bindings: [{ principalId: 'first-models', port: 2871, uid: 1001, authorizedUids: [1001] }] }, configPaths: ['/private/original.json'] },
 };
 const binding = { version: 1, user: 'first', scopeId: 'first-chat', gatewayId: 'first-remote',
-  modelBrokerUrl: 'http://127.0.0.1:2871', modelBrokerPrincipalId: 'first-models', modelBrokerUid: 1001 };
+  nativeModel: { kind: 'configured', url: 'http://127.0.0.1:2871', principalId: 'first-models', uid: 1001 } };
 const original = () => ({ listeners: [{ principal: 'first-models', port: 2871 }] });
 
 test('writer fence selects exact owning UID or explicitly configured in-process Root UID', () => {
@@ -75,11 +75,26 @@ test('canonical colon gateway IDs preserve their exact declared scope without sa
 
 test('native model origin selects exact original UID listener, never gateway URL or first listener', () => {
   assert.equal(nativeModelBinding(config, binding, 1001, original).ok, true);
-  for (const input of [{ ...binding, modelBrokerUrl: 'http://127.0.0.1:2470/v1/model-broker' }, { ...binding, modelBrokerPrincipalId: 'other' }, { ...binding, modelBrokerUid: 0 }]) {
+  for (const change of [{ url: 'http://127.0.0.1:2470/v1/model-broker' }, { principalId: 'other' }, { uid: 0 }, { token: 'foreign' }]) {
+    const input = { ...binding, nativeModel: { ...binding.nativeModel, ...change } };
     assert.equal(nativeModelBinding(config, input, 1001, original).ok, false);
   }
   assert.equal(nativeModelBinding(config, binding, 1002, original).ok, false);
   assert.equal(nativeModelBinding(config, binding, 1001, () => ({ listeners: [] })).ok, false);
+});
+
+test('explicit none preserves only the original direct-provider owner, never a default or foreign listener', () => {
+  const direct = { ...config, broker: { ...config.broker, kind: 'configured', ownerPrincipal: 'first' }, scopes: [{ ...config.scopes[0], environment: {} }] };
+  const input = { ...binding, nativeModel: { kind: 'none' } };
+  const neverRead = () => { throw new Error('none must not select a listener'); };
+  assert.deepEqual(nativeModelBinding(direct, input, 1001, neverRead), { ok: true, value: { kind: 'none' } });
+  for (const nativeModel of [undefined, {}, { kind: 'none', url: 'http://127.0.0.1:2871' }, { kind: 'disabled' }]) assert.equal(nativeModelBinding(direct, { ...input, nativeModel }, 1001, original).ok, false);
+  assert.equal(nativeModelBinding(direct, { ...input, modelBrokerUrl: binding.nativeModel.url }, 1001, original).ok, false);
+  assert.equal(nativeModelBinding(direct, input, 1002, original).ok, false);
+  assert.equal(nativeModelBinding({ ...direct, broker: { ...direct.broker, ownerPrincipal: 'second' } }, input, 1001, original).ok, false);
+  assert.equal(nativeModelBinding({ ...direct, scopes: [{ ...direct.scopes[0], environment: { PI_MODEL_BROKER_URL: binding.nativeModel.url } }] }, input, 1001, original).ok, false);
+  assert.equal(nativeModelBinding(config, input, 1001, original).ok, false);
+  assert.equal(nativeModelBinding(direct, { ...binding, nativeModel: undefined, modelBrokerUrl: binding.nativeModel.url, modelBrokerPrincipalId: 'first-models', modelBrokerUid: 1001 }, 1001, original).ok, false);
 });
 
 test('root consultations require the actual in-process core UID without broadening ordinary native grants', () => {
