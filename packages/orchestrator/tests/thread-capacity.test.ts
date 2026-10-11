@@ -201,13 +201,21 @@ it.each(["absent", "unknown", "live"] as const)("missing startup reference recov
     return native;
   });
   f.options.recoverSession = recover;
+  const pendingBeforeStop = f.service.pending("uncertain");
   const result = await f.service.control({ threadId: "uncertain", action: "cancel" });
   expect(recover).toHaveBeenCalledTimes(1);
   expect(open).toHaveBeenCalledTimes(1);
   if (proof === "absent") {
     expect(result.ok).toBe(true); expect(shared.status().active).toBe(0);
-    expect(f.service.pending("uncertain")).toEqual([]);
+    // Stop settles native execution, not never-landed input: the lossless
+    // thread-service contract retains its exact accepted receipt and payload.
+    expect(f.service.pending("uncertain")).toEqual(pendingBeforeStop);
+    expect(pendingBeforeStop).toMatchObject([{ id: "original-work", text: "work", state: "queued", insertedAt: null, landedAt: null }]);
     expect((f.service as any).db.prepare("SELECT * FROM thread_capacity WHERE execution_id=?").get(custody.executionId)).toMatchObject({ state: "released", logical_execution_id: custody.executionId, source_id: "original-work" });
+    const selected = unwrap(await f.service.cancelMessage("uncertain", "original-work"));
+    expect(selected).toMatchObject({ id: "original-work", text: "work", state: "done", outcome: "cancelled" });
+    expect(f.service.pending("uncertain")).toEqual([]);
+    expect(open).toHaveBeenCalledTimes(1);
   } else {
     expect(result).toMatchObject({ ok: false, error: { code: "cancellation_failed" } });
     expect(shared.entries()).toEqual([custody]);
