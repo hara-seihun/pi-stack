@@ -55,6 +55,11 @@
       "types": "./src/threads/anthropic-narration.d.mts",
       "default": "./src/threads/anthropic-narration.mjs"
     },
+    "./manager-watchdog": {
+      "types": "./src/threads/manager-watchdog.ts",
+      "bun": "./src/threads/manager-watchdog.ts",
+      "default": "./dist/threads/manager-watchdog.js"
+    },
     "./manager-turn": {
       "types": "./src/threads/manager-turn.d.mts",
       "default": "./src/threads/manager-turn.mjs"

@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import { admitManagerPolicyRead, authority, bindings, boundedBody, protectedRead, secret, type ManagerPolicyBinding, type Result } from "./canonical-manager-policy";
-import { validateManagerWorkSummary } from "../../../packages/orchestrator/src/threads/manager-watchdog";
+import { validateManagerWorkSummary } from "pi-orchestrator/manager-watchdog";
 
 export const MANAGER_CONTEXT_PATH = "/v1/canonical-manager-context";
 export const MANAGER_CONTEXT_BYTES = 1024 * 1024;
