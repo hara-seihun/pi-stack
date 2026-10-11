@@ -1,6 +1,24 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { gatewayBinding, nativeModelBinding, sessionWriterConfiguration, nativeStorageConfiguration, validateSessionWriterMetadata, writerParentPreparation } from '../deploy/core-host.mjs';
+import { gatewayBinding, nativeModelBinding, prepareCallbackDirectory, sessionWriterConfiguration, nativeStorageConfiguration, validateSessionWriterMetadata, writerParentPreparation } from '../deploy/core-host.mjs';
+import { mkdtempSync, statSync, chmodSync, symlinkSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+test('callback preparation repeats without replacing an owned inode and rejects aliases or writable paths', () => {
+  const root = mkdtempSync(join(tmpdir(), 'core-callback-'));
+  const path = join(root, 'callback'), alias = join(root, 'alias');
+  try {
+    assert.equal(prepareCallbackDirectory(path, process.getuid(), process.getgid()).ok, true);
+    const before = statSync(path);
+    assert.equal(prepareCallbackDirectory(path, process.getuid(), process.getgid()).ok, true);
+    assert.equal(statSync(path).ino, before.ino);
+    symlinkSync(path, alias);
+    assert.equal(prepareCallbackDirectory(alias, process.getuid(), process.getgid()).ok, false);
+    chmodSync(path, 0o777);
+    assert.equal(prepareCallbackDirectory(path, process.getuid(), process.getgid()).ok, false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 const config = {
   host: '127.0.0.1', port: 2470, root: { kind: 'disabled' },

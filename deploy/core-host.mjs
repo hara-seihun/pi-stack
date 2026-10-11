@@ -67,6 +67,13 @@ export function gatewayBinding(config, binding, uid, personOnly) {
     callbackSocket: scope.callbackGateway.kind === 'remote-callback' ? `/run/pi-stack/gateways/remote-${scope.id}/callback.sock` : null,
     url: `http://${config.host === '::1' ? '[::1]' : config.host}:${config.port}` } };
 }
+export function prepareCallbackDirectory(callbackDirectory, uid, gid) {
+  mkdirSync(callbackDirectory, { recursive: true, mode: 0o755 });
+  const previous = lstatSync(callbackDirectory);
+  if (!previous.isDirectory() || ![0, uid].includes(previous.uid) || previous.mode & 0o022) return failure('callback-directory-untrusted', 'Callback path belongs to another or writable custodian');
+  chownSync(callbackDirectory, uid, gid); chmodSync(callbackDirectory, 0o755);
+  return { ok: true, value: callbackDirectory };
+}
 export function preflightResource(entry, resources, outputPaths) {
   let path = entry.path, output = false;
   try { statSync(path); }
@@ -250,10 +257,8 @@ export async function coreHost(operation, artifact, configPath, bindingPath, req
       if (!parent.isDirectory() || parent.uid !== 0 || parent.mode & 0o022) return failure('gateway-directory-untrusted', 'Gateway parent must be root-owned and protected');
       if (callbackSocket !== null) {
         const callbackDirectory = dirname(callbackSocket);
-        mkdirSync(callbackDirectory, { mode: 0o755 });
-        const previous = lstatSync(callbackDirectory);
-        if (!previous.isDirectory() || ![0, uid].includes(previous.uid) || previous.mode & 0o022) return failure('callback-directory-untrusted', 'Callback path belongs to another or writable custodian');
-        chownSync(callbackDirectory, uid, gid); chmodSync(callbackDirectory, 0o755);
+        const preparedCallback = prepareCallbackDirectory(callbackDirectory, uid, gid);
+        if (!preparedCallback.ok) return preparedCallback;
       }
       const writer = sessionWriterConfiguration(config, config.scopes.find(item => item.id === scopeId));
       if (!writer.ok) return writer;
