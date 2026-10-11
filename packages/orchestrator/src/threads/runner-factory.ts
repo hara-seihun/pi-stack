@@ -38,7 +38,9 @@ export function identifyRunnerFactory(entryPath: string): FactoryResult<RunnerFa
       return { ok: false, error: { code: "factory-unsealed", message: "Factory source commit is invalid" } };
     let sdkDirectory: string;
     if (process.versions.bun) {
-      sdkDirectory = realpathSync(join(dirname(Bun.resolveSync("@earendil-works/pi-coding-agent", dirname(entryPath))), ".."));
+      const bun = (globalThis as unknown as { Bun?: { resolveSync(specifier: string, parent: string): string } }).Bun;
+      if (typeof bun?.resolveSync !== "function") return { ok: false, error: { code: "factory-unavailable", message: "Native Bun requires candidate-scoped ESM package lookup" } };
+      sdkDirectory = realpathSync(join(dirname(bun.resolveSync("@earendil-works/pi-coding-agent", dirname(entryPath))), ".."));
     } else {
       const findPackageJSON = (nodeModule as unknown as { findPackageJSON?: (specifier: string, base: URL) => string | undefined }).findPackageJSON;
       if (!findPackageJSON) return { ok: false, error: { code: "factory-unavailable", message: "Native Node requires candidate-scoped ESM package lookup" } };
