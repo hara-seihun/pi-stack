@@ -18,6 +18,23 @@ function fixture() {
   const options = { owners, scopes, policy, maintenance: { kind: "service" as const, id: "maintenance" }, store, signatureKey: "fixture-custody-signing-key-32-bytes", owner: (scopeId: string) => ({ ok: true as const, value: { runtime: { path: (logical: string) => { if (logical !== owners.find(owner => owner.subject === scopeId)?.folder) throw new Error("Unregistered path"); return logical; } } } }) };
   return { options, close() { store.close(); rmSync(directory, { recursive: true, force: true }); } };
 }
+test("locked projection does not fence boundary accounting for shared records, and never opens locked custody", () => {
+  const f = fixture(), { options } = f;
+  try {
+    options.scopes[1]!.availability = { kind: "unavailable", reason: "locked" };
+    const baseOwner = options.owner;
+    let lockedAccess = false;
+    options.owner = scopeId => { if (scopeId === "bob") lockedAccess = true; return baseOwner(scopeId); };
+    const built = createMemoryMarkdown(options); if (!built.ok) throw new Error(built.error.message);
+    try {
+      expect(built.value.fenced(["alice", "bob"], "content")).toBe(true);
+      expect(built.value.fenced(["alice", "bob"], "boundary-accounting")).toBe(false);
+      writeFileSync(join(options.owners[0]!.folder, "FORGET-PENDING.md"), "Pending source invalidation");
+      expect(built.value.fenced(["alice", "bob"], "boundary-accounting")).toBe(true);
+      expect(lockedAccess).toBe(false);
+    } finally { built.value.close(); }
+  } finally { f.close(); }
+});
 test("dependency invalidation uses service grants without copying another owner's plaintext or identifiers", () => {
   const f = fixture(), { options } = f;
   try {
@@ -46,8 +63,9 @@ test("missing maintenance grants fence active use and leave source unchanged; lo
     const built = createMemoryMarkdown(options); if (!built.ok) throw new Error(built.error.message);
     try {
       expect(built.value.forget({ kind: "person", id: "alice", person: "alice" }, [source.id], "delete")).toMatchObject({ ok: false, error: "unavailable" });
-      expect(built.value.fenced(["alice"])).toBe(true);
-      expect(built.value.fenced(["bob"])).toBe(true);
+      expect(built.value.fenced(["alice"], "content")).toBe(true);
+      expect(built.value.fenced(["alice"], "boundary-accounting")).toBe(true);
+      expect(built.value.fenced(["bob"], "content")).toBe(true);
       expect(options.store.authorizationItems([source.id])).toHaveLength(1);
       expect(readFileSync(join(options.owners[0]!.folder, "FORGET-PENDING.md"), "utf8")).not.toContain("Alice private source");
       expect(lockedAccess).toBe(false);

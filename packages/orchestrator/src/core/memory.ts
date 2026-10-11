@@ -226,7 +226,7 @@ export async function createCoreMemory(options: {
         const resource = { ...declared, subjects: [...new Set([...declared.subjects, ...domain, ...newDomain])] };
         const dataset = operation === "data" && object(input) ? config.datasets.find(dataset => dataset.id === input.dataset) : undefined;
         const actual = record ?? (dataset ? { about: dataset.resource.subjects, obviouslyPrivate: true } : undefined);
-        if (operation !== "forget" && actual && markdown!.fenced(actual.about) || operation === "data" && !dataset || actual && (!Array.isArray(actual.about) || actual.about.length === 0 || actual.about.some(subject => !resource.subjects.includes(subject)) || resource.privacy === "public" && actual.obviouslyPrivate !== false)) return { ok: false, error: { code: "denied", message: "The actual memory records are outside this resource's granted subject/privacy scope" } };
+        if (operation !== "forget" && actual && markdown!.fenced(actual.about, route === "/v1/root/finalize-reply" || route === "/v1/root/log-request-status" ? "boundary-accounting" : "content") || operation === "data" && !dataset || actual && (!Array.isArray(actual.about) || actual.about.length === 0 || actual.about.some(subject => !resource.subjects.includes(subject)) || resource.privacy === "public" && actual.obviouslyPrivate !== false)) return { ok: false, error: { code: "denied", message: "The actual memory records are outside this resource's granted subject/privacy scope" } };
         return authorize(options.policy, { principal, resource, action: mapping.action, now: Date.now() });
       },
     });

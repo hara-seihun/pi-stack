@@ -22,7 +22,7 @@ export function parseMarkdownOwners(value: unknown): CoreResult<MarkdownOwner[]>
   return { ok: true, value: owners };
 }
 type Available = { owner: MarkdownOwner; path: string; custody: CustodyResources };
-export function createMemoryMarkdown(options: { owners: readonly MarkdownOwner[]; maintenance: Principal | null; scopes: readonly CoreScope[]; owner(id: string): CoreResult<{ runtime: { path(logical: string): string } }>; policy: PermissionPolicy; store: MemoryStore; signatureKey: string | undefined }): CoreResult<{ fenced(subjects: readonly string[]): boolean; forget(principal: Principal, ids: string[], mode: ForgetMode): MemoryResult<MemoryValue>; close(): void }> {
+export function createMemoryMarkdown(options: { owners: readonly MarkdownOwner[]; maintenance: Principal | null; scopes: readonly CoreScope[]; owner(id: string): CoreResult<{ runtime: { path(logical: string): string } }>; policy: PermissionPolicy; store: MemoryStore; signatureKey: string | undefined }): CoreResult<{ fenced(subjects: readonly string[], use: "content" | "boundary-accounting"): boolean; forget(principal: Principal, ids: string[], mode: ForgetMode): MemoryResult<MemoryValue>; close(): void }> {
   const pinned: CustodyResources[] = [], folders: Available[] = [], unavailable: MarkdownOwner[] = [];
   const denied = (): MemoryResult<never> => ({ ok: false, error: "unavailable", message: "Dependency invalidation is pending its registered housekeeping grants; active use stays fenced" });
   try {
@@ -70,7 +70,7 @@ export function createMemoryMarkdown(options: { owners: readonly MarkdownOwner[]
       }
     }
     return { ok: true, value: {
-      fenced(subjects) { return subjects.some(subject => recoveryFailures.has(subject) || unavailable.some(owner => owner.subject === subject)) || folders.some(folder => subjects.includes(folder.owner.subject) && memoryUseFenced(folder.path)); },
+      fenced(subjects, use) { return subjects.some(subject => recoveryFailures.has(subject) || use === "content" && unavailable.some(owner => owner.subject === subject)) || folders.some(folder => subjects.includes(folder.owner.subject) && memoryUseFenced(folder.path)); },
       forget(_requester, ids, mode) {
         if (folders.length === 0 && unavailable.length === 0) return { ok: true, value: options.store.forget(ids, mode) };
         return sweep(ids, mode);
