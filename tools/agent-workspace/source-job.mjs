@@ -147,14 +147,16 @@ function readTerminal(directory) {
 }
 
 /** Sync, bounded submission/observation; only systemd owns the preparation process tree. */
-export function runSourceJob({ directory, key, request, command, env = {}, waitMs = 2000, restartInterrupted = false }) {
+export function runSourceJob({ directory, key, request, command, env = {}, waitMs = 2000, restartInterrupted = false, cleanupCommand = [], restartAbnormal = false }) {
   let database;
   let locked = false;
   try {
     if (typeof directory !== "string" || !path.isAbsolute(directory) || typeof key !== "string" || !key
       || !Array.isArray(command) || !command.length || !path.isAbsolute(command[0])
       || command.some(value => typeof value !== "string" || value.includes("\0"))
-      || !Number.isInteger(waitMs) || waitMs < 0 || waitMs > 5000 || typeof restartInterrupted !== "boolean"
+      || !Array.isArray(cleanupCommand) || cleanupCommand.some(value => typeof value !== "string" || /[\0\r\n]/u.test(value))
+      || (cleanupCommand.length > 0 && !path.isAbsolute(cleanupCommand[0]))
+      || !Number.isInteger(waitMs) || waitMs < 0 || waitMs > 5000 || typeof restartInterrupted !== "boolean" || typeof restartAbnormal !== "boolean"
       || !env || Object.getPrototypeOf(env) !== Object.prototype
       || Object.entries(env).some(([name, value]) => !/^[A-Za-z_][A-Za-z_0-9]*$/.test(name)
         || typeof value !== "string" || value.includes("\0"))) {
@@ -223,8 +225,11 @@ export function runSourceJob({ directory, key, request, command, env = {}, waitM
     });
     const submitted = systemCommand("systemd-run", [
       "--user", "--quiet", "--collect", `--unit=${unit}`, "--service-type=exec",
-      "--property=Restart=no", "--property=KillMode=control-group", "--property=UMask=0077",
+      `--property=Restart=${restartAbnormal ? "on-abnormal" : "no"}`, "--property=RestartSec=1s",
+      "--property=KillMode=control-group", "--property=UMask=0077",
       "--property=StandardOutput=null", "--property=StandardError=null",
+      ...(cleanupCommand.length ? [`--property=ExecStopPost=${cleanupCommand.map(value =>
+        `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("%", "%%")}"`).join(" ")}`] : []),
       "--", process.execPath, modulePath, "--worker", jobDirectory,
     ]);
     if (!submitted.ok) return { state: "failed", error: submitted.error };
@@ -270,6 +275,7 @@ export function runSourceJob({ directory, key, request, command, env = {}, waitM
 
 async function sourceWorker(directory) {
   try {
+    if (readTerminal(directory)) return { ok: true };
     const command = readJson(path.join(directory, "command.json"));
     const environment = readJson(path.join(directory, "environment.json"));
     if (!command.present || !environment.present) return finishSourceJob(directory,

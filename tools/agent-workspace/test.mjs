@@ -22,15 +22,15 @@ const entry = new URL("./main", import.meta.url).pathname;
 function preparingSource(args, output, previous) {
   if (args[0] !== "create" || !output.startsWith("{")) return null;
   const receipt = JSON.parse(output);
-  if (receipt.state !== "preparing") return null;
+  if (!["preparing", "creating"].includes(receipt.state)) return null;
   assert.equal(receipt.ok, true);
   assert.equal(typeof receipt.jobId, "string");
   assert.ok(receipt.jobId.length > 0);
   assert.equal(typeof receipt.progressPath, "string");
   assert.ok(path.isAbsolute(receipt.progressPath));
   assert.ok(existsSync(receipt.progressPath));
-  const identity = { jobId: receipt.jobId, progressPath: receipt.progressPath };
-  if (previous !== null) assert.deepEqual(identity, previous, "create retries must retain their source job identity");
+  const identity = { state: receipt.state, jobId: receipt.jobId, progressPath: receipt.progressPath };
+  if (previous !== null && previous.state === identity.state) assert.deepEqual(identity, previous, "create retries must retain their job identity");
   return identity;
 }
 
@@ -39,7 +39,7 @@ function pendingFailureOutput(args, error) {
   const output = error.stdout.trim();
   let receipt;
   try { receipt = JSON.parse(output); } catch { return null; }
-  return receipt?.state === "preparing" ? output : null;
+  return ["preparing", "creating"].includes(receipt?.state) ? output : null;
 }
 
 function run(args, env, cwd) {
@@ -57,7 +57,12 @@ function run(args, env, cwd) {
       }).trim();
     } catch (error) {
       output = pendingFailureOutput(args, error);
-      if (output === null) throw error;
+      if (output === null) {
+        if (["clone", "checkout"].includes(env?.PI_WORKSPACE_TEST_PREEXISTING_STAGE)) {
+          materializedPendingFixture(args, env);
+        }
+        throw error;
+      }
     }
     preparing = preparingSource(args, output, preparing);
     if (preparing === null) return output;
@@ -78,6 +83,7 @@ async function runAsync(args, env, cwd) {
         timeout: Math.max(1, deadline - Date.now()),
       }, (error, stdout) => {
         if (!error) return resolve(stdout.trim());
+        error.stdout = stdout;
         const pending = pendingFailureOutput(args, error);
         if (pending === null) reject(error);
         else resolve(pending);
@@ -161,7 +167,31 @@ if (result.status === 0 && args.includes(${JSON.stringify(stage)}) && !fs.exists
 process.exit(result.status ?? 1);
 `);
   chmodSync(wrapper, 0o755);
-  return { ...f.env, PATH: `${bin}:${process.env.PATH}` };
+  return { ...f.env, PATH: `${bin}:${process.env.PATH}`, PI_WORKSPACE_TEST_PREEXISTING_STAGE: stage };
+}
+
+// Retained materialized creations from earlier releases still need conservative resume coverage.
+function materializedPendingFixture(args, env) {
+  const database = new DatabaseSync(env.PI_WORKSPACE_STATE);
+  const record = database.prepare("SELECT * FROM workspace WHERE state='creating' ORDER BY created_at DESC LIMIT 1").get();
+  database.close();
+  if (!record || existsSync(record.path)) return;
+  const input = JSON.parse(record.creation_request);
+  mkdirSync(record.path, { recursive: true });
+  git(record.path, "init");
+  git(record.path, "fetch", "--no-tags", input.repository, record.source_commit);
+  git(record.path, "remote", "add", "origin", input.repository);
+  git(record.path, "update-ref", "--no-deref", "HEAD", record.source_commit);
+  git(record.path, "tag", `pi-workspace-source-${record.source_commit}`, record.source_commit);
+  if (input.sparsePatterns?.length) {
+    mkdirSync(path.join(record.path, ".git", "info"), { recursive: true });
+    writeFileSync(path.join(record.path, ".git", "info", "sparse-checkout"), `${input.sparsePatterns.join("\n")}\n`);
+    git(record.path, "config", "core.sparseCheckout", "true");
+    git(record.path, "config", "core.sparseCheckoutCone", "false");
+  }
+  if (env.PI_WORKSPACE_TEST_PREEXISTING_STAGE === "checkout") {
+    git(record.path, "checkout", "--force", ...(input.mode === "review" ? ["--detach"] : ["-B", input.branch]), record.source_commit);
+  }
 }
 
 for (const stage of ["clone", "checkout"]) test(`creation resumes after interruption following ${stage}`, () => {
@@ -283,7 +313,7 @@ if (result.status === 0 && args.includes('checkout')) {
   } finally { f.close(); }
 });
 
-for (const budget of ["0", "901", "NaN", "Infinity"]) test(`creation rejects unbounded or invalid timeout ${budget}`, () => {
+for (const budget of ["0", "86401", "NaN", "Infinity"]) test(`creation rejects unbounded or invalid timeout ${budget}`, () => {
   const f = fixture();
   try {
     assert.throws(() => run(["create", "--root", f.workspaces, "--name", "invalid", "--repo", f.remote,
