@@ -3063,13 +3063,22 @@ export class ThreadService implements ThreadApi {
       void this.serial(id, async () => {
         if (this.runtimes.get(id) !== runtime || runtime.executionId !== executionId || event.type !== "agent_settled" && runtime.executionId) return;
         const execution = this.execution(id);
-        if (execution && Array.isArray(event.workIds) && !event.workIds.includes(execution.work_id)) return;
-        const state = await this.rpc(runtime, { type: "get_state" }); this.adoptReference(id, state);
+        if (execution?.id !== executionId) return;
+        const state = await this.rpc(runtime, { type: "get_state" });
+        if (this.runtimes.get(id) !== runtime || runtime.executionId !== executionId || this.execution(id)?.id !== executionId || this.halts.has(id) || this.closed || this.suspended) return;
+        this.adoptReference(id, state);
         if (this.busy(state)) return;
-        if (execution && Array.isArray(state.completedWorkIds) && !state.completedWorkIds.includes(execution.work_id)) return;
         if (!runtime.executionId) { runtime.busy = false; await this.releaseCapacity(id); this.clearAdmissionWait(id); this.state(id, this.row(id)?.held ? "idle" : this.pending(id).length ? "running" : "idle"); await this.park(id, runtime); return; }
-        const last = "lastAssistantMessage" in event ? event.lastAssistantMessage as Json | null : state.lastAssistantMessage ?? runtime.finalMessage;
-        const outcome = settledWorkOutcome(event.outcome, last);
+        const works = this.sql("SELECT id FROM thread_work WHERE thread_id=? AND execution_id=?").all(id, executionId!) as { id: string }[];
+        if (!Array.isArray(state.completedWorkIds)) return;
+        const completed = new Set<string>(state.completedWorkIds);
+        if (!completed.has(execution!.work_id) || !works.every(work => completed.has(work.id))) return;
+        const eventWorkIds = event.workIds;
+        if (Array.isArray(eventWorkIds) && !works.some(work => eventWorkIds.includes(work.id))) return;
+        const eventLast = "lastAssistantMessage" in event ? event.lastAssistantMessage as Json | null : runtime.finalMessage;
+        const last = state.lastAssistantMessage !== undefined ? state.lastAssistantMessage : eventLast;
+        const currentOutcome = state.lastAssistantMessage === undefined || JSON.stringify(last) === JSON.stringify(eventLast) ? event.outcome : undefined;
+        const outcome = settledWorkOutcome(currentOutcome, last);
         const settledOutcome = this.row(id)?.held ? "cancelled" : outcome;
         await this.finish(id, runtime, settledOutcome, last ?? null, settledOutcome === "failed" ? last?.errorMessage : undefined);
       }).then(() => this.wake(id)).catch(error => {
@@ -3334,7 +3343,9 @@ export class ThreadService implements ThreadApi {
     if (runtime && outcome === "complete") {
       const state = await this.rpc(runtime, { type: "get_state" });
       this.adoptReference(id, state);
-      if (this.busy(state) || this.execution(id)?.id !== execution.id) return;
+      if (this.busy(state) || this.execution(id)?.id !== execution.id || this.runtimes.get(id) !== runtime || runtime.executionId !== execution.id || this.closed || this.suspended) return;
+      const works = this.sql("SELECT id FROM thread_work WHERE thread_id=? AND execution_id=?").all(id, execution.id) as { id: string }[];
+      if (!Array.isArray(state.completedWorkIds) || !state.completedWorkIds.includes(execution.work_id) || !works.every(work => state.completedWorkIds.includes(work.id))) return;
       const unfinished = this.sql("SELECT id FROM thread_work WHERE execution_id=? AND status!='done' AND landed_at IS NULL").all(execution.id) as { id: string }[];
       if (unfinished.length) return;
     }
