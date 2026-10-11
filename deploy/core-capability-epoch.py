@@ -7,6 +7,8 @@ from pathlib import Path
 import re
 import socket
 import sqlite3
+import sys
+sys.dont_write_bytecode = True
 from core_namespace import absolute, enter, publish, trusted
 
 SNAPSHOT = r'''

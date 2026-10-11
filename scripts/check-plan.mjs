@@ -33,6 +33,7 @@ const shipping = {
   'Claude reset collector': ['tools/claude-reset'],
   'runtime dependency closure': ['deploy/runtime', 'packages/runtime', 'packages/orchestrator', 'packages/kenan-memory', 'packages/kenan-root'],
   'core host bindings': ['deploy/core-host.mjs', 'scripts/core-host.test.mjs'],
+  'core helper artifact immutability': ['deploy', 'scripts/core-helper-immutability.test.py'],
   'core writer custody bindings': ['deploy/core-bindings', 'deploy/core-aux-run', 'scripts/core-writer-bindings.test.py'],
   'core generation adoption': ['deploy/core-adopt', 'deploy/core_namespace.py', 'deploy/core-custody', 'scripts/core-adopt.test.py'],
   'publication dependency retention': ['deploy/integration-retain.py', 'deploy/publication', 'scripts/integration-retain.test.py'],

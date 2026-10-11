@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -B
 """Resource-only kernel wait4 witness for a registered Remote supervisor's child."""
 import hashlib
 import json
@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import time
+sys.dont_write_bytecode = True
 from core_namespace import absolute, publish, trusted
 
 
@@ -141,7 +142,7 @@ def prepare(path):
     if any(absolute(plan[key]).exists() for key in ('readyPath','proofPath','tracePath')):
         return status(path)
     verify_live(plan)
-    command = ['/usr/bin/systemd-run', '--quiet', '--unit='+observer_unit(digest), '--property=Type=exec', '--property=TimeoutStopSec=infinity', '--property=Restart=no', '/usr/bin/python3', str(Path(__file__).resolve()), 'observe', str(path)]
+    command = ['/usr/bin/systemd-run', '--quiet', '--unit='+observer_unit(digest), '--property=Type=exec', '--property=TimeoutStopSec=infinity', '--property=Restart=no', '/usr/bin/python3', '-B', str(Path(__file__).resolve()), 'observe', str(path)]
     subprocess.run(command, check=True, capture_output=True, timeout=5)
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:

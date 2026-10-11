@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -B
 """Capture original technical environment/path metadata into protected scoped bindings."""
 import copy
 import hashlib
@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+sys.dont_write_bytecode = True
 from core_namespace import absolute, publish, trusted
 
 SAFE_NAMES = {'HOME', 'USER', 'LOGNAME', 'PATH', 'SHELL', 'LANG', 'LC_ALL', 'TMPDIR', 'XDG_RUNTIME_DIR', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'PI_REMOTE_ENVIRONMENT_ID', 'PI_REMOTE_MANAGER_ENVIRONMENT', 'PI_REMOTE_USER', 'PI_REMOTE_PORT', 'PI_REMOTE_ROUTER_PORT', 'PI_REMOTE_ROOMS_RUNTIME', 'PI_REMOTE_WATCH_ENABLED', 'PI_KENAN_MEMORY_ENABLED', 'PI_KENAN_ROOT_ENABLED'}

@@ -6,6 +6,7 @@ ConditionPathExists=/etc/pi-stack/core.json
 ConditionPathExists=/etc/pi-stack/core-runtime.json
 
 [Service]
+Environment=PYTHONDONTWRITEBYTECODE=1
 Type=simple
 User=root
 Group=root

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -B
 """Fence original image claims while accepted provider tasks finish; never abort them."""
 import hashlib
 import json
@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import sqlite3
 import sys
+sys.dont_write_bytecode = True
 from core_namespace import absolute, enter, publish, trusted
 
 TRIGGERS = {

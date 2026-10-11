@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -B
 """Fixed post-unlock resource/provision operation; callers supply only registered USER."""
 import copy
 import fcntl
@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 from importlib.machinery import SourceFileLoader
+sys.dont_write_bytecode = True
 from core_namespace import absolute, enter, publish, trusted
 adoption = SourceFileLoader('core_adoption', str(Path(__file__).with_name('core-adopt'))).load_module()
 

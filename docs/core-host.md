@@ -66,6 +66,10 @@ Remote's original `pi-remote-supervise` wrapper exits0 after a stop even when it
 
 For old Root scopes proved to have no previous capability issuer, `core-adopt initialize-capability ROOT_PLAN` explicitly creates a new exclusive0600 32-byte hex key beside the existing encrypted thread DB. Its receipt binds source proof, key inode/hash and scope. Existing unknown keys are refused; retries verify the same initialized key. This enables the newly scoped API without pretending a historical key existed or changing thread/DB/session identities.
 
+## Immutable helper execution
+
+Installed core Python entrypoints use `/usr/bin/python3 -B` and disable bytecode before loading neighboring modules. Explicit interpreter invocations must also use `python3 -B HELPER ...`; core service environments carry `PYTHONDONTWRITEBYTECODE=1`. A plain interpreter invocation still cannot write helper caches because the entry guard runs before local imports. Resource witnesses use the same contract. Never repair an artifact mutation by rewriting its prepared manifest.
+
 ## Physical native writer fences
 
 The two independent fence directories are `/run/pi-stack/session-writers/UID` for SDK session mutation and `/run/pi-stack/native-runner-locks/UID` for the native storage owner. Their parents are root-owned mode0755; each leaf is mode0700 under the exact executor UID/GID. Preserve existing directory and lock inodes across generations. Neither key includes a FUSE mount generation. Root consultation scopes execute in process as UID0; ordinary scopes retain their registered custody UID.

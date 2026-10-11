@@ -3,6 +3,7 @@ Description=Pi Stack common source-identical resource namespace
 ConditionPathExists=/etc/pi-stack/core-custody.json
 
 [Service]
+Environment=PYTHONDONTWRITEBYTECODE=1
 Type=notify
 User=root
 Group=root

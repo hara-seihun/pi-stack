@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -B
 """Durable, source-bound exact adoption batch; each completed receipt keeps custody."""
 import hashlib
 import json
@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import runpy
 import sys
+sys.dont_write_bytecode = True
 from core_namespace import absolute, publish, trusted
 
 

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -B
 """Exact old-owner graceful drain with durable recovery and positive detachment receipts."""
 import hashlib
 import json
@@ -9,6 +9,7 @@ import runpy
 import subprocess
 import sys
 from datetime import datetime, timezone
+sys.dont_write_bytecode = True
 from core_namespace import absolute, enter, publish, trusted
 
 

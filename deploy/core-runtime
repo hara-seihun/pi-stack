@@ -1,9 +1,10 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -B
 """Enter the one prepared core namespace once; never create or unlock storage."""
 import json
 import os
 from pathlib import Path
 import sys
+sys.dont_write_bytecode = True
 from core_namespace import namespace_path, trusted
 
 PLAN = Path('/etc/pi-stack/core-runtime.json')

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -B
 """Prepare measured original-owner auxiliary baseline inputs; no admission/drain effects."""
 import copy
 import hashlib
@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+sys.dont_write_bytecode = True
 from core_namespace import absolute, namespace_path, publish, trusted
 
 META = r'''
