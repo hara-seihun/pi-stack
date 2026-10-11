@@ -3,7 +3,9 @@ import { runJobs } from "../../scripts/run-jobs.mjs";
 
 const shardCount = 24;
 export const workspaceChecks = [["agent workspace component deployment", process.execPath,
-  ["--test", fileURLToPath(new URL("./deploy.test.mjs", import.meta.url))]], ...Array.from({ length: shardCount }, (_, index) => [
+  ["--test", fileURLToPath(new URL("./deploy.test.mjs", import.meta.url))]],
+  ["agent workspace durable source preparation", process.execPath,
+    ["--test", fileURLToPath(new URL("./source-job.test.mjs", import.meta.url))]], ...Array.from({ length: shardCount }, (_, index) => [
   `agent workspace ${index + 1}/${shardCount}`,
   process.execPath,
   ["--test", fileURLToPath(new URL("./test.mjs", import.meta.url))],

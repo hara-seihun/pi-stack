@@ -26,6 +26,12 @@ import { homedir, tmpdir, userInfo } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
+import { runSourceJob, readSourceJobRequest, writeSourceJobProgress, finishSourceJob } from "./source-job.mjs";
+
+class SourcePreparationRequired extends Error {}
+let sourcePreparationMode = null;
+let sourcePreparationDeadline = Infinity;
+let sourceJobDirectory = null;
 
 const DEFAULT_STATE = process.env.PI_WORKSPACE_STATE ?? path.join(
   process.env.XDG_STATE_HOME ?? path.join(homedir(), ".local", "state"),
@@ -164,7 +170,8 @@ function currentDirectory() {
 }
 
 function command(executable, commandArgs, options = {}) {
-  const remaining = Math.min(inspectionDeadline ?? Infinity, creationDeadline ?? Infinity) - Date.now();
+  const remaining = Math.min(inspectionDeadline ?? Infinity, creationDeadline ?? Infinity, sourcePreparationDeadline) - Date.now();
+  if (sourcePreparationMode === "foreground" && remaining <= 0) throw new SourcePreparationRequired();
   if (remaining <= 0) fail(creationDeadline === undefined
     ? "workspace inspection budget exhausted; no safety verdict was established"
     : "creation budget exhausted; checkout retained; repeat the same create command to resume");
@@ -179,6 +186,7 @@ function command(executable, commandArgs, options = {}) {
     timeout: Math.max(1, Math.min(options.timeout ?? 30_000, remaining)),
     ...(inspectionDeadline === undefined ? {} : { killSignal: "SIGKILL" }),
   });
+  if (sourcePreparationMode === "foreground" && result.error?.code === "ETIMEDOUT") throw new SourcePreparationRequired();
   if (inspectionDeadline !== undefined && result.error?.code === "ETIMEDOUT") {
     fail(`workspace inspection timed out: ${executable} ${commandArgs.join(" ")}; no safety verdict was established`);
   }
@@ -1736,7 +1744,7 @@ function sourceCapacityPlan(repository, sourceCommit, intent, blockSize, mirror,
       fail("source capacity estimate unknown: remote commit needs independent durable mirror custody; remote import remains unestimated");
     }
     const resolved = command("git", ["--git-dir", mirror, "rev-parse", "--verify", `${sourceCommit}^{commit}`]);
-    if (resolved.status !== 0 || resolved.stdout !== sourceCommit || !hasObjectClosure(mirror, sourceCommit)) {
+    if (resolved.status !== 0 || resolved.stdout !== sourceCommit || !hasObjectClosure(mirror, sourceCommit, sparsePatterns)) {
       fail("source capacity estimate unknown: remote commit closure is absent from durable mirror custody; remote import remains unestimated (refetch through that route)");
     }
     repository = mirror;
@@ -1744,31 +1752,24 @@ function sourceCapacityPlan(repository, sourceCommit, intent, blockSize, mirror,
   if (!Number.isSafeInteger(blockSize) || blockSize <= 0) fail("source capacity estimate unknown: invalid filesystem allocation unit");
   const filters = command("git", ["-C", repository, "config", "--get-regexp", "^filter\\..*\\.(smudge|process)$"]);
   if (filters.status !== 1) fail("source capacity estimate unknown: configured checkout filters need an independently budgeted installer");
-  const entries = git(repository, ["ls-tree", "-rlz", sourceCommit]).split("\0").filter(Boolean).map(entry => {
-    const match = entry.match(/^(\d+) (blob|commit) ([0-9a-f]+)\s+(\d+|-)\t(.+)$/su);
-    if (match === null) fail("source capacity estimate unknown: malformed Git tree entry");
-    const [, mode, type, hash, size, name] = match;
-    if (type === "commit" && mode !== "160000") fail("source capacity estimate unknown: unsupported tree entry");
-    return { mode, type, hash, size, name };
-  });
-  const selected = sparseSourcePaths(entries, sparsePatterns);
+  const { entries, selected } = sourceTree(repository, sourceCommit, sparsePatterns);
   let constructionBytes = 16 * 1024 ** 2;
   for (const { size, name } of entries) {
     if (name.endsWith(".gitattributes") && /(?:working-tree-encoding|filter)=/u.test(git(repository, ["show", `${sourceCommit}:${name}`]))) {
       fail("source capacity estimate unknown: checkout attribute transformation");
     }
     const materialized = selected === null || selected.has(name);
-    const blobBytes = materialized && size !== "-" ? 2 * Math.ceil(Number(size) / blockSize) * blockSize : 0;
+    const blobBytes = materialized && size !== undefined ? 2 * Math.ceil(Number(size) / blockSize) * blockSize : 0;
     constructionBytes += blobBytes + 4 * blockSize + Buffer.byteLength(name) * 2;
   }
-  const sourceImportBytes = sourceImportCapacity(repository, sourceCommit, mirror);
+  const sourceImportBytes = sourceImportCapacity(repository, sourceCommit, mirror, sparsePatterns);
   constructionBytes += sourceImportBytes;
   if (!Number.isSafeInteger(constructionBytes)) fail("source capacity estimate exceeds supported byte range");
   return { ...intent, estimate: selected === null ? "whole-tree-upper-bound" : "git-sparse-upper-bound", constructionBytes, sourceImportBytes, sourceCommit };
 }
 
-function sourceImportCapacity(repository, sourceCommit, mirror) {
-  if (mirror && existsSync(mirror) && hasObjectClosure(mirror, sourceCommit)) return 0;
+function sourceImportCapacity(repository, sourceCommit, mirror, sparsePatterns) {
+  if (mirror && existsSync(mirror) && hasObjectClosure(mirror, sourceCommit, sparsePatterns)) return 0;
   const objects = git(repository, ["rev-list", "--objects", "--no-object-names", sourceCommit]);
   const sizes = run("git", ["-C", repository, "cat-file", "--batch-check=%(objectsize)"], { input: `${objects}\n` });
   let bytes = 16 * 1024 ** 2;
@@ -2077,16 +2078,83 @@ function stabilizeObjectCustody(workspace, alternates, execute, statePath) {
   return "imported-durable-mirror";
 }
 
-function hasObjectClosure(mirror, commit) {
-  return command("git", ["--git-dir", mirror, "rev-list", "--objects", "--quiet", "--missing=error", `${commit}^{commit}`],
-    { env: { GIT_NO_LAZY_FETCH: "1", GIT_NO_REPLACE_OBJECTS: "1", GIT_ALTERNATE_OBJECT_DIRECTORIES: "" } }).status === 0;
+const closureEnvironment = { GIT_NO_LAZY_FETCH: "1", GIT_NO_REPLACE_OBJECTS: "1", GIT_ALTERNATE_OBJECT_DIRECTORIES: "" };
+
+function objectStoreStamp(mirror) {
+  const objects = path.join(mirror, "objects");
+  if (!existsSync(objects)) return null;
+  const digest = createHash("sha256");
+  const add = file => {
+    try {
+      const s = statSync(file, { bigint: true });
+      digest.update(`${file}\0${s.dev}:${s.ino}:${s.size}:${s.mtimeNs}:${s.ctimeNs}\n`);
+    } catch (error) { if (error.code !== "ENOENT") throw error; digest.update(`${file}\0absent\n`); }
+  };
+  add(objects);
+  for (let byte = 0; byte < 256; byte++) add(path.join(objects, byte.toString(16).padStart(2, "0")));
+  for (const directory of ["pack", "info"]) {
+    const root = path.join(objects, directory); add(root);
+    if (existsSync(root)) for (const name of readdirSync(root).sort()) add(path.join(root, name));
+  }
+  for (const name of ["shallow", "config"]) add(path.join(mirror, name));
+  return digest.digest("hex");
 }
 
-function cachedImmutableSource(mirror, repository, ref) {
+function sourceTree(repository, commit, sparsePatterns) {
+  const entries = git(repository, ["ls-tree", "-rz", commit], { env: closureEnvironment }).split("\0").filter(Boolean).map(entry => {
+    const match = entry.match(/^(\d+) (blob|commit) ([0-9a-f]+)\t(.+)$/su);
+    if (match === null) fail("source capacity estimate unknown: malformed Git tree entry");
+    const [, mode, type, hash, name] = match;
+    return { mode, type, hash, name };
+  });
+  const selected = sparseSourcePaths(entries, sparsePatterns);
+  const needed = entries.filter(entry => entry.type === "blob" && (selected === null || selected.has(entry.name) || entry.name.endsWith(".gitattributes")));
+  const result = command("git", ["-C", repository, "cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"],
+    { env: closureEnvironment, input: needed.map(entry => entry.hash).join("\n") + "\n" });
+  const rows = needed.length === 0 ? [] : result.stdout.split("\n");
+  if (result.status !== 0 || rows.length !== needed.length) fail("source capacity estimate unknown: selected source object is unavailable");
+  for (let index = 0; index < needed.length; index++) {
+    const match = rows[index].match(/^([0-9a-f]+) blob (\d+)$/u);
+    if (match === null || match[1] !== needed[index].hash) fail("source capacity estimate unknown: selected source object is unavailable");
+    needed[index].size = match[2];
+  }
+  return { entries, selected };
+}
+
+function hasObjectClosure(mirror, commit, sparsePatterns = []) {
+  if (!existsSync(mirror) || existsSync(path.join(mirror, "objects", "info", "alternates"))) return false;
+  const before = objectStoreStamp(mirror);
+  if (before === null) return false;
+  const key = createHash("sha256").update(JSON.stringify([commit, sparsePatterns])).digest("hex");
+  const directory = path.join(mirror, "pi-workspace-closure");
+  const file = path.join(directory, `${key}.json`);
+  if (existsSync(file)) {
+    const cached = JSON.parse(readFileSync(file, "utf8"));
+    if (cached.version === 1 && cached.stamp === before && cached.commit === commit) return true;
+  }
+  let verified;
+  if (sparsePatterns.length === 0) {
+    verified = command("git", ["--git-dir", mirror, "rev-list", "--objects", "--quiet", "--missing=error", `${commit}^{commit}`],
+      { env: closureEnvironment }).status === 0;
+  } else {
+    const root = command("git", ["--git-dir", mirror, "cat-file", "-e", `${commit}^{tree}`], { env: closureEnvironment });
+    if (root.status !== 0) return false;
+    try { sourceTree(mirror, commit, sparsePatterns); verified = true; }
+    catch (error) { if (!(error instanceof CliError)) throw error; return false; }
+  }
+  if (!verified || objectStoreStamp(mirror) !== before) return false;
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const temporary = `${file}.${randomUUID()}`;
+  writeFileSync(temporary, JSON.stringify({ version: 1, commit, sparsePatterns, stamp: before }), { mode: 0o600 });
+  renameSync(temporary, file);
+  return true;
+}
+
+function cachedImmutableSource(mirror, repository, ref, sparsePatterns) {
   if (!/^[0-9a-f]{40}$/u.test(ref) || !existsSync(mirror)) return null;
   if (existsSync(path.join(mirror, "objects", "info", "alternates"))) fail(`shared mirror must own its objects independently: ${mirror}`);
   const cached = command("git", ["--git-dir", mirror, "rev-parse", "--verify", `${sourceRefFor(repository, ref)}^{commit}`]);
-  return cached.status === 0 && cached.stdout === ref && hasObjectClosure(mirror, ref) ? ref : null;
+  return cached.status === 0 && cached.stdout === ref && hasObjectClosure(mirror, ref, sparsePatterns) ? ref : null;
 }
 
 function resolveRequestedSource(repository, ref) {
@@ -2109,24 +2177,26 @@ function resolveRequestedSource(repository, ref) {
   return ref;
 }
 
-function resolveSource(statePath, mirror, repository, upstream, ref) {
+function resolveSource(statePath, mirror, repository, upstream, ref, sparsePatterns = []) {
   ref = resolveRequestedSource(repository, ref);
-  const cached = cachedImmutableSource(mirror, repository, ref);
+  const cached = cachedImmutableSource(mirror, repository, ref, sparsePatterns);
   if (cached !== null) return cached;
   return withResourceLock(statePath, `mirror:${mirror}`, () => {
-    const shared = cachedImmutableSource(mirror, repository, ref);
+    const shared = cachedImmutableSource(mirror, repository, ref, sparsePatterns);
     if (shared !== null) return shared;
     if (existsSync(path.join(mirror, "objects", "info", "alternates"))) fail(`shared mirror must own its objects independently: ${mirror}`);
     if (/^[0-9a-f]{40}$/u.test(ref) && existsSync(mirror)
-      && hasObjectClosure(mirror, ref)) {
+      && hasObjectClosure(mirror, ref, sparsePatterns)) {
       run("git", ["--git-dir", mirror, "update-ref", sourceRefFor(repository, ref), ref]);
       return ref;
     }
+    if (sourcePreparationMode === "foreground") throw new SourcePreparationRequired();
+    if (sourceJobDirectory !== null) writeSourceJobProgress(sourceJobDirectory, { phase: "importing", commit: ref });
     prepareMirror(mirror, repository, upstream);
     if (/^[0-9a-f]{4,39}$/u.test(ref)) {
       run("git", ["--git-dir", mirror, "fetch", "--prune", "--no-tags", "origin"], { timeout: 120_000 });
     }
-    return fetchSource(mirror, repository, ref);
+    return fetchSource(mirror, repository, ref, sparsePatterns);
   });
 }
 
@@ -2152,7 +2222,7 @@ function prepareMirror(mirror, repository, upstream) {
   ]);
 }
 
-function fetchSource(mirror, repository, ref) {
+function fetchSource(mirror, repository, ref, sparsePatterns) {
   let resolved = ref;
   if (/^[0-9a-f]{4,39}$/u.test(ref)) {
     const source = existsSync(repository) ? ["-C", repository] : ["--git-dir", mirror];
@@ -2162,9 +2232,9 @@ function fetchSource(mirror, repository, ref) {
   }
   const sourceRef = sourceRefFor(repository, ref);
   // Negotiation can report an existing commit as complete despite missing trees/blobs.
-  run("git", ["--git-dir", mirror, "fetch", "--refetch", "--no-tags", "--no-auto-maintenance", "workspace-source", `+${resolved}:${sourceRef}`], { timeout: 120_000 });
+  run("git", ["--git-dir", mirror, "fetch", "--refetch", "--no-tags", "--no-auto-maintenance", "workspace-source", `+${resolved}:${sourceRef}`], { timeout: sourcePreparationMode === "worker" ? 1_800_000 : 120_000 });
   const commit = run("git", ["--git-dir", mirror, "rev-parse", "--verify", `${sourceRef}^{commit}`]);
-  if (!hasObjectClosure(mirror, commit)) fail(`fetched source has incomplete object closure: ${commit}`);
+  if (!hasObjectClosure(mirror, commit, sparsePatterns)) fail(`fetched source has incomplete object closure: ${commit}`);
   return commit;
 }
 
@@ -2230,6 +2300,106 @@ function prepareSharedSourceClone(destination, repository, sourceCommit, input, 
   if (head.status !== 0) git(destination, ["update-ref", "--no-deref", "HEAD", sourceCommit]);
 }
 
+function prepareSourceValue(database, args, request) {
+  const { statePath, root, destination, repository, upstream, mirror, intent, sparsePatterns, sourceCommit } = request;
+  if (sourceJobDirectory !== null) writeSourceJobProgress(sourceJobDirectory, { phase: "forecasting", commit: sourceCommit });
+  let plan = intent === null
+    ? { intent: "unestimated", estimate: "unknown", constructionBytes: Math.ceil(numberFlag(args, "min-free-gib", DEFAULT_MIN_FREE_GIB) * 1024 ** 3), growthBytes: 0, headroomBytes: 0 }
+    : sourceCapacityPlan(repository, sourceCommit, intent, statfsSync(root).bsize, mirror, sparsePatterns);
+  const device = String(statSync(root).dev);
+  let resolvedCommit;
+  withResourceLock(statePath, `capacity:${device}`, () => {
+    plan.admission = assertCapacity(root, args, database, destination, plan);
+    resolvedCommit = resolveSource(statePath, mirror, repository, upstream, sourceCommit, sparsePatterns);
+    if (!resolvedCommit.startsWith(sourceCommit)) fail("source preparation changed the requested commit");
+  });
+  return { sourceCommit: resolvedCommit, plan, stamp: objectStoreStamp(mirror) };
+}
+
+function prepareCreationSource(database, args, input) {
+  let sourceCommit = resolveRequestedSource(input.repository, input.ref);
+  if (input.intent !== null && !/^[0-9a-f]{40}$/u.test(sourceCommit)) {
+    const resolved = command("git", ["--git-dir", input.mirror, "rev-parse", "--verify", `${sourceCommit}^{commit}`]);
+    if (resolved.status !== 0) fail("source capacity estimate unknown: remote commit is absent from durable mirror custody; remote import remains unestimated");
+    sourceCommit = resolved.stdout;
+  }
+  const request = { ...input, sourceCommit, args: [...args.named] };
+  const key = createHash("sha256").update(JSON.stringify(request)).digest("hex");
+  const directory = path.join(path.dirname(input.statePath), "source-preparations");
+  const receipt = path.join(directory, `${key}.json`);
+  const stamp = objectStoreStamp(input.mirror);
+  if (stamp !== null && existsSync(receipt)) {
+    const value = JSON.parse(readFileSync(receipt, "utf8"));
+    if (value.sourceCommit === sourceCommit && value.stamp === stamp) return { state: "ready", value };
+  }
+  const pointerPath = path.join(directory, `${key}.job.json`);
+  let pointer = existsSync(pointerPath) ? JSON.parse(readFileSync(pointerPath, "utf8")) : null;
+  const observeJob = () => runSourceJob({ directory: path.join(directory, "jobs"), key,
+    request: { ...request, initialStamp: pointer.initialStamp, receipt },
+    command: [process.execPath, new URL(import.meta.url).pathname, "source-prepare"], env: {}, waitMs: 2000, restartInterrupted: true });
+  const accepted = job => {
+    if (job.jobId && pointer.jobId !== job.jobId) writePreparationReceipt(pointerPath, { ...pointer, jobId: job.jobId });
+    if (job.state === "failed" || job.state === "interrupted") fail(`source preparation ${job.state}: ${job.error?.code}: ${job.error?.message}; progress ${job.progressPath}`);
+    return job;
+  };
+  if (pointer !== null && pointer.jobId) {
+    const terminalPath = path.join(directory, "jobs", pointer.jobId, "result.json");
+    if (!existsSync(terminalPath)) return accepted(observeJob());
+    const terminal = JSON.parse(readFileSync(terminalPath, "utf8"));
+    if (terminal.state !== "ready") return accepted(observeJob());
+    if (terminal.value.stamp !== stamp) pointer = null;
+  }
+  let value;
+  try {
+    sourcePreparationMode = "foreground";
+    sourcePreparationDeadline = Date.now() + 1500;
+    value = prepareSourceValue(database, args, request);
+  } catch (error) {
+    if (!(error instanceof SourcePreparationRequired)) throw error;
+  } finally {
+    sourcePreparationMode = null;
+    sourcePreparationDeadline = Infinity;
+  }
+  if (value !== undefined) {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    writePreparationReceipt(receipt, value);
+    return { state: "ready", value };
+  }
+  if (pointer === null) {
+    pointer = { initialStamp: stamp };
+    writePreparationReceipt(pointerPath, pointer);
+  }
+  const job = accepted(observeJob());
+  if (job.state === "ready" && job.value.stamp !== objectStoreStamp(input.mirror)) fail("source changed during preparation; repeat the original request");
+  return job;
+}
+
+function writePreparationReceipt(file, value) {
+  const temporary = `${file}.${randomUUID()}`;
+  mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  writeFileSync(temporary, JSON.stringify(value), { mode: 0o600 });
+  renameSync(temporary, file);
+}
+
+function sourcePreparationWorker() {
+  const directory = process.env.PI_WORKSPACE_SOURCE_JOB_DIR;
+  const loaded = readSourceJobRequest(directory);
+  if (!loaded.ok) fail(loaded.error.message);
+  const request = loaded.value;
+  const database = openRegistry(request.statePath);
+  sourcePreparationMode = "worker";
+  sourceJobDirectory = directory;
+  try {
+    const value = prepareSourceValue(database, { named: new Map(request.args), positional: [] }, request);
+    writePreparationReceipt(request.receipt, value);
+    const result = finishSourceJob(directory, { state: "ready", value });
+    if (!result.ok) fail(result.error.message);
+  } catch (error) {
+    finishSourceJob(directory, { state: "failed", error: { code: "source-preparation-failed", message: error.message } });
+    throw error;
+  } finally { database.close(); }
+}
+
 function createCommand(database, args, statePath) {
   const destination = path.join(path.resolve(required(args, "root")), safeName(required(args, "name")));
   return withWorkspaceLock(database, destination, () => createWorkspace(database, args, statePath), one(args, "group"));
@@ -2275,24 +2445,15 @@ function createWorkspace(database, args, statePath) {
   } else {
     if (existsSync(destination)) fail(`workspace already exists: ${destination}`);
     mkdirSync(root, { recursive: true });
-    let sourceCommit;
-    let plan;
-    if (intent === null) {
-      assertCapacity(root, args, database);
-      plan = { intent: "unestimated", estimate: "unknown", constructionBytes: Math.ceil(numberFlag(args, "min-free-gib", DEFAULT_MIN_FREE_GIB) * 1024 ** 3), growthBytes: 0, headroomBytes: 0 };
-    } else {
-      sourceCommit = resolveRequestedSource(repository, ref);
-      if (!/^[0-9a-f]{40}$/u.test(sourceCommit) && !existsSync(repository)) {
-        const resolved = command("git", ["--git-dir", mirror, "rev-parse", "--verify", `${sourceCommit}^{commit}`]);
-        if (resolved.status !== 0) fail("source capacity estimate unknown: remote commit is absent from durable mirror custody; remote import remains unestimated");
-        sourceCommit = resolved.stdout;
-      }
-      plan = sourceCapacityPlan(repository, sourceCommit, intent, statfsSync(root).bsize, mirror, sparsePatterns);
+    const preparation = withResourceLock(statePath, `source-preparation:${destination}`, () =>
+      prepareCreationSource(database, args, { statePath, root, destination, repository, ref, upstream, mirror, intent, sparsePatterns }));
+    if (preparation.state !== "ready") {
+      print({ ok: true, state: "preparing", jobId: preparation.jobId, progressPath: preparation.progressPath, nextAction: "Repeat this exact create request after source preparation completes" }, true);
+      return;
     }
+    const { sourceCommit, plan } = preparation.value;
     const device = String(statSync(root).dev);
     withResourceLock(statePath, `capacity:${device}`, () => {
-      plan.admission = assertCapacity(root, args, database, destination, plan);
-      sourceCommit = resolveSource(statePath, mirror, repository, upstream, sourceCommit ?? ref);
       plan.admission = assertCapacity(root, args, database, destination, plan);
       database.exec("BEGIN IMMEDIATE");
       try {
@@ -2337,11 +2498,11 @@ function createWorkspace(database, args, statePath) {
     });
   }
   if (sourceCommit === null) {
-    sourceCommit = resolveSource(statePath, mirror, repository, upstream, ref);
+    sourceCommit = resolveSource(statePath, mirror, repository, upstream, ref, sparsePatterns);
     database.prepare("UPDATE workspace SET source_commit=?, updated_at=? WHERE id=?")
       .run(sourceCommit, Date.now(), row.id);
   }
-  if (intent !== null) resolveSource(statePath, mirror, repository, upstream, sourceCommit);
+  if (intent !== null) resolveSource(statePath, mirror, repository, upstream, sourceCommit, sparsePatterns);
   try {
     if (!existsSync(destination) || readdirSync(destination).length === 0) {
       const plan = database.prepare("SELECT plan_json FROM workspace_capacity WHERE workspace_id=?").get(row.id);
@@ -2874,6 +3035,7 @@ Records outlive the directory, so status explains what became of a checkout that
 export const workspaceTesting = { allocatedWorkspaceBytes, workspaceAllocationSample, cachedWorkspaceAllocation, remainingCapacityBytes, capacityRequirement, capacityReservations, sourceCapacityPlan, cacheTargets, dockerEndpointScope, dockerSnapshot, groupReconciliation, maintainReferenceClone, parseSystemdUnits, pruneReleased, systemdManagerSnapshot, systemdReferences, ownerThreadDatabases, threadSnapshot };
 
 export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
+  if (argv[0] === "source-prepare") return sourcePreparationWorker();
   const [commandName, ...rest] = argv;
   if (
     commandName === undefined ||
