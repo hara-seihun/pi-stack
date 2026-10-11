@@ -59,7 +59,7 @@ node "$root/scripts/build-workspace.mjs" orchestrator
 mkdir -p "$stage/release/host"
 rsync -a --chmod=D755,Fu=rwX,Fgo=rX packages/orchestrator/dist packages/orchestrator/src packages/orchestrator/package.json "$stage/release/"
 install -m644 deploy/core-host.mjs deploy/core-broker-handoff.mjs deploy/core_namespace.py deploy/core-capability-epoch.py deploy/systemd/pi-stack-core.service deploy/systemd/pi-stack-core-custody.service "$stage/release/host/"
-install -m755 deploy/core-runtime deploy/core-custody deploy/core-adopt deploy/core-person-activate deploy/core-plan deploy/core-native-census deploy/core-native-retire deploy/core-drain deploy/core-root-census deploy/core-remote-witness deploy/core-meet-drain deploy/core-provider-adopt deploy/core-adopt-batch deploy/core-bindings deploy/core-assemble deploy/core-aux-plan deploy/core-aux-run deploy/core-auxiliary-receipts deploy/core-image-handoff "$stage/release/host/"
+install -m755 deploy/core-runtime deploy/core-custody deploy/core-adopt deploy/core-person-activate deploy/core-plan deploy/core-native-census deploy/core-native-retire deploy/core-drain deploy/core-root-census deploy/core-remote-witness deploy/core-remote-client-guard deploy/core-remote-client-enter deploy/core-meet-drain deploy/core-provider-adopt deploy/core-adopt-batch deploy/core-bindings deploy/core-assemble deploy/core-aux-plan deploy/core-aux-run deploy/core-auxiliary-receipts deploy/core-image-handoff "$stage/release/host/"
 bun build deploy/core-auxiliary.ts --target=bun --outfile="$stage/release/host/core-auxiliary.js"
 chmod 755 "$stage/release/dist/cli.js" "$stage/release/dist/agent-capacity-cli.js"
 ln -s "$dependencies" "$stage/release/node_modules"
