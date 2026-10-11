@@ -17,11 +17,17 @@ async function fixture(busy: boolean, pendingAttachment = false) {
   let output!: (event: PiEvent) => void, release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
   const commands: PiCommand[] = [];
+  let streaming = busy;
   const session: PiSession = {
     async command(command) {
       commands.push(command);
+      if (command.type === "input_batch") {
+        streaming = true;
+        output({ type: "agent_start" });
+        output({ type: "thread_landed", workIds: (command.inputs as { workId: string }[]).map(input => input.workId), batchId: command.batchId });
+      }
       output({ type: "response", id: command.id, command: command.type, success: true,
-        data: command.type === "get_state" ? { isStreaming: busy, pendingMessageCount: 0 } : {} });
+        data: command.type === "get_state" ? { isStreaming: streaming, pendingMessageCount: 0, acceptedWorkIds: [], landedWorkIds: [], completedWorkIds: [], nativeProtocolVersion: "batch-operations-v1", backgroundOperationCount: 0 } : {} });
     },
     async close() {},
   };
@@ -33,7 +39,7 @@ async function fixture(busy: boolean, pendingAttachment = false) {
   const openSession = vi.fn(async (_options, receive: (event: PiEvent) => void) => { output = receive; return session; });
   const service = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(root, "threads.sqlite3"), sessionsDir: root, openSession, attachSession });
   services.push(service);
-  const thread = unwrap(await service.spawn({ requestId: "thread", cwd: root }));
+  const thread = unwrap(await service.spawn({ requestId: "thread", title: "Retained custody", cwd: root }));
   const owner = service as any;
   owner.sql("UPDATE thread SET metadata=json_set(metadata,'$.runnerReference',json(?)) WHERE id=?")
     .run(JSON.stringify({ control: join(root, "control.sock"), socketPath: join(root, "session.sock") }), thread.id);
@@ -56,6 +62,23 @@ it("coalesces repeated and concurrent custody attachment without replacing the n
   expect(runtime.busy).toBe(false);
 });
 
+it("cancellation crosses a pending retained attachment before issuing native RPC", async () => {
+  const f = await fixture(false, true);
+  const attaching = f.owner.attach(f.thread.id);
+  let settled = false;
+  const cancelling = f.service.control({ threadId: f.thread.id, action: "cancel", descendants: false }).then(value => { settled = true; return value; });
+  await new Promise<void>(resolve => setImmediate(resolve));
+  expect(settled).toBe(false);
+  expect(f.commands).toEqual([]);
+  f.release();
+  await attaching;
+  expect(await cancelling).toMatchObject({ ok: true });
+  expect(f.attachSession).toHaveBeenCalledTimes(1);
+  expect(f.openSession).not.toHaveBeenCalled();
+  expect(f.commands.map(command => command.type)).toEqual(["get_state", "abort", "get_state"]);
+  expect(f.service.get(f.thread.id)?.metadata?.executionError).toBeUndefined();
+});
+
 it("restores real active custody without submitting or cancelling input", async () => {
   const f = await fixture(true);
   const runtime = await f.owner.attach(f.thread.id);
@@ -69,10 +92,10 @@ it("an attached idle session can receive its original queued message after owner
   await f.owner.attach(f.thread.id);
   unwrap(await f.service.send({ requestId: "pending", threadId: f.thread.id, text: "continue", delivery: "steer" }));
   unwrap(await f.service.start());
-  for (let i = 0; i < 100 && !f.service.pending(f.thread.id)[0]?.landedAt; i++) await new Promise<void>(resolve => setImmediate(resolve));
-  const pending = f.service.pending(f.thread.id)[0]!;
+  for (let i = 0; i < 100 && !f.owner.inputReceipt(f.thread.id, "pending")?.landedAt; i++) await new Promise<void>(resolve => setImmediate(resolve));
+  const pending = f.owner.inputReceipt(f.thread.id, "pending");
   expect(pending.id).toBe("pending");
   expect(pending.landedAt).toEqual(expect.any(Number));
-  expect(f.commands.filter(command => command.type === "prompt").map(command => command.workId)).toEqual(["pending"]);
+  expect(f.commands.filter(command => command.type === "input_batch").flatMap(command => (command.inputs as { workId: string }[]).map(input => input.workId))).toEqual(["pending"]);
   expect(f.commands.some(command => command.type === "abort")).toBe(false);
 });

@@ -64,7 +64,9 @@ export function threadTools(options: PiSessionOptions) {
       description: "Set or clear your own typed dependency wait as your final tool call; this ends the turn without polling. Name agents (nonempty accessible peer threadIds and optional after cursors), job (jobId), deployment (publicationId), or message (accessible collaborator fromThreadId). Child settlements or collaborator messages resume the same thread. For external work, leave its state and next action in the owning Markdown notes; Kenaznia owns timing and recovery. Having finished or being available for assignment is idle: do not set a wait. Dependencies subscribe to durable peer results, including cancellation when a peer is closed; they never veto explicit Close. Clear removes your wait and outgoing subscriptions without creating work. The result status distinguishes registered (durable wait), already_arrived (current assignment result), resumed (new input IDs; continue with that input), and cleared. Only a still-active registered wait ends the turn.",
       parameters: threadWaitParameters,
       execute: async (id, input, signal) => {
-        const waited = await api(signal).agentWait({ ...input, threadId: options.threadId, requestId: `${options.threadId}:${id}` });
+        const requestId = input.requestId ?? `${options.threadId}:${id}`;
+        if (!requestId.startsWith(`${options.threadId}:`) || requestId.length <= options.threadId.length + 1) return result({ ok: false, error: { code: "invalid_request", message: "Wait recovery requires this caller's original requestId" } });
+        const waited = await api(signal).agentWait({ ...input, threadId: options.threadId, requestId });
         return { ...result(mapResult(waited, value => agentWaitView(value.waitRegistration))), ...(waited.ok && waited.value.waitRegistration.status === "registered"
           && JSON.stringify(waited.value.metadata?.agentWait) === JSON.stringify(waited.value.waitRegistration.wait) ? { terminate: true } : {}) };
       },
@@ -136,9 +138,13 @@ export function threadTools(options: PiSessionOptions) {
     defineTool({
       name: "thread_send", label: "Send to a thread",
       description: "Send to any existing authorized agent. Every pending message arrives together at its next completed-output boundary without cutting off text or waiting for a running tool. A closed recipient needs explicit reopen before new work.",
-      parameters: Type.Object({ threadId: Type.String(), text: Type.String() }),
+      parameters: Type.Object({ threadId: Type.String(), text: Type.String(),
+        requestId: Type.Optional(Type.String({ minLength: 1, description: "Recovery only: reuse this caller's exact requestId from an unconfirmed send with the unchanged original recipient and text. Never issue a new identity to retry uncertain delivery." })),
+      }),
       execute: async (id, input, signal) => {
-        const request = { ...input, requestId: `${options.threadId}:${id}`, senderId: options.threadId, delivery: resolveDelivery({ ...input, senderId: options.threadId }), source: "explicit" as const };
+        const requestId = input.requestId ?? `${options.threadId}:${id}`;
+        if (!requestId.startsWith(`${options.threadId}:`) || requestId.length <= options.threadId.length + 1) return result({ ok: false, error: { code: "invalid_request", message: "Send recovery requires this caller's original requestId" } });
+        const request = { ...input, requestId, senderId: options.threadId, delivery: resolveDelivery({ ...input, senderId: options.threadId }), source: "explicit" as const };
         return result(mapResult(await api(signal).send(request), agentMessageView));
       },
     }),

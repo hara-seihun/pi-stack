@@ -10,7 +10,7 @@ Production controllers use [`createSharedPiSessionOpener({dataDir})`](../src/thr
 
 `attachSession(reference, output, exit)` reconnects only to an existing session using its recorded `{control, socketPath}`. Both socket paths must belong to this controller's data directory. Attachment makes a control `status` request and attaches to the session socket; it never checks cwd, requests admission, launches a runner, or sends `open`. A missing reference or a socket connection rejected with `ENOENT` or `ECONNREFUSED` returns `null`. Timeouts, premature disconnects, malformed replies and other errors throw because they do not establish absence. This lets Stop reach a retained native session after its checkout has been reclaimed, without recreating that checkout or initializing Pi.
 
-Both opening and attachment emit `runner_attached` and use the same command, output replay, close and connection ownership code. `close` requests native disposal before detaching its connection; opener `detach` only disconnects.
+Both opening and attachment emit `runner_attached` and use the same command, output replay, close and connection ownership code. `close` requests native disposal before detaching its connection; opener `detach` only disconnects. Cancellation crosses both pending opening and pending attachment before reading the published runtime: its presence is not proof that the native command client is initialized.
 
 The controller calls `detach` during handoff. This disconnects its channels without stopping accepted work. Reopening the same thread attaches to the same session and replays unacknowledged output. Each channel's output spool is transient delivery state, not conversation history. Native JSONL and the thread database remain authoritative. A dead runner loses its in-memory tools and queues; the controller recovers using native work receipts.
 
@@ -19,6 +19,18 @@ The controller calls `detach` during handoff. This disconnects its channels with
 A shared host stays resident when empty, keeping SDK code loaded for the next agent. Per-application isolated hosts are not retained empty because each cwd is a distinct process boundary. Controller detach drains its generation when empty; current-generation opens can retain it again. Generation, selected account/environment and model compatibility are checked before idle reuse. Active recovery can attach to an older generation without disturbing accepted work, but its next assignment reopens under the selected generation. Older runners without residency negotiation retain their accepted execution contract and unload at settlement. Shutdown refuses to discard active sessions.
 
 Runner files live under the owning controller's data directory in `thread-runners/` and `thread-sockets/`. The compiled entry is `dist/threads/runner-host.js`. Startup inherits the owning Unix account. An isolated application's runner starts with its scrubbed HOME and credential environment before loading extensions. Root-repair execution retains its own account boundary and full normal context.
+
+## Core outage reconciliation
+
+The thread HTTP client retries a replay-safe request within its existing deadline using the same body and identity. A longer Core outage returns the exact `requestId` with acceptance uncertainty; it does not create another identity or replay native input. After connectivity returns, `thread_send` and `thread_wait` accept that original caller-bound `requestId` with the unchanged original parameters. The owner checks operation and normalized payload digest and returns the original durable receipt. Changed destination, text, dependency or operation is a conflict; another caller's identity is rejected.
+
+A retained native adapter keeps its cached tool schemas across future-factory selection. The selected CLI provides the same recovery route without replacing that adapter:
+
+- Original CLI send: `pi-orchestrator send RECIPIENT --prompt ORIGINAL_TEXT --request-id ORIGINAL_ID`, under the original caller and scope.
+- Original native tool send: the same command plus `--source explicit`. It requires the original `PI_THREAD_ID`, `PI_THREAD_TOKEN` and own-call ID prefix, preserving the tool's source field and normalized digest.
+- Original native wait: `pi-orchestrator wait-recover --request-id ORIGINAL_ID --input ORIGINAL_JSON`, with the original typed tool parameters and original thread capability. It cannot generate a new identity. Its CLI receipt is not itself a native turn-termination gesture; the agent ends its turn after an active registered wait, or continues on `resumed`/`already_arrived`.
+
+An accepted receipt can be returned after Stop/Close without unarchiving or resubmitting its pending work. These routes do not resend a research assignment or external effect. Focused proofs in `thread-outage-reconciliation.test.ts`, `send-recovery-command.test.ts` and `retained-attachment.test.ts` cover lost acceptance followed by owner restart, request-budget expiry, exact tool-to-CLI receipt matching, changed/foreign identity rejection and gated native attachment.
 
 ## Durable runner memory and shell custody
 

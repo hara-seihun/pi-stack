@@ -4,7 +4,7 @@ import type { ArchivedThreadsQuery, ArchivedThreadsResult } from "./contracts.js
 import { validateInspectOptions, validateThreadAwait } from "./contracts.js";
 import type { ManagerQuestionCustodyRequest, ManagerQuestionCustodyReceipt, ManagerQuestionsRequest, ManagerQuestionsResponse, AnswerThreadQuestion, AskThreadQuestions, QuestionsReceipt, QuestionReceipt, QuestionEvents, QuestionState, ThreadQuestion, AwaitThreads, ThreadAwaitResult, Result, ThreadApi, ThreadControl, ThreadHistory, ThreadInspection, InspectOptions, ThreadSettlements, PiCommand, ThreadList, ThreadMessage, ThreadPage, ThreadRead, SendThread, SpawnThread, Thread } from "./contracts.js";
 
-export interface ThreadOwner { id: string; api: ThreadApi }
+export interface ThreadOwner { id: string; api: ThreadApi; watch?: import("./watch-list.js").WatchApi }
 const error = (code: "not_found" | "invalid_request" | "conflict", message: string): Result<never> => ({ ok: false, error: { code, message } });
 
 export class ThreadDirectory implements ThreadApi {
@@ -30,8 +30,11 @@ export class ThreadDirectory implements ThreadApi {
     return owner.ok ? owner.value.api.wakeSchedule(input) : owner;
   }
   async watch(input: import("./watch-list.js").WatchRequest): Promise<Result<import("./watch-list.js").WatchResponse>> {
-    const person = this.owners.find(owner => owner.id === "person");
-    return person ? person.api.watch(input) : { ok: false, error: { code: "unavailable", message: "This person has no unlocked watch list owner" } };
+    const local = this.owners[0]!;
+    if (local.watch) return local.watch.watch(input);
+    const peers = this.owners.slice(1).filter(owner => owner.watch);
+    if (peers.length === 1) return peers[0]!.watch!.watch(input);
+    return { ok: false, error: { code: "unavailable", message: peers.length ? "This directory has multiple peer watch custodians; an owning scope is required" : "This scope has no adopted watch custodian" } };
   }
   async owner(threadId: string): Promise<Result<ThreadOwner>> {
     if (!threadId) return error("invalid_request", "A thread ID is required");

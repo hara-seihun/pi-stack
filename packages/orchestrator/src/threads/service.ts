@@ -202,9 +202,13 @@ export class ThreadService implements ThreadApi {
     this.watchList = watchList;
     return () => { if (this.watchList === watchList) this.watchList = undefined; };
   }
+  async ownedWatch(input: import("./watch-list.js").WatchRequest): Promise<Result<import("./watch-list.js").WatchResponse>> {
+    if (this.closed || this.suspended) return bad("unavailable", "Thread controller is suspended");
+    return this.watchList ? this.watchList.watch(input) : bad("unavailable", "This scope has no adopted watch custodian");
+  }
   async watch(input: import("./watch-list.js").WatchRequest): Promise<Result<import("./watch-list.js").WatchResponse>> {
     if (this.closed || this.suspended) return bad("unavailable", "Thread controller is suspended");
-    if (this.watchList) return this.watchList.watch(input);
+    if (this.watchList) return this.ownedWatch(input);
     if (this.options.workersOnly && this.directory) return this.directory.watch(input);
     return bad("unavailable", "This person has no unlocked watch list owner");
   }
@@ -2476,6 +2480,9 @@ export class ThreadService implements ThreadApi {
       try {
         // A rejected startup is not a failed cancellation: inspect the retained runner directly.
         await this.opening.get(id)?.catch(() => undefined);
+        // Attachment publishes its runtime before its native client is ready. Cancellation must
+        // cross that same readiness fence before reading it, never abort a partial controller.
+        await this.attaching.get(id)?.catch(() => undefined);
         if (!await this.reconcileCapacityHandoff(id)) return bad("unavailable", "Original-owner execution handoff remains pending");
         await this.releaseFailedStartupCapacity(id);
         await this.recoverMissingStartupCapacity(id);

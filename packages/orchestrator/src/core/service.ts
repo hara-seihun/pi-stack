@@ -5,7 +5,7 @@ import { openSqlite } from "../sqlite.js";
 import { configuredAgentCapacity, configuredCapacityRecovery } from "../agent-capacity.js";
 import { authorize, type PermissionAction, type Principal, type Resource } from "../permissions.js";
 import { ThreadService, type ThreadServiceEvent } from "../threads/service.js";
-import { ThreadDirectory } from "../threads/directory.js";
+import { ThreadDirectory, type ThreadOwner } from "../threads/directory.js";
 import { threadCapability, callerResolver, type ThreadCaller } from "../threads/caller.js";
 import { threadHttp } from "../threads/http.js";
 import type { AttachPiSession, OpenPiSession, PiEvent, PiSession, Result, Thread, ThreadApi } from "../threads/contracts.js";
@@ -57,6 +57,10 @@ export class CoreService {
     const owner = this.owners.get(scopeId);
     return owner ? { ok: true, value: owner } : { ok: false, error: { code: "unavailable", message: `Scope ${scopeId} has not transferred controller custody` } };
   }
+  private directoryOwner(owner: ScopeOwner): ThreadOwner {
+    const watch = this.config.duties.kind === "configured" && this.config.duties.entries.some(entry => entry.scopeId === owner.scope.id && entry.watch.kind === "existing");
+    return { id: owner.scope.manager.kind === "existing" ? "person" : owner.scope.id, api: owner.threads, ...(watch ? { watch: { watch: (input: import("../threads/watch-list.js").WatchRequest) => owner.threads.ownedWatch(input) } } : {}) };
+  }
   async start(): Promise<CoreResult<void>> {
     if (this.state !== "new") return { ok: false, error: { code: "ownership-conflict", message: "Core adoption requires a new controller" } };
     try {
@@ -75,7 +79,7 @@ export class CoreService {
           return grant.ok ? { ok: true, value: undefined } : failure("unavailable", grant.error.message);
         });
       }
-      const directory = new ThreadDirectory({ id: owner.scope.manager.kind === "existing" ? "person" : owner.scope.id, api: owner.threads }, scopes.filter(candidate => candidate !== owner).map(candidate => ({ id: candidate.scope.manager.kind === "existing" ? "person" : candidate.scope.id, api: candidate.threads })), owner.relay?.managerOwner, owner.relay?.questionOwner);
+      const directory = new ThreadDirectory(this.directoryOwner(owner), scopes.filter(candidate => candidate !== owner).map(candidate => this.directoryOwner(candidate)), owner.relay?.managerOwner, owner.relay?.questionOwner);
       owner.directory = directory;
       owner.threads.setDirectory(directory);
       if (owner.scope.managerRouting.kind === "configured") owner.notices = new CoreManagerNotices({ ...owner.scope.managerRouting.notices, scopeId: owner.scope.id, subscribe: listener => owner.threads.subscribe(listener), feedback: message => { if (message) console.error(`Core notices ${owner.scope.id}: ${message}`); } }, owner.metadata, owner.threads, {
@@ -371,7 +375,7 @@ export class CoreService {
     const peers = [...this.owners.values()].filter(candidate => identity.value.scopeIds.includes(candidate.scope.id)
       && authorize(this.config.policy, { principal: identity.value.principal, resource: candidate.scope.resource, action: operationAction(operation), now: Date.now() }).ok);
     const relay = identity.value.principal.id === scope.principalId ? owner.relay : undefined;
-    const directory: ThreadApi = new ThreadDirectory({ id: scope.manager.kind === "existing" ? "person" : scopeId, api: owner.threads }, peers.filter(candidate => candidate !== owner).map(candidate => ({ id: candidate.scope.manager.kind === "existing" ? "person" : candidate.scope.id, api: candidate.threads })), relay?.managerOwner, relay?.questionOwner);
+    const directory: ThreadApi = new ThreadDirectory(this.directoryOwner(owner), peers.filter(candidate => candidate !== owner).map(candidate => this.directoryOwner(candidate)), relay?.managerOwner, relay?.questionOwner);
     const api = relay ? new Proxy(directory, { get: (target, key) => key === "managerQuestionCustody" ? (input: Parameters<ThreadApi["managerQuestionCustody"]>[0]) => relay.receive(request, input, identity.value.caller.kind === "service", value => target.managerQuestionCustody(value)) : typeof Reflect.get(target, key) === "function" ? Reflect.get(target, key).bind(target) : Reflect.get(target, key) }) : directory;
     return threadHttp(api, request, `/v1/scopes/${encodeURIComponent(scopeId)}/thread-owner`, (operation, input) => resolver.admit(operation, input, identity.value.caller));
   }

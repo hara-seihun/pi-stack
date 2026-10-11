@@ -1,5 +1,7 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
+import { CoreDuties, WATCH_CUSTODY_TABLES } from "../src/core/duties-runtime.js";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -68,6 +70,61 @@ test("one adopted writer preserves original thread, queue identity and scoped di
     expect((await reader.read()).done).toBe(true);
   } finally { expect((await core.close()).ok).toBe(true); }
   const reowned = acquireScopeOwnership(f.scope, path => path); expect(reowned.ok).toBe(true); if (reowned.ok) reowned.value.close();
+});
+
+test("manager-less adopted watch is routed by both Core directories without contacting the canonical manager", async () => {
+  const f = await fixture(), path = f.scope.custody.dataDir;
+  const watchPath = join(path, "watch.sqlite3"), receiptPath = join(path, "watch.json");
+  const db = new DatabaseSync(watchPath);
+  db.exec(`CREATE TABLE watch_item(id TEXT PRIMARY KEY,body TEXT NOT NULL);
+    CREATE TABLE watch_request(id TEXT PRIMARY KEY,input TEXT NOT NULL,response TEXT NOT NULL);
+    CREATE TABLE watch_wake(id TEXT PRIMARY KEY,input TEXT NOT NULL);
+    CREATE TABLE watch_delivery(id TEXT PRIMARY KEY,retryAt INTEGER NOT NULL,error TEXT NOT NULL);
+    CREATE TABLE watch_schedule(id INTEGER PRIMARY KEY,nextWakeAt INTEGER NOT NULL);
+    INSERT INTO watch_schedule VALUES(1,123);`);
+  const item = { id: "original-duty", what: "Read owning notes", why: "Retained duty", nextDueAt: 13, addedBy: "alice", createdAt: 1, updatedAt: 1 };
+  const occurrence = { id: "original-occurrence", requestId: "original-occurrence-request", cwd: path, title: "Accepted check", message: "Keep exact accepted input" };
+  db.prepare("INSERT INTO watch_item VALUES(?,?)").run(item.id, JSON.stringify(item));
+  db.prepare("INSERT INTO watch_wake VALUES(?,?)").run(occurrence.id, JSON.stringify(occurrence));
+  const stat = statSync(watchPath, { bigint: true });
+  writeFileSync(receiptPath, JSON.stringify({ version: 1, state: "detached", scopeId: "alice:watch", databasePath: watchPath,
+    databaseIdentity: { dev: String(stat.dev), ino: String(stat.ino) }, tableNames: WATCH_CUSTODY_TABLES,
+    previousOwner: { identity: "original-watch-controller", detachedAt: new Date().toISOString() } }), { mode: 0o600 });
+  f.scope.managerRouting = { kind: "configured", relay: { scopeId: "alice", environmentId: "remote",
+    callbackUrl: "http://unreachable-manager.test/v1/core/manager-relay", canonicalManager: { environmentId: "personal", threadId: "canonical-manager" },
+    remoteEnvironments: [{ id: "personal", resource: f.scope.resource }], adoptedOrigins: [] },
+    notices: { notificationOwnerId: "alice", adoptedCursors: { settlements: 0, attention: 0, questions: 0 } } };
+  f.config.duties = { kind: "configured", entries: [{ scopeId: "alice", path: join(path, "duties.md"),
+    watch: { kind: "existing", databasePath: watchPath, adoptionReceiptPath: receiptPath, acceptedSpool: "hold" } }] };
+  const core = new CoreService(f.config, async () => ({ ok: true, value: f.runtime }));
+  const plugin = new CoreDuties(f.config.duties, { scopes: f.config.scopes, principals: f.config.principals, policy: f.config.policy,
+    owner: id => core.owner(id), enabled: () => true });
+  const wiring = spyOn(ThreadService.prototype, "setDirectory");
+  const input = { action: "list" as const, threadId: f.threadId };
+  const request = (body: unknown, token = "alice-token") => core.request(new Request(`${core.url}/v1/scopes/alice/thread-owner/watch`, {
+    method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body) }));
+  try {
+    expect((await core.start()).ok).toBe(true);
+    const directory = wiring.mock.calls[0]![0];
+    expect(await directory.watch(input)).toMatchObject({ ok: false, error: { code: "unavailable" } });
+    expect((await plugin.start()).ok).toBe(true);
+    const owner = core.owner("alice"); if (!owner.ok) throw new Error(owner.error.message);
+    expect((await owner.value.threads.control({ action: "close", threadId: f.threadId })).ok).toBe(true);
+    expect((await core.activate()).ok).toBe(true);
+    expect(await directory.watch(input)).toEqual({ ok: true, value: { items: [item] } });
+    expect(await (await request(input))!.json()).toEqual({ ok: true, value: { items: [item] } });
+    expect(await (await request({ ...input, action: "update", requestId: "new-update", id: item.id, patch: { nextDueAt: 99 } }))!.json())
+      .toMatchObject({ ok: false, error: { code: "invalid_request", message: expect.stringContaining("Markdown") } });
+    expect((await request(input, "bob-token"))?.status).toBe(403);
+    expect(db.prepare("SELECT id FROM watch_wake").get()).toMatchObject({ id: occurrence.id });
+    expect(db.prepare("SELECT body FROM watch_item").get()).toMatchObject({ body: JSON.stringify(item) });
+    expect(db.prepare("SELECT count(*) n FROM watch_request").get()).toMatchObject({ n: 0 });
+    expect(owner.value.threads.get(occurrence.id)).toBeNull();
+    expect(owner.value.threads.pending(f.threadId).map(message => message.id)).toEqual(["accepted-before-cutover"]);
+    await plugin.close();
+    expect(await directory.watch(input)).toMatchObject({ ok: false, error: { code: "unavailable" } });
+    expect(await (await request(input))!.json()).toMatchObject({ ok: false, error: { code: "unavailable" } });
+  } finally { wiring.mockRestore(); await plugin.close(); await core.close(); db.close(); }
 });
 
 test("kernel-admitted gateway identity and route ceilings bound native capabilities", async () => {

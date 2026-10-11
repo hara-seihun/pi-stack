@@ -12,6 +12,8 @@ import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { AccountTransfer, prepareWithDrainWait, transferEndpoint, transferPeer } from "./auth/account-transfer.js";
 import { fetchAccountFromPeer, resolveFetchPeer, resolvePeerHost } from "./auth/account-peers.js";
 import { isSpeed, SPEEDS } from "./threads/speed.js";
+import { Check } from "typebox/value";
+import { threadWaitParameters } from "./threads/wait-contract.js";
 
 export const COMMANDS=[
   ["status","Print provider accounts, leases, and active threads"],
@@ -19,7 +21,8 @@ export const COMMANDS=[
   ["run","Spawn fresh threads with --prompt TEXT [--model MODEL] [--count N] [--ephemeral[=true|false]] [--background] [--mode live]"],
   ["list","List threads [--parent ID] [--state STATE] [--limit N] [--cursor CURSOR]"],
   ["read","Read a thread's native history: THREAD_ID [--limit N] [--cursor CURSOR]"],
-  ["send","Send to THREAD_ID with --prompt TEXT at the next completed-output boundary"],
+  ["send","Send to THREAD_ID with --prompt TEXT; --request-id ORIGINAL_ID reconciles an uncertain send with unchanged caller and payload"],
+  ["wait-recover","Reconcile own native wait with --request-id ORIGINAL_ID --input ORIGINAL_JSON; never creates a new request identity"],
   ["close","Cancel and archive THREAD_ID; subscribers receive cancellation"],
   ["cancel","Cancel THREAD_ID's current work without closing its conversation"],
   ["reopen","Restore THREAD_ID without resuming interrupted work"],
@@ -143,8 +146,19 @@ export async function dispatch(argv:string[]):Promise<void>{
   if(command==="send"){
     const {named,positional}=flags(rest),threadId=positional[0],text=named.get("prompt")??positional.slice(1).join(" "),senderId=process.env.PI_THREAD_ID||undefined;
     if(!threadId||!text.trim())throw new Error("send requires a thread id and --prompt");
-    if([...named.keys()].some(key=>key!=="prompt"))throw new Error("send accepts only --prompt");
-    threadOutput(await threadClient().send({requestId:randomUUID(),threadId,senderId,text,delivery:"pending"}));return;
+    if([...named.keys()].some(key=>!["prompt","request-id","source"].includes(key)))throw new Error("send accepts --prompt, recovery --request-id and --source explicit for an original native tool send");
+    const requestId=named.get("request-id")??randomUUID(),source=named.get("source");
+    if(!requestId.trim()||named.has("request-id")&&requestId==="true")throw new Error("Recovery --request-id requires the exact original identity");
+    if(source!==undefined&&(source!=="explicit"||!named.has("request-id")||!senderId||!process.env.PI_THREAD_TOKEN||!requestId.startsWith(`${senderId}:`)||requestId.length<=senderId.length+1))throw new Error("Native tool recovery --source explicit requires this caller's original --request-id");
+    threadOutput(await threadClient().send({requestId,threadId,senderId,text,delivery:"pending",...(source==="explicit"?{source:"explicit" as const}:{})}));return;
+  }
+  if(command==="wait-recover"){
+    const {named,positional}=flags(rest),threadId=process.env.PI_THREAD_ID,requestId=required(named,"request-id");
+    if(positional.length||[...named.keys()].some(key=>!["request-id","input"].includes(key)))throw new Error("wait-recover requires only --request-id and --input original JSON");
+    if(!threadId||!process.env.PI_THREAD_TOKEN||!requestId.startsWith(`${threadId}:`)||requestId.length<=threadId.length+1)throw new Error("Wait recovery requires this caller's original request-id and thread capability");
+    const input:unknown=JSON.parse(required(named,"input"));
+    if(!Check(threadWaitParameters,input)||input.requestId!==undefined&&input.requestId!==requestId)throw new Error("Wait recovery requires the unchanged original typed wait payload");
+    threadOutput(await threadClient().agentWait({...input,threadId,requestId}));return;
   }
   if(command==="peer"){
     if(rest.length!==1||rest[0]!=="list")throw new Error("usage: pi-orchestrator peer list");
