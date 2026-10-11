@@ -6,6 +6,7 @@ export type ResponseEventKind = "created" | "completed" | "failed" | "incomplete
 const responseEvents = {
   "response.created": "created", "response.completed": "completed", "response.failed": "failed", "response.incomplete": "incomplete", error: "error",
   "response.output_item.done": "item_done",
+  keepalive: "progress",
   "response.audio.delta": "progress", "response.audio.done": "progress",
   "response.audio.transcript.delta": "progress", "response.audio.transcript.done": "progress",
   "response.code_interpreter_call_code.delta": "progress", "response.code_interpreter_call_code.done": "progress",
@@ -26,7 +27,7 @@ const responseEvents = {
   "response.mcp_list_tools.completed": "progress", "response.mcp_list_tools.failed": "progress", "response.mcp_list_tools.in_progress": "progress",
   "response.output_text.annotation.added": "progress", "response.queued": "progress",
   "response.custom_tool_call_input.delta": "progress", "response.custom_tool_call_input.done": "progress",
-} satisfies Record<ResponseStreamEvent["type"], ResponseEventKind>;
+} satisfies Record<ResponseStreamEvent["type"] | "keepalive", ResponseEventKind>;
 
 export interface ResponseObservation { kind: ResponseEventKind; event: Record<string, any> }
 export function parseResponseEvent(value: unknown): VariantResult<ResponseObservation> {

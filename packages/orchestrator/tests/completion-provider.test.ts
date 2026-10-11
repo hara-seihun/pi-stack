@@ -82,6 +82,13 @@ it("marks accepted stream loss indeterminate and never retries provider dispatch
   expect(transport).toHaveBeenCalledTimes(1);
 });
 
+it("continues a native completion across provider keepalive heartbeats without redispatch", async () => {
+  const native = events().replace(event("response.output_text.delta", { output_index: 0, content_index: 0, delta: '{"ok":true}' }), event("keepalive", {}) + event("response.output_text.delta", { output_index: 0, content_index: 0, delta: '{"ok":true}' }));
+  const transport = vi.fn(async () => new Response(event("keepalive", {}) + native));
+  expect(await executeCompletion(input, run, options(transport))).toMatchObject({ state: "completed", result: { text: '{"ok":true}', responseId: "resp-native" } });
+  expect(transport).toHaveBeenCalledTimes(1);
+});
+
 it("fences unknown provider SSE variants even when a completed result follows", async () => {
   const transport = vi.fn(async () => new Response(event("response.new_variant", {}) + events()));
   expect(await executeCompletion(input, run, options(transport))).toMatchObject({ state: "indeterminate", error: { code: "protocol", message: expect.stringContaining("Unknown provider response event type") } });
