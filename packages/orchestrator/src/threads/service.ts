@@ -233,6 +233,16 @@ export class ThreadService implements ThreadApi {
     return statement;
   }
 
+  private ensureIndex(name: "thread_work_queue" | "thread_execution_active", definition: string): void {
+    const existing = this.sql("SELECT sql FROM sqlite_master WHERE type='index' AND name=?").get(name) as { sql: string } | undefined;
+    const normalized = (sql: string) => sql.replace(/\bIF NOT EXISTS\b/gi, "").replace(/\s+/g, "").toLowerCase();
+    if (existing && normalized(existing.sql) === normalized(definition)) return;
+    this.transaction(() => {
+      if (existing) this.db.exec(`DROP INDEX ${name}`);
+      this.db.exec(definition);
+    });
+  }
+
   constructor(private readonly options: ThreadServiceOptions) {
     if (options.capacity && "mode" in options.capacity && options.capacity.mode !== "unmanaged") throw new Error("Invalid explicit agent capacity mode");
     if (options.databasePath !== ":memory:") mkdirSync(dirname(options.databasePath), { recursive: true });
@@ -257,7 +267,7 @@ export class ThreadService implements ThreadApi {
         reply_to TEXT, status TEXT NOT NULL DEFAULT 'queued', front INTEGER NOT NULL DEFAULT 0,
         settings TEXT NOT NULL, prepared TEXT, execution_id TEXT, created_at INTEGER NOT NULL, inserted_at INTEGER,
         landed_at INTEGER, outcome TEXT, final_message TEXT, error TEXT);
-      CREATE INDEX IF NOT EXISTS thread_work_queue ON thread_work(thread_id,status,front DESC,ordinal);
+      CREATE INDEX IF NOT EXISTS thread_work_queue ON thread_work(thread_id,status,ordinal);
       CREATE INDEX IF NOT EXISTS thread_work_unfinished ON thread_work(thread_id) WHERE status!='done';
       CREATE TABLE IF NOT EXISTS thread_human_activity (
         work_id TEXT PRIMARY KEY REFERENCES thread_work(id), thread_id TEXT NOT NULL REFERENCES thread(id), created_at INTEGER NOT NULL);
@@ -295,11 +305,11 @@ export class ThreadService implements ThreadApi {
       CREATE TABLE IF NOT EXISTS thread_question_link (
         original_id TEXT PRIMARY KEY REFERENCES thread_question(id), forwarded_id TEXT NOT NULL REFERENCES thread_question(id));
       INSERT OR IGNORE INTO thread_question_event(question_id) SELECT id FROM thread_question WHERE accepted_at IS NULL
+        AND NOT EXISTS(SELECT 1 FROM thread_question_event e WHERE e.question_id=thread_question.id)
         AND NOT EXISTS(SELECT 1 FROM thread_question_route r WHERE r.question_id=thread_question.id AND r.state='held')
         AND NOT EXISTS(SELECT 1 FROM thread_question_origin o WHERE o.question_id=thread_question.id)
         AND NOT EXISTS(SELECT 1 FROM thread_question_unresolved u WHERE u.question_id=thread_question.id) ORDER BY created_at,rowid;
       CREATE INDEX IF NOT EXISTS thread_question_pending ON thread_question(thread_id,created_at) WHERE accepted_at IS NULL;
-      DROP INDEX IF EXISTS thread_execution_active;
       UPDATE thread SET state='idle',held=1 WHERE state='stopped';
       UPDATE thread SET metadata=json_set(metadata,'$.peerDependencies',json_extract(metadata,'$.agentWait.threadIds'))
         WHERE json_extract(metadata,'$.peerDependencies') IS NULL AND json_type(metadata,'$.agentWait.threadIds')='array';
@@ -307,7 +317,8 @@ export class ThreadService implements ThreadApi {
         WHERE json_extract(metadata,'$.peerDependencies') IS NULL AND json_type(metadata,'$.agentWait.fromThreadId')='text';
       UPDATE thread_work SET status='dispatched' WHERE status IN ('dispatching','inserted');
       UPDATE thread SET metadata=json_set(metadata,'$.peerDependencies',json_extract(metadata,'$.dependencyUpdate.desired'))
-        WHERE json_type(metadata,'$.dependencyUpdate.desired')='array';
+        WHERE json_type(metadata,'$.dependencyUpdate.desired')='array'
+          AND json_extract(metadata,'$.peerDependencies') IS NOT json_extract(metadata,'$.dependencyUpdate.desired');
       UPDATE thread SET metadata=json_set(metadata,'$.dependencyUpdate',json_object('previous',json_extract(metadata,'$.peerDependencies'),'desired',json_extract(metadata,'$.peerDependencies')))
         WHERE json_array_length(json_extract(metadata,'$.peerDependencies'))>0 AND json_extract(metadata,'$.dependencyUpdate') IS NULL;`);
     const generationSchema = this.sql("SELECT sql FROM sqlite_master WHERE type='table' AND name='thread_context_generation'").get() as { sql: string };
@@ -334,7 +345,8 @@ export class ThreadService implements ThreadApi {
         const parentRole = row.parent_id && byId.has(row.parent_id) ? adoptRole(row.parent_id) : undefined;
         const role = threadRole(metadata, parentRole);
         roles.set(id, role); visiting.delete(id);
-        this.sql("UPDATE thread SET metadata=? WHERE id=?").run(JSON.stringify({ ...metadata, role }), id);
+        const adopted = JSON.stringify({ ...metadata, role });
+        if (adopted !== row.metadata) this.sql("UPDATE thread SET metadata=? WHERE id=?").run(adopted, id);
         return role;
       };
       for (const row of rows) adoptRole(row.id);
@@ -346,6 +358,7 @@ export class ThreadService implements ThreadApi {
     if (!executionColumns.some(column => column.name === "retry_settings")) this.db.exec("ALTER TABLE thread_execution ADD COLUMN retry_settings TEXT");
     if (!executionColumns.some(column => column.name === "assignment_pending")) this.db.exec("ALTER TABLE thread_execution ADD COLUMN assignment_pending INTEGER NOT NULL DEFAULT 0");
     if (!executionColumns.some(column => column.name === "notification_only")) this.db.exec("ALTER TABLE thread_execution ADD COLUMN notification_only INTEGER NOT NULL DEFAULT 0 CHECK(notification_only IN (0,1))");
+    this.ensureIndex("thread_execution_active", "CREATE UNIQUE INDEX thread_execution_active ON thread_execution(thread_id) WHERE ended_at IS NULL");
     if (executionColumns.some(column => column.name === "state")) this.db.exec("ALTER TABLE thread_execution DROP COLUMN state");
     if (!(this.sql("PRAGMA table_info(thread_work)").all() as { name: string }[]).some(column => column.name === "input_origin")) {
       this.transaction(() => this.db.exec(`ALTER TABLE thread_work ADD COLUMN input_origin TEXT CHECK(input_origin IN ('human','machine'));
@@ -355,14 +368,12 @@ export class ThreadService implements ThreadApi {
           ELSE NULL END;`));
     }
     if (!(this.sql("PRAGMA table_info(thread_work)").all() as { name: string }[]).some(column => column.name === "priority")) this.db.exec("ALTER TABLE thread_work ADD COLUMN priority INTEGER NOT NULL DEFAULT 0 CHECK(priority IN (0,1,2))");
-    this.db.exec(`UPDATE thread_work SET delivery='pending',front=0 WHERE status!='done';
-      DROP INDEX IF EXISTS thread_work_queue;
-      CREATE INDEX thread_work_queue ON thread_work(thread_id,status,ordinal);`);
+    this.db.exec(`UPDATE thread_work SET delivery='pending',front=0 WHERE status!='done' AND (delivery!='pending' OR front!=0);`);
+    this.ensureIndex("thread_work_queue", "CREATE INDEX thread_work_queue ON thread_work(thread_id,status,ordinal)");
     if (!(this.sql("PRAGMA table_info(thread_work)").all() as { name: string }[]).some(column => column.name === "sender_name")) this.db.exec("ALTER TABLE thread_work ADD COLUMN sender_name TEXT");
     if (!(this.sql("PRAGMA table_info(thread_work)").all() as { name: string }[]).some(column => column.name === "landed_at")) this.db.exec("ALTER TABLE thread_work ADD COLUMN landed_at INTEGER; UPDATE thread_work SET landed_at=inserted_at WHERE status='dispatched' AND inserted_at IS NOT NULL");
     this.db.exec(`CREATE INDEX IF NOT EXISTS thread_execution_settlements ON thread_execution(thread_id,ended_at DESC,id DESC);
       CREATE INDEX IF NOT EXISTS thread_execution_await ON thread_execution(thread_id,settlement_seq);
-      CREATE UNIQUE INDEX IF NOT EXISTS thread_execution_active ON thread_execution(thread_id) WHERE ended_at IS NULL;
       UPDATE thread SET state=CASE
         WHEN json_extract(metadata,'$.runnerReference') IS NOT NULL OR EXISTS(SELECT 1 FROM thread_execution e WHERE e.thread_id=thread.id AND e.ended_at IS NULL) THEN 'running'
         WHEN held=1 THEN 'idle'

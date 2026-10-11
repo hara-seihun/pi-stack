@@ -64,6 +64,16 @@ export class CoreService {
   private readonly db: ReturnType<typeof openSqlite>;
   private readonly cursors = new Map<string, { current: number; ceiling: number }>();
   private state: "new" | "adopted" | "serving" | "draining" | "closed" = "new";
+  private readonly adoptionMs = { runtimeCustody: 0, threadDatabase: 0, scopeAdoption: 0, directoryWiring: 0 };
+  private measureAdoption<T>(stage: "threadDatabase", operation: () => T): T {
+    const started = performance.now();
+    try { return operation(); } finally { this.adoptionMs[stage] += performance.now() - started; }
+  }
+  private reportAdoption(outcome: "adopted" | "failed"): void {
+    console.info(JSON.stringify({ type: "core-adoption", releaseCommit: this.config.releaseCommit, outcome,
+      declaredScopeCount: this.config.scopes.length, adoptedScopeCount: this.owners.size,
+      durationsMs: Object.fromEntries(Object.entries(this.adoptionMs).map(([stage, ms]) => [stage, Math.round(ms)])) }));
+  }
   constructor(readonly config: CoreConfig, private readonly runtimeFactory: CoreRuntimeFactory) {
     mkdirSync(dirname(config.statePath), { recursive: true, mode: 0o700 });
     this.db = openSqlite(config.statePath);
@@ -79,12 +89,17 @@ export class CoreService {
   }
   async start(): Promise<CoreResult<void>> {
     if (this.state !== "new") return { ok: false, error: { code: "ownership-conflict", message: "Core adoption requires a new controller" } };
+    let wiringStarted: number | null = null;
     try {
     for (const scope of this.config.scopes) {
       if (scope.availability.kind === "unavailable") continue;
-      const result = await this.adopt(scope);
-      if (!result.ok) { await this.close(); return result; }
+      const started = performance.now();
+      let result: CoreResult<void>;
+      try { result = await this.adopt(scope); }
+      finally { this.adoptionMs.scopeAdoption += performance.now() - started; }
+      if (!result.ok) { this.reportAdoption("failed"); await this.close(); return result; }
     }
+    wiringStarted = performance.now();
     for (const owner of this.owners.values()) {
       const principal = this.config.principals.find(principal => principal.id === owner.scope.principalId)!;
       const scopes = [...this.owners.values()].filter(candidate => candidate.scope.principalId === owner.scope.principalId && authorize(this.config.policy, { principal, resource: candidate.scope.resource, action: "read", now: Date.now() }).ok);
@@ -117,9 +132,14 @@ export class CoreService {
         return summary.ok ? { ok: true, value: { ...summary.value, managerThreadId: owner.scope.manager.kind === "existing" ? owner.scope.manager.threadId : null } } : summary;
       }, message => { if (message) console.error(`Core manager ${owner.scope.id}: ${message}`); });
     }
+    this.adoptionMs.directoryWiring += performance.now() - wiringStarted;
+    wiringStarted = null;
     this.state = "adopted";
+    this.reportAdoption("adopted");
     return { ok: true, value: undefined };
     } catch (cause) {
+      if (wiringStarted !== null) this.adoptionMs.directoryWiring += performance.now() - wiringStarted;
+      this.reportAdoption("failed");
       const drained = await this.close();
       return { ok: false, error: { code: "unavailable", message: `Core scope wiring failed: ${cause instanceof Error ? cause.message : String(cause)}${drained.ok ? "" : `; ${drained.error.message}`}` } };
     }
@@ -141,7 +161,10 @@ export class CoreService {
     return { ok: true, value: undefined };
   }
   private async adopt(scope: CoreScope): Promise<CoreResult<void>> {
-    const built = await this.runtimeFactory(scope);
+    const custodyStarted = performance.now();
+    let built: Awaited<ReturnType<CoreRuntimeFactory>>;
+    try { built = await this.runtimeFactory(scope); }
+    finally { this.adoptionMs.runtimeCustody += performance.now() - custodyStarted; }
     if (!built.ok) return built;
     const runtime = built.value;
     const ownership = acquireScopeOwnership(scope, path => runtime.path(path));
@@ -153,7 +176,7 @@ export class CoreService {
       if (!existsSync(keyPath)) throw new Error("Existing capability key is missing; adoption cannot mint a replacement");
       const capability = threadCapability(keyPath);
       const callback = scopeCallbackTransport(this.config.scopes, scope, unixGatewayFetch);
-      threads = new ThreadService({
+      threads = this.measureAdoption("threadDatabase", () => new ThreadService({
         databasePath: runtime.path(scope.storage.databasePath), sessionsDir: runtime.path(scope.storage.sessionsDir), capability,
         capacity: configuredAgentCapacity(process.env.PI_AGENT_CAPACITY_CONFIG === undefined ? {} : { PI_AGENT_CAPACITY_CONFIG: process.env.PI_AGENT_CAPACITY_CONFIG }, { uid: scope.custody.uid }),
         capacityRecovery: configuredCapacityRecovery(process.env.PI_AGENT_CAPACITY_CONFIG === undefined ? {} : { PI_AGENT_CAPACITY_CONFIG: process.env.PI_AGENT_CAPACITY_CONFIG }, agentId => !!threads?.get(agentId)),
@@ -169,7 +192,7 @@ export class CoreService {
           const relay = this.owners.get(scope.id)?.relay?.managerOwner;
           return relay ? relay.api.managerNotificationPolicy() : Promise.resolve({ ok: true as const, value: scope.manager.kind === "existing" ? { view: "mono" as const, managerThreadId: scope.manager.threadId } : { view: "classic" as const } });
         },
-      });
+      }));
       if (scope.manager.kind === "existing") {
         const manager = threads.get(scope.manager.threadId);
         if (!manager || manager.metadata?.manager !== true) throw new Error("Declared manager does not match the existing canonical thread");
