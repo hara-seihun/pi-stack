@@ -78,6 +78,7 @@ export interface ThreadServiceOptions {
   recoverSession?: (threadId: string, output: (event: PiEvent) => void, exit: (code: number | null) => void) => Promise<PiSession | null>;
   workersOnly?: boolean;
   capacity?: import("../agent-capacity.js").AgentCapacity | { mode: "unmanaged" };
+  capacityRecovery?: import("../agent-capacity.js").CapacityRecovery;
   admitNewThread?: (settings: ThreadSettings) => Result<void>;
   /** Owning person's implicit model for NEW spawns only. Explicit choices and accepted receipts win. */
   spawnDefaultModel?: () => string | undefined;
@@ -358,7 +359,7 @@ export class ThreadService implements ThreadApi {
         ELSE 'idle' END WHERE state NOT IN ('idle','running');`);
     const capacity = options.capacity;
     this.capacityLedger = capacity && "mode" in capacity && capacity.mode === "unmanaged" ? undefined
-      : new ThreadCapacityLedger(this.db, capacity && !("mode" in capacity) ? capacity : configuredAgentCapacity());
+      : new ThreadCapacityLedger(this.db, capacity && !("mode" in capacity) ? capacity : configuredAgentCapacity(), options.capacityRecovery);
   }
 
   private transaction<T>(operation: () => T): T {
@@ -1011,6 +1012,57 @@ export class ThreadService implements ThreadApi {
     if (!this.capacityLedger.current(id).some(row => row.entered_native && row.state !== "releasing")) return;
     const runtime = await this.attach(id, true);
     if (!runtime) await this.releaseCapacity(id);
+  }
+  private async reconcileCapacityHandoff(id: string): Promise<boolean> {
+    const ledger = this.capacityLedger;
+    if (!ledger || !this.options.capacityRecovery) return true;
+    let ready = true;
+    for (const row of ledger.current(id)) {
+      const owner = await ledger.identify(row);
+      if (!owner.ok) { this.capacityReleaseEvidence(id, owner); ready = false; continue; }
+      const capacity = this.options.capacity;
+      if (!capacity || "mode" in capacity || owner.value === capacity.ownerId) continue;
+      if (row.state === "releasing") {
+        const released = await ledger.flush(row.execution_id); this.capacityReleaseEvidence(id, released);
+        if (!released.ok) ready = false;
+        continue;
+      }
+      if (row.entered_native === 0) {
+        const released = await ledger.handoff(row, { kind: "unentered", observedAt: Date.now() });
+        this.capacityReleaseEvidence(id, released); if (!released.ok) ready = false;
+        continue;
+      }
+      try {
+        const reference = this.get(id)?.metadata?.runnerReference;
+        if (!this.runtimes.has(id) && !reference && !this.options.recoverSession) {
+          this.admissionWait(id, { code: "unavailable", message: "Global agent capacity: original-owner native custody has no positive observation route", retryAt: Date.now() + 5_000 }); ready = false; continue;
+        }
+        const runtime = this.runtimes.get(id) ?? await this.attach(id, !reference);
+        let observed: Json | undefined;
+        if (runtime) {
+          const state = await this.rpc(runtime, { type: "get_state" }); this.adoptReference(id, state); observed = state;
+          const idle = state.nativeProtocolVersion === "batch-operations-v1" && state.isStreaming === false && state.isCompacting === false
+            && state.isBashRunning === false && state.localTools === 0 && state.pendingCommandCount === 0 && state.pendingMessageCount === 0
+            && state.backgroundOperationCount === 0 && !state.cancellationFailed;
+          if (!idle) {
+            this.admissionWait(id, { code: "unavailable", message: "Global agent capacity: original-owner native execution remains active or uncertain", retryAt: Date.now() + 5_000 }); ready = false; continue;
+          }
+          runtime.busy = false;
+          this.adoptLanded(id, state);
+        }
+        const released = await ledger.handoff(row, { kind: runtime ? "native-idle" : "native-absent", observedAt: Date.now(), threadId: id });
+        this.capacityReleaseEvidence(id, released); if (!released.ok) ready = false;
+        if (released.ok && runtime && observed && Array.isArray(observed.completedWorkIds)) {
+          const execution = this.execution(id);
+          const works = execution ? this.sql("SELECT id FROM thread_work WHERE execution_id=? AND status!='done'").all(execution.id) as { id: string }[] : [];
+          if (execution && observed.completedWorkIds.includes(execution.work_id) && works.every(work => observed!.completedWorkIds.includes(work.id)))
+            await this.finish(id, runtime, settledWorkOutcome(undefined, observed.lastAssistantMessage), observed.lastAssistantMessage ?? null);
+        }
+      } catch (error) {
+        this.admissionWait(id, { code: "unavailable", message: `Global agent capacity: original-owner native proof unavailable: ${errorText(error)}`, retryAt: Date.now() + 5_000 }); ready = false;
+      }
+    }
+    return ready;
   }
   private async recoverUnassignedCapacity(id: string): Promise<boolean> {
     for (const row of this.capacityLedger?.current(id) ?? []) {
@@ -2418,6 +2470,7 @@ export class ThreadService implements ThreadApi {
       try {
         // A rejected startup is not a failed cancellation: inspect the retained runner directly.
         await this.opening.get(id)?.catch(() => undefined);
+        if (!await this.reconcileCapacityHandoff(id)) return bad("unavailable", "Original-owner execution handoff remains pending");
         await this.releaseFailedStartupCapacity(id);
         await this.recoverMissingStartupCapacity(id);
         const hadReference = !!this.get(id)?.metadata?.runnerReference;
@@ -2853,7 +2906,7 @@ export class ThreadService implements ThreadApi {
         args: ["--provider", provider!, "--model", model.join("/"), "--thinking", settings.thinkingLevel, "--name", thread.title, ...(raw ? [RAW_ARGUMENT] : []), ...(telephone ? [TELEPHONE_CONTEXT_ARGUMENT, JSON.stringify(telephone)] : []), ...(context ? ["--orchestrator-context", JSON.stringify(context)] : [])], env, threads: this.directory ?? this },
         event => this.output(id, runtime, event), code => this.exited(id, runtime, code));
       const state = await this.rpc(runtime, { type: "get_state" });
-      runtime.nativeProtocol = nativeProtocol(state, !!env.PI_THREAD_RUNNER_REFERENCE);
+      runtime.nativeProtocol = nativeProtocol(state, !!env.PI_THREAD_RUNNER_REFERENCE || runtime.session.nativeOwnership?.kind === "retained");
       this.adoptReference(id, state);
       runtime.busy = this.busy(state); runtime.finalMessage = state.lastAssistantMessage;
       if (runtime.nativeProtocol === "draining") {
@@ -2864,7 +2917,7 @@ export class ThreadService implements ThreadApi {
       }
       this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.nativeProtocolAdoption') WHERE id=?").run(id);
       this.clearAdmissionWait(id);
-      if (env.PI_THREAD_RUNNER_REFERENCE && state.threadSessionKey !== env.PI_THREAD_SESSION_KEY) runtime.environmentKey = undefined;
+      if ((env.PI_THREAD_RUNNER_REFERENCE || runtime.session.nativeOwnership?.kind === "retained") && state.threadSessionKey !== env.PI_THREAD_SESSION_KEY) runtime.environmentKey = undefined;
       runtime.busy = this.busy(state); runtime.finalMessage = state.lastAssistantMessage;
       await this.rpc(runtime, { type: "set_session_name", name: thread.title });
       const execution = this.execution(id);
@@ -3029,6 +3082,7 @@ export class ThreadService implements ThreadApi {
   private queuedWork(id: string): boolean { return !!this.sql("SELECT 1 FROM thread_work WHERE id=? AND status='queued'").get(id); }
   private async drain(id: string): Promise<void> {
     if (this.suspended || this.closed) return;
+    if (!await this.reconcileCapacityHandoff(id)) return;
     const thread = this.get(id); if (!thread || thread.metadata?.archived || thread.metadata?.inputFailure || this.row(id)?.held || this.halts.has(id) || this.closed) return;
     const env = this.options.environment?.(thread);
     if (env && [env.PI_MODEL_DELIVERY_TIMEZONE, env.PI_PERSON_TIMEZONE_FILE, env.PI_PERSON_SETTINGS_DATA, env.PI_REMOTE_DATA].some(value => value !== undefined)) {
@@ -3045,6 +3099,11 @@ export class ThreadService implements ThreadApi {
     const nextWork = this.execution(id)?.work_id ?? this.pending(id)[0]?.id;
     if (startup && startup.workId === nextWork && Number(startup.retryAt) > Date.now()) return;
     let execution = this.execution(id), runtime = this.runtimes.get(id);
+    if (execution && runtime && this.options.capacityRecovery) {
+      const capacity = await this.acquireCapacity(id, execution.id, execution.work_id, "work");
+      if (!capacity.ok) { this.admissionWait(id, capacity.error); return; }
+      this.capacityLedger?.entered(id, execution.id);
+    }
     if (execution && !runtime) runtime = await this.open(id, this.executionSettings(execution), true);
     execution = this.execution(id);
     if (runtime?.nativeProtocol === "draining") {
@@ -3420,6 +3479,13 @@ export class ThreadService implements ThreadApi {
     if (this.closed) return good(undefined);
     this.suspend();
     await Promise.allSettled([...this.operations.values(), ...this.halts.values(), ...this.opening.values(), ...this.attaching.values(), ...this.dependencyOperations.values()]);
+    if (this.capacityLedger) {
+      for (const row of this.sql("SELECT * FROM thread_capacity WHERE state!='released'").all() as unknown as import("./capacity-ledger.js").ThreadCapacityRow[]) {
+        const owner = await this.capacityLedger.identify(row);
+        if (!owner.ok) this.capacityReleaseEvidence(row.thread_id, owner);
+        if (!row.entered_native && owner.ok && this.options.capacityRecovery) await this.capacityLedger.handoff(row, { kind: "unentered", observedAt: Date.now() });
+      }
+    }
     // Native sessions outlive controllers, including idle ones. The successor
     // retires them with its context listener already serving; shutdown hooks
     // must not hold this listener's own handoff hostage.

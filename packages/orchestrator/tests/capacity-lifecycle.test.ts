@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, test } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,7 +27,7 @@ function fixture() {
 
 test("requested retries keep their identity; released custody never becomes a new work candidate", async () => {
   const f = fixture();
-  f.db.exec("INSERT INTO thread_capacity VALUES('retry','retry','agent','work','work','requested',NULL,0,NULL)");
+  f.db.exec("INSERT INTO thread_capacity VALUES('retry','retry','agent','work','work','requested',NULL,0,NULL,NULL)");
   expect(f.ledger.candidate("agent", "work")).toBe("retry");
   unwrap(await f.ledger.acquire("agent", "retry", "work", "work"));
   expect(f.ledger.candidate("agent", "work")).toBe("retry");
@@ -38,7 +38,7 @@ test("requested retries keep their identity; released custody never becomes a ne
 test("old-owner release errors preserve custody without poisoning other rows or threads", async () => {
   const f = fixture();
   const old = unwrap(f.authority.acquire("previous", { agentId: "old", executionId: "old" }));
-  f.db.prepare("INSERT INTO thread_capacity VALUES('old','old','old','old','work','held',?,1,NULL)").run(old.leaseId);
+  f.db.prepare("INSERT INTO thread_capacity VALUES('old','old','old','old','work','held',?,1,NULL,NULL)").run(old.leaseId);
   const healthy = unwrap(await f.ledger.acquire("healthy", "healthy", "healthy", "work"));
   f.ledger.requestRelease("old"); f.ledger.requestRelease("healthy");
   expect((await f.ledger.flush()).ok).toBe(false);
@@ -57,7 +57,7 @@ test("release reconciliation wakes pending work even when old-owner acknowledgem
   cleanups.push(() => service.detach());
   unwrap(await service.spawn({ id: "agent", requestId: "work", cwd: root, message: "work" }));
   const old = unwrap(f.authority.acquire("previous", { agentId: "agent", executionId: "previous" }));
-  (service as any).db.prepare("INSERT INTO thread_capacity VALUES('previous','previous','agent','previous','work','releasing',?,1,NULL)").run(old.leaseId);
+  (service as any).db.prepare("INSERT INTO thread_capacity VALUES('previous','previous','agent','previous','work','releasing',?,1,NULL,NULL)").run(old.leaseId);
   let drains = 0;
   (service as any).drain = async () => { drains++; };
   (service as any).started = true;
@@ -78,7 +78,7 @@ test("startup rejection never reinserts a settled identity, even with an unrelea
     settings: { model: "sol", thinkingLevel: "high", speed: "standard" } }));
   unwrap(service.importMessage({ id: "work", threadId: "agent", text: "work", state: "done", outcome: "failed", executionId: "settled" }));
   const db = (service as any).db;
-  db.exec("UPDATE thread_work SET status='queued',execution_id=NULL WHERE id='work'; INSERT INTO thread_capacity VALUES('settled','settled','agent','work','work','requested',NULL,0,NULL)");
+  db.exec("UPDATE thread_work SET status='queued',execution_id=NULL WHERE id='work'; INSERT INTO thread_capacity VALUES('settled','settled','agent','work','work','requested',NULL,0,NULL,NULL)");
   await (service as any).rejectStartup("agent", "Invalid recorded runner");
   const executions = db.prepare("SELECT id FROM thread_execution WHERE thread_id='agent'").all();
   expect(executions).toHaveLength(2);

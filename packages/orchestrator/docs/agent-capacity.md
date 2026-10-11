@@ -53,6 +53,28 @@ Standalone clients select the actual Unix UID. Adopted Core scopes call `configu
 
 `PI_AGENT_CAPACITY_CONFIG` explicitly selects a different absolute manifest path. An explicit complete environment tuple (`PI_AGENT_CAPACITY_URL`, `PI_AGENT_CAPACITY_OWNER`, `PI_AGENT_CAPACITY_TOKEN_FILE`) selects a client directly; a partial tuple is an error. These are configuration routes, not failover authorities. Unset, unreadable, invalid, unauthorized or unreachable configuration fails closed. There is no production unmanaged fallback. Mock-only owners explicitly select unmanaged mode; installed Remote and Orchestrator owners use the shared client.
 
+## Automatic owner handoff
+
+`thread_capacity.owner_id` records the original registered owner before admission. Historical unknown rows require affirmative exact `/v1/recorded-owner` lookup; errors retain custody. An authority `migrations` grant names `{ownerId, ownerIds}` with every ID registered under the same explicit `owners[].host`. Only that migration credential can look up one exact agent/execution pair. The result contains an owner identity or explicit absence, never credentials, leases, thread content or an enumeration. Unset grants refuse lookup.
+
+The host client manifest's `migration` field carries the same finite grant; its migration owner must be the explicitly registered UID0. Core creates a privileged recovery broker bound to each adopted scope's actual thread inventory. It supplies only exact-execution inspect/release/withdraw clients for the original owner, never acquisition or native environment credentials. Normal acquisition remains strict to the adopted scope UID.
+
+Every resident thread automatically reconciles independently before dispatch, including held threads. Unentered admissions can be withdrawn/released from their durable never-entered fence. Entered custody requires exact native attachment/recovery and positive current-protocol idle counters, including pending inputs, commands, local tools and background operations; missing observation or active/unknown state stays explicitly pending. Positive native absence uses only the fenced recover-session route. Completed native work settles its original execution rather than replaying it. The outgoing controller records original ownership and reconciles unentered admissions after its operations quiesce; retained native work remains with the successor's observation loop.
+
+`thread_capacity_handoff` journals original owner and immutable positive proof atomically with release intent, then records the authority acknowledgement atomically with the released row. Lost acknowledgements replay the same original-owner release; unrelated rows continue. Neither expiry nor ownership transfer is used. Successors acquire fresh physical custody only after the original release is acknowledged.
+
+### Host configuration staging and activation order
+
+[`deploy/capacity-migration-config.mjs`](../../../deploy/capacity-migration-config.mjs) stages, never installs:
+
+```
+node deploy/capacity-migration-config.mjs HOST ABS_AUTHORITY_CONFIG ABS_HOST_CLIENT_CONFIG ABS_PRIVATE_STAGE
+```
+
+The root-protected input authority's exact registered host inventory must equal that host's client owner inventory; the registered UID0 selects the migration owner. Owner spelling is not host evidence. Stage the second host against the first staged `authority.json` so both finite grants survive. Outputs are private `authority.json` and `client.json`; database path, existing owner/token inventory and unrelated grants are retained. Enrollment generators preserve an explicitly selected grant only while all named registrations retain exact UID and token path. New accounts do not automatically extend historical migration authority.
+
+The publication owner prepares the new Orchestrator artifact, installs the staged authority configuration at `/etc/pi-stack/agent-capacity-authority.json`, and selects the new authority code before restarting the existing `pi-agent-capacity.service` on kenan-server. Its command remains `/srv/pi/pi-orchestrator/dist/agent-capacity-cli.js serve /etc/pi-stack/agent-capacity-authority.json`. Preserve the existing `/var/lib/pi-stack/agent-capacity/capacity.sqlite3` inode, WAL and leases; do not initialize another authority. Install each protected staged client at `/etc/pi-stack/agent-capacity-client.json` before activating its new Core. Converge retains its same-authority tunnel. If the authority endpoint is not upgraded yet, reconciliation remains typed pending without credential probing or admission fallback.
+
 ## Initial cutover
 
 An empty authority starts **uninitialized** and refuses fresh admission. Before accepting its census:
