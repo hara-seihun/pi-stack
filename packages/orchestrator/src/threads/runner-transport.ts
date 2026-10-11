@@ -447,22 +447,13 @@ export function createSharedPiSessionOpener({ dataDir, durable = false, custody,
     let retained = options.env.PI_THREAD_RUNNER_REFERENCE ? validate(JSON.parse(options.env.PI_THREAD_RUNNER_REFERENCE)) : undefined;
     const group = boundary(options, custody);
     const currentControl = join(socketDir, "thread-runners", `${group}.sock`);
-    if (retained && retained.control !== currentControl) {
-      let status: any;
-      try { status = await request(retained.control, { type: "status" }); }
-      catch (error) { if (!socketAbsent(error)) throw error; }
-      const recoveringLive = options.env.PI_THREAD_RECOVERING === "1" && status?.threadIds?.includes(options.threadId);
-      // Request drain before closing the last idle resident: its close can remove the control socket.
-      // Recovery keeps accepted sessions, not obsolete empty generations, even after a controller crash.
-      if (typeof status?.activeSessions === "number") {
-        try { await request(retained.control, { type: "drain" }); }
-        catch (error) { if (!socketAbsent(error)) throw error; }
-      }
-      if (!recoveringLive && status && status.sessions !== 0) {
-        try { await request(retained.control, { type: "close", socketPath: retained.socketPath }, 35_000); }
-        catch (error) { if (!socketAbsent(error)) throw error; }
-      }
-      if (!recoveringLive) retained = undefined;
+    const owner = nativeStorageOwner(dataDir, custody?.uid ?? process.getuid!());
+    if (owner) {
+      await request(owner.control, { type: "status" });
+      const generation = owner.control.slice(owner.control.lastIndexOf("/") + 1, -5);
+      retained = validate({ control: owner.control, socketPath: join(socketDir, "thread-sockets", `${generation}.${hash(options.threadId)}.sock`) });
+    } else {
+      retained = undefined;
     }
     const control = retained?.control ?? currentControl;
     const socketPath = retained?.socketPath ?? join(socketDir, "thread-sockets", `${group}.${hash(options.threadId)}.sock`);
