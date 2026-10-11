@@ -30,11 +30,17 @@ class Native implements PiSession {
   bind(output: (event: PiEvent) => void) { this.output = output; }
   async command(command: PiCommand) {
     if (command.type === "abort" && this.abortFails) throw new Error("Tool cancellation unconfirmed");
-    if (command.type === "prompt" || command.type === "steer") { this.busy = true; this.accepted.add(String(command.workId)); this.output({ type: "agent_start" }); }
+    if (command.type === "input_batch") {
+      this.busy = true;
+      for (const workId of command.workIds ?? []) this.accepted.add(String(workId));
+      this.output({ type: "thread_landed", workIds: command.workIds });
+      this.output({ type: "agent_start" });
+    }
+    if (command.type === "resume_pending") { this.busy = true; this.output({ type: "agent_start" }); }
     if (command.type === "compact") { this.busy = true; this.commandBusy = true; this.output({ type: "compaction_start" }); }
     if (command.type === "abort") { this.busy = false; this.commandBusy = false; }
     this.output({ type: "response", id: command.id, command: command.type, success: true,
-      data: command.type === "get_state" ? { isStreaming: this.busy && !this.commandBusy, isCompacting: this.commandBusy, pendingMessageCount: 0, acceptedWorkIds: [...this.accepted], completedWorkIds: [...this.completed], sessionFile: this.options.sessionFile, lastAssistantMessage: this.lastAssistantMessage } : {} });
+      data: command.type === "get_state" ? { nativeProtocolVersion: "batch-operations-v1", isStreaming: this.busy && !this.commandBusy, isCompacting: this.commandBusy, isBashRunning: false, localTools: 0, pendingCommandCount: 0, pendingMessageCount: 0, backgroundOperationCount: 0, acceptedWorkIds: [...this.accepted], landedWorkIds: [...this.accepted], completedWorkIds: [...this.completed], sessionFile: this.options.sessionFile, lastAssistantMessage: this.lastAssistantMessage } : {} });
   }
   settle() {
     this.busy = false; this.commandBusy = false;
@@ -72,29 +78,29 @@ afterEach(async () => {
   vi.unstubAllEnvs();
 });
 
-it("one hard100 gate covers parallel owners, foreground/background and arbitrary launch ancestry", async () => {
+it("one unlimited authority covers parallel owners, foreground/background and arbitrary launch ancestry", async () => {
   const shared = authority(), fixtures = [fixture(client(shared, "host-a/alice")), fixture(client(shared, "host-b/bob")), fixture(client(shared, "host-a/app"))];
   for (let owner = 0; owner < fixtures.length; owner++) {
-    unwrap(await fixtures[owner]!.service.spawn({ id: `origin-${owner}`, requestId: `origin-${owner}`, cwd: fixtures[owner]!.root }));
+    unwrap(await fixtures[owner]!.service.spawn({ id: `origin-${owner}`, title: `Origin ${owner}`, requestId: `origin-${owner}`, cwd: fixtures[owner]!.root }));
     for (let i = 0; i < 42; i++) unwrap(await fixtures[owner]!.service.spawn({ id: `agent-${owner}-${i}`, requestId: `work-${owner}-${i}`, ...(i % 3 ? { parentId: `origin-${owner}` } : {}), cwd: fixtures[owner]!.root, message: "work", admission: i % 2 ? "background" : "force", metadata: { source: i % 3 ? "direct" : "lane", ...(i % 6 === 0 ? { mode: "live" } : {}) } }));
   }
   for (const f of fixtures) {
     for (const thread of f.service.snapshot().filter((_thread, index) => index % 2 === 0)) unwrap(await f.service.control({ threadId: thread.id, action: "open" }));
     unwrap(await f.service.start());
   }
-  await until(() => fixtures.reduce((sum, f) => sum + [...f.sessions.values()].filter(native => native.busy).length, 0) === 100 && shared.status().queued === 26);
-  expect(shared.status()).toMatchObject({ active: 100, queued: 26 });
-  expect(fixtures.flatMap(f => f.service.snapshot()).filter(thread => thread.metadata?.admissionWait).every(thread => String((thread.metadata!.admissionWait as any).message).includes("Global agent limit 100/100"))).toBe(true);
+  await until(() => fixtures.reduce((sum, f) => sum + [...f.sessions.values()].filter(native => native.busy).length, 0) === 126);
+  expect(shared.status()).toMatchObject({ active: 126, queued: 0, limit: null });
+  expect(fixtures.flatMap(f => f.service.snapshot()).filter(thread => thread.metadata?.admissionWait)).toEqual([]);
   const running = fixtures.flatMap(f => [...f.sessions.values()]).find(native => native.busy)!;
-  running.settle(); await until(() => shared.status().active === 99);
+  running.settle(); await until(() => shared.status().active === 125);
   for (const f of fixtures) { (f.service as any).db.exec("UPDATE thread SET metadata=json_remove(metadata,'$.admissionWait')"); f.service.reconcile(); }
-  await until(() => shared.status().active === 100 && shared.status().queued === 25);
+  expect(shared.status()).toMatchObject({ active: 125, queued: 0 });
 });
 
 it("closing an idle result waiter publishes cancellation without inventing native capacity custody", async () => {
   const shared = authority(), f = fixture(client(shared, "host-a/alice"));
-  unwrap(await f.service.spawn({ id: "waiter", requestId: "waiter", cwd: f.root }));
-  unwrap(await f.service.spawn({ id: "producer", requestId: "producer", cwd: f.root }));
+  unwrap(await f.service.spawn({ id: "waiter", title: "Waiter", requestId: "waiter", cwd: f.root }));
+  unwrap(await f.service.spawn({ id: "producer", title: "Producer", requestId: "producer", cwd: f.root }));
   unwrap(await f.service.agentWait({ action: "set", kind: "message", requestId: "wait", threadId: "waiter", fromThreadId: "producer", }));
   unwrap(await f.service.control({ action: "close", threadId: "producer" }));
   expect(f.service.latestSettlement("producer")?.outcome).toBe("cancelled");
@@ -340,7 +346,7 @@ it.each(["untyped", "inserted", "landed", "different-error", "different-source",
 
 it("legacy synthetic native-census custody releases only after positive native idle proof", async () => {
   const shared = new AgentCapacityAuthority(":memory:"); authorities.push(shared);
-  const original = fixture({ mode: "unmanaged" }); unwrap(await original.service.spawn({ id: "legacy", requestId: "create", cwd: original.root }));
+  const original = fixture({ mode: "unmanaged" }); unwrap(await original.service.spawn({ id: "legacy", title: "Legacy", requestId: "create", cwd: original.root }));
   unwrap(await original.service.command("legacy", { type: "compact", id: "old-command" }));
   await original.service.detach(); owners.splice(owners.indexOf(original.service), 1);
   unwrap(shared.initialize([{ ownerId: "host-a/alice", agentId: "legacy", executionId: "native-census:legacy" }]));
@@ -352,7 +358,7 @@ it("legacy synthetic native-census custody releases only after positive native i
 
 it("manual compaction consumes a slot only until positively idle, without creating an agent execution", async () => {
   const shared = authority(), f = fixture(client(shared, "host-a/alice"));
-  unwrap(await f.service.spawn({ id: "agent", requestId: "create", cwd: f.root }));
+  unwrap(await f.service.spawn({ id: "agent", title: "Agent", requestId: "create", cwd: f.root }));
   unwrap(await f.service.command("agent", { type: "compact", id: "compact-one" }));
   expect(shared.status().active).toBe(1);
   expect((f.service as any).db.prepare("SELECT COUNT(*) AS n FROM thread_execution").get().n).toBe(0);
