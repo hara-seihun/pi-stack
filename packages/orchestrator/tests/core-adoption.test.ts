@@ -15,9 +15,18 @@ import { CoreReloadOwner, validateCoreReload } from "../src/core/reload.js";
 import { acquireDatabaseOwnership, acquireScopeOwnership } from "../src/core/ownership.js";
 import { bindGatewayRequest, registerGatewaySocket, type GatewayBinding } from "../src/core/gateway.js";
 import type { IncomingMessage } from "node:http";
+import { createServer } from "node:net";
 import type { CoreConfig, CoreScope } from "../src/core/contracts.js";
 
 const roots: string[] = [];
+async function fixturePort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Synthetic Core needs its allocated TCP port");
+  await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  return address.port;
+}
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 async function fixture() {
   const path = mkdtempSync(join(tmpdir(), "core-adoption-")); roots.push(path);
@@ -39,7 +48,7 @@ async function fixture() {
 
 test("Core becomes healthy while manager notice callback is pending and still drains its original delivery on close", async () => {
   const f = await fixture();
-  f.config.port = 20000 + Math.floor(Math.random() * 30000);
+  f.config.port = await fixturePort();
   f.scope.managerRouting = { kind: "configured", relay: { scopeId: "alice", environmentId: "remote",
     callbackUrl: "http://synthetic-callback.invalid", canonicalManager: null, remoteEnvironments: [], adoptedOrigins: [] },
     notices: { notificationOwnerId: "original-owner", adoptedCursors: { settlements: 0, attention: 0, questions: 0 } } };
@@ -228,8 +237,9 @@ test("distinct table custodians share a physical lock but never overlapping auth
 test("the unified HTTP host serves health without opening unavailable partitions", async () => {
   const f = await fixture();
   f.scope.availability = { kind: "unavailable", reason: "locked" };
-  f.config.port = 20_000 + Math.floor(Math.random() * 30_000);
+  f.config.port = await fixturePort();
   const started = await serveCore(f.config);
+  if (!started.ok) throw new Error(started.error.message);
   expect(started.ok).toBe(true);
   if (!started.ok) throw new Error(started.error.message);
   try {
@@ -276,4 +286,38 @@ test("shutdown during reload drain never admits a replacement", async () => {
   const reload = owner.reload(); await draining;
   const stop = owner.stop(); release();
   expect((await reload).ok).toBe(true); expect((await stop).ok).toBe(true); expect(starts).toBe(0);
+});
+
+test("adoption substage observation is aggregate-only and preserves custody refusal", async () => {
+  const f = await fixture();
+  const records: string[] = [];
+  const report = spyOn(console, "info").mockImplementation(value => { records.push(String(value)); });
+  const core = new CoreService(f.config, async () => ({ ok: true, value: f.runtime }));
+  try {
+    expect((await core.start()).ok).toBe(true);
+    const rows = records.map(value => JSON.parse(value)).filter(value => value.type === "core-adoption");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toEqual({ type: "core-adoption", releaseCommit: f.config.releaseCommit, outcome: "adopted", declaredScopeCount: 1, adoptedScopeCount: 1,
+      durationsMs: { runtimeCustody: expect.any(Number), threadDatabase: expect.any(Number), scopeAdoption: expect.any(Number), directoryWiring: expect.any(Number) } });
+    expect(Object.values(rows[0].durationsMs).every(value => Number.isFinite(value) && Number(value) >= 0)).toBe(true);
+    expect(JSON.stringify(rows[0])).not.toContain(f.scope.id);
+    expect(JSON.stringify(rows[0])).not.toContain(f.scope.storage.databasePath);
+    expect((await core.start()).ok).toBe(false);
+    expect(records.map(value => JSON.parse(value)).filter(value => value.type === "core-adoption")).toHaveLength(1);
+  } finally { await core.close(); report.mockRestore(); }
+});
+
+test("failed runtime custody retains its typed result and emits no private adoption fields", async () => {
+  const f = await fixture(), records: string[] = [];
+  const report = spyOn(console, "info").mockImplementation(value => { records.push(String(value)); });
+  const refused = { ok: false as const, error: { code: "unavailable" as const, message: "Synthetic custody refusal" } };
+  const core = new CoreService(f.config, async () => refused);
+  try {
+    expect(await core.start()).toEqual(refused);
+    const row = records.map(value => JSON.parse(value)).find(value => value.type === "core-adoption");
+    expect(row).toMatchObject({ outcome: "failed", declaredScopeCount: 1, adoptedScopeCount: 0 });
+    expect(Object.keys(row).sort()).toEqual(["adoptedScopeCount", "declaredScopeCount", "durationsMs", "outcome", "releaseCommit", "type"]);
+    expect(JSON.stringify(row)).not.toContain(f.scope.id);
+    expect(JSON.stringify(row)).not.toContain(refused.error.message);
+  } finally { await core.close(); report.mockRestore(); }
 });
