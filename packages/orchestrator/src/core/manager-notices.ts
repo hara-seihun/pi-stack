@@ -83,7 +83,7 @@ export class CoreManagerNotices {
         if (!thread) throw new Error(`Manager notice names missing thread ${receipt.threadId}`);
         let requestId: string, text: string;
         if ("executionId" in receipt) {
-          if (receipt.assignmentPending || !receipt.finalMessage && receipt.outcome === "complete") continue;
+          if (receipt.assignmentPending || receipt.notificationOnly || !receipt.finalMessage && receipt.outcome === "complete") continue;
           requestId = `manager-notice:${this.config.notificationOwnerId}:settlement:${receipt.executionId}`;
           text = JSON.stringify({ type: "thread_settled", threadId: thread.id, title: thread.title, outcome: receipt.outcome, finalMessage: receipt.finalMessage, error: receipt.error });
         } else if ("summary" in receipt) {
