@@ -80,6 +80,8 @@ The two independent fence directories are `/run/pi-stack/session-writers/UID` fo
 
 `python3 -B core-native-census ROOT_PLAN` observes original runner-host processes and requests only existing `status`, as each exact UID in its current namespace. The root plan declares version1, configPath and outputPath. Protected output records PID/birth/source hash, registered data-directory cohorts and acknowledged active-session/thread metadata; stdout contains counts/digest only. A control acknowledging another PID, an unavailable control or ambiguous registered storage remains explicit uncertainty, never idle. This helper acquires no lease and closes no owner.
 
+`python3 -B core-native-retire ROOT_PLAN` retires one uniquely reachable original idle native owner. The protected plan binds exact PID/birth/UID/namespace/control, immutable host and SDK close source hashes, and state/proof/trace paths. It rejects a duplicate control cleanup pathname, requires the SDK's positive active/background-work rejection before halt, captures exact per-thread close acknowledgements, then zero-session status and host drain acknowledgement. Only a kernel normal-exit trace completes the receipt. Interrupted claimed closes remain unconfirmed and are not automatically replayed. This is resource retirement, not capability initialization or new model execution.
+
 These fences protect new patched writers. Original unpatched hosts require their own positively acknowledged closure; directory creation alone cannot fence an already accepted legacy write.
 
 ## Coordinated activation

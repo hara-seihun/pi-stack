@@ -1,0 +1,151 @@
+#!/usr/bin/python3 -B
+"""Positively retire a unique idle original native generation through its own guarded close."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+sys.dont_write_bytecode = True
+from core_namespace import absolute, enter, publish, trusted
+
+REQUEST = '''import json,os,socket,struct,sys
+p=json.loads(sys.argv[1]);s=socket.socket(socket.AF_UNIX);s.settimeout(3);s.connect(p['control']);pid,uid,gid=struct.unpack('3i',s.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))
+if pid!=p['pid'] or uid!=p['uid']:raise ValueError('another kernel peer owns native control')
+s.sendall((json.dumps(p['command'])+'\\n').encode());raw=b''
+while b'\\n' not in raw:
+ b=s.recv(65536)
+ if not b or len(raw)>1048576:raise ValueError('native control acknowledgement unavailable')
+ raw+=b
+r=json.loads(raw.split(b'\\n',1)[0]);s.close()
+if r.get('ok') is not True or ('pid' in r and r['pid']!=pid):raise ValueError('native operation refused or owner changed')
+print(json.dumps({k:r[k] for k in ['ok','pid','sessions','activeSessions','threadIds','activeThreadIds'] if k in r}))
+'''
+
+
+def source_guard(host, adapter):
+    host_tokens = ['sessions.get(value.socketPath)?.close()', 'sessions.size', 'server.close()', 'remove(controlPath)']
+    if not all(token in host for token in host_tokens):
+        raise ValueError('original host lacks declared per-session close and host drain')
+    close = adapter[adapter.index('close: () =>'):]
+    guards = ['backgroundCommands.size', '!runtime.session.isIdle', 'runtime.session.isBashRunning', 'execution.active', 'execution.blocked', 'Cannot close active Pi execution']
+    if not all(token in close and close.index(token) < close.index('await halt();') for token in guards):
+        raise ValueError('original SDK close must refuse active or background work before any halt')
+
+
+def other_owners(pid, uid, control):
+    owners = []
+    for path in Path('/proc').iterdir():
+        if not path.name.isdigit() or int(path.name) == pid:
+            continue
+        try:
+            args = path.joinpath('cmdline').read_bytes().split(b'\0')
+            if path.stat().st_uid == uid and control.encode() in args and any(arg.startswith(b'/') and arg.endswith(b'/dist/threads/runner-host.js') for arg in args):
+                owners.append(int(path.name))
+        except OSError:
+            continue
+    return owners
+
+
+def request(plan, command):
+    return json.loads(enter(plan['namespace'], ['/usr/bin/python3', '-B', '-c', REQUEST, json.dumps({**plan, 'command': command})], plan['uid'], plan['gid'], timeout=5))
+
+
+def normal_exit(trace):
+    return bool(re.search(r'^exit_group\(0\)\s*=\s*\?\s*$', trace, re.M)) and '+++ exited with 0 +++' in trace
+
+
+def retire(path):
+    plan = trusted(path)
+    if plan.get('version') != 1 or type(plan.get('pid')) is not int or not isinstance(plan.get('startTicks'), str) or min(plan['uid'], plan['gid']) < 0:
+        raise ValueError('explicit original native PID, birth and Unix owner required')
+    control = absolute(plan['control'])
+    if not re.fullmatch('[a-f0-9]{16}\\.sock', control.name) or control.parent.name != 'thread-runners':
+        raise ValueError('original native generation control is outside declared boundary')
+    state_path, proof_path, trace_path = [absolute(plan[key]) for key in ['statePath', 'proofPath', 'tracePath']]
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if proof_path.exists():
+        receipt = trusted(proof_path)
+        if receipt.get('planSha256') != digest or receipt.get('state') != 'closed' or hashlib.sha256(trace_path.read_bytes()).hexdigest() != receipt['trace']['sha256']:
+            raise ValueError('existing native retirement evidence differs')
+        return {'state': 'closed', 'pid': plan['pid'], 'proofPath': str(proof_path)}
+    if state_path.exists():
+        raise ValueError('native retirement already claimed; reconcile recorded acknowledgements, never replay uncertain closes')
+    proc = Path('/proc') / str(plan['pid'])
+    if proc.joinpath('stat').read_text().rsplit(')', 1)[1].split()[19] != plan['startTicks'] or proc.stat().st_uid != plan['uid'] or proc.joinpath('exe').resolve().name != 'node':
+        raise ValueError('original native process birth or Unix owner differs')
+    source = {}
+    for kind in ['host', 'adapter']:
+        declared = plan['sourceProof'][kind]
+        code = absolute(declared['path']).read_text()
+        if hashlib.sha256(code.encode()).hexdigest() != declared['sha256']:
+            raise ValueError('original native source changed')
+        source[kind] = code
+    source_guard(source['host'], source['adapter'])
+    if other_owners(plan['pid'], plan['uid'], str(control)):
+        raise ValueError('another live native generation could own this cleanup pathname')
+    before = request(plan, {'type': 'status'})
+    if before.get('pid') != plan['pid'] or before.get('activeSessions') != 0 or not isinstance(before.get('threadIds'), list) or before.get('sessions') != len(before['threadIds']):
+        return {'state': 'pending', 'waiting': 'accepted-native-work', 'pid': plan['pid']}
+    fd = os.open(trace_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.close(fd)
+    observer = subprocess.Popen(['/usr/bin/strace', '-e', 'trace=exit_group', '-p', str(plan['pid']), '-o', str(trace_path)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    state = {'version': 1, 'planSha256': digest, 'state': 'observing', 'before': before, 'observerPid': observer.pid, 'closes': []}
+    publish(state_path, state)
+    deadline = time.monotonic()+2
+    while time.monotonic() < deadline:
+        status = dict(line.split(':', 1) for line in proc.joinpath('status').read_text().splitlines() if ':' in line)
+        if status.get('TracerPid', '').strip() == str(observer.pid):
+            break
+        if observer.poll() is not None:
+            raise ValueError('kernel native exit observer could not attach')
+        time.sleep(.01)
+    else:
+        raise ValueError('kernel native observer did not acknowledge attachment')
+    try:
+        for thread_id in sorted(before['threadIds']):
+            if not isinstance(thread_id, str) or not thread_id:
+                raise ValueError('native thread identity is invalid')
+            socket_path = control.parent.parent / 'thread-sockets' / (control.stem+'.'+hashlib.sha256(thread_id.encode()).hexdigest()[:16]+'.sock')
+            state['claim'] = {'threadId': thread_id, 'socketPath': str(socket_path)}
+            publish(state_path, state)
+            acknowledgement = request(plan, {'type': 'close', 'socketPath': str(socket_path)})
+            if acknowledgement.get('pid') != plan['pid']:
+                raise ValueError('original close acknowledgement lost native owner')
+            state['closes'].append({**state.pop('claim'), 'acknowledgement': acknowledgement})
+            publish(state_path, state)
+        after = request(plan, {'type': 'status'})
+        if after.get('pid') != plan['pid'] or after.get('threadIds') != [] or after.get('sessions') != 0 or after.get('activeSessions') != 0:
+            raise ValueError('native owner has not positively released all original sessions')
+        state['after'] = after
+        state['drainClaimed'] = True
+        publish(state_path, state)
+        state['drainAcknowledgement'] = request(plan, {'type': 'drain'})
+        publish(state_path, state)
+        observer.wait(timeout=4)
+        trace = trace_path.read_text()
+        if not normal_exit(trace):
+            raise ValueError('native owner did not positively exit normally')
+        receipt = {'version': 1, 'protocol': 'pi-core-native-idle-retirement-v1', 'state': 'closed', 'pid': plan['pid'], 'startTicks': plan['startTicks'],
+                   'uid': plan['uid'], 'control': str(control), 'planSha256': digest, 'sourceProof': plan['sourceProof'],
+                   'before': before, 'closes': state['closes'], 'after': after, 'drainAcknowledgement': state['drainAcknowledgement'],
+                   'exit': {'kind': 'normal', 'code': 0}, 'trace': {'path': str(trace_path), 'sha256': hashlib.sha256(trace.encode()).hexdigest()}}
+        publish(proof_path, receipt)
+        return {'state': 'closed', 'pid': plan['pid'], 'proofPath': str(proof_path)}
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        if observer.poll() is None:
+            observer.terminate()
+            observer.wait(timeout=2)
+        raise
+
+
+if __name__ == '__main__':
+    try:
+        if os.geteuid() != 0 or len(sys.argv) != 2:
+            raise ValueError('usage: root core-native-retire ROOT_PLAN')
+        print(json.dumps({'ok': True, 'value': retire(absolute(sys.argv[1]))}))
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        print(json.dumps({'ok': False, 'error': {'code': 'native-retirement-unconfirmed', 'message': str(error)}}))
+        sys.exit(75)
