@@ -3,6 +3,7 @@ import type { PermissionAction, Resource } from "../permissions.js";
 import type { ManagerQuestionCustodyRequest, ManagerQuestionCustodyReceipt, Result } from "../threads/contracts.js";
 import type { ThreadOwner } from "../threads/directory.js";
 import { createThreadClient } from "../threads/http.js";
+import { combineManagerWork, validateManagerWorkSummary, type ManagerWorkSummary } from "../threads/manager-watchdog.js";
 type ThreadFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 import type { ManagerReplies, ManagerRepliesInput } from "./manager-replies.js";
 
@@ -47,6 +48,18 @@ export class CoreManagerRelay {
   get managerOwner(): ThreadOwner | undefined {
     const target = this.config.canonicalManager;
     return target && target.environmentId !== this.config.environmentId ? this.peers.get(target.environmentId) : undefined;
+  }
+  async workSummary(): Promise<Result<ManagerWorkSummary>> {
+    const target = this.config.canonicalManager;
+    if (!target || target.environmentId !== this.config.environmentId) return { ok: true, value: combineManagerWork([]) };
+    const results = await Promise.all([...this.peers.values()].map(peer => peer.api.managerWorkSummary()));
+    const values: ManagerWorkSummary[] = [];
+    for (const result of results) {
+      if (!result.ok) return result;
+      if (!validateManagerWorkSummary(result.value)) return failure("unavailable", "Remote work summary is not bounded metadata");
+      values.push(result.value);
+    }
+    return { ok: true, value: combineManagerWork(values) };
   }
   async managerReplies(input: ManagerRepliesInput): Promise<Result<ManagerReplies>> {
     const target = this.config.canonicalManager;

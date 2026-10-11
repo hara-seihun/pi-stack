@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { managerPolicyAuthority, managerNoticeCapability, parseManagerPolicyBinding, type ManagerPolicyBinding } from "../apps/remote/server/canonical-manager-policy";
 
+import { managerContextCapability } from "../apps/remote/server/canonical-manager-context";
+
 const STORE = "/etc/pi-stack/canonical-manager-policy.json", ROOT = "/etc/pi-stack/manager-policy";
 function guarded(path: string) {
   const s = lstatSync(path); if (!s.isFile() || s.uid !== 0 || (s.mode & 0o777) !== 0o600 || s.size > 65536) throw new Error("Protected root-owned 0600 enrollment file required");
@@ -48,8 +50,8 @@ async function main() {
     process.exitCode = locked.status; return;
   }
   const [action, planPath, ...rest] = process.argv.slice(2);
-  if (action === "enable-notices") {
-    if (!planPath || rest.length || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/.test(planPath)) throw new Error("Use enable-notices EXACT_EXISTING_BINDING_ID");
+  if (action === "enable-notices" || action === "enable-context") {
+    if (!planPath || rest.length !== (action === "enable-context" ? 1 : 0) || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/.test(planPath)) throw new Error("Use enable-notices ID or enable-context ID RECIPROCAL_LOOPBACK_ORIGIN");
     const directory = `${ROOT}/${planPath}`;
     const parsed = parseManagerPolicyBinding(JSON.parse(guarded(`${directory}/binding.json`)));
     if (!parsed.ok) throw new Error(parsed.error.message);
@@ -62,10 +64,12 @@ async function main() {
     if (!selected || selected.length !== 1 || !same(selected[0], binding)) throw new Error("Exact current protected route required");
     const token = guarded(binding.credentialFile).trim();
     if (!/^[a-f0-9]{64}$/.test(token) || createHash("sha256").update(token).digest("hex") !== binding.credentialSha256) throw new Error("Original enrolled credential required");
-    const path = `${directory}/notices.json`, capability = managerNoticeCapability(binding);
+    const context = action === "enable-context" ? managerContextCapability(binding, rest[0]!) : null;
+    if (context && !context.ok) throw new Error(context.error.message);
+    const path = `${directory}/${action === "enable-context" ? "context" : "notices"}.json`, capability = context?.ok ? context.value : managerNoticeCapability(binding);
     if (existsSync(path)) { if (!same(JSON.parse(guarded(path)), capability)) throw new Error("Notice capability identity changed"); }
     else replace(path, capability);
-    console.log(JSON.stringify({ state: "notices-enrolled", id: binding.id, direction: binding.direction, managerThreadId: binding.target.managerThreadId, uiGrantsChanged: false, credentialChanged: false }));
+    console.log(JSON.stringify({ state: action === "enable-context" ? "context-enrolled" : "notices-enrolled", id: binding.id, direction: binding.direction, managerThreadId: binding.target.managerThreadId, uiGrantsChanged: false, credentialChanged: false }));
     return;
   }
   if (action === "amend-origin") {

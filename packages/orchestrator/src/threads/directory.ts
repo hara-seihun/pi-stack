@@ -10,7 +10,8 @@ const error = (code: "not_found" | "invalid_request" | "conflict", message: stri
 export class ThreadDirectory implements ThreadApi {
   readonly owners: readonly ThreadOwner[];
   constructor(local: ThreadOwner, peers: readonly ThreadOwner[] = [], private managerOwner?: ThreadOwner,
-    private questionOwner?: (id: string) => ThreadOwner | null) {
+    private questionOwner?: (id: string) => ThreadOwner | null,
+    private remoteWorkSummary?: () => Promise<Result<ManagerWorkSummary>>) {
     this.owners = [local, ...peers];
     if (new Set(this.owners.map(owner => owner.id)).size !== this.owners.length) throw new Error("Thread owner IDs must be unique");
   }
@@ -76,7 +77,8 @@ export class ThreadDirectory implements ThreadApi {
     return (person ?? this.owners[0]!).api.managerNotificationPolicy();
   }
   async managerWorkSummary(): Promise<Result<ManagerWorkSummary>> {
-    const summaries = await Promise.all(this.owners.map(owner => owner.api.managerWorkSummary()));
+    const summaries = await Promise.all([...this.owners.map(owner => owner.api.managerWorkSummary()),
+      ...(this.remoteWorkSummary ? [this.remoteWorkSummary()] : [])]);
     const values: ManagerWorkSummary[] = [];
     for (const summary of summaries) {
       if (!summary.ok) return summary;

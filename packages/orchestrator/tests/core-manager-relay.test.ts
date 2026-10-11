@@ -150,3 +150,22 @@ test("notice outbox yields between acknowledgements and stopped delivery restart
   expect(db.prepare("SELECT count(*) AS count FROM core_manager_notice_outbox").get()).toMatchObject({ count: 0 });
   await restarted.close(); db.close();
 });
+
+test("canonical local manager combines reciprocal work metadata without registering foreign directory owners or looping to itself", async () => {
+  const db = openSqlite(":memory:"), value = config();
+  let calls = 0, allowed = true;
+  const relay = new CoreManagerRelay(value, db, async (_url, init) => {
+    calls++; const body = JSON.parse(String(init?.body));
+    expect(body.input).toEqual({});
+    return Response.json({ ok: true, value: { activeWork: body.environmentId === "remote", lastHumanMessageAt: body.environmentId === "remote" ? 7 : 9 } });
+  }, (_resource, action) => { expect(action).toBe("read"); return allowed ? { ok: true, value: undefined } : { ok: false, error: { code: "unavailable", message: "Revoked" } }; });
+  expect(await relay.workSummary()).toEqual({ ok: true, value: { activeWork: true, lastHumanMessageAt: 9 } });
+  expect(calls).toBe(2);
+  allowed = false;
+  expect((await relay.workSummary()).ok).toBe(false);
+  expect(calls).toBe(2);
+  value.canonicalManager = { environmentId: "remote", threadId: "manager" };
+  const workHost = new CoreManagerRelay(value, db, async () => { throw new Error("Work host must not pull manager summary"); }, () => ({ ok: true, value: undefined }));
+  expect(await workHost.workSummary()).toEqual({ ok: true, value: { activeWork: false, lastHumanMessageAt: null } });
+  db.close();
+});

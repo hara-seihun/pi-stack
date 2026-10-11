@@ -12,7 +12,7 @@ const STORE = "/etc/pi-stack/canonical-manager-policy.json";
 type Identity = { host: string; environment: string; scopeId: string; user: string; uid: number };
 export type ManagerPolicyBinding = { version: 1; id: string; direction: "incoming" | "outgoing"; source: Identity; target: Identity & { managerThreadId: string }; origin: string; credentialSha256: string; credentialFile: string };
 type Failure = { ok: false; error: { code: "unavailable" | "forbidden" | "invalid_request" | "conflict"; message: string } };
-type Result<T> = { ok: true; value: T } | Failure;
+export type Result<T> = { ok: true; value: T } | Failure;
 const bad = (code: Failure["error"]["code"], message: string): Failure => ({ ok: false, error: { code, message } });
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 const keys = (v: Record<string, unknown>, expected: string[]) => Object.keys(v).length === expected.length && expected.every(k => Object.hasOwn(v, k));
@@ -55,7 +55,7 @@ export function admitManagerPolicyRead(input: unknown, presented: string | null,
   if (!presented || !/^[a-f0-9]{64}$/.test(presented) || !timingSafeEqual(createHash("sha256").update(presented).digest(), Buffer.from(binding.credentialSha256, "hex"))) return bad("forbidden", "Enrolled manager-policy credential required");
   return { ok: true, value: undefined };
 }
-async function boundedBody(body: ReadableStream<Uint8Array> | null, maximum = 4096): Promise<string> {
+export async function boundedBody(body: ReadableStream<Uint8Array> | null, maximum = 4096): Promise<string> {
   if (body === null) throw new Error("Manager policy metadata is absent");
   const reader = body.getReader(); const chunks: Uint8Array[] = []; let bytes = 0;
   const deadline = AbortSignal.timeout(5000); const cancel = () => { void reader.cancel().catch(() => {}); };
@@ -65,13 +65,13 @@ async function boundedBody(body: ReadableStream<Uint8Array> | null, maximum = 40
     return Buffer.concat(chunks).toString("utf8");
   } finally { deadline.removeEventListener("abort", cancel); await reader.cancel(); reader.releaseLock(); }
 }
-function protectedRead(path: string): string {
+export function protectedRead(path: string): string {
   const stat = lstatSync(path);
   if (!stat.isFile() || stat.uid !== 0 || (stat.mode & 0o777) !== 0o600) throw new Error("Manager-policy store requires root-owned 0600 regular files");
   if (stat.size > 64 * 1024) throw new Error("Manager-policy store exceeds metadata limit");
   return readFileSync(path, "utf8");
 }
-function bindings(): Result<ManagerPolicyBinding[]> {
+export function bindings(): Result<ManagerPolicyBinding[]> {
   if (!existsSync(STORE)) return { ok: true, value: [] };
   try {
     const value: unknown = JSON.parse(protectedRead(STORE));
@@ -82,14 +82,14 @@ function bindings(): Result<ManagerPolicyBinding[]> {
     return { ok: true, value: rows };
   } catch { return bad("unavailable", "Protected manager-policy store unreadable"); }
 }
-function secret(binding: ManagerPolicyBinding): Result<string> {
+export function secret(binding: ManagerPolicyBinding): Result<string> {
   try {
     const token = protectedRead(binding.credentialFile).trim();
     if (!/^[a-f0-9]{64}$/.test(token) || createHash("sha256").update(token).digest("hex") !== binding.credentialSha256) return bad("unavailable", "Manager-policy credential identity disagrees");
     return { ok: true, value: token };
   } catch { return bad("unavailable", "Enrolled manager-policy credential unavailable; enrollment never occurs during requests"); }
 }
-function authority(binding: ManagerPolicyBinding): Result<void> {
+export function authority(binding: ManagerPolicyBinding): Result<void> {
   if ((binding.direction === "outgoing" ? binding.source.host : binding.target.host) !== hostname()) return bad("forbidden", "Manager-policy binding names another host");
   try { return managerPolicyAuthority(JSON.parse(readFileSync("/etc/pi-stack/core.json", "utf8")), binding); }
   catch { return bad("unavailable", "Core manager authority unreadable"); }
