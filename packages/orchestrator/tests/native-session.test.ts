@@ -39,15 +39,17 @@ function nativeFixture(paths: ReturnType<typeof options>, execute = async () => 
   const agent = new Agent({ initialState: { tools: [{ name: "fixture_tool", label: "Fixture", description: "Fixture", parameters: { type: "object" }, execute }] }, streamFn: () => { throw new Error("No provider in native fixture"); } });
   const queue: any[] = [];
   let queued!: () => void; const queuedMessage = new Promise<void>(resolve => { queued = resolve; });
-  const dispose = vi.fn();
+  const dispose = vi.fn(() => manager.dispose());
+  const listeners = new Set<(event: any) => void>();
+  const settled = () => { for (const listener of listeners) listener({ type: "agent_settled" }); };
   const session = { agent, sessionManager: manager, sessionFile: file, sessionId: manager.getSessionId(),
     get messages() { return agent.state.messages; }, get isStreaming() { return agent.state.isStreaming; }, get isIdle() { return !agent.state.isStreaming; },
     isCompacting: false, isBashRunning: false, pendingMessageCount: 0,
-    subscribe: () => () => {}, sendCustomMessage: async (message: unknown) => { queue.push(message); queued(); },
+    subscribe: (listener: (event: any) => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; }, sendCustomMessage: async (message: unknown) => { queue.push(message); queued(); },
     prompt: async () => {}, steer: async () => {}, followUp: async () => {},
     abortCompaction: () => {}, abortBash: () => {}, abort: async () => { agent.abort(); await agent.waitForIdle(); }, dispose,
   } as unknown as AgentSession;
-  return { session, manager, queue, dispose, queuedMessage };
+  return { session, manager, queue, dispose, queuedMessage, settled };
 }
 it("preserves a native construction failure through cleanup", async () => {
   const paths = options(capacityFixture().capacity), error = new Error("Resource construction failed");
@@ -56,14 +58,30 @@ it("preserves a native construction failure through cleanup", async () => {
 it("native UI inputs use the same durable batch adapter and close is idempotent", async () => {
   const paths = options(capacityFixture().capacity), f = nativeFixture(paths);
   const managed = await createManagedAgentSession(async () => ({ session: f.session }), paths);
-  await managed.session.prompt("exact native input\n\nwhitespace  ");
+  let finished = false;
+  const prompt = managed.session.prompt("exact native input\n\nwhitespace  ").then(() => { finished = true; });
   await f.queuedMessage;
+  expect(finished).toBe(false);
+  const message = f.queue[0] as any;
+  f.manager.appendCustomMessageEntry(message.customType, message.content, message.display, message.details);
+  f.settled();
+  await prompt;
+  expect(finished).toBe(true);
   const receipt = f.manager.getEntries().find(entry => entry.type === "custom" && entry.customType === "thread_input_batch_accepted");
   expect(receipt?.type === "custom" ? receipt.data : undefined).toMatchObject({ inputs: [{ message: "exact native input\n\nwhitespace  " }] });
   expect(f.queue).toHaveLength(1);
   expect(managed.session.agent.state.tools.some(tool => tool.name === "tool_operation")).toBe(true);
   await managed.close(); await managed.close();
   expect(f.dispose).toHaveBeenCalledTimes(1);
+});
+it("native close rejects an admitted prompt without pretending it settled", async () => {
+  const paths = options(capacityFixture().capacity), f = nativeFixture(paths);
+  const managed = await createManagedAgentSession(async () => ({ session: f.session }), paths);
+  const prompt = managed.session.prompt("unfinished input");
+  const rejected = expect(prompt).rejects.toThrow("Native inbox closed before prompt settled");
+  await f.queuedMessage;
+  await managed.close();
+  await rejected;
 });
 it("external tools use operation custody without acquiring a parked model lease", async () => {
   const cap = capacityFixture(), paths = options(cap.capacity);

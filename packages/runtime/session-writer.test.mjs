@@ -133,7 +133,25 @@ test("manager lifetime excludes aliases, preserves raw prefixes, and disposes ex
   assert.equal(resumed.getEntries().length, 3);
 });
 
-test("missing scope and unflushed competing manager cannot mutate files", async t => {
+test("fresh managers commit canonical headers and accepted input before any assistant", async t => {
+  const { SessionManager, dir, config } = await fixture(t);
+  for (const create of [() => SessionManager.create(dir, dir), () => SessionManager.open(join(dir, "fresh-explicit.jsonl"))]) {
+    const manager = withSessionWriterConfiguration(config, create);
+    const file = manager.getSessionFile();
+    assert.deepEqual(readFileSync(file, "utf8"), JSON.stringify(manager.getHeader()) + "\n");
+    manager.appendCustomEntry("thread_input_batch_accepted", { inputs: [{ workId: "original", message: "synthetic" }] });
+    const original = readFileSync(file);
+    assert.equal(original.toString().trim().split("\n").length, 2);
+    manager.dispose();
+    const resumed = withSessionWriterConfiguration(config, () => SessionManager.open(file));
+    assert.equal(resumed.getSessionId(), manager.getSessionId());
+    assert.equal(resumed.getEntries()[0].customType, "thread_input_batch_accepted");
+    assert.deepEqual(readFileSync(file), original);
+    resumed.dispose();
+  }
+});
+
+test("missing scope and competing manager cannot mutate files", async t => {
   const { SessionManager, dir, config } = await fixture(t);
   assert.throws(() => withSessionWriterConfiguration({ directory: dir }, () => SessionManager.create(dir, dir)), { code: "SESSION_WRITER_CONFIGURATION" });
   const first = withSessionWriterConfiguration(config, () => SessionManager.create(dir, dir, { id: "pending" }));

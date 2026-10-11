@@ -156,6 +156,9 @@ export async function createManagedAgentSession<T extends { session: AgentSessio
         if (inbox && (name === "prompt" || name === "steer" || name === "followUp") && typeof args[0] === "string") {
           const input = { workId: randomUUID(), message: args[0], inputOrigin: "human" as const,
             ...((args[1] as { images?: any[] } | undefined)?.images ? { images: (args[1] as { images: any[] }).images } : {}) };
+          if (name === "prompt") return inbox.acceptAndWait(input).then(result => {
+            if (!result.ok) throw new Error(result.error);
+          });
           const result = inbox.accept([input]);
           return result.ok ? Promise.resolve() : Promise.reject(new Error(result.error));
         }

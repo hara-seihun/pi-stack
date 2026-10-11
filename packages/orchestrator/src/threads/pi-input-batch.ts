@@ -29,6 +29,7 @@ export class PiInputBatch {
   private readonly known = new Map<string, NativeInput>();
   private readonly commands = new Map<string, string>();
   private readonly enqueued = new Set<string>();
+  private readonly settlementWaiters = new Map<string, (result: { ok: true } | { ok: false; error: string }) => void>();
   private phase: "idle" | "generating" | "tools" | "preparing" = "idle";
   private scheduled = false;
   private admissions = 0;
@@ -86,6 +87,11 @@ export class PiInputBatch {
     this.unsubscribeSession = session.subscribe(event => {
       if (event.type === "agent_settled") {
         this.phase = "idle";
+        const landed = new Set(inputReceipts(this.session.sessionManager.getBranch()).landedWorkIds);
+        for (const [workId, settle] of this.settlementWaiters) if (landed.has(workId)) {
+          this.settlementWaiters.delete(workId);
+          settle({ ok: true });
+        }
         // A provider error can leave steer messages queued outside a live loop.
         this.schedule();
       }
@@ -115,6 +121,17 @@ export class PiInputBatch {
     }
     if (this.phase === "tools" && this.session.isStreaming) this.pump(); else this.schedule();
     return { ok: true };
+  }
+
+  acceptAndWait(input: NativeInput): Promise<{ ok: true } | { ok: false; error: string }> {
+    if (this.settlementWaiters.has(input.workId) || this.known.has(input.workId)) return Promise.resolve({ ok: false, error: "Native prompt identity already exists" });
+    return new Promise(settle => {
+      this.settlementWaiters.set(input.workId, settle);
+      try {
+        const result = this.accept([input]);
+        if (!result.ok) { this.settlementWaiters.delete(input.workId); settle(result); }
+      } catch (error) { this.settlementWaiters.delete(input.workId); settle({ ok: false, error: String(error) }); }
+    });
   }
 
   resume(): void {
@@ -187,11 +204,20 @@ export class PiInputBatch {
     }, error => {
       this.admissions--;
       // Entries whose message_end committed are already removed; retain only unlanded bytes.
-      for (const workId of workIds) this.enqueued.delete(workId);
+      for (const workId of workIds) {
+        this.enqueued.delete(workId);
+        const settle = this.settlementWaiters.get(workId);
+        if (settle) { this.settlementWaiters.delete(workId); settle({ ok: false, error: String(error) }); }
+      }
       this.phase = "idle";
       this.output({ type: "extension_error", error: `Native input batch ${batchId} retained after admission failure: ${String(error)}` });
     });
   }
 
-  close(): void { this.stopped = true; this.unsubscribe(); this.unsubscribeSession(); }
+  close(): void {
+    this.stopped = true;
+    for (const settle of this.settlementWaiters.values()) settle({ ok: false, error: "Native inbox closed before prompt settled" });
+    this.settlementWaiters.clear();
+    this.unsubscribe(); this.unsubscribeSession();
+  }
 }

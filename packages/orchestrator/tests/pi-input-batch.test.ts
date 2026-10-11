@@ -8,11 +8,12 @@ import { PiInputBatch } from "../src/threads/pi-input-batch.js";
 import { PiExecution } from "../src/threads/pi-execution.js";
 import { inputReceipts } from "../src/threads/pi-input-receipts.js";
 import { seedPiSession } from "../src/threads/pi-session-file.js";
-const roots: string[] = [];
-afterEach(() => { vi.restoreAllMocks(); roots.splice(0).forEach(root => rmSync(root, { recursive: true, force: true })); });
+const roots: string[] = [], managers: SessionManager[] = [];
+afterEach(() => { vi.restoreAllMocks(); managers.splice(0).forEach(manager => manager.dispose()); roots.splice(0).forEach(root => rmSync(root, { recursive: true, force: true })); });
 function fixture(manager?: SessionManager) {
   const root = mkdtempSync(join(tmpdir(), "pi-inbox-")); roots.push(root);
   if (!manager) { const file = join(root, "session.jsonl"); seedPiSession(file, root); manager = SessionManager.open(file); }
+  managers.push(manager);
   const agent = new Agent({ streamFn: () => { throw new Error("Fixture has no provider"); } });
   const listeners: ((event: any) => unknown)[] = [];
   agent.subscribe = listener => { listeners.push(listener as any); return () => {}; };
@@ -35,6 +36,22 @@ function fixture(manager?: SessionManager) {
   const settled = async () => { streaming = false; for (const listener of publicListeners) await listener({ type: "agent_settled" }); };
   return { inbox, execution, session, queue, output, emit, settled, idle: () => { streaming = false; }, assistant, manager };
 }
+
+it("prompt acceptance waits for its committed landing and native settlement", async () => {
+  const f = fixture();
+  let finished = false;
+  const prompt = f.inbox.acceptAndWait({ workId: "print", message: "synthetic print input" }).then(result => { finished = true; return result; });
+  await Promise.resolve();
+  expect(finished).toBe(false);
+  await f.settled();
+  expect(finished).toBe(false);
+  await f.emit({ type: "message_end", message: f.queue.shift() });
+  await f.emit({ type: "message_end", message: f.assistant });
+  expect(finished).toBe(false);
+  await f.settled();
+  expect(await prompt).toEqual({ ok: true });
+  f.inbox.close();
+});
 
 it("retains every streaming arrival until output finalization, then queues one ordered batch", async () => {
   const f = fixture();
@@ -130,6 +147,7 @@ it("a committed landing with a missed notification retires pending custody witho
 it("reconciles landed IDs from committed custom content, not a separate landing receipt", () => {
   const f = fixture(); f.inbox.accept([{ workId: "landed", message: "original" }]); f.inbox.close();
   f.manager!.appendCustomMessageEntry("thread_input_batch", "original", true, { batchId: "cutoff", workIds: ["landed"] });
+  f.manager!.dispose();
   const recovered = fixture(SessionManager.open(f.session.sessionFile!));
   expect(recovered.inbox.awaitingAdmission).toBe(false);
   recovered.inbox.close();

@@ -79,8 +79,29 @@ function replaceOnce(source, before, after, label) {
   return source.slice(0, first) + after + source.slice(first + before.length);
 }
 
+function patchInitialSessionDurability(source) {
+  const initialMarker = "// PiStack initial session durability v1\n";
+  if (source.includes(initialMarker)) return source;
+  source = replaceOnce(source, `                this._buildIndex();
+                this.flushed = false;`, `                this._buildIndex();
+                writeSessionFileDurably(this.sessionFile, this.fileEntries.map((entry) => \`\${JSON.stringify(entry)}\\n\`).join(""), "wx", this._sessionWriter);
+                this.flushed = true;`, "SDK initial explicit session durability");
+  source = replaceOnce(source, `            this.sessionFile = join(this.getSessionDir(), \`\${fileTimestamp}_\${this.sessionId}.jsonl\`);
+        }
+        return this.sessionFile;`, `            this.sessionFile = join(this.getSessionDir(), \`\${fileTimestamp}_\${this.sessionId}.jsonl\`);
+            writeSessionFileDurably(this.sessionFile, \`\${JSON.stringify(header)}\\n\`, "wx", this._sessionWriter);
+            this.flushed = true;
+        }
+        return this.sessionFile;`, "SDK initial generated session durability");
+  const pendingStart = source.indexOf('        const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");');
+  const pendingEnd = source.indexOf("        if (!this.flushed) {", pendingStart);
+  if (pendingStart < 0 || pendingEnd < 0) throw new Error("Pinned Pi deferred session persistence changed");
+  source = source.slice(0, pendingStart) + source.slice(pendingEnd);
+  return initialMarker + source;
+}
+
 export function patchSessionDurability(source) {
-  if (source.includes(marker)) return source;
+  if (source.includes(marker)) return patchInitialSessionDurability(source);
   if (source.includes("function writeSessionFileDurably")) throw new Error("Rebuild the immutable Pi tree before upgrading session writer custody");
   source = replaceOnce(source,
     'import { appendFileSync, closeSync, createReadStream, existsSync, mkdirSync, openSync, readdirSync, readSync, statSync, writeFileSync, } from "fs";',
@@ -283,7 +304,7 @@ export function patchSessionDurability(source) {
         catch (error) { branch.dispose(); throw error; }
     }
     static create(cwd, sessionDir, options) {`, "SDK detached fork custody");
-  return source;
+  return patchInitialSessionDurability(source);
 }
 
 export function patchAgentSessionWriterDisposal(source) {
