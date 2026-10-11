@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { installBrowserEffectFence } from "./effects.mjs";
+import { installPrivateCredentialMode } from "./private-credential.mjs";
 
 const entry = realpathSync(fileURLToPath(import.meta.url));
 const require = createRequire(entry);
@@ -36,7 +37,10 @@ export default async function browser(pi) {
     get(target, key) {
       if (key !== "registerTool") return Reflect.get(target, key);
       return tool => {
-        if (tool.name === "agent_browser") installBrowserEffectFence(tool, { loadContract, createAuthority, env: effectEnvironment });
+        if (tool.name === "agent_browser") {
+          installBrowserEffectFence(tool, { loadContract, createAuthority, env: effectEnvironment });
+          installPrivateCredentialMode(tool);
+        }
         return target.registerTool(tool);
       };
     },
