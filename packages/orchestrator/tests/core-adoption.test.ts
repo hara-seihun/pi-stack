@@ -239,7 +239,6 @@ test("the unified HTTP host serves health without opening unavailable partitions
   f.scope.availability = { kind: "unavailable", reason: "locked" };
   f.config.port = await fixturePort();
   const started = await serveCore(f.config);
-  if (!started.ok) throw new Error(started.error.message);
   expect(started.ok).toBe(true);
   if (!started.ok) throw new Error(started.error.message);
   try {

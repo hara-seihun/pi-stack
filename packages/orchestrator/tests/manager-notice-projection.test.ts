@@ -49,7 +49,7 @@ test("real future manager outbox strips envelopes while accepted original outbox
   } as unknown as ThreadApi;
   let acknowledged = false; const sent: SendThread[] = [];
   const directory = { managerNotificationPolicy: async () => ({ ok: true as const, value: { view: "mono" as const, managerThreadId: "manager" } }),
-    send: async (input: SendThread) => { sent.push(structuredClone(input)); return acknowledged ? { ok: true as const, value: { id: input.requestId, state: "queued" as const } } : { ok: false as const, error: { code: "unavailable" as const, message: "Synthetic lost acknowledgement" } }; } };
+    send: async (input: SendThread) => { sent.push(structuredClone(input)); return acknowledged ? { ok: true as const, value: { ...message(input.text), id: input.requestId, threadId: input.threadId, senderId: input.senderId ?? null } } : { ok: false as const, error: { code: "unavailable" as const, message: "Synthetic lost acknowledgement" } }; } };
   const config = { scopeId: "synthetic", notificationOwnerId: "original-owner", adoptedCursors: { settlements: 8, attention: 0, questions: 0 }, subscribe: () => () => {}, feedback: () => {} };
   const first = new CoreManagerNotices(config, db, api, directory);
   const original: SendThread = { requestId: "manager-notice:original-owner:settlement:original-execution", threadId: "manager", senderId: "origin", source: "notification", text: originalText };
