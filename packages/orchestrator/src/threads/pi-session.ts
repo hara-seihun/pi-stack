@@ -33,7 +33,7 @@ import { RunnerStartupError } from "./runner-startup.js";
 import { memoryExtension } from "kenan-memory/tools";
 import { oneKenanEnabled } from "kenan-memory/config";
 import { isRoomSession, assertRoomTools, ROOM_TOOLS, roomSessionInstructions } from "./room-session.js";
-import { createThreadClient } from "./http.js";
+import { createGatewayThreadClient } from "./gateway-client.js";
 import { createExecutionActivity, executionActivitySnapshot, observeExecutionActivity, settleExecutionActivity } from "./execution-activity.js";
 import { FINAL_RESULT_RECOVERY_PROTOCOL, finalResultRecovery, recoverFinalResult } from "./pi-final-result-recovery.js";
 import { TELEPHONE_CONTEXT_ARGUMENT, isTelephoneContext, telephoneModelContext } from "./telephone-context.js";
@@ -157,7 +157,8 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
       preparePiSession(sessionManager);
       env.PI_SESSION_FILE = sessionManager.getSessionFile();
       const memoryFactories = memoryEligible ? [memoryExtension({ env, ask: async (id, question, suggestions) => {
-        const api = options.threads ?? createThreadClient(env.PI_THREAD_API_URL!, fetch, { token: env.PI_THREAD_TOKEN });
+        if (!options.threads && (!env.PI_THREAD_API_URL || !env.PI_THREAD_TOKEN)) throw new Error("Native memory questions require their injected thread API and capability; no operator fallback");
+        const api = options.threads ?? createGatewayThreadClient(env.PI_THREAD_API_URL!, env);
         const result = await api.ask({ threadId: options.threadId, requestId: `${options.threadId}:${id}`, questions: [{ question, suggestions }] });
         if (!result.ok) throw new Error(`Cannot ask which forget mode: ${JSON.stringify(result)}`);
         return result.value;

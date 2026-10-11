@@ -4,7 +4,7 @@ import { ActionHttpClient } from "kenan-memory/action-http-client";
 import type { ActionState } from "kenan-memory/actions";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { resolveDelivery, THINKING_LEVELS, THREAD_AWAIT_TIMEOUT_MS, type PiSessionOptions, type Result, type ThreadApi } from "./contracts.js";
-import { createThreadClient } from "./http.js";
+import { createGatewayThreadClient } from "./gateway-client.js";
 import { historyPreview } from "./pi-history-preview.js";
 import { readableNotificationText } from "./message-format.js";
 import { DELEGATION_POLICY } from "../delegation-policy.js";
@@ -59,7 +59,8 @@ export function threadTools(options: PiSessionOptions) {
     if (options.threads) return options.threads;
     const url = options.env.PI_THREAD_API_URL;
     if (!url) throw new Error("Thread owner is unavailable: PI_THREAD_API_URL is not configured");
-    return createThreadClient(url, fetch, { signal, token: options.env.PI_THREAD_TOKEN });
+    if (!options.env.PI_THREAD_TOKEN) throw new Error("Thread owner is unavailable: PI_THREAD_TOKEN is not configured; no operator fallback");
+    return createGatewayThreadClient(url, options.env, { signal });
   }
   return [
     defineTool<typeof purposeResolution, PurposeResolutionDetails>({

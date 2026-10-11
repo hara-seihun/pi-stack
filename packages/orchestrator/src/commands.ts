@@ -5,7 +5,7 @@ import { loadConfig } from "./config.js";
 import { Store } from "./store.js";
 import { readUsageEvidence } from "./usage-evidence.js";
 import { randomUUID } from "node:crypto";
-import { createThreadClient } from "./threads/http.js";
+import { createGatewayThreadClient } from "./threads/gateway-client.js";
 import { isThreadState, isThinkingLevel, THINKING_LEVELS, type Result, type SettingsOverrides, type SpawnThread, type Thread } from "./threads/contracts.js";
 import { providerOAuth, transactSharedCredential } from "./auth/shared-oauth.js";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
@@ -35,9 +35,9 @@ export const USAGE=`usage: pi-orchestrator ${COMMANDS.map(([name])=>name.replace
 export const ACCOUNT_USAGE=`usage: pi-orchestrator account list | capabilities [ID] | import ID --provider openai-codex|anthropic --credential-file FILE [--label LABEL] | refresh ID | disable ID | enable ID | remove ID | use ID shared|voice | transfer ID --to PEER_OR_SSH_HOST [--wait-for-drain [DURATION]] | fetch ID --from PEER [--wait-for-drain [DURATION]] | transfer-status ID`;
 
 const base=()=>{const url=process.env.PI_CORE_URL;if(!url)throw new Error("PI_CORE_URL is required");return url.replace(/\/$/,"");};
-const threadBase=()=>{if(process.env.PI_THREAD_API_URL)return process.env.PI_THREAD_API_URL;const scope=process.env.PI_CORE_SCOPE_ID;if(!scope)throw new Error("PI_CORE_SCOPE_ID is required outside a thread");return `${base()}/v1/scopes/${encodeURIComponent(scope)}/thread-owner`;};
+const threadBase=()=>{if(process.env.PI_THREAD_TOKEN){const url=process.env.PI_THREAD_API_URL;if(!url)throw new Error("PI_THREAD_API_URL is required with a native thread capability");return url;}const scope=process.env.PI_CORE_SCOPE_ID;if(!scope)throw new Error("PI_CORE_SCOPE_ID is required outside a thread");return `${base()}/v1/scopes/${encodeURIComponent(scope)}/thread-owner`;};
 const credentials=()=>{const path=process.env.PI_CORE_TOKEN_FILE;if(!path)throw new Error("PI_CORE_TOKEN_FILE is required");const token=readFileSync(path,"utf8").trim();if(!token||/\s/.test(token))throw new Error("Invalid core token file");return {authorization:`Bearer ${token}`};};
-const threadClient=()=>{const url=threadBase(),token=process.env.PI_THREAD_TOKEN||undefined,auth=token?{}:credentials();return createThreadClient(url,(endpoint,init)=>fetch(endpoint,{...init,headers:{...Object.fromEntries(new Headers(init?.headers)),...auth}}),{token});};
+const threadClient=()=>createGatewayThreadClient(threadBase(),process.env);
 const ledgerPath=()=>process.env.PI_ORCHESTRATOR_LEDGER||join(homedir(),".local/share/pi-orchestrator/ledger.sqlite3");
 function flags(args:string[]):{named:Map<string,string>;positional:string[]}{const named=new Map<string,string>(),positional:string[]=[];for(let i=0;i<args.length;i++){const value=args[i]!;if(!value.startsWith("--")){positional.push(value);continue;}const [name,inline]=value.slice(2).split("=",2);if(inline!==undefined)named.set(name!,inline);else if(["force","background","descendants","resume"].includes(name!))named.set(name!,"true");else if(args[i+1]&&!args[i+1]!.startsWith("--"))named.set(name!,args[++i]!);else named.set(name!,"true");}return{named,positional};}
 function required(named:Map<string,string>,key:string):string{const value=named.get(key);if(!value)throw new Error(`--${key} is required`);return value;}

@@ -106,3 +106,9 @@ Current duty rows, notes, hold decisions, instructions and next actions are edit
 ### Failed retained attachment cleanup
 
 When a busy retained-session attachment cannot establish state, discard only that failed controller observation: detach its socket and reconnect timer before removing the runtime. The idempotent observation detach does not close or abort the native execution, release its custody, or replay input. A replacement controller can then attach without an orphan observer continuing to reconnect.
+
+## Account-bound gateway consumers
+
+The thread CLI and out-of-process native tools use the registered own-UID Unix Core gateway. Outside a thread, CLI scope selection requires `PI_CORE_SCOPE_ID`; a stale `PI_THREAD_API_URL` does not select an account. Inside a native thread, the injected API path, `PI_THREAD_TOKEN` and deadline travel through that same gateway; native tools refuse an unset token rather than acquiring operator authority. In-process owner APIs are unchanged.
+
+Unset gateway configuration, peer refusal and unconfirmed transport receipts return terminal typed errors with the original request identity. A lost receipt is inspected by that identity, not retried into another intake. `cli-gateway-transport.test.ts` exercises the real CLI and kernel-bound gateway; `native-gateway-tools.test.ts` exercises actual peer read/send and the existing capability/role ceiling using a disposable owner without native execution.
