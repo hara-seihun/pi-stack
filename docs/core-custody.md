@@ -57,3 +57,12 @@ Core socket startup holds an exclusive resource-owner flock through bind, drain 
 `tests/core-custody.test.ts` attaches synthetic old-generation sockets through a real process descriptor, checks unchanged store identity/bytes, rejects changed PID birth and unregistered paths, proves atomic private-batch rejection and accepted judgment drain, and transports a large frame through the fixed Python bridge. Root managed-session tests exercise the actual shared ThreadService/capacity, exact queued original request adoption, replay fencing, terminal reply reuse and missing-owner errors.
 
 Deployment owns generation-transfer validation, namespace pins, FUSE resource custody and callback listeners. No live handoff, mounts, grants or service activation are part of these adapter changes.
+
+
+## Active-person key verification
+
+An adopted thin Remote may be active without a transient router unlock-key file. In One Kenan mode the router authenticates an active encrypted person through the fixed custody verifier, then waits for that existing supervisor. It never stops the runtime, recreates a key file or calls mount authentication for this path.
+
+The root-owned One Kenan configuration explicitly declares `keyStore` (the existing custody store) and `keyVerifier` (the fixed executable `apps/remote/server/one-kenan-verify.ts` from the selected Remote release). The verifier takes only `{user,key}` on bounded private stdin and returns only a typed success or400/403/503 failure. It reuses `KenanKeys.verify`: the existing per-person key wrapper and vault authenticate the supplied key without changing custody state, mounting folders or exporting key/master material. Its opened descriptor pins the root-owned private regular-file inode; missing, unsafe or malformed stores fail closed. Router dispatch has a five-second child deadline. No verifier configuration means unavailable, not active-unit authentication.
+
+Install/select the verifier with the router release and bind those nonsecret configuration paths through the existing host owner. Keep the original custody controller, resource keeper and private namespace alive. The verifier requires no controller restart. Locked-person initial provisioning continues through the existing mount-authentication route.

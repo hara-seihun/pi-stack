@@ -23,7 +23,7 @@ import { handleAgentActions } from "./agent-actions";
 import { handleAgentManager } from "./agent-manager";
 import { incomingManagerPolicy, outgoingManagerPolicy, MANAGER_POLICY_PATH } from "./canonical-manager-policy";
 import { oneKenanEnabled } from "kenan-memory/config";
-import { oneKenanConfig, custodyAuthenticate, custodyStatus } from "./one-kenan";
+import { oneKenanConfig, custodyAuthenticate, custodyStatus, custodyVerify } from "./one-kenan";
 import { EditorAccess, editorOriginAllowed, editorSocket } from "./editor-access";
 import { editorResponse } from "./editor-proxy";
 import { activatePersonalCore, preparedSupervisorHealth } from "./core-readiness";
@@ -139,8 +139,17 @@ async function waitForSupervisor(person: Person, scopeId: string): Promise<boole
 
 type StartResult = { ok: true } | { ok: false; error: string; status: number };
 async function start(person: Person, key: string): Promise<StartResult> {
-  const personal = await startPersonal(person, key);
   const custody = oneKenanConfig();
+  if (person.unlock && custody && await unitActive(person)) {
+    const verified = await custodyVerify(custody, person.user, key);
+    if (!verified.ok) return verified;
+    const prepared = await activatePersonalCore(person.user);
+    if (!prepared.ok) { activeUsers.delete(person.user); return prepared; }
+    return await waitForSupervisor(person, prepared.value.scopeId)
+      ? { ok: true }
+      : { ok: false, error: "The supervisor did not become ready", status: 503 };
+  }
+  const personal = await startPersonal(person, key);
   if (personal.ok && custody && person.unlock) {
     void custodyAuthenticate(custody, person.user, key).then(captured => {
       if (!captured.ok) console.error(`Kenan custody capture for ${person.user} did not finish: ${captured.error}`);

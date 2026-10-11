@@ -44,7 +44,7 @@ function person(user: string, encrypted: boolean, remoteAccess: string[]) {
         ? undefined
         : new Response("Upgrade failed", { status: 400 });
     }
-    return Response.json({ user, path: url.pathname });
+    return Response.json(url.pathname === "/v1/health" ? { ok: true, core: { scopeId: `fixture:${user}`, error: null } } : { user, path: url.pathname });
   }, websocket: {
     perMessageDeflate: false,
     open(socket) { websocketConnections.push({ ...socket.data, socket }); },
@@ -116,13 +116,18 @@ Bun.spawn = (command, options) => Array.isArray(command) && command[0] === '/usr
   ? spawn([process.execPath, ${JSON.stringify(join(root, "activation-fixture.mjs"))}, ...command.slice(1)], options)
   : spawn(command, options);
 `);
+  writeFileSync(join(root, "core-fixture.ts"), `import { mock } from "bun:test";
+mock.module(${JSON.stringify(join(import.meta.dir, "core-readiness.ts"))}, () => ({
+  activatePersonalCore: async user => ({ ok: true, value: { protocol: "pi-core-person-activation-v1", user, scopeId: "fixture:" + user, state: "prepared" } }),
+  preparedSupervisorHealth: (health, scopeId) => health.ok === true && health.core?.scopeId === scopeId && health.core.error === null,
+}));`);
   await startRouter();
 });
 
 async function startRouter(oidcConfig = "") {
   router = Bun.spawn([process.execPath, "--preload", join(root, "activation-preload.mjs"), join(import.meta.dir, "router.ts")], {
     stdout: "ignore", stderr: "pipe",
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, PI_REMOTE_ROUTER_PORT: String(port), PI_REMOTE_PERSONS_DIR: persons, PI_STACK_HOST_FILE: join(root, "host.json"), PI_REMOTE_KEY_DIR: keys, PI_REMOTE_UPSTREAM_CREDENTIAL_DIR: join(root, "upstream-credentials"), PI_REMOTE_UNLOCK_TIMEOUT_MS: "300", PI_REMOTE_OIDC_CONFIG: oidcConfig },
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, PI_REMOTE_ROUTER_PORT: String(port), PI_REMOTE_PERSONS_DIR: persons, PI_STACK_HOST_FILE: join(root, "host.json"), PI_REMOTE_KEY_DIR: keys, PI_REMOTE_UPSTREAM_CREDENTIAL_DIR: join(root, "upstream-credentials"), PI_REMOTE_UNLOCK_TIMEOUT_MS: "300", PI_REMOTE_OIDC_CONFIG: oidcConfig, PI_KENAN_CONFIG: join(root, "one-kenan.json"), PI_STACK_HOST_CONFIG: join(root, "host.json"), PI_REMOTE_ROOMS_DB: join(root, "rooms.sqlite3") },
   });
   const deadline = Date.now() + 4_000;
   while (Date.now() < deadline) {
@@ -470,4 +475,36 @@ test("OAuth host hides the chooser and rejects key/name/cookie spoofing before a
   expect(callback.status).toBe(403);
   expect(callback.headers.get("set-cookie")).toContain("Max-Age=0");
   expect((await request("/v1/sessions", undefined, "kenan")).status).toBe(423);
+});
+
+test("active adopted person authenticates through custody without a transient key or runtime replacement", async () => {
+  router.kill(); await router.exited;
+  const hostPath = join(root, "host.json"), original = readFileSync(hostPath, "utf8");
+  const verifier = join(bin, "custody-verify");
+  writeFileSync(verifier, `#!/usr/bin/python3\nimport json,sys\nx=json.load(sys.stdin)\nif x["user"] != "sybil" or x["key"] != "sybil-key":\n print(json.dumps({"ok":False,"status":403,"error":"Wrong key"}))\nelse: print(json.dumps({"ok":True}))\n`, { mode: 0o700 });
+  writeFileSync(join(root, "one-kenan.json"), JSON.stringify({ version: 1, executionUser: "pi-kenan", custodySocket: join(root, "unreachable.sock"), keyVerifier: verifier }));
+  writeFileSync(hostPath, JSON.stringify({ ...JSON.parse(original), oneKenan: true }));
+  const active = join(units, "pi-remote@sybil.service");
+  writeFileSync(active, "original-runtime");
+  rmSync(join(keys, "sybil"), { force: true });
+  const before = statSync(active).ino;
+  try {
+    await startRouter();
+    expect((await unlock("sybil", "wrong")).status).toBe(403);
+    const response = await unlock("sybil"); expect(response.status).toBe(200);
+    const { session, user } = await response.json(); expect(user).toBe("sybil");
+    expect((await request("/v1/health", session, "sybil")).status).toBe(200);
+    expect((await request("/v1/health", session, "kenan")).status).toBe(403);
+    expect(statSync(active).ino).toBe(before);
+    expect(readFileSync(active, "utf8")).toBe("original-runtime");
+    expect(existsSync(join(keys, "sybil"))).toBe(false);
+    writeFileSync(verifier, "#!/usr/bin/python3\nprint(\"malformed\")\n");
+    expect((await unlock("sybil")).status).toBe(503);
+    expect(statSync(active).ino).toBe(before);
+    expect(existsSync(join(keys, "sybil"))).toBe(false);
+  } finally {
+    router.kill(); await router.exited;
+    writeFileSync(hostPath, original);
+    await startRouter();
+  }
 });
