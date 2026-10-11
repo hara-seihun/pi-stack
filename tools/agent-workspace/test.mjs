@@ -1332,6 +1332,24 @@ test("sparse custody admission never walks history or reads a large excluded blo
   } finally { f.close(); }
 });
 
+test("fresh durable source import retains its received pack instead of unpacking loose objects", () => {
+  const f = fixture();
+  try {
+    const commit = git(f.source, "rev-parse", "HEAD");
+    const created = JSON.parse(run(["create", "--root", f.workspaces, "--name", "packed-import", "--repo", `file://${f.remote}`,
+      "--ref", commit, "--min-free-gib", "0", "--json"], f.env));
+    assert.equal(created.state, "active");
+    const objects = readFileSync(path.join(created.path, ".git", "objects", "info", "alternates"), "utf8").trim();
+    const packs = readdirSync(path.join(objects, "pack")).filter(name => name.endsWith(".pack"));
+    assert.ok(packs.length > 0, "a first import must retain Git's received pack");
+    for (const pack of packs) assert.equal(existsSync(path.join(objects, "pack", pack.replace(/\.pack$/u, ".idx"))), true);
+    const loose = readdirSync(objects).filter(name => /^[0-9a-f]{2}$/u.test(name))
+      .flatMap(name => readdirSync(path.join(objects, name)).filter(file => /^[0-9a-f]{38}$/u.test(file)));
+    assert.equal(loose.length, 0, "received source objects must not be expanded into loose encrypted-storage files");
+    assert.equal(readFileSync(path.join(created.path, "file.txt"), "utf8"), "source\n");
+  } finally { f.close(); }
+});
+
 test("slow first import returns one durable preparing job before registering a workspace", () => {
   const f = fixture();
   const release = path.join(f.root, "release-import");

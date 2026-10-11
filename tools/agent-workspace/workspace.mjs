@@ -2204,7 +2204,7 @@ function prepareMirror(mirror, repository, upstream) {
   mkdirSync(path.dirname(mirror), { recursive: true, mode: 0o700 });
   if (!existsSync(mirror)) run("git", ["init", "--bare", mirror]);
   if (existsSync(path.join(mirror, "objects", "info", "alternates"))) fail(`shared mirror must own its objects independently: ${mirror}`);
-  for (const [name, value] of Object.entries({ ...REFERENCE_CLONE_CONFIG, "fetch.unpackLimit": "0" })) {
+  for (const [name, value] of Object.entries({ ...REFERENCE_CLONE_CONFIG, "fetch.unpackLimit": "1" })) {
     run("git", ["--git-dir", mirror, "config", "--local", name, value]);
   }
   for (const [name, url] of [["origin", upstream.fetch], ["workspace-source", repository]]) {
