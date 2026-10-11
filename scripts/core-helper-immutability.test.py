@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class ImmutableHelpers(unittest.TestCase):
     def test_plain_interpreter_and_direct_entry_never_add_artifact_caches(self):
         names = ['core-runtime', 'core-custody', 'core-person-activate', 'core-plan', 'core-drain',
-                 'core-root-census', 'core-remote-witness', 'core-meet-drain', 'core-adopt-batch',
+                 'core-root-census', 'core-native-census', 'core-remote-witness', 'core-meet-drain', 'core-adopt-batch',
                  'core-bindings', 'core-assemble', 'core-aux-plan', 'core-aux-run',
                  'core-image-handoff', 'core-provider-adopt', 'core-adopt', 'core-capability-epoch.py']
         with tempfile.TemporaryDirectory() as temporary:

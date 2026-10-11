@@ -1,0 +1,112 @@
+#!/usr/bin/python3 -B
+"""Observe original native owners without acquiring leases or mutating their controls."""
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import subprocess
+import sys
+sys.dont_write_bytecode = True
+from core_namespace import absolute, publish, trusted
+
+STATUS = '''import json,socket,sys
+s=socket.socket(socket.AF_UNIX);s.settimeout(0.6);s.connect(sys.argv[1]);s.sendall(b'{"type":"status"}\\n');raw=b''
+while b'\\n' not in raw:
+ chunk=s.recv(65536)
+ if not chunk: raise ValueError('control closed without status')
+ raw+=chunk
+ if len(raw)>1048576: raise ValueError('status frame exceeds metadata bound')
+v=json.loads(raw.split(b'\\n',1)[0]);s.close()
+if v.get('ok') is not True: raise ValueError('native status refused')
+print(json.dumps({k:v[k] for k in ['pid','sessions','activeSessions','threadIds','activeThreadIds','historySource','unit'] if k in v}))
+'''
+
+
+def match_scopes(scopes, control, uid):
+    socket_parent = str(PurePosixPath(control).parent)
+    return [scope for scope in scopes if scope['custody']['uid'] == uid and socket_parent == str(PurePosixPath(scope['custody']['socketDir']) / 'thread-runners')]
+
+
+def birth(path):
+    return path.joinpath('stat').read_text().rsplit(')', 1)[1].split()[19]
+
+
+def observe(pid, scopes):
+    process = Path('/proc') / str(pid)
+    try:
+        arguments = process.joinpath('cmdline').read_bytes().split(b'\0')
+        entries = [arg.decode() for arg in arguments if arg.startswith(b'/') and arg.endswith(b'/dist/threads/runner-host.js')]
+        if len(entries) != 1:
+            return None
+        executable = os.readlink(process / 'exe')
+        if Path(executable).name != 'node':
+            return None
+        controls = [arg.decode() for arg in arguments if arg.startswith(b'/') and arg.endswith(b'.sock')]
+        started = birth(process)
+        metadata = process.stat()
+        namespace_inode = str(process.joinpath('ns/mnt').stat().st_ino)
+        row = {'pid': pid, 'startTicks': started, 'uid': metadata.st_uid, 'gid': metadata.st_gid,
+               'namespace': {'kind': 'process', 'pid': pid, 'startTicks': started, 'mountNamespaceInode': namespace_inode},
+               'entry': entries[0], 'controls': controls}
+        entry = process / 'root' / entries[0].lstrip('/')
+        row['sourceSha256'] = hashlib.sha256(entry.read_bytes()).hexdigest()
+        if len(controls) != 1:
+            row['state'] = 'control-unresolved'
+            return row
+        registered = match_scopes(scopes, controls[0], metadata.st_uid)
+        row['scopeIds'] = [scope['id'] for scope in registered]
+        directories = sorted({scope['custody']['dataDir'] for scope in registered})
+        row['registeredDataDirs'] = directories
+        row['state'] = 'registered' if len(directories) == 1 else 'registration-unresolved'
+        command = ['/usr/bin/nsenter', '--mount='+str(process / 'ns/mnt'), '--', '/usr/bin/setpriv',
+                   '--reuid='+str(metadata.st_uid), '--regid='+str(metadata.st_gid), '--clear-groups',
+                   '/usr/bin/python3', '-B', '-c', STATUS, controls[0]]
+        try:
+            response = subprocess.run(command, capture_output=True, text=True, check=True, timeout=1.5)
+            status = json.loads(response.stdout)
+            if status.get('pid') != pid:
+                row['status'] = {'state': 'different-owner', 'acknowledgedPid': status.get('pid')}
+            else:
+                row['status'] = {'state': 'acknowledged', 'value': status}
+        except (OSError, ValueError, subprocess.SubprocessError):
+            row['status'] = {'state': 'unavailable'}
+        if birth(process) != started or process.stat().st_uid != metadata.st_uid or str(process.joinpath('ns/mnt').stat().st_ino) != namespace_inode:
+            row['state'] = 'generation-changed'
+            row['status'] = {'state': 'unavailable'}
+        return row
+    except (OSError, ValueError, UnicodeError):
+        return None
+
+
+def census(plan):
+    if plan.get('version') != 1:
+        raise ValueError('explicit version1 protected census plan required')
+    configuration_path = absolute(plan['configPath'])
+    output = absolute(plan['outputPath'])
+    original_config = configuration_path.read_bytes()
+    config = trusted(configuration_path)
+    candidates = [int(path.name) for path in Path('/proc').iterdir() if path.name.isdigit()]
+    owners = [row for pid in sorted(candidates) if (row := observe(pid, config['scopes'])) is not None]
+    cohorts = {}
+    for row in owners:
+        for data_dir in row.get('registeredDataDirs', []):
+            key = str(row['uid'])+':'+data_dir
+            cohorts.setdefault(key, {'uid': row['uid'], 'dataDir': data_dir, 'owners': []})['owners'].append(row['pid'])
+    if configuration_path.read_bytes() != original_config:
+        raise ValueError('configuration changed during read-only owner census')
+    result = {'version': 1, 'protocol': 'pi-core-native-owner-census-v1', 'state': 'observed',
+              'configSha256': hashlib.sha256(original_config).hexdigest(),
+              'owners': owners, 'cohorts': list(cohorts.values()), 'mutations': False}
+    publish(output, result)
+    return {'owners': len(owners), 'cohorts': len(cohorts), 'unavailableControls': sum(row.get('status', {}).get('state') != 'acknowledged' for row in owners),
+            'outputPath': str(output), 'outputSha256': hashlib.sha256(output.read_bytes()).hexdigest(), 'mutations': False}
+
+
+if __name__ == '__main__':
+    try:
+        if os.geteuid() != 0 or len(sys.argv) != 2:
+            raise ValueError('usage: root core-native-census ROOT_PLAN')
+        print(json.dumps({'ok': True, 'value': census(trusted(absolute(sys.argv[1])))}))
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        print(json.dumps({'ok': False, 'error': {'code': 'native-census-unavailable', 'message': str(error)}}))
+        sys.exit(75)

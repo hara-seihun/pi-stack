@@ -41,6 +41,7 @@ const jobs = [
   ['core host bindings', 'node', ['--test', 'scripts/core-host.test.mjs']],
   ['core writer custody bindings', 'python3', ['-B', 'scripts/core-writer-bindings.test.py']],
   ['core helper artifact immutability', 'python3', ['-B', 'scripts/core-helper-immutability.test.py']],
+  ['core retained native census', 'python3', ['-B', 'scripts/core-native-census.test.py']],
   ['core generation adoption', 'python3', ['-B', 'scripts/core-adopt.test.py']],
   ['publication dependency retention', 'python3', ['-B', 'scripts/integration-retain.test.py']],
   ["prompt availability", "python3", ["-B", "scripts/prompt-availability.test.py"]],

@@ -78,6 +78,8 @@ The two independent fence directories are `/run/pi-stack/session-writers/UID` fo
 
 `core-bindings writer-env ROOT_CONFIG ROOT_BINDINGS OUTPUT` adds only the mechanically derived fence environment and exact directory declarations to existing registered scopes. `PI_SESSION_WRITER_DIRECTORY` and `PI_SESSION_WRITER_SCOPE` bind the physical UID leaf and exact `CoreScope.id`; `PI_NATIVE_RUNNER_DATA_DIR` and `PI_NATIVE_RUNNER_UID` bind the original registered data directory and executor. Native launch acquires its full-SHA256 data-directory storage lease; SDK session identity has a separate logical-source lease. Read-only auxiliary capture spans multiple owners and therefore strips caller session-writer and thread-credential environment rather than choosing an arbitrary scope.
 
+`python3 -B core-native-census ROOT_PLAN` observes original runner-host processes and requests only existing `status`, as each exact UID in its current namespace. The root plan declares version1, configPath and outputPath. Protected output records PID/birth/source hash, registered data-directory cohorts and acknowledged active-session/thread metadata; stdout contains counts/digest only. A control acknowledging another PID, an unavailable control or ambiguous registered storage remains explicit uncertainty, never idle. This helper acquires no lease and closes no owner.
+
 These fences protect new patched writers. Original unpatched hosts require their own positively acknowledged closure; directory creation alone cannot fence an already accepted legacy write.
 
 ## Coordinated activation
