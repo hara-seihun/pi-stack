@@ -82,7 +82,7 @@ export function patchBashCancellationCopies(nodeModules) {
   apply(join(coding, "core/bash-executor.js"), sdkExecutor, "..");
   apply(join(core, "harness/env/nodejs.js"), harness, "../..");
   apply(join(core, "harness/utils/shell-output.js"), shellOutput, "../..");
-  for (const base of [coding, core]) for (const name of ["pi-shell-owner.mjs", "pi-shell-owner.py", "pi-bash-worker.py"]) {
+  for (const base of [coding, core]) for (const name of ["pi-shell-owner.mjs", "pi-shell-owner.py", "pi-bash-worker.py", "resident-shell-adoption.mjs"]) {
     pending.set(join(base, name), readFileSync(join(here, name), "utf8"));
   }
   for (const [path, source] of pending) if (readExisting(path) !== source) writeFileSync(path, source);

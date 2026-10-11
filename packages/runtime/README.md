@@ -343,6 +343,53 @@ factory. New consumers of the selected SDK use the repair; resident Core/native
 shell-tool consumers need their owning routine release adoption. Never edit a
 selected dependency closure to activate this change.
 
+### Retained resident shell adoption
+
+The prepared SDK also carries [`resident-shell-adoption.mjs`](resident-shell-adoption.mjs).
+Its `adoptResidentLocalShells` API installs the candidate local shell executor into
+the retained operation object; it does not replace a tool, session or history.
+The finite native operator imports the sealed SDK's `core/tools/bash.js`
+`createLocalShellOperations` factory and calls the adopter with:
+
+```js
+{
+  protocol: "resident-local-shell-v1",
+  factory: candidate.createLocalShellOperations,
+  factorySha256: approvedCandidateFactoryHash,
+  entries: [{ kind: "local-shell", id: residentIdentity, operations: retainedLocal,
+    expectedExecSha256: approvedPredecessorExecHash,
+    shellName: originalShellName, resolveShellConfig: originalResolveShellConfig }]
+}
+```
+
+These are original object/function handles, not copies or regenerated callbacks.
+For the retained 9cb/891/e7 adapter's approved scoped-local route, the finite
+inspector census follows `customBash.execute`'s `definition` binding, then
+`definition.execute`'s `ops` binding, then `ops.exec`'s `local` binding. For a
+known direct-local route, `ops` itself is the local operation object. The local
+`exec` closure provides the original `shellName` and `resolveShellConfig`
+bindings. Every traversed function must match its approved source hash, and the
+operator must bind the complete actual resident/operation census to the same
+native PID/birth and candidate seal. A missing or unknown route is a failure,
+not permission to replace a tool with a default executor. Durable-worker
+operations cannot be described as local operations by this API.
+
+The adopter preflights all predecessors and descriptor identities before one
+synchronous CAS. It preserves local operation object identity and descriptor
+flags; scoped wrappers, budgets, environment hooks, PiExecution admission and
+history remain unchanged. Active calls retain their already-captured executor
+and original child/cancellation registry. Adoption neither cancels nor replays
+those calls and does not retroactively repair an already-running old Python
+owner. Coverage applies to subsequent calls through the adopted object.
+Resident runtime/session replacement can construct another old-module operation
+object; its owning factory-adoption route must cover that creation before claiming
+replacement coverage. The future-native-factory selector alone does not do so.
+
+`node --test packages/runtime/resident-shell-adoption.test.mjs` covers complete
+preflight refusal and unchanged in-flight ownership. The Bash cancellation suite
+also runs a real original-SDK command, adopts its operation while active, proves
+original abort/sibling ownership, then proves repaired root cleanup for a new call.
+
 `deploy/runtime` runs the same proof against copied installed source without
 patching it:
 

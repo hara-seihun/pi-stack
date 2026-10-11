@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
+import { adoptResidentLocalShells, residentShellProtocol, shellFunctionHash } from "./resident-shell-adoption.mjs";
 
 const linux = process.platform === "linux";
 const rootCustody = process.env.PI_TEST_ROOT_CUSTODY === "1";
@@ -17,6 +18,7 @@ let directory;
 let gnuTimeout;
 let ownerModule;
 let ownerHelpers = [];
+let candidateShellFactory, legacyBashFactory;
 
 function writableFixture(path) {
   const stat = lstatSync(path);
@@ -240,6 +242,9 @@ if (linux) {
   }
   const load = path => import(pathToFileURL(path).href);
   const sdk = await load(join(base, "core/tools/bash.js"));
+  candidateShellFactory = sdk.createLocalShellOperations;
+  const legacyBase = dirname(fileURLToPath(process.env.PI_TEST_LEGACY_RUNTIME_ENTRY ?? runtime));
+  legacyBashFactory = (await load(join(legacyBase, "core/tools/bash.js"))).createLocalBashOperations;
   const { NodeExecutionEnv } = await load(join(core, "dist/harness/env/nodejs.js"));
   const harness = await load(join(core, "dist/harness/utils/shell-output.js"));
   for (const [name, api] of [["SDK local Bash operations", sdk]]) {
@@ -341,6 +346,45 @@ for (const privilege of rootCustody ? ["user", "root"] : ["user"]) for (const ba
       }
     });
   }
+}
+
+if (linux && !unpatchedReproduction) {
+  test("resident local exec adoption preserves in-flight original cancellation and sibling ownership", { timeout: 10000 }, async () => {
+    const operations = legacyBashFactory();
+    const originalExec = operations.exec;
+    const active = makeFixture("tree"), sibling = makeFixture("sibling"), future = makeFixture("tree");
+    if (rootCustody) future.command = `exec sudo -n -- /usr/bin/env PI_BASH_CANCELLATION_TEST_TOKEN=${shellQuote(future.token)} PI_BASH_CANCELLATION_GNU_TIMEOUT=${shellQuote(gnuTimeout)} /usr/bin/python3 -I -B ${shellQuote(join(directory, "fixture.py"))} ${shellQuote(future.folder)} tree`;
+    const oldController = new AbortController(), siblingController = new AbortController(), futureController = new AbortController();
+    const run = (fixture, controller, timeout) => observed(operations.exec(fixture.command, directory, { onData() {}, signal: controller.signal, timeout }));
+    let oldRun, siblingRun, futureRun;
+    try {
+      oldRun = run(active, oldController, 5); siblingRun = run(sibling, siblingController, 5);
+      await until(() => existsSync(join(active.folder, "ready")) && existsSync(join(sibling.folder, "sibling.json")), 2000, "original operations did not become ready");
+      const adopted = adoptResidentLocalShells({ protocol: residentShellProtocol, factory: candidateShellFactory,
+        factorySha256: shellFunctionHash(candidateShellFactory), entries: [{ kind: "local-shell", id: "retained-local", operations,
+          expectedExecSha256: shellFunctionHash(originalExec), shellName: "bash", resolveShellConfig: () => ({ shell: "/bin/bash", args: ["-c"], commandTransport: "args" }) }] });
+      assert.equal(adopted.ok, true, JSON.stringify(adopted));
+      assert.notEqual(operations.exec, originalExec);
+      futureRun = run(future, futureController, 1);
+      await until(() => existsSync(join(future.folder, "ready")), 2000, "adopted future command did not start");
+      oldController.abort();
+      const oldResult = await oldRun;
+      assert.equal(oldResult.ok, false); assert.match(oldResult.error.message, /aborted/);
+      await until(() => recordsFor(active).every(record => !sameProcess(record)), 2000, "original cancellation lost its process owner after adoption");
+      const newResult = await futureRun;
+      assert.equal(newResult.ok, false); assert.match(newResult.error.message, /timeout/);
+      await until(() => recordsFor(future).every(record => !sameProcess(record)), 2000, "adopted root descendants survived");
+      assert.ok(sameProcess(recordsFor(sibling)[0]), "original sibling must remain owned and alive");
+      writeFileSync(join(sibling.folder, "release"), "go");
+      assert.equal((await siblingRun).value.exitCode, 0);
+    } finally {
+      oldController.abort(); siblingController.abort(); futureController.abort();
+      const cleanup = await Promise.allSettled([cleanFixture(active), cleanFixture(sibling), cleanFixture(future)]);
+      await Promise.allSettled([oldRun, siblingRun, futureRun].filter(Boolean));
+      const failures = cleanup.filter(result => result.status === "rejected");
+      if (failures.length) throw new AggregateError(failures.map(result => result.reason), "adoption fixture cleanup failed");
+    }
+  });
 }
 
 if (linux && rootCustody && !unpatchedReproduction) {
