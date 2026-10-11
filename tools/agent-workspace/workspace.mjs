@@ -71,7 +71,7 @@ const ORIGIN_FETCH_REFSPEC = "+refs/heads/*:refs/remotes/origin/*";
 
 function creationTimeout(args) {
   const seconds = numberFlag(args, "creation-timeout-seconds", DEFAULT_CREATION_TIMEOUT_SECONDS);
-  if (seconds < 1 || seconds > 900) fail("--creation-timeout-seconds must be between 1 and 900");
+  if (seconds < 1 || seconds > 86400) fail("--creation-timeout-seconds must be between 1 and 86400");
   return seconds * 1000;
 }
 
@@ -191,7 +191,7 @@ function command(executable, commandArgs, options = {}) {
     fail(`workspace inspection timed out: ${executable} ${commandArgs.join(" ")}; no safety verdict was established`);
   }
   if (creationDeadline !== undefined && result.error?.code === "ETIMEDOUT") {
-    fail("creation command timed out; checkout retained; repeat the same create command to resume, optionally increasing --creation-timeout-seconds (maximum 900)");
+    fail("creation command timed out; repeat the same create command to retry, optionally increasing --creation-timeout-seconds (maximum 86400)");
   }
   return {
     status: result.status ?? 1,
@@ -1608,7 +1608,7 @@ function directNestedGitRoots(container) {
 function adoptionCandidates(root, nestedGroups) {
   const candidates = [];
   for (const entry of readdirSync(root, { withFileTypes: true })) {
-    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+    if (!entry.isDirectory() || entry.isSymbolicLink() || /^\..+\.creating-[0-9a-f-]{36}(?:-\d+-\d+)?$/.test(entry.name)) continue;
     const candidate = path.join(root, entry.name);
     if (!existsSync(candidate)) continue;
     const candidateIsGitRoot = gitRoot(candidate);
@@ -2408,13 +2408,45 @@ function sourcePreparationWorker() {
   } finally { database.close(); }
 }
 
+function creationRequest(args, repository) {
+  const name = safeName(required(args, "name"));
+  const sparsePatterns = many(args, "sparse-pattern");
+  const intent = capacityIntent(args);
+  return JSON.stringify({ repository, ref: one(args, "ref", "HEAD"), mode: one(args, "mode", "writer"),
+    strategy: one(args, "strategy", "clone"), branch: one(args, "branch", `agent/${name}`),
+    owner: one(args, "owner", name), kind: one(args, "kind", "agent"), groupId: one(args, "group", null),
+    cachePaths: normalizeCachePaths(many(args, "cache")),
+    ...(sparsePatterns.length ? { sparsePatterns } : {}), ...(intent === null ? {} : { capacity: intent }),
+    leaseSeconds: numberFlag(args, "lease-seconds", DEFAULT_LEASE_SECONDS) });
+}
+
 function createCommand(database, args, statePath) {
+  assertOnly(args, ["root", "name", "repo", "ref", "branch", "kind", "mode", "owner", "group", "strategy", "lease-seconds", "cache", "max-count", "min-free-gib", "min-free-inodes-percent", "creation-timeout-seconds", "sparse-pattern", "intent", "headroom-gib", "growth-mib", "json"]);
   const destination = path.join(path.resolve(required(args, "root")), safeName(required(args, "name")));
+  const pending = database.prepare("SELECT id,creation_request FROM workspace WHERE path=? AND state='creating'").get(destination);
+  if (pending && process.env.PI_WORKSPACE_CHECKOUT_JOB !== pending.id) {
+    const request = creationRequest(args, repositoryLocation(required(args, "repo"), currentDirectory()));
+    if (request !== pending.creation_request) fail(`workspace already exists with a different creation request: ${destination}`);
+    const directory = path.join(path.dirname(statePath), "checkout-jobs", pending.id);
+    if (existsSync(directory)) for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const job = path.join(directory, entry.name);
+      if (existsSync(path.join(job, "result.json")) || !existsSync(path.join(job, "attempt.json"))) continue;
+      const attempt = JSON.parse(readFileSync(path.join(job, "attempt.json"), "utf8"));
+      const active = command("systemctl", ["--user", "show", attempt.unit, "--property=ActiveState", "--value"], { timeout: 2500 });
+      if (active.status === 0 && ["active", "activating", "deactivating"].includes(active.stdout)) {
+        print({ ok: true, state: "creating", id: pending.id, path: destination,
+          jobId: entry.name, progressPath: path.join(job, "progress.json"),
+          nextAction: "Repeat this exact create request to observe the durable checkout job" }, true);
+        process.exitCode = 75;
+        return;
+      }
+    }
+  }
   return withWorkspaceLock(database, destination, () => createWorkspace(database, args, statePath), one(args, "group"));
 }
 
 function createWorkspace(database, args, statePath) {
-  assertOnly(args, ["root", "name", "repo", "ref", "branch", "kind", "mode", "owner", "group", "strategy", "lease-seconds", "cache", "max-count", "min-free-gib", "min-free-inodes-percent", "creation-timeout-seconds", "sparse-pattern", "intent", "headroom-gib", "growth-mib", "json"]);
   const intent = capacityIntent(args);
   const checkoutTimeout = creationTimeout(args);
   const root = path.resolve(required(args, "root"));
@@ -2433,12 +2465,7 @@ function createWorkspace(database, args, statePath) {
   }
   if (sparsePatterns.length && strategy !== "clone") fail("--sparse-pattern currently requires --strategy clone");
   const branch = one(args, "branch", `agent/${name}`);
-  const request = JSON.stringify({ repository, ref, mode, strategy, branch,
-    owner: one(args, "owner", name), kind: one(args, "kind", "agent"), groupId: one(args, "group", null),
-    cachePaths: normalizeCachePaths(many(args, "cache")),
-    ...(sparsePatterns.length ? { sparsePatterns } : {}),
-    ...(intent === null ? {} : { capacity: intent }),
-    leaseSeconds: numberFlag(args, "lease-seconds", DEFAULT_LEASE_SECONDS) });
+  const request = creationRequest(args, repository);
   const input = JSON.parse(request);
   const upstream = repositoryRemotes(repository);
   const mirror = mirrorFor(statePath, intent === null ? repository : upstream.fetch);
@@ -2512,8 +2539,56 @@ function createWorkspace(database, args, statePath) {
       .run(sourceCommit, Date.now(), row.id);
   }
   if (intent !== null) resolveSource(statePath, mirror, repository, upstream, sourceCommit, sparsePatterns);
+  const staged = strategy === "clone" && !existsSync(destination);
+  const staging = process.env.PI_WORKSPACE_CHECKOUT_JOB === row.id
+    ? process.env.PI_WORKSPACE_CHECKOUT_STAGE
+    : path.join(root, `.${name}.creating-${row.id}`);
+  if (staged && process.env.PI_WORKSPACE_CHECKOUT_JOB !== row.id) {
+    if (!args.named.has("creation-timeout-seconds")) {
+      const fileCount = git(mirror, ["ls-tree", "-r", "--name-only", "-z", sourceCommit]).split("\0").filter(Boolean).length;
+      const plan = JSON.parse(database.prepare("SELECT plan_json FROM workspace_capacity WHERE workspace_id=?").get(row.id).plan_json);
+      const bytes = plan.intent === "unestimated" ? 0 : plan.constructionBytes;
+      args.named.set("creation-timeout-seconds", [String(Math.min(86400,
+        Math.max(DEFAULT_CREATION_TIMEOUT_SECONDS, Math.ceil(60 + fileCount / 100 + bytes / (8 * 1024 ** 2)))))]);
+    }
+    const jobBudget = creationTimeout(args);
+    const normalized = [...args.named].flatMap(([flag, values]) => values.map(value => `--${flag}=${value}`));
+    const jobDirectory = path.join(path.dirname(statePath), "checkout-jobs", row.id);
+    mkdirSync(jobDirectory, { recursive: true, mode: 0o700 });
+    const generationFile = path.join(jobDirectory, "generation");
+    const generation = existsSync(generationFile) ? Number(readFileSync(generationFile, "utf8")) : 0;
+    if (!Number.isSafeInteger(generation) || generation < 0) fail("invalid checkout job generation");
+    const candidate = `${staging}-${generation}-${jobBudget}`;
+    const job = runSourceJob({
+      directory: jobDirectory,
+      key: `checkout:${row.id}:${jobBudget}:${generation}`, request: { id: row.id, sourceCommit, request },
+      command: [process.execPath, new URL("checkout-job.mjs", import.meta.url).pathname,
+        statePath, row.id, candidate, String(jobBudget), ...normalized],
+      waitMs: 0, restartInterrupted: true, restartAbnormal: true,
+      cleanupCommand: [process.execPath, new URL("checkout-job.mjs", import.meta.url).pathname, "--cleanup", candidate],
+    });
+    if (job.state === "ready") {
+      print(creationRecord(database, row.id), bool(args, "json"));
+      return;
+    }
+    if (job.state === "failed") {
+      const next = `${generationFile}.tmp`;
+      writeFileSync(next, String(generation + 1), { mode: 0o600 });
+      renameSync(next, generationFile);
+      database.prepare("UPDATE workspace SET detail=?,updated_at=? WHERE id=? AND state='creating'")
+        .run(`checkout failed; private staging cleaned: ${job.error.message}`, Date.now(), row.id);
+      fail(`checkout failed (${job.error.code}): ${job.error.message}; repeat the same create request to retry`);
+    }
+    print({ ok: true, state: "creating", id: row.id, path: destination,
+      jobId: job.jobId, progressPath: job.progressPath,
+      nextAction: "Repeat this exact create request to observe the durable checkout job" }, true);
+    process.exitCode = 75;
+    return;
+  }
+  const materialization = staged ? staging : destination;
+  if (staged) rmSync(staging, { recursive: true, force: true });
   try {
-    if (!existsSync(destination) || readdirSync(destination).length === 0) {
+    if (!existsSync(materialization) || readdirSync(materialization).length === 0) {
       const plan = database.prepare("SELECT plan_json FROM workspace_capacity WHERE workspace_id=?").get(row.id);
       assertCapacity(root, args, database, destination, plan === undefined ? undefined : JSON.parse(plan.plan_json));
       if (strategy === "worktree") {
@@ -2522,7 +2597,7 @@ function createWorkspace(database, args, statePath) {
         else worktreeArgs.push("-b", branch, destination, sourceCommit);
         run("git", worktreeArgs, { timeout: checkoutTimeout });
       } else if (intent !== null) {
-        prepareSharedSourceClone(destination, repository, sourceCommit, input, mirror);
+        prepareSharedSourceClone(materialization, repository, sourceCommit, input, mirror);
       } else {
         const sourceTag = cloneSourceTag(statePath, mirror, sourceCommit);
         run("git", ["clone", "--no-local", ...Object.entries(REFERENCE_CLONE_CONFIG)
@@ -2530,34 +2605,42 @@ function createWorkspace(database, args, statePath) {
           "--config", `remote.origin.url=${repository}`, "--config", `remote.origin.fetch=${ORIGIN_FETCH_REFSPEC}`,
           "--origin", "workspace-source",
           "--reference-if-able", mirror, "--no-checkout", "--no-tags", "--single-branch", "--branch", sourceTag,
-          mirror, destination], { timeout: 40_000 });
+          mirror, materialization], { timeout: checkoutTimeout });
       }
     }
-    if (intent !== null) prepareSharedSourceClone(destination, repository, sourceCommit, input, mirror);
-    const info = gitInfo(destination);
+    if (intent !== null) prepareSharedSourceClone(materialization, repository, sourceCommit, input, mirror);
+    const info = gitInfo(materialization);
     if (info.checkoutType !== strategy) fail("pending checkout type changed");
     if (strategy === "clone") {
-      prepareSparseCheckout(destination, input);
-      resumeCloneCheckout(destination, input, sourceCommit, upstream, checkoutTimeout);
+      prepareSparseCheckout(materialization, input);
+      resumeCloneCheckout(materialization, input, sourceCommit, upstream, checkoutTimeout);
     }
-    const head = git(destination, ["rev-parse", "HEAD"]);
-    const selectedBranch = command("git", ["-C", destination, "symbolic-ref", "--quiet", "--short", "HEAD"]);
+    const head = git(materialization, ["rev-parse", "HEAD"]);
+    const selectedBranch = command("git", ["-C", materialization, "symbolic-ref", "--quiet", "--short", "HEAD"]);
     if (head !== sourceCommit || (mode === "writer" ? selectedBranch.stdout !== branch : selectedBranch.status === 0)) {
       fail("pending checkout HEAD or branch differs from the reserved source");
     }
-    assertPendingClean(destination);
+    assertPendingClean(materialization);
     if (strategy === "clone") {
-      git(destination, ["remote", "set-url", "origin", upstream.fetch]);
-      ensureOriginFetch(destination);
-      configurePushUrl(["-C", destination], upstream);
-      const cloneSource = command("git", ["-C", destination, "config", "--local", "--get", "remote.workspace-source.url"]);
-      if (cloneSource.status === 0 && cloneSource.stdout === mirror) git(destination, ["remote", "remove", "workspace-source"]);
-      maintainReferenceClone(destination, true, statePath);
+      git(materialization, ["remote", "set-url", "origin", upstream.fetch]);
+      ensureOriginFetch(materialization);
+      configurePushUrl(["-C", materialization], upstream);
+      const cloneSource = command("git", ["-C", materialization, "config", "--local", "--get", "remote.workspace-source.url"]);
+      if (cloneSource.status === 0 && cloneSource.stdout === mirror) git(materialization, ["remote", "remove", "workspace-source"]);
+      maintainReferenceClone(materialization, true, statePath);
+    }
+    if (staged) {
+      try {
+        lstatSync(destination);
+        fail("checkout destination appeared during materialization; candidate not published");
+      } catch (error) { if (error.code !== "ENOENT") throw error; }
+      renameSync(staging, destination);
     }
     completeCreation(database, row.id, upstream.fetch, input.leaseSeconds, "creation completed", args);
   } catch (error) {
+    if (staged) rmSync(staging, { recursive: true, force: true });
     database.prepare("UPDATE workspace SET detail=?, updated_at=? WHERE id=? AND state='creating'")
-      .run(`creation retained: ${error.message}`, Date.now(), row.id);
+      .run(`${staged ? "creation failed; private staging removed" : "creation retained"}: ${error.message}`, Date.now(), row.id);
     throw error;
   }
 }
@@ -2722,6 +2805,18 @@ function cancelCreationCommand(database, args) {
   assertOnly(args, ["id", "path", "json"]);
   const record = recordBy(database, selectorFrom(args));
   if (record.state !== "creating") fail(`workspace cannot cancel creation from state ${record.state}`);
+  const statePath = registryPaths.get(database);
+  const jobs = path.join(path.dirname(statePath), "checkout-jobs", record.id);
+  if (existsSync(jobs)) for (const entry of readdirSync(jobs, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const attemptFile = path.join(jobs, entry.name, "attempt.json");
+    if (!existsSync(attemptFile)) continue;
+    const attempt = JSON.parse(readFileSync(attemptFile, "utf8"));
+    const observed = command("systemctl", ["--user", "show", attempt.unit, "--property=ActiveState", "--value"]);
+    if (observed.status !== 0 || !["inactive", "failed"].includes(observed.stdout)) {
+      fail("pending checkout has a durable job still running or stopping; repeat create to observe completion before cancellation");
+    }
+  }
   // lstat also protects dangling symlinks. Cancellation never removes filesystem entries.
   try {
     lstatSync(record.path);
@@ -3036,6 +3131,10 @@ function help() {
 The registry defaults to ${DEFAULT_STATE}. Set PI_WORKSPACE_STATE to move it.
 Repeat --cache to declare ignored generated paths that release may remove; these extend the default cache set.
 Use a Git ref the source repository can fetch, such as refs/heads/main or a branch name, not origin/main.
+Clone checkout is a durable systemd user job; exit 75 with state creating means repeat the exact request.
+Checkout budgets scale with immutable path count and construction bytes; --creation-timeout-seconds accepts 1–86400.
+A caller timeout cannot interrupt it. New clones publish atomically; failed/interrupted staging is removed.
+Use repeatable --sparse-pattern PATTERN (Git non-cone patterns) to materialize only selected source paths.
 A lease expiry permits reconciliation; it never makes dirty or unpushed work disposable.
 Records with the same --group lease, heartbeat, and release as one multi-repository workspace.
 Records outlive the directory, so status explains what became of a checkout that is gone;
@@ -3072,7 +3171,7 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
         env: { PI_WORKSPACE_STATE: statePath, PI_WORKSPACE_CREATE_CHILD: statePath },
       });
       if ([124, 137].includes(result.status) || result.error?.code === "ETIMEDOUT") {
-        fail("creation budget exhausted; any pending checkout is retained, not active; repeat the same create command to resume, optionally increasing --creation-timeout-seconds (maximum 900)");
+        fail("creation budget exhausted; pending reservation retained, not active; repeat the same create command to retry, optionally increasing --creation-timeout-seconds (maximum 86400)");
       }
       if (result.status === 75 && result.stdout) {
         const pending = JSON.parse(result.stdout);
@@ -3082,7 +3181,14 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
           return;
         }
       }
-      if (result.status === 75) throw new ResourceBusyError(result.stderr);
+      if (result.status === 75) {
+        if (result.stdout) {
+          process.stdout.write(`${result.stdout}\n`);
+          process.exitCode = 75;
+          return;
+        }
+        throw new ResourceBusyError(result.stderr);
+      }
       if (result.status !== 0) fail(result.stderr || result.error?.message ||
         "creation interrupted; repeat the same command to resume");
       process.stdout.write(`${result.stdout}\n`);
