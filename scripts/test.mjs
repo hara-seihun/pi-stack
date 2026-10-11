@@ -40,6 +40,7 @@ const jobs = [
   ['runtime dependency closure', 'node', ['--test', 'scripts/deploy-runtime-closure.test.mjs'], { dependsOn: ['orchestrator memory build'], timeoutMs: 55_000 }],
   ['core host bindings', 'node', ['--test', 'scripts/core-host.test.mjs']],
   ['core writer custody bindings', 'python3', ['-B', 'scripts/core-writer-bindings.test.py']],
+  ['core workspace resource bindings', 'python3', ['-B', 'scripts/core-workspace-resources.test.py']],
   ['core helper artifact immutability', 'python3', ['-B', 'scripts/core-helper-immutability.test.py']],
   ['core retained native census', 'python3', ['-B', 'scripts/core-native-census.test.py']],
   ['core idle native retirement', 'python3', ['-B', 'scripts/core-native-retire.test.py']],

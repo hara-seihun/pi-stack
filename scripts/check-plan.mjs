@@ -37,6 +37,7 @@ const shipping = {
   'core retained native census': ['deploy/core-native-census', 'deploy/core_namespace.py', 'scripts/core-native-census.test.py'],
   'core idle native retirement': ['deploy/core-native-retire', 'deploy/core_namespace.py', 'scripts/core-native-retire.test.py'],
   'core writer custody bindings': ['deploy/core-bindings', 'deploy/core-aux-run', 'scripts/core-writer-bindings.test.py'],
+  'core workspace resource bindings': ['deploy/core-bindings', 'deploy/core_namespace.py', 'scripts/core-workspace-resources.test.py'],
   'core generation adoption': ['deploy/core-adopt', 'deploy/core_namespace.py', 'deploy/core-custody', 'scripts/core-adopt.test.py'],
   'publication dependency retention': ['deploy/integration-retain.py', 'deploy/publication', 'scripts/integration-retain.test.py'],
   'prompt availability': ['deploy/prompt-availability', 'scripts/prompt-availability.test.py'],

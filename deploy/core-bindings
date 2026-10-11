@@ -1,12 +1,14 @@
 #!/usr/bin/python3 -B
 """Capture original technical environment/path metadata into protected scoped bindings."""
 import copy
+from contextlib import closing
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
+import sqlite3
 import sys
 sys.dont_write_bytecode = True
 from core_namespace import absolute, publish, trusted
@@ -47,6 +49,80 @@ for item in json.load(sys.stdin):
  result.append(out)
 print(json.dumps(result))
 '''
+
+
+def covered_directories(resources, candidates):
+    """Cwd observations do not add a second lifetime requirement beneath an existing grant."""
+    roots = [Path(entry['path']) for entry in resources if entry['kind'] == 'directory']
+    return [entry for entry in resources if not (entry['kind'] == 'directory' and entry['path'] in candidates
+        and any(root != Path(entry['path']) and root in Path(entry['path']).parents for root in roots))]
+
+
+def path_references(value, root):
+    if isinstance(value, dict):
+        return any(path_references(child, root) for child in value.values())
+    if isinstance(value, list):
+        return any(path_references(child, root) for child in value)
+    return isinstance(value, str) and value.startswith('/') and (value == root or value.startswith(root + '/'))
+
+
+def retired_workspace_resources(config, records, uid, observe):
+    result, evidence, candidates = copy.deepcopy(config), [], set()
+    released = {str(absolute(row['path'])): row['id'] for row in records if row['state'] == 'released'}
+    for scope in result['scopes']:
+        if scope['custody']['uid'] != uid:
+            continue
+        for entry in scope['resources']:
+            path = entry['path']
+            if entry['kind'] != 'directory' or path not in released:
+                continue
+            observation = observe(scope, path)
+            if 'error' not in observation:
+                continue
+            if observation['error'] != 2:
+                raise ValueError('workspace observation failed: ' + path)
+            ancestors = [entry['path'] for entry in scope['resources'] if entry['kind'] == 'directory' and Path(entry['path']) in Path(path).parents]
+            if not ancestors or not any(observe(scope, ancestor).get('kind') == 'directory' for ancestor in ancestors):
+                raise ValueError('retired workspace lacks an existing explicit ancestor grant: ' + path)
+            candidates.add((scope['id'], path))
+            evidence.append({'scopeId': scope['id'], 'path': path, 'workspaceId': released[path], 'state': 'released-and-absent'})
+    for scope in result['scopes']:
+        scope['resources'] = [entry for entry in scope['resources'] if not (entry['kind'] == 'directory' and (scope['id'], entry['path']) in candidates)]
+    # All remaining references, including exact files under these directories, remain required.
+    for _, path in candidates:
+        if path_references(result, path):
+            raise ValueError('retired workspace still has a required configuration consumer: ' + path)
+    return result, evidence
+
+
+def reconcile_workspace_resources(config_path, registry_path, output_path):
+    if output_path == config_path or output_path == Path('/etc/pi-stack/core.json') or output_path.is_symlink():
+        raise ValueError('workspace retirement writes a separate candidate, never the live configuration')
+    source_hash = hashlib.sha256(config_path.read_bytes()).hexdigest()
+    config = trusted(config_path)
+    identity = registry_path.stat()
+    if not registry_path.is_file() or identity.st_mode & 0o022:
+        raise ValueError('protected owning workspace registry required')
+    with closing(sqlite3.connect(registry_path.as_uri() + '?mode=ro', uri=True, timeout=1)) as database:
+        database.row_factory = sqlite3.Row
+        records = [dict(row) for row in database.execute('SELECT id,path,state FROM workspace')]
+    # Observe the owning resource view, not a possibly different host underlay.
+    from core_namespace import namespace_path
+    def observation(scope, path):
+        descriptor = os.open(namespace_path(scope['custody']['namespace']), os.O_RDONLY)
+        try:
+            response = subprocess.run(['/usr/bin/nsenter', f'--mount=/proc/self/fd/{descriptor}', '--', '/usr/bin/python3', '-B', '-c', PATH_METADATA],
+                input=json.dumps([path]), text=True, capture_output=True, pass_fds=(descriptor,), check=True, timeout=10)
+            return json.loads(response.stdout)[path]
+        finally:
+            os.close(descriptor)
+    candidate, evidence = retired_workspace_resources(config, records, identity.st_uid, observation)
+    if hashlib.sha256(config_path.read_bytes()).hexdigest() != source_hash:
+        raise ValueError('source configuration changed during candidate preparation')
+    publish(output_path, candidate)
+    return {'writtenPath': str(output_path), 'sourceConfigSha256': source_hash,
+            'registry': {'path': str(registry_path), 'uid': identity.st_uid, 'dev': str(identity.st_dev), 'ino': str(identity.st_ino)},
+            'retiredResources': evidence, 'liveEffects': False}
 
 
 def writer_bindings(scopes, config):
@@ -160,7 +236,7 @@ def collect(directory, runtime_path, output_path):
             observed.update({item['id']: item for item in json.loads(response.stdout)})
         finally:
             os.close(descriptor)
-    result, pending, absent = [], [], []
+    result, pending, absent, captured_cwds = [], [], [], {}
     for original_scope in base['scopes']:
         scope = copy.deepcopy(original_scope)
         plan = plans[scope['id']]
@@ -189,9 +265,11 @@ def collect(directory, runtime_path, output_path):
                 if value.startswith('/') and ':' not in value:
                     paths.setdefault(value, 'unknown')
             meta = observed[scope['id']]
+            captured_cwds[scope['id']] = set()
             for cwd in meta['cwd']:
-                if isinstance(cwd, str) and cwd.startswith('/'):
+                if isinstance(cwd, str) and cwd.startswith('/') and cwd not in paths:
                     paths[cwd] = 'directory'
+                    captured_cwds[scope['id']].add(cwd)
             # Batched path observations below use one process per unique data view.
             scope['resources'] = [{'path': path, 'kind': kind} for path, kind in paths.items()]
             scope['capturedManagerIds'] = meta['managerIds']
@@ -226,6 +304,7 @@ def collect(directory, runtime_path, output_path):
                 (pending if entry['path'] in required else absent).append(evidence)
                 continue
             registered.append({'path': entry['path'], 'kind': info['kind']})
+        registered = covered_directories(registered, captured_cwds[scope['id']])
         scope['resources'], targets = exact_file_targets(registered, path_info[view])
         scope['exactFileTargets'] = targets
     indexed = {item['id']:item for item in result}
@@ -262,13 +341,15 @@ if __name__ == '__main__':
             raise ValueError('root core-bindings required')
         if len(sys.argv) == 4 and sys.argv[1] == 'resolve-files':
             result = resolve_files(*(absolute(path) for path in sys.argv[2:]))
+        elif len(sys.argv) == 5 and sys.argv[1] == 'workspace-resources':
+            result = reconcile_workspace_resources(*(absolute(path) for path in sys.argv[2:]))
         elif len(sys.argv) == 5 and sys.argv[1] == 'writer-env':
             result = bind_writers(*(absolute(path) for path in sys.argv[2:]))
         elif len(sys.argv) == 4:
             result = collect(*(absolute(path) for path in sys.argv[1:]))
         else:
-            raise ValueError('usage: root core-bindings MIGRATION_DIRECTORY RUNTIME_JSON OUTPUT_JSON | writer-env CONFIG_JSON BINDINGS_JSON OUTPUT_JSON | resolve-files BINDINGS_JSON OUTPUT_JSON')
+            raise ValueError('usage: root core-bindings MIGRATION_DIRECTORY RUNTIME_JSON OUTPUT_JSON | writer-env CONFIG_JSON BINDINGS_JSON OUTPUT_JSON | resolve-files BINDINGS_JSON OUTPUT_JSON | workspace-resources CONFIG_JSON OWNER_REGISTRY_SQLITE OUTPUT_CANDIDATE_JSON')
         print(json.dumps({'ok': True, 'value': result}))
-    except (OSError, KeyError, ValueError, TypeError, subprocess.SubprocessError) as error:
+    except (OSError, KeyError, ValueError, TypeError, sqlite3.Error, subprocess.SubprocessError) as error:
         print(json.dumps({'ok': False, 'error': {'code': 'core-bindings-unavailable', 'message': str(error)}}))
         sys.exit(75)
