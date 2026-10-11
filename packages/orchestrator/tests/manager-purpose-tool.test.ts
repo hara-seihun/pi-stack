@@ -32,12 +32,12 @@ function fixture(){
    const finished=actions.finish(claimed.value,state,{synthetic:true},evidence);if(!finished.ok)throw Error(finished.message);return finished.value;
  };
  const calls:any[]=[];
- const route=()=>spyOn(globalThis,"fetch").mockImplementation(async(url:any,init:any)=>{
+ const route=()=>spyOn(globalThis,"fetch").mockImplementation(Object.assign(async(url:any,init:any)=>{
    expect(String(url)).toBe("http://127.0.0.1:19999/v1/external-actions");
    const request=new Request(String(url),init), body=await request.clone().json();calls.push({body,headers:Object.fromEntries(request.headers)});
    const caller=externalActionCaller(resolver.resolve({headers:request.headers}),1234,manager,false);
    return externalActionsEndpoint(request,actions,caller);
- });
+ }, { preconnect: globalThis.fetch.preconnect }));
  return {root,actions,options,tool,create,calls,route};
 }
 async function execute(tool:any,input:unknown){return tool.execute("synthetic-call",input,new AbortController().signal);}

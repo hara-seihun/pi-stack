@@ -131,7 +131,7 @@ describe("existing duty custody", () => {
       const unbind = service.setWatchList(replacement);
       await plugin.close();
       expect(await service.watch({ action: "list", threadId: "manager" })).toEqual({ ok: true, value: { items: [] } });
-      expect(replacement.watch).toHaveBeenCalledOnce();
+      expect(replacement.watch).toHaveBeenCalledTimes(1);
       unbind(); unbind();
       expect(await service.watch({ action: "list", threadId: "manager" })).toMatchObject({ ok: false, error: { code: "unavailable" } });
     } finally { db.close(); }

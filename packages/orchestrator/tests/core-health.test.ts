@@ -33,7 +33,7 @@ test("unobserved, broken reconciliation and invalid Root counters never report r
 
 test("duty custody errors remain explicit without disabling unrelated Core routes", () => {
   const failure = { scopeId: "person", path: "/notes/duties.md", stage: "markdown" as const,
-    error: { code: "invalid_request", message: "Markdown duty custody receipt does not match its snapshot" } };
+    error: { code: "invalid_request" as const, message: "Markdown duty custody receipt does not match its snapshot" } };
   const health = observeCoreReconciliation(provider, { status: "fulfilled", value: { errors: 0 } }, duties,
     { ...configured, dutyCustodyErrors: [failure] });
   expect(health).toMatchObject({ duties: "custody-degraded", dutyCustodyErrors: [failure] });

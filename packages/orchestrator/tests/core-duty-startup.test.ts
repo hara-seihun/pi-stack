@@ -57,7 +57,7 @@ test("a checksum mismatch starts Core, callbacks and scoped routes without dispa
   if (!started.ok) throw new Error(started.error.message);
   expect(started.ok).toBe(true);
   try {
-    expect(callbacks).toHaveBeenCalledOnce();
+    expect(callbacks).toHaveBeenCalledTimes(1);
     const health = await fetch(`${started.value.service.url}/v1/health`);
     expect(health.status).toBe(200);
     expect(await health.json()).toMatchObject({ ready: true, degraded: true, reconciliation: { duties: "custody-degraded", dutyCustodyErrors: [{ scopeId: "person", stage: "markdown", error: { code: "invalid_request" } }] } });
@@ -68,5 +68,5 @@ test("a checksum mismatch starts Core, callbacks and scoped routes without dispa
     expect(db.prepare("SELECT count(*) n FROM thread_work WHERE id LIKE 'thread-wake:%'").get()).toMatchObject({ n: 0 });
     expect(openSession).not.toHaveBeenCalled();
   } finally { expect((await started.value.close()).ok).toBe(true); db.close(); }
-  expect(closed).toHaveBeenCalledOnce();
+  expect(closed).toHaveBeenCalledTimes(1);
 });

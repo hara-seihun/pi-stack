@@ -43,7 +43,7 @@ test.each(["refused", "timeout"])("failed retained open (%s) detaches only its o
   });
   const opener=createSharedPiSessionOpener({dataDir:root}); const returned:PiSession[]=[];
   const service=new ThreadService({capacity:{mode:"unmanaged"},databasePath:join(root,"threads.sqlite"),sessionsDir:root,
-    openSession:async (_options,output,exit)=>{const session=await opener.attachSession(reference,output,exit);if(!session)throw Error("Synthetic native missing"); returned.push(session);return session;}});
+    openSession:async (_options,output,exit)=>{const session=await opener.attachSession(reference,output,code=>exit(code === null ? undefined : code));if(!session)throw Error("Synthetic native missing"); returned.push(session);return session;}});
   const imported=service.importThread({id:"child",title:"Child",cwd:root,sessionFile:join(root,"child.jsonl"),
     settings:{model:"sol",thinkingLevel:"high",speed:"standard"},metadata:{runnerReference:reference}});
   if(!imported.ok)throw Error(imported.error.message);
