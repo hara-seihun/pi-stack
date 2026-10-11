@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connectRuntime, meetSocket, runtimeCall, runtimeRevision, runtimeStatus } from "./runtime";
@@ -26,7 +26,9 @@ test("person-owned external meeting retains camera, Voice and platform transcrip
   const socket = meetSocket(data);
   const config = join(data, "config.json");
   writeFileSync(config, JSON.stringify({ version: 1, environment: {} }));
-  const env = { ...process.env, PI_REMOTE_DATA: data, PI_REMOTE_CONFIG: config };
+  const host = mkdtempSync(join(tmpdir(), "meet-host-"));
+  const callback = join(host, "callback.sock");
+  const env = { ...process.env, PI_REMOTE_DATA: data, PI_REMOTE_CONFIG: config, PI_CORE_CALLBACK_SOCKET: callback };
   const fixture = join(import.meta.dir, "fixtures", "runtime-supervisor.ts");
   const supervisor = async (input: unknown) => {
     const child = Bun.spawn([process.execPath, fixture, JSON.stringify(input)], { env, stdout: "pipe", stderr: "pipe" });
@@ -38,8 +40,10 @@ test("person-owned external meeting retains camera, Voice and platform transcrip
   let streamFinish: (() => void) | null = null;
   const previousData = process.env.PI_REMOTE_DATA;
   const previousConfig = process.env.PI_REMOTE_CONFIG;
+  const previousCallback = process.env.PI_CORE_CALLBACK_SOCKET;
   process.env.PI_REMOTE_DATA = data;
   process.env.PI_REMOTE_CONFIG = config;
+  process.env.PI_CORE_CALLBACK_SOCKET = callback;
   try {
     const id = crypto.randomUUID();
     const seeded = await supervisor({ mode: "seed", id });
@@ -47,7 +51,19 @@ test("person-owned external meeting retains camera, Voice and platform transcrip
     expect(current.pid).toBe(seeded.workerPid);
     expect(current.pid).not.toBe(seeded.supervisorPid);
     expect(current.rooms).toEqual([{ id, sessionId: "thread" }]);
+    const contender = Bun.spawn([process.execPath, join(import.meta.dir, "runtime-main.ts")], { env, stdout: "ignore", stderr: "pipe" });
+    expect(await contender.exited).toBe(1);
+    expect((await status(socket)).instance).toBe(current.instance);
+    expect((await status(socket)).rooms).toEqual(current.rooms);
     expect(statSync(socket).mode & 0o777).toBe(0o600);
+    expect(current.socketPath?.startsWith(host + "/")).toBe(true);
+    // A delayed legacy sibling cleanup can erase only the alias, not this worker.
+    unlinkSync(socket);
+    const recovered = await connectRuntime(data);
+    expect(recovered.ok).toBe(true);
+    if (!recovered.ok) throw new Error(recovered.error);
+    expect(recovered.value.pid).toBe(current.pid);
+    const { symlinkSync } = await import("node:fs"); symlinkSync(current.socketPath!, socket);
     const inspected = await supervisor({ mode: "inspect", id, hostId: seeded.result.host.participant.id });
     expect(inspected.supervisorPid).not.toBe(seeded.supervisorPid);
     expect(inspected.workerPid).toBe(seeded.workerPid);
@@ -134,7 +150,9 @@ test("person-owned external meeting retains camera, Voice and platform transcrip
     }
     if (previousData === undefined) delete process.env.PI_REMOTE_DATA; else process.env.PI_REMOTE_DATA = previousData;
     if (previousConfig === undefined) delete process.env.PI_REMOTE_CONFIG; else process.env.PI_REMOTE_CONFIG = previousConfig;
+    if (previousCallback === undefined) delete process.env.PI_CORE_CALLBACK_SOCKET; else process.env.PI_CORE_CALLBACK_SOCKET = previousCallback;
     rmSync(data, { recursive: true, force: true });
+    rmSync(host, { recursive: true, force: true });
   }
 }, 20_000);
 
