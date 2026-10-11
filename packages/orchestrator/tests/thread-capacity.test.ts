@@ -32,7 +32,8 @@ class Native implements PiSession {
     if (command.type === "abort" && this.abortFails) throw new Error("Tool cancellation unconfirmed");
     if (command.type === "input_batch") {
       this.busy = true;
-      for (const workId of command.workIds ?? []) this.accepted.add(String(workId));
+      if (!Array.isArray(command.workIds) || command.workIds.some(workId => typeof workId !== "string")) throw new Error("Native batch fixture requires explicit work IDs");
+      for (const workId of command.workIds) this.accepted.add(workId);
       this.output({ type: "thread_landed", workIds: command.workIds });
       this.output({ type: "agent_start" });
     }
