@@ -4,7 +4,7 @@ The shared native runner owns physical storage and residents. A Core cutover can
 
 ## Upgrade
 
-Runner `status` reports `nativeOwner`, `factoryProtocol`, `futureFactory`, and `residentFactories`. Each factory identity contains the canonical `pi-session.js` entry, its SHA256, the exact SDK package directory and the source commit. Upgrades require a commit-addressed release with `.pi-stack-commit` and a read-only SDK directory; selector paths are refused.
+Runner `status` reports `nativeOwner`, `factoryProtocol`, `futureFactory`, and `residentFactories`. Each factory identity contains the canonical `pi-session.js` entry, its SHA256, the exact SDK package directory and the source commit. Upgrades require a commit-addressed release with `.pi-stack-commit` and a read-only SDK directory; selector paths are refused. Native Node uses `findPackageJSON` with the candidate URL to identify its ESM SDK package; Bun uses its candidate-scoped import resolver. Import-only SDK exports do not authorize a CommonJS require lookup or selection of the controller's SDK. Loading still verifies the candidate's exported SDK directory and execution contract.
 
 `upgrade_factory` carries the literal protocol, exact process/storage owner, expected predecessor identity and candidate identity. The native serial queue validates physical ownership before loading and before committing. Loading verifies the file identity, exported SDK/environment/factory contract, and shared provider projection files. A stale predecessor, changed source, unavailable module, invalid contract or lost lease returns a specific `errorCode`; no alternate creator is selected. The acknowledgement includes old/new identities and the unchanged resident factory census.
 

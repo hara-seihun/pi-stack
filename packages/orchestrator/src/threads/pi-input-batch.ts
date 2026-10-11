@@ -31,6 +31,7 @@ export class PiInputBatch {
   private readonly enqueued = new Set<string>();
   private phase: "idle" | "generating" | "tools" | "preparing" = "idle";
   private scheduled = false;
+  private admissions = 0;
   private stopped = false;
   private readonly unsubscribe: () => void;
   private readonly unsubscribeSession: () => void;
@@ -127,6 +128,24 @@ export class PiInputBatch {
     void continued.catch(error => { this.phase = "idle"; this.output({ type: "extension_error", error: `Native recovery failed: ${String(error)}` }); });
   }
 
+  reconcileIdleAdmission(): void {
+    this.reconcileEnqueued();
+    if (this.phase === "idle" && this.pending.size) this.schedule();
+  }
+
+  private reconcileEnqueued(): void {
+    if (this.stopped || this.phase !== "idle" || this.admissions !== 0 || this.execution.blocked
+      || this.session.isIdle !== true || this.session.isStreaming !== false || this.session.agent.state.isStreaming !== false
+      || this.session.isBashRunning !== false || this.session.agent.hasQueuedMessages()
+      || this.execution.active || this.execution.activeTools !== 0) return;
+    const landed = new Set(inputReceipts(this.session.sessionManager.getBranch()).landedWorkIds);
+    for (const workId of this.pending.keys()) {
+      // Committed history outranks a missed notification; only unlanded bytes may enter Pi again.
+      if (landed.has(workId)) this.pending.delete(workId);
+      this.enqueued.delete(workId);
+    }
+  }
+
   private schedule(): void {
     if (this.scheduled || this.stopped) return;
     this.scheduled = true;
@@ -144,6 +163,7 @@ export class PiInputBatch {
 
   private pump(): void {
     if (this.stopped || this.phase === "generating" || this.phase === "preparing" || this.execution.blocked) return;
+    this.reconcileEnqueued();
     const inputs = [...this.pending.values()].filter(input => !this.enqueued.has(input.workId));
     if (!inputs.length) {
       if (this.session.isIdle && this.session.agent.hasQueuedMessages()) {
@@ -156,11 +176,16 @@ export class PiInputBatch {
     for (const workId of workIds) this.enqueued.add(workId);
     const live = this.session.isStreaming;
     if (!live) this.phase = "preparing";
+    this.admissions++;
     const sent = this.session.sendCustomMessage(message,
       { triggerTurn: true, deliverAs: "steer" });
     // sendCustomMessage's live branch enqueues synchronously; release only after that.
     if (live) this.execution.releaseObservations();
-    void sent.catch(error => {
+    void sent.then(() => {
+      this.admissions--;
+      this.reconcileIdleAdmission();
+    }, error => {
+      this.admissions--;
       // Entries whose message_end committed are already removed; retain only unlanded bytes.
       for (const workId of workIds) this.enqueued.delete(workId);
       this.phase = "idle";

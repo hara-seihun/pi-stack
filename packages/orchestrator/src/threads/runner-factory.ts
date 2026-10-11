@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { createRequire } from "node:module";
+import * as nodeModule from "node:module";
 import { dirname, isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { AsyncLocalStorage } from "node:async_hooks";
@@ -36,8 +36,17 @@ export function identifyRunnerFactory(entryPath: string): FactoryResult<RunnerFa
     const sourceCommit = existsSync(manifest) ? readFileSync(manifest, "utf8").trim() : null;
     if (sourceCommit !== null && !/^[a-f0-9]{40}$/.test(sourceCommit))
       return { ok: false, error: { code: "factory-unsealed", message: "Factory source commit is invalid" } };
-    const sdkEntry = createRequire(pathToFileURL(entryPath)).resolve("@earendil-works/pi-coding-agent");
-    const sdkDirectory = realpathSync(join(dirname(sdkEntry), ".."));
+    let sdkDirectory: string;
+    if (process.versions.bun) {
+      sdkDirectory = realpathSync(join(dirname(Bun.resolveSync("@earendil-works/pi-coding-agent", dirname(entryPath))), ".."));
+    } else {
+      const findPackageJSON = (nodeModule as unknown as { findPackageJSON?: (specifier: string, base: URL) => string | undefined }).findPackageJSON;
+      if (!findPackageJSON) return { ok: false, error: { code: "factory-unavailable", message: "Native Node requires candidate-scoped ESM package lookup" } };
+      const sdkManifest = findPackageJSON("@earendil-works/pi-coding-agent", pathToFileURL(entryPath));
+      if (!sdkManifest || JSON.parse(readFileSync(sdkManifest, "utf8")).name !== "@earendil-works/pi-coding-agent")
+        return { ok: false, error: { code: "factory-contract-invalid", message: "Candidate ESM SDK package identity is absent or invalid" } };
+      sdkDirectory = realpathSync(dirname(sdkManifest));
+    }
     return { ok: true, value: { entryPath, entrySha256: createHash("sha256").update(readFileSync(entryPath)).digest("hex"), sdkDirectory, sourceCommit } };
   } catch (cause) { return { ok: false, error: { code: "factory-unavailable", message: String(cause) } }; }
 }

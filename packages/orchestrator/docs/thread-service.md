@@ -32,6 +32,8 @@ There is one delivery behavior: `pending`. Existing persisted queue/steer/hardSt
 
 The native inbox owns the completed-output boundary. It batches messages after the current assistant output, never mid-generation. Running tools yield observation to the model while their operation continues with its own identity. `tool_operation_result` enters the same durable inbox under deterministic `operation:…:terminal` work identity, so a repeated completion event cannot create another input.
 
+If accepted input remains unlanded after native steering disappears, `PiInputBatch` may retire its transient enqueued marker only with positive idle evidence: inbox phase idle, no admission promise, session idle/nonstreaming, Agent nonstreaming with no queued messages, and execution unblocked/inactive with no tools or bash. It then admits the original retained bytes and work IDs, without a new acceptance receipt or effect execution. Live, preparing, queued or unacknowledged work cannot authorize this transition. Settlement schedules this reconciliation before refusing pending admission, so a lost steering marker cannot wedge accepted custody forever. `pi-input-idle-recovery.test.ts` exercises the actual SDK terminal boundary; `pi-input-batch.test.ts` covers refusal states.
+
 Recovery uses `input_batch` only for original not-landed inputs, then `resume_pending {workIds}` to continue the exact adopted branch. Original work/execution IDs, prepared attachments and accepted settings survive. Completed receipts settle without another model request. Rejected, never-landed input remains pending with an explicit `inputFailure`; deliberate repair/retry owns its next admission.
 
 ## Timing and Markdown duties

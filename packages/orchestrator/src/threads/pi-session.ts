@@ -243,7 +243,11 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
     function settle(cancelled = false): void {
       if (closed || replacing && !cancelled || executionStart === undefined && !activeWork.size) return;
       if (execution.active || !runtime.session.isIdle || runtime.session.isBashRunning) return;
-      if (!cancelled && (execution.blocked || inbox.awaitingAdmission)) return;
+      if (!cancelled) {
+        if (execution.blocked) return;
+        inbox.reconcileIdleAdmission();
+        if (inbox.awaitingAdmission) return;
+      }
       if (!cancelled && runtime.session.agent.hasQueuedMessages()) {
         // Pi consumes queued steering only inside a live run. A run that ended on a terminal error (for example a
         // fenced compaction) leaves the queue stranded, and settlement would wait on it forever. Run it now.
