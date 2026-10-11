@@ -5,7 +5,7 @@ import { hostname } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
-import { managerPolicyAuthority, parseManagerPolicyBinding, type ManagerPolicyBinding } from "../apps/remote/server/canonical-manager-policy";
+import { managerPolicyAuthority, managerNoticeCapability, parseManagerPolicyBinding, type ManagerPolicyBinding } from "../apps/remote/server/canonical-manager-policy";
 
 const STORE = "/etc/pi-stack/canonical-manager-policy.json", ROOT = "/etc/pi-stack/manager-policy";
 function guarded(path: string) {
@@ -48,6 +48,26 @@ async function main() {
     process.exitCode = locked.status; return;
   }
   const [action, planPath, ...rest] = process.argv.slice(2);
+  if (action === "enable-notices") {
+    if (!planPath || rest.length || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/.test(planPath)) throw new Error("Use enable-notices EXACT_EXISTING_BINDING_ID");
+    const directory = `${ROOT}/${planPath}`;
+    const parsed = parseManagerPolicyBinding(JSON.parse(guarded(`${directory}/binding.json`)));
+    if (!parsed.ok) throw new Error(parsed.error.message);
+    const binding = parsed.value;
+    if ((binding.direction === "outgoing" ? binding.source.host : binding.target.host) !== hostname()) throw new Error("Notice enrollment names another host");
+    const authority = managerPolicyAuthority(JSON.parse(readFileSync("/etc/pi-stack/core.json", "utf8")), binding);
+    if (!authority.ok) throw new Error(authority.error.message);
+    const store = JSON.parse(guarded(STORE));
+    const selected = store.bindings?.filter((row: ManagerPolicyBinding) => row.id === binding.id);
+    if (!selected || selected.length !== 1 || !same(selected[0], binding)) throw new Error("Exact current protected route required");
+    const token = guarded(binding.credentialFile).trim();
+    if (!/^[a-f0-9]{64}$/.test(token) || createHash("sha256").update(token).digest("hex") !== binding.credentialSha256) throw new Error("Original enrolled credential required");
+    const path = `${directory}/notices.json`, capability = managerNoticeCapability(binding);
+    if (existsSync(path)) { if (!same(JSON.parse(guarded(path)), capability)) throw new Error("Notice capability identity changed"); }
+    else replace(path, capability);
+    console.log(JSON.stringify({ state: "notices-enrolled", id: binding.id, direction: binding.direction, managerThreadId: binding.target.managerThreadId, uiGrantsChanged: false, credentialChanged: false }));
+    return;
+  }
   if (action === "amend-origin") {
     if (!planPath || rest.length) throw new Error("Use amend-origin PLAN");
     amendOrigin(JSON.parse(readFileSync(planPath, "utf8"))); return;

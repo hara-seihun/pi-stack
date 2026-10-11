@@ -18,3 +18,16 @@ test("other operations, payloads and unregistered identities never consume polic
   expect((await invoke(request("managerNotificationPolicy", { extra: true }), 1002)).status).toBe(503);
   expect((await invoke(request(), 999)).status).toBe(403); expect(calls).toBe(0);
 });
+
+test("canonical notice delivery uses its separate enrollment without UI grants or policy authority", async () => {
+  const input = { threadId: "original-manager", requestId: "manager-notice:fleet:settlement:original", senderId: "original-worker", source: "notification", text: "Original outcome" };
+  let notices = 0, proxies = 0, policies = 0;
+  const invoke = (uid: number, operation = "send") => handleAgentManager(request(operation, input), { uid }, people, () => person, () => [], "converge",
+    async () => { proxies++; return Response.json({}); }, async () => { policies++; return Response.json(projected); },
+    async (user, uid, source, target, original) => { notices++; expect([user, uid, source, target]).toEqual(["kenan", 1002, "converge", "local"]); expect(original).toEqual(input); return Response.json({ ok: true, value: { id: input.requestId, threadId: input.threadId } }); });
+  expect((await invoke(1002)).status).toBe(200);
+  expect((await invoke(999)).status).toBe(403);
+  expect((await invoke(1002, "questionOrigin")).status).toBe(503);
+  expect(notices).toBe(1); expect(proxies).toBe(0); expect(policies).toBe(0);
+  expect(person.remoteAccess).toBeUndefined(); expect(person.unlock).toBeUndefined();
+});
