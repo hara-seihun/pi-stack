@@ -313,6 +313,12 @@ pi_stack_publish_release() {
       pi_stack_as_root rm -rf "$root_stage"
       return 1
     fi
+    if [[ $name == remote ]]; then
+      if ! pi_stack_as_root node "$root/deploy/custody-verifier.mjs" "$root_stage/server/one-kenan-verify.ts" "$root/apps/remote/server/one-kenan-verify.ts" prepare; then
+        pi_stack_as_root rm -rf "$root_stage"
+        return 66
+      fi
+    fi
     pi_stack_as_root mv -T "$root_stage" "$release"
   fi
   [[ $(pi_stack_as_root cat "$release/.pi-stack-commit") == "$commit" ]] || {
