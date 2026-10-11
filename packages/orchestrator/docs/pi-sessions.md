@@ -72,7 +72,10 @@ with the stable command ID and original work IDs, then `thread_resume`, before
 acknowledging. A `thread_final_result_request` custom message asks only for the final
 result. It neither repeats the assignment nor retakes original input custody.
 
-`get_state.finalResultRecovery` reports that receipt. Repeated command identity
+[`pi-final-result-recovery.ts`](../src/threads/pi-final-result-recovery.ts) owns the
+single recovery policy used by fresh adapters and adopted residents.
+`get_state.finalResultRecoveryProtocol` identifies `final-result-recovery-v1`;
+`get_state.finalResultRecovery` reports its receipt. Repeated command identity
 acknowledges without another model request; changed work under that ID or another
 attempt for the same work is rejected. A second empty result settles failed through
 the controller's ordinary result path. Cold recovery with an accepted attempt but
@@ -90,11 +93,51 @@ Run from `packages/orchestrator` against the prepared shared-RPC SDK. The native
 fixture executes one real Bash effect, recovers the result and reopens the session
 without repeating that effect or the original input.
 
+## Retained resident final-result adoption
+
+[`pi-final-result-adoption.ts`](../src/threads/pi-final-result-adoption.ts) exports
+`adoptResidentFinalResultRecovery(targets, approved)`. Its finite bootstrap accepts
+exact retained objects and SHA256-approved predecessor methods, preflights the whole
+cohort, then replaces only each adapter's command method and its event sink's publish
+method. It preserves SDK/session manager objects, original command/close ownership,
+history, tools, active executions, environment scope and input identities. Installation
+neither appends native history nor executes commands. Errors identify contract,
+source-identity or installation failure; successful repeated installation is idempotent.
+
+For the audited batch-protocol predecessor, traverse the retained host's
+`resident.close` closure to `adapter` and the `RuntimeOutput` sink named `output`.
+Traverse `adapter.command` to `runtime`, `inbox`, `execution`, `env`, native projection
+`output` and `settle`; take the original module's `piEnvironmentScope`. Capture exact
+command/publish/resume function objects, their approved source hashes, SDK object,
+header ID and canonical session path before installation. Never substitute candidate
+module environment scope or a newly opened SDK session for those bindings.
+
+Recovery observes original `get_state`, requires positively idle native/execution
+state, then calls original `resume_pending` under a private stable command identity.
+Its audited synchronous registration updates original active-work/settler custody.
+Only during that synchronous call, the retained `inbox.resume` is shadowed with a
+no-op and restored before awaiting anything, preventing the predecessor's original
+assignment continuation. The shared recovery policy then sends the short final request.
+Private acknowledgements are correlated and hidden from the ordinary channel; all
+other original native events retain the same spool owner and sequence.
+
+Coverage is per exact SDK/header/file binding, advertised as
+`finalResultRecoveryAdoption.state: covered`. Native session replacement revokes it
+as `unsupported` and removes the capability until current closure bindings receive
+adoption. A future-factory upgrade alone does not cover existing adapters. Pre-batch
+residents without the audited `inbox`/`resume_pending` contract are explicitly
+unsupported, including the 9cb predecessor; they need a separately proven source route.
+
+`tests/pi-final-result-adoption.test.ts` proves adoption during a real Bash/model
+turn without replacing native objects or repeating the effect, whole-cohort rejection,
+source guarding, one attempt per work, and coverage invalidation after actual native
+new-session/switch/fork. Run it directly through Vitest against the prepared SDK.
+
 ## Native command receipts
 
 Fork, clone, new-session, switch, compaction, shell commands and model/thinking cycles require stable command IDs. A synced `thread_command` native entry precedes execution. A changed payload under the same ID fails. `thread_command_result` records the exact response and resulting session file before the response reaches the controller.
 
-Replacement writes a pending command receipt into its target and a target reference into its source before emitting `session_changed`. Completion writes its result to both native files. Retrying from the source can therefore adopt the recorded target and replay the response without another fork. A pending receipt without a result is an explicit unconfirmed outcome. It never authorizes a retry, a new request ID or a guess about whether compaction completed.
+Replacement writes a pending command receipt into its target and a target reference into its source before emitting `session_changed`. Completion writes its result to both native files. SDK replacement disposes the original manager; receipts retain only its canonical path and cwd. Source receipt writes reacquire that file through `SessionManager.open`, hold its exclusive writer lease for the append/checkpoint, then dispose the temporary manager. They never write through a released manager. A custody or persistence failure yields `command-receipt-unconfirmed` with the actual source/target paths and original native response; the target replacement identity remains authoritative and mutation is never repeated. Retrying from the source can therefore adopt the recorded target and replay the response without another fork. A pending receipt without a result is an explicit unconfirmed outcome. It never authorizes a retry, a new request ID or a guess about whether compaction completed.
 
 These are native execution receipts; the thread service still owns command admission. External tool effects are not transactions. A process can stop after an external effect but before its result, so recovery inspects current state rather than promising exactly-once external effects.
 

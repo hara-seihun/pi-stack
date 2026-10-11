@@ -35,6 +35,7 @@ import { oneKenanEnabled } from "kenan-memory/config";
 import { isRoomSession, assertRoomTools, ROOM_TOOLS, roomSessionInstructions } from "./room-session.js";
 import { createThreadClient } from "./http.js";
 import { createExecutionActivity, executionActivitySnapshot, observeExecutionActivity, settleExecutionActivity } from "./execution-activity.js";
+import { FINAL_RESULT_RECOVERY_PROTOCOL, finalResultRecovery, recoverFinalResult } from "./pi-final-result-recovery.js";
 import { TELEPHONE_CONTEXT_ARGUMENT, isTelephoneContext, telephoneModelContext } from "./telephone-context.js";
 import { installOrphanReceiptProjection } from "./pi-orphan-projection.js";
 
@@ -240,11 +241,6 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
         : [...entries].reverse().find(entry => entry.type === "message" && entry.message.role === "assistant");
       return entry?.type === "message" ? entry.message : null;
     }
-    function finalResultRecovery(commandId?: string) {
-      const entry = [...branch()].reverse().find(entry => entry.type === "custom" && entry.customType === "thread_final_result_recovery"
-        && (commandId === undefined || (entry.data as { commandId: string }).commandId === commandId));
-      return entry?.type === "custom" ? entry.data as { commandId: string; workIds: string[] } : null;
-    }
     function settle(cancelled = false): void {
       if (closed || replacing && !cancelled || executionStart === undefined && !activeWork.size) return;
       if (execution.active || !runtime.session.isIdle || runtime.session.isBashRunning) return;
@@ -289,9 +285,11 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
         const result = await operation();
         preparePiSession(runtime.session.sessionManager);
         checkpointPiSession(runtime.session.sessionManager);
-        commands.attach(runtime.session.sessionManager);
+        const attached = commands.attach(runtime.session.sessionManager);
         inputStatuses = new PiInputStatus(runtime.session.sessionManager);
         output({ type: "session_changed", sessionFile: runtime.session.sessionFile, sessionId: runtime.session.sessionId, cwd: runtime.cwd });
+        if (!attached.ok) output({ type: "extension_error", error: attached.error.message, errorCode: attached.error.code,
+          sessionFile: attached.error.sessionFile, sourceSessionFile: attached.error.sourceSessionFile });
         return result;
       } finally { replacing = false; }
     }
@@ -319,14 +317,16 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
         if (event.type === "response") {
           if (internalResponses.has(String(event.id))) { internalResponses.set(String(event.id), event); return; }
           inputStatuses.finish(event);
-          commands.finish(event, runtime.session.sessionManager);
+          const finished = commands.finish(event, runtime.session.sessionManager);
+          if (!finished.ok) event = { ...event, success: false, error: finished.error.message, errorCode: finished.error.code,
+            data: { nativeResponse: event, sessionFile: finished.error.sessionFile, sourceSessionFile: finished.error.sourceSessionFile } };
           if (backgroundCommands.delete(String(event.id))) {
             output({ type: "compaction_end", commandId: event.id, success: event.success, error: event.error, result: event.data });
             output({ type: "command_settled", commandId: event.id, response: event });
             return;
           }
           if (event.command === "get_state" && event.success) event = { ...event, data: { ...event.data as object, ...receipts(),
-            lastAssistantMessage: lastAssistant(), finalResultRecovery: finalResultRecovery(), context: acceptedContext, historySource: "native-jsonl-v1", localTools: execution.active ? execution.activeTools : 0,
+            lastAssistantMessage: lastAssistant(), finalResultRecovery: finalResultRecovery(runtime.session), finalResultRecoveryProtocol: FINAL_RESULT_RECOVERY_PROTOCOL, context: acceptedContext, historySource: "native-jsonl-v1", localTools: execution.active ? execution.activeTools : 0,
             nativeProtocolVersion: "batch-operations-v1", backgroundOperationCount: execution.activeTools, pendingCommandCount: backgroundCommands.size,
             isStreaming: !runtime.session.isIdle || execution.active || executionStart !== undefined,
             cancellationFailed: execution.blocked } };
@@ -362,40 +362,15 @@ export const openPiSession: OpenPiSession = async (options, emitOutput, exit) =>
             response(result.ok, result.ok ? undefined : result.error.message, result.ok ? result.value : undefined); return;
           }
           if (command.type === "recover_final_result") {
-            if (!command.id || !Array.isArray(command.workIds) || !command.workIds.length
-              || command.workIds.some(id => typeof id !== "string" || !id) || new Set(command.workIds).size !== command.workIds.length) {
-              response(false, "Final result recovery requires command identity and distinct workIds"); return;
-            }
-            const workIds = command.workIds as string[];
-            const prior = finalResultRecovery(command.id);
-            if (prior?.commandId === command.id) {
-              if (JSON.stringify(prior.workIds) !== JSON.stringify(command.workIds)) response(false, "Final result recovery identity belongs to different work");
-              else response(true, undefined, { alreadyAccepted: true });
-              return;
-            }
-            const known = receipts();
-            if (branch().some(entry => entry.type === "custom" && entry.customType === "thread_final_result_recovery"
-              && (entry.data as { workIds: string[] }).workIds.some(id => workIds.includes(id)))) {
-              response(false, "Final result recovery was already attempted for this work"); return;
-            }
-            if (command.workIds.some(id => !known.completedWorkIds.includes(id) || !known.landedWorkIds.includes(id))) {
-              response(false, "Final result recovery requires settled, landed native work"); return;
-            }
-            if (closed || replacing || execution.blocked || execution.active || execution.activeTools || !runtime.session.isIdle || runtime.session.isBashRunning || backgroundCommands.size) {
-              response(false, "Final result recovery requires confirmed native idleness"); return;
-            }
-            runtime.session.sessionManager.appendCustomEntry("thread_final_result_recovery", { commandId: command.id, workIds: command.workIds });
-            runtime.session.sessionManager.appendCustomEntry("thread_resume", { workIds: command.workIds });
-            checkpointPiSession(runtime.session.sessionManager);
-            for (const workId of command.workIds) activeWork.add(workId);
-            executionStart = runtime.session.sessionManager.getLeafId();
-            response(true, undefined, { accepted: true });
-            void runtime.session.sendCustomMessage({ customType: "thread_final_result_request", display: true,
-              content: "state your final result in one short message", details: { commandId: command.id, workIds: command.workIds } },
-              { triggerTurn: true, deliverAs: "steer" }).catch(error => {
-                output({ type: "extension_error", error: `Final result recovery failed: ${String(error)}` });
-                settle();
-              });
+            await recoverFinalResult({ session: () => runtime.session,
+              idle: () => !closed && !replacing && !execution.blocked && !execution.active && !execution.activeTools && !backgroundCommands.size,
+              register: workIds => {
+                runtime.session.sessionManager.appendCustomEntry("thread_resume", { workIds });
+                checkpointPiSession(runtime.session.sessionManager);
+                for (const workId of workIds) activeWork.add(workId);
+                executionStart = runtime.session.sessionManager.getLeafId();
+                return { ok: true };
+              }, output, settle }, command);
             return;
           }
           if (command.type === "resume_pending") {
