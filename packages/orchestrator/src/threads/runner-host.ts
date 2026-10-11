@@ -2,6 +2,9 @@ import { createServer, type Socket } from "node:net";
 import { unlinkSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { basename, dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { getPackageDir } from "@earendil-works/pi-coding-agent";
+import { publishNativeStorageOwner, assertNativeStorageOwner } from "./runner-ownership.js";
 import { underMemoryPressure } from "./runner-memory.js";
 import { RuntimeOutput } from "./runner-output.js";
 import { shareFile } from "../shared-custody.js";
@@ -13,6 +16,13 @@ import { requireRunnerChannelRequest, requireRunnerControlRequest } from "./runn
 type Resident = { close(): Promise<void>; id: string; key?: string; active: boolean; used: number; pending: number; priority: boolean; background: Set<string>; backgroundCount: number };
 const [controlPath] = process.argv.slice(2);
 if (!controlPath) throw new Error("Thread runner requires a control socket");
+const nativeDataDir = process.env.PI_NATIVE_RUNNER_DATA_DIR;
+const nativeUid = process.env.PI_NATIVE_RUNNER_UID;
+if (!nativeDataDir || !/^\d+$/.test(nativeUid ?? "")) throw new Error("Native storage ownership configuration is required");
+const nativeOwner = publishNativeStorageOwner(nativeDataDir, Number(nativeUid), controlPath);
+type WriterLease = { release(): { ok: boolean }; assertOwned(): { ok: boolean } };
+type WriterModule = { acquireSessionWriter(config: { directory: string | undefined; scope: string | undefined; identity: string }): { ok: true; value: WriterLease } | { ok: false; error: Error } };
+const writers: WriterModule = await import(pathToFileURL(join(getPackageDir(), "dist/core/session-writer.mjs")).href);
 const sessions = new Map<string, Resident>();
 let stopping = false, drainWhenEmpty = false;
 const shared = process.env.PI_THREAD_RUNNER_RESIDENT !== "0";
@@ -60,9 +70,11 @@ function lines(socket: Socket, receive: (value: any) => void) {
 }
 function reply(socket: Socket | null, value: unknown) { if (socket?.writable) socket.write(`${JSON.stringify(value)}\n`); }
 function remove(path: string) {
+  assertNativeStorageOwner(nativeOwner);
   try { unlinkSync(path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
 }
 async function open(options: PiSessionOptions & { socketPath: string; priority?: boolean }) {
+  assertNativeStorageOwner(nativeOwner);
   if (stopping) throw new Error("Runner is stopping");
   const existing = sessions.get(options.socketPath);
   if (existing) {
@@ -77,8 +89,14 @@ async function open(options: PiSessionOptions & { socketPath: string; priority?:
   if (dirname(socketPath) !== join(dirname(controlPath), "..", "thread-sockets") || !basename(socketPath).startsWith(`${generation}.`)) throw new Error("Invalid thread socket");
   const env = { ...options.env };
   const spoolPath = `${socketPath}.events`;
-  for (const path of [socketPath, spoolPath]) remove(path);
-  const output = new RuntimeOutput(spoolPath);
+  const claimed = writers.acquireSessionWriter({ directory: env.PI_SESSION_WRITER_DIRECTORY, scope: env.PI_SESSION_WRITER_SCOPE, identity: `thread:${options.threadId}` });
+  if (!claimed.ok) throw claimed.error;
+  const lease = claimed.value;
+  let output: RuntimeOutput;
+  try {
+    for (const path of [socketPath, spoolPath]) remove(path);
+    output = new RuntimeOutput(spoolPath);
+  } catch (error) { lease.release(); throw error; }
   let client: Socket | null = null;
   let closed = false;
   let adapter: PiSession;
@@ -124,6 +142,8 @@ async function open(options: PiSessionOptions & { socketPath: string; priority?:
     closed = true;
     reply(client, { type: "exit", code }); client?.end(); channel.close(); output.close();
     for (const path of [socketPath, spoolPath]) remove(path);
+    const released = lease.release();
+    if (!released.ok) throw new Error("Native thread ownership release failed");
     sessions.delete(socketPath);
     if (!sessions.size && (drainWhenEmpty || !shared) && !stopping) void serial(stop);
   }

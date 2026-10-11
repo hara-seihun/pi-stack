@@ -3,10 +3,11 @@ import { promisify } from "node:util";
 import type { CoreCustody } from "../core/contracts.js";
 import { CustodyResources } from "../core/custody-resources.js";
 import { runnerSlices, BOUNDARY_MEMORY, TOOLS_MEMORY } from "./runner-resources.js";
+import { nativeRunnerLock, nativeStorageOwner, validateNativeRunnerDirectory, RunnerOwnershipError } from "./runner-ownership.js";
 const execute = promisify(execFile);
 import { createHash } from "node:crypto";
 import { setMaxListeners } from "node:events";
-import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -162,7 +163,7 @@ function boundary(options: PiSessionOptions, custody?: CoreCustody) {
   const isolation = options.args.includes("--orchestrator-context") ? `isolated:${options.cwd}` : "normal";
   return hash(JSON.stringify([custody ? ["shared-core-native-v1", custody.namespace] : import.meta.url, custody?.uid ?? process.getuid?.(), options.env.HOME ?? process.env.HOME, options.env.PI_CODING_AGENT_DIR ?? "", options.env.PI_ORCHESTRATOR_EXECUTION ?? "user", options.env.PI_MODEL_BROKER_URL ?? "direct", isolation]));
 }
-async function ensureRunner(control: string, options: PiSessionOptions, durable: boolean, currentGeneration = true, signal?: AbortSignal, resources?: CustodyResources): Promise<void> {
+async function ensureRunner(dataDir: string, control: string, options: PiSessionOptions, durable: boolean, currentGeneration = true, signal?: AbortSignal, resources?: CustodyResources): Promise<void> {
   signal?.throwIfAborted();
   const observed = control;
   const connector = resources ? (path: string) => resources.connection(path) : createConnection;
@@ -172,12 +173,25 @@ async function ensureRunner(control: string, options: PiSessionOptions, durable:
     const command = resources.launch(["/usr/bin/systemctl", ...(user ? ["--user"] : []), ...args]);
     return execute(command[0]!, command.slice(1), { env, timeout: 5000, maxBuffer: 64 * 1024 });
   };
+  const uid = resources?.custody.uid ?? process.getuid!();
+  const ownershipPath = nativeRunnerLock(dataDir, uid);
+  validateNativeRunnerDirectory(ownershipPath, uid);
+  const owner = nativeStorageOwner(dataDir, uid);
+  if (owner) {
+    if (owner.control !== control) throw new RunnerOwnershipError("ownership-conflict", "Another native generation owns this storage; retain or drain that owner before replacement");
+    const status = await runnerRequest(observed, { type: "status" }, 5000, signal, connector);
+    if (status?.pid !== owner.pid) throw new RunnerOwnershipError("ownership-conflict", "Native socket does not belong to the registered storage owner");
+    if (currentGeneration) await runnerRequest(observed, { type: "retain" }, 5000, signal, connector);
+    return;
+  }
   if (present()) {
-    try { await runnerRequest(observed, { type: currentGeneration ? "retain" : "status" }, 5000, signal, connector); return; }
-    catch (error) { if (!["ENOENT", "ECONNREFUSED"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error; }
+    try {
+      await runnerRequest(observed, { type: "status" }, 5000, signal, connector);
+      throw new RunnerOwnershipError("ownership-uncertain", "Reachable native runner has not been adopted into host-global ownership");
+    } catch (error) { if (!socketAbsent(error)) throw error; }
   }
   if (underMemoryPressure()) throw new Error("Runner capacity busy: memory pressure");
-  const env: NodeJS.ProcessEnv = { ...process.env, ...options.env, PI_THREAD_RUNNER_RESIDENT: !currentGeneration || options.args.includes("--orchestrator-context") ? "0" : "1" };
+  const env: NodeJS.ProcessEnv = { ...process.env, ...options.env, PI_NATIVE_RUNNER_DATA_DIR: resolve(dataDir), PI_NATIVE_RUNNER_UID: String(uid), PI_THREAD_RUNNER_RESIDENT: !currentGeneration || options.args.includes("--orchestrator-context") ? "0" : "1" };
   const broker = !!options.env.PI_MODEL_BROKER_URL;
   const brokerSecrets = ["PI_ORCHESTRATOR_AUTH", "PI_ORCHESTRATOR_OWNER_UID", "PI_ORCHESTRATOR_OWNER_GID", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
   if (broker) for (const key of brokerSecrets) delete env[key];
@@ -198,7 +212,7 @@ async function ensureRunner(control: string, options: PiSessionOptions, durable:
   delete env.PI_THREAD_RESOURCE_BOUNDARY;
   delete env.PI_THREAD_RUNNER_UNIT;
   const resourceId = hash(control), unit = resources ? newRunnerUnit(resourceId).replace(/\.service$/, ".scope") : newRunnerUnit(resourceId);
-  const command = [executable("flock", env.PATH), "--no-fork", "--nonblock", "--conflict-exit-code", "75", `${control}.lock`, executable("node", env.PATH), `--max-old-space-size=${durable ? RUNNER_HEAP_MB : 8192}`, "--expose-gc", entry, control];
+  const command = [executable("flock", env.PATH), "--no-fork", "--nonblock", "--conflict-exit-code", "75", ownershipPath, executable("node", env.PATH), `--max-old-space-size=${durable ? RUNNER_HEAP_MB : 8192}`, "--expose-gc", entry, control];
   if (durable) {
     if (!root) Object.assign(env, userManagerEnvironment(resources?.custody.uid ?? process.getuid!()));
     env.PI_THREAD_RESOURCE_BOUNDARY = resourceId;
@@ -233,6 +247,8 @@ async function ensureRunner(control: string, options: PiSessionOptions, durable:
     if (present()) {
       try {
         const status = await runnerRequest(observed, { type: "status" }, 5000, signal, connector);
+        const admitted = nativeStorageOwner(dataDir, uid);
+        if (!admitted || admitted.control !== control || admitted.pid !== status?.pid) throw new RunnerOwnershipError("ownership-uncertain", "Started native socket has no matching host-global owner");
         if (durable) {
           // A concurrent launch may have won the control lock; its owner names the live unit.
           if (typeof status.unit !== "string") throw new Error("Durable thread runner did not report its controller unit");
@@ -259,23 +275,6 @@ export class RunnerRecoveryError extends Error {
   constructor(readonly code: "ownership-uncertain" | "ownership-conflict", message: string) { super(message); this.name = "RunnerRecoveryError"; }
 }
 
-function controlOwnerAbsent(control: string, resources?: CustodyResources): boolean {
-  let lock: { dev: number | string; ino: number | string } | null;
-  try { lock = resources ? resources.identity(`${control}.lock`) : statSync(`${control}.lock`); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return true; throw error; }
-  if (!lock) return true;
-  const dev = BigInt(lock.dev);
-  const major = ((dev >> 8n) & 0xfffn) | ((dev >> 32n) & 0xfffff000n);
-  const minor = (dev & 0xffn) | ((dev >> 12n) & 0xffffff00n);
-  // An unlocked file is not ownership; flock keeps the lock for the native process lifetime.
-  return !readFileSync("/proc/locks", "utf8").split("\n").some(line => {
-    const fields = line.trim().split(/\s+/);
-    const identity = fields[5]?.split(":");
-    return fields[1] === "FLOCK" && identity?.length === 3 &&
-      BigInt(`0x${identity[0]}`) === major && BigInt(`0x${identity[1]}`) === minor && BigInt(identity[2]!) === BigInt(lock.ino);
-  });
-}
-
 export function createSharedPiSessionOpener({ dataDir, durable = false, custody, resources }: { dataDir: string; durable?: boolean; custody?: CoreCustody; resources?: CustodyResources }): { openSession: OpenPiSession; attachSession: AttachPiSession; recoverSession(threadId: string, output: (event: PiEvent) => void, exit: (code: number | null) => void): Promise<PiSession | null>; detach(): void } {
   if ((custody === undefined) !== (resources === undefined)) throw new Error("Registered custody and pinned resources must be supplied together");
   if (custody && (custody.dataDir !== dataDir || resources!.custody !== custody)) throw new Error("Runner custody does not match its registered resources");
@@ -294,7 +293,10 @@ export function createSharedPiSessionOpener({ dataDir, durable = false, custody,
   const routes = new Map<string, CustodyResources>();
   const controlFor = (path: string) => dirname(path) === join(socketDir, "thread-runners") ? path.replace(/\.lock$/, "")
     : join(socketDir, "thread-runners", `${path.slice(path.lastIndexOf("/") + 1, path.lastIndexOf("/") + 17)}.sock`);
-  const absentOwner = (control: string) => targets.length ? targets.every(target => controlOwnerAbsent(control, target)) : controlOwnerAbsent(control);
+  const absentOwner = (control: string) => {
+    const owner = nativeStorageOwner(dataDir, custody?.uid ?? process.getuid!());
+    return owner === null || owner.control !== control;
+  };
   const present = (path: string) => {
     const target = routes.get(controlFor(path));
     return target ? target.exists(path) : targets.length ? targets.some(target => target.exists(path)) : existsSync(path);
@@ -309,7 +311,7 @@ export function createSharedPiSessionOpener({ dataDir, durable = false, custody,
   const controls = new Map<string, boolean>();
   const observation = new AbortController();
   setMaxListeners(0, observation.signal);
-  const request = async (path: string, value: unknown, timeout = 5000) => {
+  const rawRequest = async (path: string, value: unknown, timeout = 5000) => {
     if (!targets.length || routes.has(controlFor(path))) return runnerRequest(path, value, timeout, observation.signal, connector);
     if ((value as { type?: string }).type !== "status") throw new RunnerRecoveryError("ownership-uncertain", "Native command has no proven namespace owner");
     const found: { target: CustodyResources; status: any }[] = [];
@@ -322,6 +324,18 @@ export function createSharedPiSessionOpener({ dataDir, durable = false, custody,
     if (!found.length) throw Object.assign(new Error("No registered namespace acknowledges native control"), { code: "ENOENT", syscall: "connect" });
     routes.set(path, found[0]!.target);
     return found[0]!.status;
+  };
+  const request = async (path: string, value: unknown, timeout = 5000) => {
+    const owner = nativeStorageOwner(dataDir, custody?.uid ?? process.getuid!());
+    const status = (value as { type?: string }).type === "status";
+    if (owner && owner.control !== path) {
+      if (status) throw Object.assign(new Error("Control is not the host-global native owner"), { code: "ENOENT", syscall: "connect" });
+      throw new RunnerRecoveryError("ownership-conflict", "Native mutation targets a different storage owner");
+    }
+    if (!owner && !status) throw new RunnerRecoveryError("ownership-uncertain", "Native mutation has no host-global owner");
+    const result = await rawRequest(path, value, timeout);
+    if (status && (!owner || result?.pid !== owner.pid)) throw new RunnerRecoveryError("ownership-uncertain", "Native status does not match the host-global owner");
+    return result;
   };
   function validate(reference: PiRunnerReference): PiRunnerReference {
     if (!reference || typeof reference.control !== "string" || typeof reference.socketPath !== "string") throw new Error("Invalid recorded runner reference");
@@ -466,7 +480,7 @@ export function createSharedPiSessionOpener({ dataDir, durable = false, custody,
     const key = startupKey(control, launchResources);
     let starting = starts.get(key);
     if (!starting) {
-      starting = ensureRunner(control, options, durable, control === currentControl, observation.signal, launchResources).finally(() => starts.delete(key));
+      starting = ensureRunner(dataDir, control, options, durable, control === currentControl, observation.signal, launchResources).finally(() => starts.delete(key));
       starts.set(key, starting);
     }
     await starting;
