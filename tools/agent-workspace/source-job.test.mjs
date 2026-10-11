@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -35,10 +35,11 @@ if (process.argv[1].endsWith('/systemctl')) {
   fs.writeFileSync(context, JSON.stringify(state));
   if (state.mode === 'ready' || state.mode === 'no-result') {
     const command = args.slice(args.indexOf('--') + 1);
-    const child = cp.spawnSync(command[0], command.slice(1), { stdio: 'ignore' });
+    cp.spawnSync(command[0], command.slice(1), { stdio: 'ignore' });
     state.units[unit] = 'inactive';
     fs.writeFileSync(context, JSON.stringify(state));
-    process.exit(child.status);
+    // systemd-run acknowledges exec admission, not the worker's eventual exit status.
+    process.exit(0);
   }
 }
 `}`);
@@ -142,6 +143,58 @@ test("worker exit without a terminal result is failed even when exit code is zer
     assert.equal(result.state, "failed");
     assert.equal(result.error.code, "source-job-worker-no-result");
     assert.deepEqual(runSourceJob(f.options), result);
+    assert.equal(f.state().submissions.length, 1);
+  } finally { f.restore(); }
+});
+
+for (const signal of ["SIGKILL", "SIGTERM"]) test(`worker ${signal} is interrupted and resumes under the same identity`, () => {
+  const f = fixture("ready");
+  try {
+    f.options.command = readyCommand({ resumed: true });
+    f.options.command[3] = `
+      import { existsSync, writeFileSync } from 'node:fs';
+      const marker = process.env.PI_WORKSPACE_SOURCE_JOB_DIR + '/interrupted-once';
+      if (!existsSync(marker)) {
+        writeFileSync(marker, 'interrupted');
+        process.kill(process.pid, ${JSON.stringify(signal)});
+      }
+    ` + f.options.command[3];
+    const first = runSourceJob(f.options);
+    assert.equal(first.state, "interrupted");
+    assert.equal(first.error.code, "source-job-interrupted");
+    const directory = f.jobDirectory();
+    assert.equal(existsSync(path.join(directory, "result.json")), false);
+    assert.equal(JSON.parse(readFileSync(path.join(directory, "attempt.json"))).number, 1);
+    const repeated = runSourceJob(f.options);
+    assert.equal(repeated.state, "interrupted");
+    assert.equal(repeated.jobId, first.jobId);
+    assert.equal(f.state().submissions.length, 1);
+    assert.deepEqual(runSourceJob({ ...f.options, restartInterrupted: true }), { state: "ready", value: { resumed: true } });
+    assert.equal(path.basename(directory), first.jobId);
+    assert.equal(JSON.parse(readFileSync(path.join(directory, "attempt.json"))).number, 2);
+    assert.equal(f.state().submissions.length, 2);
+  } finally { f.restore(); }
+});
+
+test("ordinary nonzero worker exit without result stays terminal on explicit restart", () => {
+  const f = fixture("no-result");
+  try {
+    f.options.command = [process.execPath, "-e", "process.exit(17)"];
+    const result = runSourceJob(f.options);
+    assert.equal(result.state, "failed");
+    assert.equal(result.error.code, "source-job-worker-no-result");
+    assert.match(result.error.message, /exit 17, signal null/);
+    assert.deepEqual(runSourceJob({ ...f.options, restartInterrupted: true }), result);
+    assert.equal(f.state().submissions.length, 1);
+  } finally { f.restore(); }
+});
+
+test("published ready result wins over a subsequent worker signal", () => {
+  const f = fixture("ready");
+  try {
+    f.options.command = readyCommand({ published: true });
+    f.options.command[3] += "process.kill(process.pid, 'SIGKILL');";
+    assert.deepEqual(runSourceJob(f.options), { state: "ready", value: { published: true } });
     assert.equal(f.state().submissions.length, 1);
   } finally { f.restore(); }
 });
