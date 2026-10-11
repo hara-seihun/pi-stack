@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 sys.dont_write_bytecode = True
 from core_namespace import absolute, publish
+from core_worker_environment import bind_worker_gateways
 
 
 def read(path):
@@ -262,6 +263,7 @@ def assemble(directory, inputs_path, output_path):
     if pending:
         publish(output_path.with_suffix('.pending.json'), {'version': 1, 'state': 'incomplete', 'pending': pending})
         return {'state': 'incomplete', 'pendingCount': len(pending), 'writtenConfig': False}
+    bind_worker_gateways(config, runtime['uid'])
     publish(output_path, config)
     return {'state': 'assembled', 'scopeCount': len(scopes), 'writtenConfig': True, 'activationPermitted': False}
 
