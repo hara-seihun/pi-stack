@@ -66,6 +66,16 @@ Remote's original `pi-remote-supervise` wrapper exits0 after a stop even when it
 
 For old Root scopes proved to have no previous capability issuer, `core-adopt initialize-capability ROOT_PLAN` explicitly creates a new exclusive0600 32-byte hex key beside the existing encrypted thread DB. Its receipt binds source proof, key inode/hash and scope. Existing unknown keys are refused; retries verify the same initialized key. This enables the newly scoped API without pretending a historical key existed or changing thread/DB/session identities.
 
+## Physical native writer fences
+
+The two independent fence directories are `/run/pi-stack/session-writers/UID` for SDK session mutation and `/run/pi-stack/native-runner-locks/UID` for the native storage owner. Their parents are root-owned mode0755; each leaf is mode0700 under the exact executor UID/GID. Preserve existing directory and lock inodes across generations. Neither key includes a FUSE mount generation. Root consultation scopes execute in process as UID0; ordinary scopes retain their registered custody UID.
+
+`core-host.mjs prepare-writers ARTIFACT ROOT_CONFIG` prepares only these declared physical resources. It starts no controller, opens no adopted database and unlocks no folder. Preflight requires the same leaf dev/ino in the caller's prepared namespace and `/proc/1/root`, outside FUSE, with exact owner and mode. Missing or divergent views require the owning resource preparer; no plaintext or per-namespace substitute is created.
+
+`core-bindings writer-env ROOT_CONFIG ROOT_BINDINGS OUTPUT` adds only the mechanically derived fence environment and exact directory declarations to existing registered scopes. `PI_SESSION_WRITER_DIRECTORY` and `PI_SESSION_WRITER_SCOPE` bind the physical UID leaf and exact `CoreScope.id`; `PI_NATIVE_RUNNER_DATA_DIR` and `PI_NATIVE_RUNNER_UID` bind the original registered data directory and executor. Native launch acquires its full-SHA256 data-directory storage lease; SDK session identity has a separate logical-source lease. Read-only auxiliary capture spans multiple owners and therefore strips caller session-writer and thread-credential environment rather than choosing an arbitrary scope.
+
+These fences protect new patched writers. Original unpatched hosts require their own positively acknowledged closure; directory creation alone cannot fence an already accepted legacy write.
+
 ## Coordinated activation
 
 Prepare immutable artifacts while old owners serve. Prepare pins and resource custody, drain only old SQLite/execution controllers, record their exact receipts, certify target generations, reconcile configuration and bindings, then start core. Old callback ports and broker completion IDs remain until explicitly adopted same-process transports and retained credentials can serve their accepted generations. Core health precedes Remote/rooms rotation. Phone and shared Live transport rotate together only when telephone idle; active Meet runtime source remains until its ordinary idle rotation.

@@ -48,6 +48,38 @@ print(json.dumps(result))
 '''
 
 
+def writer_bindings(scopes, config):
+    registered = {scope['id']: scope for scope in config['scopes']}
+    root = config['root']
+    roots = {root['consultationScopeId'], *(item['scopeId'] for item in root['consultationOwners'])} if root['kind'] == 'configured' else set()
+    for scope in scopes:
+        original = registered.get(scope['id'])
+        if original is None or any(scope['custody'][key] != original['custody'][key] for key in ('uid', 'gid')):
+            raise ValueError('writer fence requires the exact registered scope Unix custodian')
+        uid = 0 if scope['id'] in roots else scope['custody']['uid']
+        if type(uid) is not int or uid < 0:
+            raise ValueError('explicit writer Unix identity required')
+        directory = '/run/pi-stack/session-writers/' + str(uid)
+        native_directory = '/run/pi-stack/native-runner-locks/' + str(uid)
+        data = scope['custody'].get('dataDir')
+        if not isinstance(data, str) or not data.startswith('/') or data != original['custody']['dataDir']:
+            raise ValueError('native storage fence requires the exact registered data directory')
+        scope['environment'].update({'PI_SESSION_WRITER_DIRECTORY': directory, 'PI_SESSION_WRITER_SCOPE': scope['id'], 'PI_NATIVE_RUNNER_DATA_DIR': data, 'PI_NATIVE_RUNNER_UID': str(uid)})
+        for path in (directory, native_directory):
+            existing = [item for item in scope['resources'] if item['path'] == path]
+            if existing and existing != [{'path': path, 'kind': 'directory'}]:
+                raise ValueError('writer directory resource kind differs from its registered physical custody')
+            if not existing: scope['resources'].append({'path': path, 'kind': 'directory'})
+    return scopes
+
+
+def bind_writers(config_path, bindings_path, output_path):
+    config, bindings = trusted(config_path), trusted(bindings_path)
+    bindings['scopes'] = writer_bindings(bindings['scopes'], config)
+    publish(output_path, bindings)
+    return {'scopeCount': len(bindings['scopes']), 'writerFenceDeclared': True, 'liveEffects': False}
+
+
 def collect(directory, runtime_path, output_path):
     original = trusted(directory / 'manifest.json')
     base = trusted(directory / 'activation/core-config.projection.json')['config']
@@ -88,9 +120,9 @@ def collect(directory, runtime_path, output_path):
             scope['storage'].update({key: plan[key] for key in ('databasePath', 'sessionsDir', 'capabilityKeyPath', 'adoptionReceiptPath')})
             source = plan['source']
             root = plan['ownerUnit'] == 'pi-kenan-root.service'
-            data = source if source['kind'] == 'host' else runtime['namespace']
+            data = runtime['namespace']
             scope['custody']['namespace'] = data
-            scope['custody']['retainedRunnerNamespace'] = data if root else source
+            scope['custody']['retainedRunnerNamespace'] = source
             scope['environment'] = {**envs[plan['ownerUnit']], **references}
             if root:
                 credentials = trusted(directory / 'activation/final-schema/root.fragment.json')['credentials']
@@ -160,6 +192,7 @@ def collect(directory, runtime_path, output_path):
         fleet['environment']['PI_REMOTE_SERVER_URL'] = origin
         fleet['callbackGateway'] = {'kind':'shared-remote-callback','targetScopeId':remote_id,'peerUid':target['custody']['uid']}
         fleet['callbackEvidence'] = {'kind':'original-related-thread-directory','sourcePath':str(source),'sourceSha256':hashlib.sha256(raw).hexdigest(),'targetScopeId':remote_id}
+    writer_bindings(result, base)
     value = {'version': 1, 'scopes': result, 'metadata': {'privateContentRead': False, 'pending': pending, 'absentOptionalPaths': absent, 'sourceSchemas': observed}}
     publish(output_path, value)
     return {'scopeCount': len(result), 'pendingCount': len(pending), 'writtenPath': str(output_path)}
@@ -167,9 +200,10 @@ def collect(directory, runtime_path, output_path):
 
 if __name__ == '__main__':
     try:
-        if os.geteuid() != 0 or len(sys.argv) != 4:
-            raise ValueError('usage: root core-bindings MIGRATION_DIRECTORY RUNTIME_JSON OUTPUT_JSON')
-        print(json.dumps({'ok': True, 'value': collect(*(absolute(path) for path in sys.argv[1:]))}))
+        if os.geteuid() != 0 or len(sys.argv) not in (4, 5) or len(sys.argv) == 5 and sys.argv[1] != 'writer-env':
+            raise ValueError('usage: root core-bindings MIGRATION_DIRECTORY RUNTIME_JSON OUTPUT_JSON | writer-env CONFIG_JSON BINDINGS_JSON OUTPUT_JSON')
+        result = bind_writers(*(absolute(path) for path in sys.argv[2:])) if len(sys.argv) == 5 else collect(*(absolute(path) for path in sys.argv[1:]))
+        print(json.dumps({'ok': True, 'value': result}))
     except (OSError, KeyError, ValueError, TypeError, subprocess.SubprocessError) as error:
         print(json.dumps({'ok': False, 'error': {'code': 'core-bindings-unavailable', 'message': str(error)}}))
         sys.exit(75)

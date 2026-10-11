@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, chownSync, fsyncSync, closeSync, openSync, readFileSync, writeFileSync, renameSync, mkdirSync, statSync, lstatSync } from 'node:fs';
+import { chmodSync, chownSync, fsyncSync, closeSync, openSync, readFileSync, writeFileSync, renameSync, mkdirSync, statSync, lstatSync, statfsSync } from 'node:fs';
 import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -76,12 +76,53 @@ export function preflightResource(entry, resources, outputPaths) {
   if (actual.dev !== registered.dev || actual.ino !== registered.ino || (output || entry.kind === 'directory' ? !actual.isDirectory() : !actual.isFile())) return failure('custody-resource-invalid', 'Declared resource or registered output ancestor differs from its owning view');
   return { ok: true, value: { path: entry.path, state: output ? 'declared-output' : 'existing', observedAncestor: path } };
 }
+export function sessionWriterConfiguration(config, scope) {
+  if (!scope || !Number.isSafeInteger(scope.custody?.uid) || !Number.isSafeInteger(scope.custody?.gid) || scope.custody.uid < 0 || scope.custody.gid < 0 || typeof scope.id !== 'string' || !scope.id) return failure('session-writer-owner-invalid', 'Explicit scope and owning Unix identity required');
+  const roots = config.root.kind === 'configured' ? [config.root.consultationScopeId, ...config.root.consultationOwners.map(item => item.scopeId)] : [];
+  const root = roots.includes(scope.id);
+  return { ok: true, value: { directory: `/run/pi-stack/session-writers/${root ? 0 : scope.custody.uid}`, scope: scope.id, uid: root ? 0 : scope.custody.uid, gid: root ? 0 : scope.custody.gid } };
+}
+export function validateSessionWriterMetadata(expected, local, host, filesystem) {
+  if (!local.isDirectory() || local.isSymbolicLink() || local.uid !== expected.uid || local.gid !== expected.gid || (local.mode & 0o777) !== 0o700 || local.dev !== host.dev || local.ino !== host.ino || filesystem.type !== 0x01021994) return failure('session-writer-custody-invalid', 'Writer fence must be the exact owner-only host directory on host tmpfs, shared across namespaces');
+  return { ok: true, value: expected };
+}
+export function nativeStorageConfiguration(config, scope) {
+  const writer = sessionWriterConfiguration(config, scope);
+  if (!writer.ok) return writer;
+  if (!isAbsolute(scope.custody.dataDir ?? '')) return failure('native-storage-owner-invalid', 'Native storage needs its exact registered absolute data directory');
+  return { ok: true, value: { ...writer.value, directory: `/run/pi-stack/native-runner-locks/${writer.value.uid}`, dataDir: scope.custody.dataDir } };
+}
+function prepareSessionWriters(config) {
+  for (const path of ['/run/pi-stack', '/run/pi-stack/session-writers', '/run/pi-stack/native-runner-locks']) {
+    try { lstatSync(path); } catch (error) { if (error.code !== 'ENOENT') throw error; mkdirSync(path, { mode: 0o755 }); }
+    const metadata = lstatSync(path);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink() || metadata.uid !== 0 || (metadata.mode & 0o777) !== 0o755 || statfsSync(path).type !== 0x01021994) return failure('session-writer-parent-untrusted', 'Physical writer parent must be root-owned mode0755 on host tmpfs');
+  }
+  const prepared = new Map();
+  for (const scope of config.scopes) {
+    for (const declared of [sessionWriterConfiguration(config, scope), nativeStorageConfiguration(config, scope)]) {
+      if (!declared.ok) return declared;
+      const owner = declared.value;
+      if (prepared.has(owner.directory)) continue;
+      try { lstatSync(owner.directory); }
+      catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+        mkdirSync(owner.directory, { mode: 0o700 }); chownSync(owner.directory, owner.uid, owner.gid);
+      }
+      const result = validateSessionWriterMetadata(owner, lstatSync(owner.directory), statSync(`/proc/1/root${owner.directory}`), statfsSync(owner.directory));
+      if (!result.ok) return result;
+      prepared.set(owner.directory, owner);
+    }
+  }
+  return { ok: true, value: { directories: [...prepared.values()], activated: false } };
+}
 export async function coreHost(operation, artifact, configPath, bindingPath, requestId) {
   try {
-    if (!['check', 'preflight', 'proof', 'install', 'bind-person', 'bind-gateway', 'provision'].includes(operation) || !isAbsolute(artifact) || !isAbsolute(configPath)) return failure('invalid-operation', 'check|preflight|proof|install|bind-person|bind-gateway requires absolute artifact and configuration paths');
+    if (!['check', 'preflight', 'proof', 'install', 'bind-person', 'bind-gateway', 'provision', 'prepare-writers'].includes(operation) || !isAbsolute(artifact) || !isAbsolute(configPath)) return failure('invalid-operation', 'check|preflight|proof|install|prepare-writers|bind-person|bind-gateway|provision requires absolute artifact and configuration paths');
     const config = await configAt(artifact, configPath);
     if (operation === 'check') return { ok: true, value: { scopes: config.scopes.map(scope => scope.id), url: `http://${config.host === '::1' ? '[::1]' : config.host}:${config.port}` } };
     if (process.getuid() !== 0) return failure('root-required', 'Core custody inspection, installation and person binding require root');
+    if (operation === 'prepare-writers') return prepareSessionWriters(config);
     if (operation === 'provision') {
       if (!isAbsolute(bindingPath ?? '') || typeof requestId !== 'string' || !requestId) return failure('invalid-registration', 'Explicit protected registration path and stable request ID required');
       const { provisionRegisteredAccount } = await import(pathToFileURL(join(artifact, 'dist/core/provision-command.js')));
@@ -124,6 +165,17 @@ export async function coreHost(operation, artifact, configPath, bindingPath, req
         if (scope.availability.kind === 'unavailable') { scopes.push({ scopeId: scope.id, availability: scope.availability }); continue; }
         const resources = new CustodyResources(scope.custody);
         try {
+          const declared = sessionWriterConfiguration(config, scope);
+          if (!declared.ok) return declared;
+          const writer = declared.value;
+          if (scope.environment.PI_SESSION_WRITER_DIRECTORY !== writer.directory || scope.environment.PI_SESSION_WRITER_SCOPE !== writer.scope || !scope.resources.some(item => item.kind === 'directory' && item.path === writer.directory)) return failure('session-writer-binding-missing', `Exact outside-FUSE writer directory and scope required for ${scope.id}`);
+          const native = nativeStorageConfiguration(config, scope);
+          if (!native.ok) return native;
+          if (scope.environment.PI_NATIVE_RUNNER_DATA_DIR !== native.value.dataDir || scope.environment.PI_NATIVE_RUNNER_UID !== String(native.value.uid) || !scope.resources.some(item => item.kind === 'directory' && item.path === native.value.directory)) return failure('native-storage-binding-missing', `Exact outside-FUSE native storage fence required for ${scope.id}`);
+          for (const fence of [writer, native.value]) {
+            const physical = validateSessionWriterMetadata(fence, lstatSync(fence.directory), statSync(`/proc/1/root${fence.directory}`), statfsSync(fence.directory));
+            if (!physical.ok) return physical;
+          }
           const storage = [];
           for (const [key, path] of Object.entries(scope.storage).filter(([key]) => key !== 'adoptionReceiptPath')) {
             const actual = statSync(path, { bigint: true });
@@ -135,7 +187,7 @@ export async function coreHost(operation, artifact, configPath, bindingPath, req
           const outputs = config.duties.kind === 'configured' ? config.duties.entries.filter(entry => entry.scopeId === scope.id).map(entry => entry.path) : [];
           for (const entry of scope.resources) {
             const checked = preflightResource(entry, resources, outputs);
-            if (!checked.ok) return checked;
+            if (!checked.ok) return failure(checked.error.code, `${scope.id}/${entry.path}: ${checked.error.message}`);
           }
           scopes.push({ scopeId: scope.id, availability: scope.availability, storage });
         } finally { resources.close(); }
@@ -189,7 +241,13 @@ export async function coreHost(operation, artifact, configPath, bindingPath, req
         if (!previous.isDirectory() || ![0, uid].includes(previous.uid) || previous.mode & 0o022) return failure('callback-directory-untrusted', 'Callback path belongs to another or writable custodian');
         chownSync(callbackDirectory, uid, gid); chmodSync(callbackDirectory, 0o755);
       }
-      const environment = `PI_CORE_URL=${url}\nPI_CORE_SCOPE_ID=${scopeId}\nPI_CORE_PRINCIPAL_ID=${principalId}\nPI_CORE_GATEWAY_ID=${gatewayId}\nPI_CORE_GATEWAY_SOCKET=/run/pi-stack/gateways/${gatewayId}.sock\nPI_CORE_GATEWAY_UID=0\nPI_MODEL_BROKER_URL=${model.value}\n`
+      const writer = sessionWriterConfiguration(config, config.scopes.find(item => item.id === scopeId));
+      if (!writer.ok) return writer;
+      const native = nativeStorageConfiguration(config, config.scopes.find(item => item.id === scopeId));
+      if (!native.ok) return native;
+      const prepared = prepareSessionWriters(config);
+      if (!prepared.ok) return prepared;
+      const environment = `PI_NATIVE_RUNNER_DATA_DIR=${native.value.dataDir}\nPI_NATIVE_RUNNER_UID=${native.value.uid}\nPI_SESSION_WRITER_DIRECTORY=${writer.value.directory}\nPI_SESSION_WRITER_SCOPE=${writer.value.scope}\nPI_CORE_URL=${url}\nPI_CORE_SCOPE_ID=${scopeId}\nPI_CORE_PRINCIPAL_ID=${principalId}\nPI_CORE_GATEWAY_ID=${gatewayId}\nPI_CORE_GATEWAY_SOCKET=/run/pi-stack/gateways/${gatewayId}.sock\nPI_CORE_GATEWAY_UID=0\nPI_MODEL_BROKER_URL=${model.value}\n`
         + (callbackSocket === null ? '' : `PI_CORE_CALLBACK_SOCKET=${callbackSocket}\nPI_CORE_CALLBACK_UID=0\n`);
       let providerEnvironment = '';
       if (binding.modelBrokerOwnerId !== undefined) {

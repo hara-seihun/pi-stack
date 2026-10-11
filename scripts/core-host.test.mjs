@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { gatewayBinding, nativeModelBinding } from '../deploy/core-host.mjs';
+import { gatewayBinding, nativeModelBinding, sessionWriterConfiguration, nativeStorageConfiguration, validateSessionWriterMetadata } from '../deploy/core-host.mjs';
 
 const config = {
   host: '127.0.0.1', port: 2470, root: { kind: 'disabled' },
@@ -13,6 +13,26 @@ const config = {
 const binding = { version: 1, user: 'first', scopeId: 'first-chat', gatewayId: 'first-remote',
   modelBrokerUrl: 'http://127.0.0.1:2871', modelBrokerPrincipalId: 'first-models', modelBrokerUid: 1001 };
 const original = () => ({ listeners: [{ principal: 'first-models', port: 2871 }] });
+
+test('writer fence selects exact owning UID or explicitly configured in-process Root UID', () => {
+  const scope = { id: 'fleet:first', custody: { uid: 1001, gid: 1001 } };
+  assert.deepEqual(sessionWriterConfiguration(config, scope).value, { directory: '/run/pi-stack/session-writers/1001', scope: 'fleet:first', uid: 1001, gid: 1001 });
+  const root = { ...config, root: { kind: 'configured', consultationScopeId: scope.id, consultationOwners: [] } };
+  assert.deepEqual(sessionWriterConfiguration(root, scope).value, { directory: '/run/pi-stack/session-writers/0', scope: 'fleet:first', uid: 0, gid: 0 });
+  assert.equal(sessionWriterConfiguration(config, { ...scope, custody: { uid: 1001 } }).ok, false);
+  assert.equal(nativeStorageConfiguration(config, scope).ok, false);
+  assert.deepEqual(nativeStorageConfiguration(config, { ...scope, custody: { ...scope.custody, dataDir: '/private/first' } }).value, { directory: '/run/pi-stack/native-runner-locks/1001', scope: scope.id, uid: 1001, gid: 1001, dataDir: '/private/first' });
+});
+
+test('writer custody rejects a FUSE alias, replaced inode, wrong Unix owner and writable leaf', () => {
+  const expected = { uid: 1001, gid: 1001 };
+  const local = { uid: 1001, gid: 1001, mode: 0o40700, dev: 41, ino: 55, isDirectory: () => true, isSymbolicLink: () => false };
+  const host = { dev: 41, ino: 55 };
+  assert.equal(validateSessionWriterMetadata(expected, local, host, { type: 0x01021994 }).ok, true);
+  for (const update of [{ uid: 0 }, { gid: 0 }, { mode: 0o40755 }, { isSymbolicLink: () => true }]) assert.equal(validateSessionWriterMetadata(expected, { ...local, ...update }, host, { type: 0x01021994 }).ok, false);
+  assert.equal(validateSessionWriterMetadata(expected, local, { ...host, ino: 56 }, { type: 0x01021994 }).ok, false);
+  for (const type of [0x65735546, 0xEF53]) assert.equal(validateSessionWriterMetadata(expected, local, host, { type }).ok, false);
+});
 
 test('person transport binds exact kernel peer, principal, scope and reverse callback', () => {
   const result = gatewayBinding(config, binding, 1001, true);

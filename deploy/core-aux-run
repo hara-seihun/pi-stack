@@ -3,10 +3,18 @@
 import hashlib
 import json
 import os
+import pwd
 from pathlib import Path
 import subprocess
 import sys
 from core_namespace import absolute, namespace_path, publish, trusted
+
+
+def capture_environment(uid, environ):
+    identity = pwd.getpwuid(uid)
+    # Metadata capture has many source scopes and creates no native sessions.
+    # It must not inherit the caller's one-session writer identity or credentials.
+    return {'HOME': identity.pw_dir, 'USER': identity.pw_name, 'LOGNAME': identity.pw_name, 'PATH': '/usr/local/bin:/usr/bin:/bin', 'LANG': 'C.UTF-8'}
 
 
 def capture(index_path, bundle_path, selected):
@@ -20,8 +28,8 @@ def capture(index_path, bundle_path, selected):
         raise ValueError('declared auxiliary group index required')
     group = groups[selected]
     plan = trusted(absolute(group['planPath']))
-    if plan['phase'] != 'baseline':
-        raise ValueError('original UID capture is baseline only; detached capture uses prepared root custody')
+    if plan['phase'] not in ('baseline', 'detached') or plan['phase'] == 'detached' and (group['uid'] != 0 or group['gid'] != 0 or group['namespace'].get('kind') != 'pinned'):
+        raise ValueError('capture requires original baseline identity or root-owned prepared detached custody')
     destination = absolute(plan['outputPath'])
     plan_sha = hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
     bundle_sha = hashlib.sha256(bundle.read_bytes()).hexdigest()
@@ -35,14 +43,14 @@ def capture(index_path, bundle_path, selected):
     bundle_fd = os.open(bundle, os.O_RDONLY)
     script = "const {captureAuxiliary}=await import('data:text/javascript;base64,'+Buffer.from(await Bun.file('/proc/self/fd/"+str(bundle_fd)+"').text()).toString('base64'));const input=JSON.parse(await Bun.stdin.text());process.stdout.write(JSON.stringify(captureAuxiliary(input)));"
     try:
-        response = subprocess.run(['nsenter', f'--mount=/proc/self/fd/{fd}', '--', 'setpriv', '--reuid='+str(group['uid']), '--regid='+str(group['gid']), '--clear-groups', '/usr/local/bin/bun', '-e', script], input=json.dumps(plan), text=True, capture_output=True, pass_fds=(fd,bundle_fd), check=True, timeout=1200)
+        response = subprocess.run(['nsenter', f'--mount=/proc/self/fd/{fd}', '--', 'setpriv', '--reuid='+str(group['uid']), '--regid='+str(group['gid']), '--clear-groups', '/usr/local/bin/bun', '-e', script], input=json.dumps(plan), text=True, capture_output=True, env=capture_environment(group['uid'], os.environ), pass_fds=(fd,bundle_fd), check=True, timeout=1200)
     finally:
         os.close(bundle_fd)
         os.close(fd)
     value = json.loads(response.stdout)
     publish(destination, value)
     digest = hashlib.sha256(destination.read_bytes()).hexdigest()
-    receipt = {'version':1,'planSha256':plan_sha,'bundleSha256':bundle_sha,'outputSha256':digest,'scopeCount':len(value['scopes']),'outputPath':str(destination),'phase':'baseline'}
+    receipt = {'version':1,'planSha256':plan_sha,'bundleSha256':bundle_sha,'outputSha256':digest,'scopeCount':len(value['scopes']),'outputPath':str(destination),'phase':plan['phase']}
     publish(receipt_path, receipt)
     return {'state':'captured','scopeCount':receipt['scopeCount'],'sha256':digest,'reused':False}
 
