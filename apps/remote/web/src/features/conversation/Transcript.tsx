@@ -480,7 +480,7 @@ export function Transcript({ entries, liveThinking, thinkingActive, autoCollapse
   return <InlineImagesContext.Provider value={images}>
     <div ref={ref} className="transcript conversation-transcript">
       {earlierAvailable && <button type="button" className="context-earlier" disabled={loadingEarlier} onClick={onShowEarlier}>
-        {loadingEarlier ? "Loading earlier…" : "Show 60 earlier"}
+        {loadingEarlier ? "Loading earlier conversation…" : "Load earlier conversation"}
       </button>}
       {earlierError && <p className="context-earlier-error" role="status">{earlierError}</p>}
       <VirtualTranscript items={visible} messageIds={transcriptMessageIds} itemKey={item => `${sessionId}:${item.kind === "work" ? item.key : item.entry.key}`} render={(item, index) => item.kind === "work"
@@ -490,7 +490,7 @@ export function Transcript({ entries, liveThinking, thinkingActive, autoCollapse
           : item.kind === "outgoing"
             ? <OutgoingEntry entry={item.entry} sessionId={sessionId} autoCollapse={autoCollapse} />
             : <MessageEntry entry={item.entry} sessionId={sessionId} autoCollapse={autoCollapse} mono={mono} bubble={messenger && (item.kind === "user" || item.kind === "assistant") ? bubbles.get(item.entry.key) : undefined} onEdit={onEdit} onReply={onReply} onRetryPrompt={onRetryPrompt} onDiscardPrompt={onDiscardPrompt} />} />
-      {newerAvailable && <button type="button" className="context-earlier context-newer" disabled={loadingEarlier} onClick={onShowNewer}>{loadingEarlier ? "Loading newer…" : "Show 60 newer"}</button>}
+      {newerAvailable && <button type="button" className="context-earlier context-newer" disabled={loadingEarlier} onClick={onShowNewer}>{loadingEarlier ? "Loading newer…" : "Load newer history"}</button>}
     </div>
   </InlineImagesContext.Provider>;
 }

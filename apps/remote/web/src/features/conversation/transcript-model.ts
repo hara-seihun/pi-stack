@@ -35,7 +35,7 @@ export function emptyAssistantEntry(entry: ContextEntry): boolean {
 export function visibleKind(entry: ContextEntry, mono = false): "user" | "assistant" | "outgoing" | undefined {
   switch (entry.kind) {
     case "user": return !mono || entry.monoVisibility !== "hidden" && monoMessage(entry) ? "user" : undefined;
-    case "assistant": return mono && (entry.monoVisibility === "hidden" || entry.text === SILENT_TURN_TEXT) ? undefined : "assistant";
+    case "assistant": return entry.text === SILENT_TURN_TEXT || mono && entry.monoVisibility === "hidden" ? undefined : "assistant";
     case "toolCall": return !mono && outgoingAgentMessage(entry) ? "outgoing" : undefined;
     case "system": case "tool": case "thinking": case "notice": return undefined;
   }
@@ -145,12 +145,7 @@ export function appendLiveThinking(items: TranscriptItem[], liveThinking?: strin
 export function messengerWork(items: TranscriptItem[], working: boolean): TranscriptItem[] {
   const humanIndex = items.findLastIndex(item => item.kind === "user");
   const activeWorkIndex = working ? items.findIndex((item, index) => index > humanIndex && item.kind === "work") : -1;
-  const visible = items.flatMap((item, index): TranscriptItem[] => {
-    if (item.kind !== "work") return [item];
-    const nextHuman = items.findIndex((next, nextIndex) => nextIndex > index && next.kind === "user");
-    const hasReply = items.slice(index + 1, nextHuman < 0 ? items.length : nextHuman).some(next => next.kind === "assistant");
-    return hasReply || index === activeWorkIndex ? [{ ...item, running: index === activeWorkIndex }] : [];
-  });
+  const visible = items.map((item, index): TranscriptItem => item.kind === "work" ? { ...item, running: index === activeWorkIndex } : item);
   if (!working || activeWorkIndex >= 0) return visible;
   const human = items[humanIndex];
   const key = human?.kind === "user" ? `work-after:${human.entry.key}` : "work-after:start";
@@ -177,7 +172,7 @@ export function buildStableTranscript(entries: ContextEntry[], mono = false): Tr
   const ordered = [...entries].sort((left, right) => left.seq !== undefined && right.seq !== undefined ? left.seq - right.seq
     : left.seq !== undefined ? -1 : right.seq !== undefined ? 1 : 0);
   for (const entry of ordered) {
-    if (emptyAssistantEntry(entry) || mono && entry.kind === "assistant" && entry.text === SILENT_TURN_TEXT) continue;
+    if (emptyAssistantEntry(entry)) continue;
     const kind = visibleKind(entry, mono);
     if (!mono) {
       if (kind) {

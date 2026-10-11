@@ -1,6 +1,6 @@
-// The client holds the authoritative recent window plus any older pages the
-// person explicitly loaded. The stream replaces its recent region in full;
-// older pages arrive only when the person asks for them.
+// Recent native heads expand to a useful conversation window. Explicit older
+// pages remain ordered with that window; the stream replaces its recent region
+// in full without replaying native source identities.
 //
 // A generation is the identity of the list prefix. Compaction, a fork or tree
 // navigation start a new one, and the window is replaced rather than merged.
@@ -20,14 +20,17 @@ export const emptyTranscript: TranscriptWindow = { generation: "", total: 0, ite
 export const TRANSCRIPT_HEAD_BUDGET = 600;
 export const TRANSCRIPT_HEAD_BYTES = 8 * 1024 * 1024;
 
-export function boundTranscriptHeads(items: readonly TranscriptItemHead[], direction: "older" | "newer"): TranscriptItemHead[] {
+export function boundTranscriptHeads(items: readonly TranscriptItemHead[], direction: "older" | "newer", visible?: (head: TranscriptItemHead) => boolean): TranscriptItemHead[] {
   const source = direction === "older" ? items : [...items].reverse();
   const held: TranscriptItemHead[] = [];
   let bytes = 0;
+  let conversation = 0;
   for (const head of source) {
     const size = JSON.stringify(head).length * 2;
-    if (held.length >= TRANSCRIPT_HEAD_BUDGET || held.length && bytes + size > TRANSCRIPT_HEAD_BYTES) break;
+    // Raw-work density must not evict the conversation this window was loaded for.
+    if ((!visible || conversation >= EARLIER_PAGE_SIZE) && (held.length >= TRANSCRIPT_HEAD_BUDGET || held.length && bytes + size > TRANSCRIPT_HEAD_BYTES)) break;
     held.push(head);
+    if (visible?.(head)) conversation += 1;
     bytes += size;
   }
   return direction === "older" ? held : held.reverse();
@@ -61,12 +64,12 @@ export function mergeHeads(current: readonly TranscriptItemHead[], incoming: rea
   return [...bySeq.values()].sort((a, b) => a.seq - b.seq);
 }
 
-export function applyTranscriptEvent(current: TranscriptWindow | null, event: TranscriptEvent, visible: VisibleTranscriptRange | null = null): TranscriptWindow {
-  if (!current || current.generation !== event.generation) return { generation: event.generation, total: event.total, items: boundTranscriptHeads(mergeHeads([], event.items), "newer") };
+export function applyTranscriptEvent(current: TranscriptWindow | null, event: TranscriptEvent, visible: VisibleTranscriptRange | null = null, conversation?: (head: TranscriptItemHead) => boolean): TranscriptWindow {
+  if (!current || current.generation !== event.generation) return { generation: event.generation, total: event.total, items: boundTranscriptHeads(mergeHeads([], event.items), "newer", conversation) };
   const first = event.items[0]?.seq ?? event.total;
   const older = current.items.filter(item => item.seq < first && item.seq < event.total).map(withoutBody);
   const candidate = mergeHeads(older, event.items);
-  const tail = boundTranscriptHeads(candidate, "newer");
+  const tail = boundTranscriptHeads(candidate, "newer", conversation);
   const readingOlder = hasNewer(current) && first > (current.items.at(-1)?.seq ?? -1) + 1
     || !!visible && !!tail.length && visible.from < tail[0].seq;
   if (readingOlder) {
@@ -86,9 +89,9 @@ export function hasEarlier(window: TranscriptWindow | null): boolean {
   return window.items[0].seq > 0;
 }
 
-export type TranscriptFetch = (path: string) => Promise<Response>;
+export type TranscriptFetch = (path: string, signal?: AbortSignal) => Promise<Response>;
 
-const request: TranscriptFetch = path => piFetch(path, { headers: { accept: "application/json" }, cache: "no-store" });
+const request: TranscriptFetch = (path, signal) => piFetch(path, { signal, headers: { accept: "application/json" }, cache: "no-store" });
 
 export type PageResult =
   | { ok: true; page: TranscriptPage }
@@ -99,12 +102,13 @@ export async function fetchTranscriptPage(
   sessionId: string,
   query: { generation?: string; before?: number; limit?: number },
   fetcher: TranscriptFetch = request,
+  signal?: AbortSignal,
 ): Promise<PageResult> {
   const response = await fetcher(API.sessionTranscript.path({ sessionId }, {
     generation: query.generation || undefined,
     before: query.before,
     limit: query.limit,
-  }));
+  }), signal);
   const text = await response.text();
   const body = text ? JSON.parse(text) : {};
   // The generation moved under the request; the answer carries the current one.

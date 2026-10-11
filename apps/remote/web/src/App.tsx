@@ -54,12 +54,13 @@ import { createLiveText, visibleLiveText, type LiveTextStore } from "./features/
 import { ThreadDirectoryProvider, type ThreadDirectory } from "./features/conversation/thread-chips";
 import { ThreadDiscovery } from "./thread-discovery";
 import { entriesFromHeads, WAITING_ENTRY } from "./features/conversation/transcript-entries";
-import { applyTranscriptEvent, hasEarlier, hasNewer, loadEarlier, loadNewer, loadLatest, type VisibleTranscriptRange, type TranscriptWindow } from "./features/conversation/transcript-store";
+import { applyTranscriptEvent, EARLIER_PAGE_SIZE, hasEarlier, hasNewer, loadNewer, loadLatest, type VisibleTranscriptRange, type TranscriptWindow } from "./features/conversation/transcript-store";
+import { conversationCount, conversationHead, loadVisibleEarlier } from "./features/conversation/visible-history";
 import type { QueueAction } from "./features/queue/QueueSheet";
 import { threadStatus } from "./features/status/thread-status";
 import { parseSettingsEntry, parseSettingsSnapshot } from "../../shared/settings-wire";
 import { observeClientTimezone } from "./features/settings/client-timezone";
-import { managerNavigation, monoTranscript, type ManagerPreference } from "./app/mono";
+import { managerNavigation, type ManagerPreference } from "./app/mono";
 import { requestManager } from "./manager-client";
 
 // Screen code warms after bootstrap, without mounting views or fetching data.
@@ -442,6 +443,9 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
 
   // The route decides the selection; this effect does the work of selecting.
   const selectionGeneration = useRef(0);
+  const conversationMode = useRef(mono);
+  conversationMode.current = mono;
+  const historyLoad = useRef<AbortController | null>(null);
   const selectThread = useCallback(async (id: string, discovered?: Session, signal?: AbortSignal) => {
     const generation = ++selectionGeneration.current;
     const candidate = discovered ?? [...stateRef.current.sessions, ...stateRef.current.discovered].find(item => item.id === id);
@@ -784,8 +788,8 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
         case "workers": patch({ fleet: event.sessions }); return;
         case "transcript": {
           const previous = stateRef.current.transcript;
-          const transcript = applyTranscriptEvent(previous, event, visibleHeads.current?.sessionId === event.sessionId ? visibleHeads.current.range : null);
-          patch({ transcript, syncing: false, earlierError: "" });
+          const transcript = applyTranscriptEvent(previous, event, visibleHeads.current?.sessionId === event.sessionId ? visibleHeads.current.range : null, head => conversationHead(head, conversationMode.current));
+          patch({ transcript, syncing: false });
           finishSection(`thread:${event.sessionId}`);
           if (previous && previous.generation !== transcript.generation) stream.current?.update({ transcriptFrom: null });
           cache.rememberThread(event.sessionId, { transcript });
@@ -906,35 +910,59 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     });
   }, [stateRef]);
 
-  const showEarlier = useCallback(() => {
+  const pageEarlier = useCallback(async (budget: number) => {
     const id = selectedAiId(stateRef.current);
     const window = stateRef.current.transcript;
     if (!id || !window || stateRef.current.loadingEarlier) return;
+    const selection = selectionGeneration.current;
+    const controller = new AbortController();
+    historyLoad.current?.abort();
+    historyLoad.current = controller;
+    const usable = () => !controller.signal.aborted && selection === selectionGeneration.current && selectedAiId(stateRef.current) === id;
     patch({ loadingEarlier: true, earlierError: "" });
-    void loadEarlier(id, window).then((result) => {
-      if (selectedAiId(stateRef.current) !== id) return;
-      const latest = stateRef.current.transcript;
-      const changedWhilePaging = latest?.generation !== window.generation;
-      const updated = !result.reset && latest?.generation === result.window.generation
-        ? { ...result.window, total: Math.max(latest.total, result.window.total), items: result.window.items.map(item => latest.items.find(current => current.seq === item.seq) ?? item) }
-        : changedWhilePaging ? latest ?? result.window : result.window;
-      cache.rememberThread(id, { transcript: updated });
-      patch({ transcript: updated, loadingEarlier: false });
-      stream.current?.update({ transcriptFrom: null });
-    }, (cause: unknown) => {
-      if (selectedAiId(stateRef.current) !== id) return;
-      patch({ loadingEarlier: false, earlierError: cause instanceof Error ? cause.message : String(cause) });
+    const result = await loadVisibleEarlier(id, window, {
+      mono: conversationMode.current, budget, signal: controller.signal,
+      onPage: (page, reset) => {
+        if (!usable()) return;
+        const latest = stateRef.current.transcript;
+        if (latest?.generation !== window.generation && latest?.generation !== page.generation) { controller.abort(); return; }
+        const updated = latest?.generation === page.generation
+          ? { ...page, total: Math.max(latest.total, page.total), items: page.items.map(item => latest.items.find(current => current.seq === item.seq) ?? item) }
+          : reset ? page : latest;
+        if (!updated) return;
+        cache.rememberThread(id, { transcript: updated });
+        patch({ transcript: updated });
+      },
     });
+    if (!usable()) return;
+    historyLoad.current = null;
+    patch({ loadingEarlier: false, earlierError: !result.ok && result.error.kind === "unavailable" ? result.error.message : "" });
   }, [cache, patch, stateRef]);
+
+  const showEarlier = useCallback(() => { void pageEarlier(EARLIER_PAGE_SIZE); }, [pageEarlier]);
+  const historyGeneration = state.transcript?.generation;
+  useEffect(() => {
+    const window = stateRef.current.transcript;
+    if (window && hasEarlier(window)) {
+      const missing = EARLIER_PAGE_SIZE - conversationCount(window, mono);
+      if (missing > 0) void pageEarlier(missing);
+    }
+    return () => {
+      if (historyLoad.current) { historyLoad.current.abort(); historyLoad.current = null; patch({ loadingEarlier: false }); }
+    };
+  }, [aiId, historyGeneration, mono, person, pageEarlier, patch, stateRef]);
 
   const showNewer = useCallback(async (jump: boolean) => {
     const id = selectedAiId(stateRef.current);
     const held = stateRef.current.transcript;
     if (!id || !held || stateRef.current.loadingEarlier) return;
+    const selection = selectionGeneration.current;
+    const usable = () => selection === selectionGeneration.current && selectedAiId(stateRef.current) === id;
+    let jumped = false;
     patch({ loadingEarlier: true, earlierError: "" });
     try {
       const page = jump ? await loadLatest(id) : (await loadNewer(id, held)).window;
-      if (selectedAiId(stateRef.current) !== id) return;
+      if (!usable()) return;
       const current = stateRef.current.transcript;
       if (current && current.generation !== held.generation && current.generation !== page.generation) return;
       const updated = current?.generation === page.generation
@@ -943,10 +971,15 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
       visibleHeads.current = null;
       cache.rememberThread(id, { transcript: updated });
       patch({ transcript: updated });
+      jumped = jump;
     } catch (cause) {
-      if (selectedAiId(stateRef.current) === id) patch({ earlierError: cause instanceof Error ? cause.message : String(cause) });
-    } finally { if (selectedAiId(stateRef.current) === id) patch({ loadingEarlier: false }); }
-  }, [cache, patch, stateRef]);
+      if (usable()) patch({ earlierError: cause instanceof Error ? cause.message : String(cause) });
+    } finally { if (usable()) patch({ loadingEarlier: false }); }
+    if (jumped && usable() && stateRef.current.transcript) {
+      const missing = EARLIER_PAGE_SIZE - conversationCount(stateRef.current.transcript, conversationMode.current);
+      if (missing > 0) await pageEarlier(missing);
+    }
+  }, [cache, pageEarlier, patch, stateRef]);
 
   const thinkingOpen = useCallback((open: boolean) => {
     if (!mono && !autoCollapse) return;
@@ -1212,7 +1245,7 @@ function RemoteApp({ update }: { update: ReturnType<typeof useAppUpdate> }) {
     const inputs = new Map(selected?.inputs?.map(input => [input.id, input]));
     const source = state.transcript.items.map(head => head.kind === "user" && head.inputId && inputs.has(head.inputId)
       ? { ...head, inputState: inputs.get(head.inputId) } : head);
-    const heads = mono ? monoTranscript(source) : source;
+    const heads = source;
     return heads.length ? entriesFromHeads(heads) : mono ? [] : [WAITING_ENTRY];
   }, [state.transcript, mono, selected?.inputs]);
   const contextEntries = useMemo(() => reconcilePromptEntries(durableEntries, pendingPromptEntries,
