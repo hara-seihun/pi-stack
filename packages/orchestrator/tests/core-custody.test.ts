@@ -100,6 +100,29 @@ test("fixed resource bridge streams large native frames without hosting executio
   } finally { socket.destroy(); await close(server); }
 });
 
+test("ending a completed control observation closes its resource bridge without stopping the native owner", async () => {
+  const scope = fixture();
+  mkdirSync(join(scope.custody.socketDir, "thread-runners"));
+  const path = join(scope.custody.socketDir, "thread-runners", "4444444444444444.sock");
+  let nativePeerEnded = false;
+  const server = createServer(peer => {
+    peer.once("data", () => peer.write('{"ok":true}\n'));
+    peer.once("end", () => { nativePeerEnded = true; });
+  });
+  await listen(server, path);
+  const socket = custodySocket(["/usr/bin/python3", fileURLToPath(new URL("../src/core/custody-bridge.py", import.meta.url)), "socket", path]);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      socket.once("error", reject);
+      socket.once("connect", () => socket.write('{"type":"status"}\n'));
+      socket.once("data", () => socket.end());
+      socket.once("close", () => resolve());
+    });
+    expect(nativePeerEnded).toBe(true);
+    expect(server.listening).toBe(true);
+  } finally { socket.destroy(); await close(server); }
+}, 2_000);
+
 test("changed namespace birth is an explicit error before opening resources", async () => {
   const scope = fixture();
   if (scope.custody.namespace.kind === "process") scope.custody.namespace.startTicks = "0";

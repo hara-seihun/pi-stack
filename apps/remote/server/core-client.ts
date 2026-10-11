@@ -187,10 +187,14 @@ export class CoreClient {
     return this.refresh;
   }
 
-  start(): void { void this.consume(); }
+  start(): void { void this.consume(false); }
   close(): void { this.abort.abort(); if (this.reconnect) clearTimeout(this.reconnect); this.listeners.clear(); }
-  private async consume(): Promise<void> {
+  private async consume(reconnecting: boolean): Promise<void> {
     try {
+      if (reconnecting) {
+        const projection = await this.refreshProjection();
+        if (!projection.ok) throw new Error(projection.error.message);
+      }
       const response = await this.transport(`${this.base}/events?after=${this.cursor}`, { signal: this.abort.signal });
       if (!response.ok || !response.body) { await response.body?.cancel(); throw new Error(`Core events returned HTTP ${response.status}`); }
       const reader = response.body.getReader();
@@ -227,7 +231,7 @@ export class CoreClient {
     } catch (error) {
       if (this.abort.signal.aborted) return;
       this.feedback(String(error));
-      this.reconnect = setTimeout(() => { this.reconnect = null; void this.consume(); }, 1_000);
+      this.reconnect = setTimeout(() => { this.reconnect = null; void this.consume(true); }, 1_000);
     }
   }
 }

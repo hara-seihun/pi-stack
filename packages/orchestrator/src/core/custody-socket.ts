@@ -9,6 +9,7 @@ export function custodySocket(command: string[]): Socket {
   const stream = new Duplex({
     read() { child.stdout.resume(); },
     write(chunk, encoding, callback) { child.stdin.write(chunk, encoding, callback); },
+    final(callback) { child.stdin.end(callback); },
     destroy(error, callback) { child.kill("SIGTERM"); child.stdin.destroy(); child.stdout.destroy(); callback(error); },
   });
   Object.assign(stream, { setNoDelay() { return stream; } });
