@@ -15,6 +15,8 @@ The native adapter consumes `roleTools()` and `roleInstruction()`. `PI_THREAD_CA
 
 Workers write state and the next action to their owning Markdown notes and finish. Completion does not archive a thread. Only explicit Close archives it. Close cancels running work after positive native cancellation; not-landed input retains its exact receipt and payload. Reopen releases that pending custody without repeating already-landed work. Explicit user-requested `cancelMessage` cancels that selected pending receipt. `view` does not mutate lifecycle, and automatic inactivity archival is rejected.
 
+Close and Cancel commit a held cancellation intent before native halt. Owner handoff preserves that intent even when native acknowledgement fails. Startup reconciliation selects these intent rows independently of activity, execution, input or capacity rows, including already-idle conversations. It reattaches retained native custody or accepts positive absence, completes the original cancellation, then consumes the intent; it never creates another assignment. The pending-intent partial index keeps the five-second reconciliation independent of historical thread count. `idle-cancellation-restart.test.ts` covers interrupted idle Close/Cancel, retained and absent runners, unrelated conversations and a second restart.
+
 ## Lossless delivery
 
 There is one delivery behavior: `pending`. Existing persisted queue/steer/hardSteer values are adopted as pending without deleting, interrupting or cancelling their messages. Historical terminal receipts retain their recorded values. Current tools expose no mode selector or promotion.

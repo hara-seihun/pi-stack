@@ -248,6 +248,7 @@ export class ThreadService implements ThreadApi {
       CREATE INDEX IF NOT EXISTS thread_archived ON thread(id) WHERE json_extract(metadata,'$.archived')=1;
       CREATE INDEX IF NOT EXISTS thread_running ON thread(id,json_extract(metadata,'$.laneId'),json_extract(metadata,'$.execution')) WHERE state='running';
       CREATE INDEX IF NOT EXISTS thread_native_custody ON thread(id) WHERE json_extract(metadata,'$.runnerReference') IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS thread_cancellation_pending ON thread(id) WHERE held=1 AND json_extract(metadata,'$.cancellationRequest') IN ('close','cancel');
       CREATE TABLE IF NOT EXISTS thread_work (
         ordinal INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, thread_id TEXT NOT NULL,
         sender_id TEXT, text TEXT NOT NULL, images TEXT NOT NULL, delivery TEXT NOT NULL, source TEXT NOT NULL,
@@ -1180,6 +1181,7 @@ export class ThreadService implements ThreadApi {
     }
     // CROSS JOIN keeps the partial custody indexes on the driving side; SQLite otherwise scans historical threads to merge the UNION.
     const rows = this.sql(`SELECT id,held FROM thread WHERE state='running'
+      UNION SELECT id,held FROM thread INDEXED BY thread_cancellation_pending WHERE held=1 AND json_extract(metadata,'$.cancellationRequest') IN ('close','cancel')
       UNION SELECT t.id,t.held FROM thread_execution e INDEXED BY thread_execution_active CROSS JOIN thread t ON t.id=e.thread_id WHERE e.ended_at IS NULL
       UNION SELECT t.id,t.held FROM thread_work w INDEXED BY thread_work_unfinished CROSS JOIN thread t ON t.id=w.thread_id WHERE w.status!='done' AND t.held=0
       ${this.capacityLedger ? "UNION SELECT t.id,t.held FROM thread_capacity c CROSS JOIN thread t ON t.id=c.thread_id WHERE c.state!='released'" : ""}`).all() as { id: string; held: number }[];
