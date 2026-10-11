@@ -1736,8 +1736,8 @@ function sourceCapacityPlan(repository, sourceCommit, intent, blockSize, mirror,
       fail("source capacity estimate unknown: remote commit needs independent durable mirror custody; remote import remains unestimated");
     }
     const resolved = command("git", ["--git-dir", mirror, "rev-parse", "--verify", `${sourceCommit}^{commit}`]);
-    if (resolved.status !== 0 || resolved.stdout !== sourceCommit) {
-      fail("source capacity estimate unknown: remote commit is absent from durable mirror custody; remote import remains unestimated");
+    if (resolved.status !== 0 || resolved.stdout !== sourceCommit || !hasObjectClosure(mirror, sourceCommit)) {
+      fail("source capacity estimate unknown: remote commit closure is absent from durable mirror custody; remote import remains unestimated (refetch through that route)");
     }
     repository = mirror;
   }
@@ -1768,7 +1768,7 @@ function sourceCapacityPlan(repository, sourceCommit, intent, blockSize, mirror,
 }
 
 function sourceImportCapacity(repository, sourceCommit, mirror) {
-  if (mirror && existsSync(mirror) && command("git", ["--git-dir", mirror, "cat-file", "-e", `${sourceCommit}^{commit}`]).status === 0) return 0;
+  if (mirror && existsSync(mirror) && hasObjectClosure(mirror, sourceCommit)) return 0;
   const objects = git(repository, ["rev-list", "--objects", "--no-object-names", sourceCommit]);
   const sizes = run("git", ["-C", repository, "cat-file", "--batch-check=%(objectsize)"], { input: `${objects}\n` });
   let bytes = 16 * 1024 ** 2;
@@ -2077,11 +2077,16 @@ function stabilizeObjectCustody(workspace, alternates, execute, statePath) {
   return "imported-durable-mirror";
 }
 
+function hasObjectClosure(mirror, commit) {
+  return command("git", ["--git-dir", mirror, "rev-list", "--objects", "--quiet", "--missing=error", `${commit}^{commit}`],
+    { env: { GIT_NO_LAZY_FETCH: "1", GIT_NO_REPLACE_OBJECTS: "1", GIT_ALTERNATE_OBJECT_DIRECTORIES: "" } }).status === 0;
+}
+
 function cachedImmutableSource(mirror, repository, ref) {
   if (!/^[0-9a-f]{40}$/u.test(ref) || !existsSync(mirror)) return null;
   if (existsSync(path.join(mirror, "objects", "info", "alternates"))) fail(`shared mirror must own its objects independently: ${mirror}`);
   const cached = command("git", ["--git-dir", mirror, "rev-parse", "--verify", `${sourceRefFor(repository, ref)}^{commit}`]);
-  return cached.status === 0 && cached.stdout === ref ? ref : null;
+  return cached.status === 0 && cached.stdout === ref && hasObjectClosure(mirror, ref) ? ref : null;
 }
 
 function resolveRequestedSource(repository, ref) {
@@ -2113,7 +2118,7 @@ function resolveSource(statePath, mirror, repository, upstream, ref) {
     if (shared !== null) return shared;
     if (existsSync(path.join(mirror, "objects", "info", "alternates"))) fail(`shared mirror must own its objects independently: ${mirror}`);
     if (/^[0-9a-f]{40}$/u.test(ref) && existsSync(mirror)
-      && command("git", ["--git-dir", mirror, "cat-file", "-e", `${ref}^{commit}`]).status === 0) {
+      && hasObjectClosure(mirror, ref)) {
       run("git", ["--git-dir", mirror, "update-ref", sourceRefFor(repository, ref), ref]);
       return ref;
     }
@@ -2156,8 +2161,11 @@ function fetchSource(mirror, repository, ref) {
     resolved = commit.stdout;
   }
   const sourceRef = sourceRefFor(repository, ref);
-  run("git", ["--git-dir", mirror, "fetch", "--no-tags", "--no-auto-maintenance", "workspace-source", `+${resolved}:${sourceRef}`], { timeout: 120_000 });
-  return run("git", ["--git-dir", mirror, "rev-parse", "--verify", `${sourceRef}^{commit}`]);
+  // Negotiation can report an existing commit as complete despite missing trees/blobs.
+  run("git", ["--git-dir", mirror, "fetch", "--refetch", "--no-tags", "--no-auto-maintenance", "workspace-source", `+${resolved}:${sourceRef}`], { timeout: 120_000 });
+  const commit = run("git", ["--git-dir", mirror, "rev-parse", "--verify", `${sourceRef}^{commit}`]);
+  if (!hasObjectClosure(mirror, commit)) fail(`fetched source has incomplete object closure: ${commit}`);
+  return commit;
 }
 
 // Clone uses a temporary source remote, so Git does not create origin's fetch mapping.

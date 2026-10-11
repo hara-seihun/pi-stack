@@ -1161,6 +1161,60 @@ process.exit(result.status ?? 1);
   } finally { f.close(); }
 });
 
+for (const missing of ["HEAD^{tree}", "HEAD:selected", "HEAD:selected/result.md", "HEAD:excluded.bin"])
+for (const repair of ["local-priced", "remote-unestimated"]) test(`incomplete mirror closure ${missing} is refused then refetched by ${repair}`, () => {
+  const f = fixture();
+  try {
+    const repository = `file://${f.remote}`;
+    git(f.source, "remote", "set-url", "origin", repository);
+    mkdirSync(path.join(f.source, "selected"));
+    writeFileSync(path.join(f.source, "selected", "result.md"), "selected result\n");
+    writeFileSync(path.join(f.source, "excluded.bin"), "excluded but still owned\n");
+    git(f.source, "add", "."); git(f.source, "commit", "-m", "closure fixture");
+    git(f.source, "push", "origin", "main");
+    const commit = git(f.source, "rev-parse", "HEAD");
+    const selection = ["--sparse-pattern", "/selected/"];
+    const base = ["create", "--root", f.workspaces, "--repo", repository, "--ref", commit, ...selection, "--json"];
+    const seed = JSON.parse(run([...base, "--name", "seed", "--min-free-gib", "0"], f.env));
+    const mirror = path.dirname(readFileSync(path.join(seed.path, ".git", "objects", "info", "alternates"), "utf8").trim());
+    // Keep the commit and source ref, but remove one reachable object from actual custody.
+    const objects = git(f.source, "rev-list", "--objects", "--no-object-names", commit).split("\n");
+    for (const id of objects) {
+      const relative = path.join(id.slice(0, 2), id.slice(2));
+      mkdirSync(path.join(mirror, "objects", id.slice(0, 2)), { recursive: true });
+      if (!existsSync(path.join(mirror, "objects", relative))) writeFileSync(path.join(mirror, "objects", relative), readFileSync(path.join(f.source, ".git", "objects", relative)));
+    }
+    rmSync(path.join(mirror, "objects", "pack"), { recursive: true, force: true });
+    const absent = git(f.source, "rev-parse", missing);
+    rmSync(path.join(mirror, "objects", absent.slice(0, 2), absent.slice(2)));
+    assert.equal(git(mirror, "rev-parse", `${commit}^{commit}`), commit);
+    const priced = ["--intent", "source-only", "--headroom-gib", "1", "--growth-mib", "8"];
+    assert.throws(() => run([...base, "--name", "must-not-admit", ...priced], f.env), /remote commit closure.*unestimated/);
+    assert.equal(JSON.parse(run(["status", "--json"], f.env)).records.length, 1);
+    assert.equal(existsSync(path.join(f.workspaces, "must-not-admit")), false);
+    if (repair === "local-priced") {
+      if (missing === "HEAD^{tree}") {
+        rmSync(f.remote, { recursive: true });
+        assert.throws(() => run([...base, "--name", "failed-refetch", "--min-free-gib", "0"], f.env), /fetch.*failed/s);
+        assert.equal(JSON.parse(run(["status", "--json"], f.env)).records.length, 1);
+        assert.equal(existsSync(path.join(f.workspaces, "failed-refetch")), false);
+      }
+      // The no-source-ref shortcut must reject the same incomplete object store.
+      for (const ref of git(mirror, "for-each-ref", "--format=%(refname)", "refs/pi-workspace/sources").split("\n").filter(Boolean)) git(mirror, "update-ref", "-d", ref);
+    }
+    const fixed = JSON.parse(run(["create", "--root", f.workspaces, "--name", "fixed", "--repo",
+      repair === "local-priced" ? f.source : repository, "--ref", commit, ...selection,
+      ...(repair === "local-priced" ? priced : ["--min-free-gib", "0"]), "--json"], f.env));
+    assert.equal(fixed.state, "active");
+    assert.equal(readFileSync(path.join(fixed.path, "selected", "result.md"), "utf8"), "selected result\n");
+    assert.equal(existsSync(path.join(fixed.path, "excluded.bin")), false);
+    assert.equal(git(mirror, "cat-file", "-t", absent), missing.endsWith(".md") || missing.endsWith(".bin") ? "blob" : "tree");
+    if (repair === "local-priced") assert.ok(fixed.capacity.sourceImportBytes > 0);
+    const recovered = JSON.parse(run([...base, "--name", "priced-after-repair", ...priced], f.env));
+    assert.equal(recovered.capacity.sourceImportBytes, 0);
+  } finally { f.close(); }
+});
+
 test("budgeted source creation shares existing objects and records immutable sparse pricing", () => {
   const f = fixture();
   try {
