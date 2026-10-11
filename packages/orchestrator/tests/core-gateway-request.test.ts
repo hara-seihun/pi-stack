@@ -38,16 +38,21 @@ test("CLI executes through selected-release symlinks and imports stay silent", a
       target: "node", format: "esm", outdir: root, naming: "gateway.mjs" });
     expect(build.success).toBe(true);
     symlinkSync(entry, selected);
-    for (const runtime of [process.execPath, "/usr/bin/node"]) {
+    const node = Bun.which("node");
+    if (node === null) throw new Error("CLI contract proof requires an installed Node runtime");
+    for (const runtime of [process.execPath, node]) {
       for (const path of [entry, selected]) {
         const result = Bun.spawnSync([runtime, path], { stdin: Buffer.from("not JSON"), env: {}, timeout: 5000 });
         expect(result.exitCode).toBe(0);
         expect(JSON.parse(result.stdout.toString())).toMatchObject({ ok: false, error: { code: "invalid-request" } });
       }
-      const imported = Bun.spawnSync([runtime, "--input-type=module", "-e", `await import(${JSON.stringify(pathToFileURL(selected).href)})`],
-        { stdin: Buffer.from("not JSON"), env: {}, timeout: 5000 });
-      expect(imported.exitCode).toBe(0);
-      expect(imported.stdout.toString()).toBe("");
+      const program = `const module = await import(${JSON.stringify(pathToFileURL(selected).href)}); console.log(typeof module.gatewayRequest)`;
+      for (const args of [["--input-type=module", "-e", program], ["--input-type=module", "-"]]) {
+        const imported = Bun.spawnSync([runtime, ...args],
+          { stdin: Buffer.from(args.at(-1) === "-" ? program : "not JSON"), env: {}, timeout: 5000 });
+        expect(imported.exitCode).toBe(0);
+        expect(imported.stdout.toString()).toBe("function\n");
+      }
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

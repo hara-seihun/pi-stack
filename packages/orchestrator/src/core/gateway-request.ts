@@ -61,6 +61,6 @@ export async function gatewayRequestStdin(stream: AsyncIterable<string | Buffer>
     return await gatewayRequest(JSON.parse(Buffer.concat(chunks).toString("utf8")), env);
   } catch { return failed("invalid-request", "Gateway stdin must be one JSON request"); }
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
+if (process.argv[1] && process.argv[1] !== "-" && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   console.log(JSON.stringify(await gatewayRequestStdin(process.stdin)));
 }
