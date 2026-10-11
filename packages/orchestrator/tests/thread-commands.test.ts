@@ -1,30 +1,30 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { writeFileSync } from "node:fs";
-import { join } from "node:path";
+import * as gateway from "../src/core/gateway-fetch.js";
 import { dispatch } from "../src/commands.js";
 const endpoint = "http://127.0.0.1:19181/v1/scopes/work/thread-owner";
 beforeEach(() => {
   for (const key of ["PI_THREAD_ID", "PI_THREAD_CAN_SPAWN", "PI_THREAD_API_URL", "PI_THREAD_TOKEN"]) vi.stubEnv(key, undefined);
-  const tokenFile = join(process.env.HOME!, "core-cli-token"); writeFileSync(tokenFile, "fixture-token\n");
-  vi.stubEnv("PI_CORE_URL", "http://127.0.0.1:19181"); vi.stubEnv("PI_CORE_SCOPE_ID", "work"); vi.stubEnv("PI_CORE_TOKEN_FILE", tokenFile);
+  vi.stubEnv("PI_CORE_URL", "http://127.0.0.1:19181"); vi.stubEnv("PI_CORE_SCOPE_ID", "work"); vi.stubEnv("PI_CORE_TOKEN_FILE", undefined);
+  vi.stubEnv("PI_CORE_GATEWAY_SOCKET", "/synthetic/core.sock"); vi.stubEnv("PI_CORE_GATEWAY_UID", "0");
 });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); process.exitCode = 0; });
 function transport(responses: unknown[] = []) {
   const calls: { path: string; method: string; body: any; authorization: string | null }[] = [];
   vi.spyOn(console, "log").mockImplementation(() => {});
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+  vi.spyOn(gateway, "unixGatewayFetch").mockImplementation(async (peer, input, init) => {
+    expect(peer).toEqual({ socketPath: "/synthetic/core.sock", peerUid: 0 });
     calls.push({ path: new URL(String(input)).pathname, method: init?.method ?? "GET", body: init?.body ? JSON.parse(String(init.body)) : undefined, authorization: new Headers(init?.headers).get("authorization") });
     return Response.json(responses.length ? responses.shift() : { ok: true, value: { id: `thread-${calls.length}` } });
   });
   return calls;
 }
 it("preserves an agent parent and uses its injected native capability without reading a core token", async () => {
-  vi.stubEnv("PI_THREAD_ID", "caller"); vi.stubEnv("PI_THREAD_API_URL", "http://127.0.0.1:18790/v1/threads"); vi.stubEnv("PI_THREAD_TOKEN", "native-capability"); vi.stubEnv("PI_CORE_TOKEN_FILE", "/missing/token");
+  vi.stubEnv("PI_THREAD_ID", "caller"); vi.stubEnv("PI_THREAD_API_URL", endpoint); vi.stubEnv("PI_THREAD_TOKEN", "native-capability");
   const calls = transport(); await dispatch(["run", "--prompt", "bounded work"]);
   expect(calls[0]!.body).toMatchObject({ parentId: "caller", ephemeral: true });
   expect(calls[0]!.authorization).toBeNull();
-  expect(vi.mocked(fetch).mock.calls[0]![0]).toBe("http://127.0.0.1:18790/v1/threads/spawn");
-  expect(new Headers(vi.mocked(fetch).mock.calls[0]![1]?.headers).get("x-pi-thread-token")).toBe("native-capability");
+  expect(String(vi.mocked(gateway.unixGatewayFetch).mock.calls[0]![1])).toBe(`${endpoint}/spawn`);
+  expect(new Headers(vi.mocked(gateway.unixGatewayFetch).mock.calls[0]![2]?.headers).get("x-pi-thread-token")).toBe("native-capability");
   await expect(dispatch(["run", "--prompt", "work", "--parent", "another"])).rejects.toThrow("own thread");
   expect(calls).toHaveLength(1);
 });
@@ -32,17 +32,17 @@ it.each([undefined, "caller"])("sends one pending message with sender %s", async
   vi.stubEnv("PI_THREAD_ID", senderId);
   const calls = transport(); await dispatch(["send", "recipient", "--prompt", "work"]);
   expect(calls[0]!.body).toEqual({ requestId: expect.any(String), threadId: "recipient", text: "work", delivery: "pending", ...(senderId ? { senderId } : {}) });
-  expect(vi.mocked(fetch).mock.calls[0]![0]).toBe(`${endpoint}/send`);
-  expect(calls[0]!.authorization).toBe("Bearer fixture-token");
+  expect(String(vi.mocked(gateway.unixGatewayFetch).mock.calls[0]![1])).toBe(`${endpoint}/send`);
+  expect(calls[0]!.authorization).toBeNull();
 });
 it("restricted boundaries cannot bypass the missing spawn tool with CLI run", async () => {
   vi.stubEnv("PI_THREAD_CAN_SPAWN", "0"); const calls = transport();
   await expect(dispatch(["run", "--prompt", "work"])).rejects.toThrow("does not grant agent creation"); expect(calls).toHaveLength(0);
 });
-it("spawns fresh forced threads without resolving server settings and sends the core bearer", async () => {
+it("spawns fresh forced threads through the registered own-UID gateway without bearer credentials", async () => {
   const calls = transport(); await dispatch(["run", "--prompt", "do work", "--cwd", "/work", "--count", "2"]);
   expect(calls).toHaveLength(2);
-  for (const call of calls) expect(call).toEqual({ path: "/v1/scopes/work/thread-owner/spawn", method: "POST", authorization: "Bearer fixture-token", body: { requestId: expect.any(String), message: "do work", cwd: "/work", admission: "force", ephemeral: false } });
+  for (const call of calls) expect(call).toEqual({ path: "/v1/scopes/work/thread-owner/spawn", method: "POST", authorization: null, body: { id: expect.stringMatching(/^spawn-[a-f0-9]{64}$/), requestId: expect.any(String), message: "do work", cwd: "/work", admission: "force", ephemeral: false } });
   expect(calls[0]!.body.requestId).not.toBe(calls[1]!.body.requestId);
 });
 it.each([
@@ -59,7 +59,7 @@ it("sends explicit model, thinking, speed and admission", async () => {
 });
 it("stops a failed batch and includes the original accepted IDs", async () => {
   const calls = transport([{ ok: true, value: { id: "accepted" } }, { ok: false, error: { code: "unavailable", message: "Paused" } }]);
-  await dispatch(["run", "--prompt", "work", "--count", "3"]); expect(fetch).toHaveBeenCalledTimes(2); expect(process.exitCode).toBe(1);
+  await dispatch(["run", "--prompt", "work", "--count", "3"]); expect(gateway.unixGatewayFetch).toHaveBeenCalledTimes(2); expect(process.exitCode).toBe(1);
   expect(calls[1]!.body.requestId).not.toBe(calls[0]!.body.requestId);
   expect(JSON.parse(String(vi.mocked(console.log).mock.calls[0]?.[0]))).toEqual({ ok: false, error: { code: "unavailable", message: "Paused", retryable: false, requestId: calls[1]!.body.requestId }, threads: [{ id: "accepted" }] });
 });
@@ -73,7 +73,7 @@ it.each([
   { argv: ["list", "--parent", "parent", "--state", "idle", "--limit", "4"], operation: "list", body: { parentId: "parent", state: "idle", limit: 4 } },
   { argv: ["send", "thread/id", "--prompt", "new work"], operation: "send", body: { requestId: expect.any(String), threadId: "thread/id", text: "new work", delivery: "pending" } },
 ])("uses registered native thread $operation", async ({ argv, operation, body }) => {
-  const calls = transport(); await dispatch(argv); expect(calls).toEqual([{ path: `/v1/scopes/work/thread-owner/${operation}`, method: "POST", body, authorization: "Bearer fixture-token" }]);
+  const calls = transport(); await dispatch(argv); expect(calls).toEqual([{ path: `/v1/scopes/work/thread-owner/${operation}`, method: "POST", body, authorization: null }]);
 });
 it.each([
   ["run", "--prompt", "work", "--count", "0"], ["run", "--prompt", "work", "--count", "1.5"],
@@ -83,8 +83,13 @@ it.each([
 ])("rejects unsupported input %j without transport", async (...argv) => {
   const calls = transport(); await expect(dispatch(argv)).rejects.toThrow(); expect(calls).toEqual([]);
 });
-it.each(["PI_CORE_SCOPE_ID", "PI_CORE_URL", "PI_CORE_TOKEN_FILE"])("refuses missing %s instead of choosing another owner", async key => {
+it.each(["PI_CORE_SCOPE_ID", "PI_CORE_URL"])("refuses missing %s instead of choosing another owner", async key => {
   vi.stubEnv(key, undefined); const calls = transport();
   await expect(dispatch(["list"])).rejects.toThrow(key);
   expect(calls).toEqual([]);
+});
+it.each(["PI_CORE_GATEWAY_SOCKET", "PI_CORE_GATEWAY_UID"])("reports unset %s without a network or bearer fallback", async key => {
+  vi.stubEnv(key, undefined); const calls = transport(); await dispatch(["list"]);
+  expect(calls).toEqual([]); expect(process.exitCode).toBe(1);
+  expect(JSON.parse(String(vi.mocked(console.log).mock.calls[0]?.[0]))).toMatchObject({ ok: false, error: { message: expect.stringContaining("configuration") } });
 });

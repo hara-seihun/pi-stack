@@ -12,7 +12,7 @@ Kenaznia dispatches work; native code owns accepted input, execution and result 
 
 [`createModelBroker`](src/model-broker.ts) borrows that same Store and controller. Its embedded `request(verifiedPrincipal, req, res)` receives identity from core authentication, never from a caller-supplied principal. Core publishes account/model grants only to each original source configuration's declared ledger footprint, grouped by its original grant owner; an absent owner stays absent. Embedded brokers borrow publication custody. [`core/provider.ts`](src/core/provider.ts) locks each original ledger under its detached-owner receipt and installs explicit immutable completion aliases before exposing requests. Existing UID-bound loopback listeners run in this same process during finite caller adoption. An exact root-owned drained-stream receipt permits port adoption; live nft UID/input gates and unified use permission are checked on every request. UID-bound configuration includes explicit `admissionDeltaPaths` (empty when none); [enrollment evidence](docs/ordinary-users.md#enrollment-evidence) can extend the current UID policy without rewriting that original drain receipt.
 
-Core credentials are root-owned digest bindings to registered principals. Clients set `PI_CORE_URL` and `PI_CORE_TOKEN_FILE`; the token file supplies `Authorization: Bearer …`. The broker mounts at `/v1/model-broker`. Operator provider routes mount at `/v1/providers` and require authorization for the provider resource before [`providerHttp`](src/provider-http.ts) runs. Ordinary model grants do not confer operator access. Native callers with an existing UID-bound listener set `PI_MODEL_BROKER_URL=http://127.0.0.1:PORT`; this explicit endpoint takes precedence over a tokenless gateway `PI_CORE_URL` and receives no unrelated core bearer.
+Core credentials are root-owned digest bindings to registered principals. Explicit operator provider clients set `PI_CORE_URL` and `PI_CORE_TOKEN_FILE`; their token file supplies `Authorization: Bearer …`. Thread CLI and native peer tools instead use their registered own-UID Unix gateway, never a bearer fallback. The broker mounts at `/v1/model-broker`. Operator provider routes mount at `/v1/providers` and require authorization for the provider resource before [`providerHttp`](src/provider-http.ts) runs. Ordinary model grants do not confer operator access. Native callers with an existing UID-bound listener set `PI_MODEL_BROKER_URL=http://127.0.0.1:PORT`; this explicit endpoint takes precedence over a tokenless gateway `PI_CORE_URL` and receives no unrelated core bearer.
 
 Account eligibility preserves explicit stops, enabled state, calling-account exclusions, model entitlement, quota and cooldown evidence. Exact model/thinking/speed selections are retained; another model or tier is not substituted. Pi supplies provider catalogues and custom endpoint definitions. [`models.ts`](src/models.ts) overlays the shared explicit provider definitions for current routing and historical pricing.
 
@@ -60,11 +60,15 @@ Usage is component-aware (`input`, `output`, `cacheRead`, `cacheWrite`) and reco
 
 ```text
 PI_CORE_URL
-PI_CORE_TOKEN_FILE
-PI_CORE_SCOPE_ID       # CLI outside a native thread
+PI_CORE_GATEWAY_SOCKET
+PI_CORE_GATEWAY_UID    # exact expected Core server UID
+PI_CORE_SCOPE_ID       # explicit account scope for CLI outside a native thread
+PI_CORE_TOKEN_FILE     # operator provider commands only; must be unset for thread commands
 PI_THREAD_API_URL      # injected scoped native callback address
 PI_THREAD_TOKEN        # injected native thread capability
 ```
+
+Outside a thread, explicitly export the chosen account's existing `/etc/pi-stack/users/USER/core.env` before invoking thread commands (`set -a; . /etc/pi-stack/users/USER/core.env; set +a`). Unset native `PI_THREAD_ID`/`PI_THREAD_TOKEN` and `PI_CORE_TOKEN_FILE`; no account is inferred from HOME or a stale callback URL. The socket's kernel credentials and existing route ceiling still authorize that account. Missing scope/gateway configuration is an error. A native capability requires its injected `PI_THREAD_API_URL` and is preserved through the same gateway, including original send/wait IDs and the request deadline. Gateway uncertainty returns an unconfirmed receipt for the original identity, not another transport or automatic resubmission.
 
 ```bash
 pi-orchestrator run --prompt "…" --model openai-codex/gpt-6.1-sol --thinking high --speed standard

@@ -12,6 +12,9 @@ export interface ThreadClientOptions { signal?: AbortSignal; timeoutMs?: number;
 /** Checks and stamps a request with its verified caller before the owner sees it. */
 export type ThreadAdmission = (operation: string, input: Record<string, any>) => Promise<AdmissionResult>;
 type ThreadFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+export class ThreadTransportError extends Error {
+  constructor(message: string, readonly acceptance: "not-contacted" | "unconfirmed") { super(message); }
+}
 
 const operations = ["attention", "attentionEvents", "agentWait", "wakeSchedule", "watch", "ask", "questions", "managerQuestions", "managerThread", "managerNotificationPolicy", "managerWorkSummary", "questionOrigin", "managerQuestionCustody", "pendingQuestions", "questionState", "questionEvents", "answer", "spawn", "send", "list", "read", "control", "inspect", "command", "settlements", "await", "archived"] as const;
 type Operation = typeof operations[number];
@@ -119,6 +122,8 @@ export function createThreadClient(baseUrl: string, fetcher: ThreadFetch = fetch
           retry = true;
         }
       } catch (error) {
+        if (error instanceof ThreadTransportError) return terminal({ ok: false, error: { code: "unavailable", message: error.message,
+          ...(uncertainSpawn && error.acceptance === "unconfirmed" ? { spawnReceipt: uncertainSpawn } : {}) } });
         lastError = error instanceof Error ? error.message : String(error);
         retry = !(error instanceof SyntaxError);
       }

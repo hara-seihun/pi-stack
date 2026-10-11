@@ -18,7 +18,9 @@ export async function gatewayRequest(input: unknown, env: Record<string, string 
       || input.method === "GET" && input.body !== undefined || input.body !== undefined && !object(input.body)) return failed("invalid-request", "Explicit method, core route and optional JSON object body required");
   const headers: Record<string, string> = {};
   if (input.headers !== undefined) {
-    if (!object(input.headers) || Object.keys(input.headers).some(key => key !== "x-pi-thread-token") || Object.values(input.headers).some(value => typeof value !== "string" || !value || /[\r\n]/u.test(value))) return failed("invalid-request", "Only an explicit native thread sender header is accepted");
+    if (!object(input.headers) || Object.keys(input.headers).some(key => !["x-pi-thread-token", "x-pi-thread-deadline"].includes(key)) || Object.values(input.headers).some(value => typeof value !== "string" || !value || /[\r\n]/u.test(value))) return failed("invalid-request", "Only explicit native thread sender and deadline headers are accepted");
+    const deadline = input.headers["x-pi-thread-deadline"];
+    if (deadline !== undefined && (!/^\d+$/u.test(String(deadline)) || !Number.isSafeInteger(Number(deadline)) || Number(deadline) <= 0)) return failed("invalid-request", "Native thread deadline must be an explicit positive epoch millisecond integer");
     Object.assign(headers, input.headers);
   }
   if (env.PI_THREAD_TOKEN) {
