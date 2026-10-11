@@ -56,6 +56,12 @@ Usage is component-aware (`input`, `output`, `cacheRead`, `cacheWrite`) and reco
 
 `/health` and `/v1/health` report `ready`, `degraded`, and explicit subsystem `reconciliation` states. Startup, shutdown, an unobserved first reconciliation, thrown reconciliation failures and failed duties remain HTTP503. Root's returned delivery-error count describes retained durable outbox work: it reports `delivery-degraded` and its count without disabling unrelated host scopes. A locked or unreachable recipient does not make the shared engine unavailable. The original outbox retains its identity, error and retry; readiness neither acknowledges delivery nor suppresses that failure.
 
+Core activation subscribes each manager-notice adapter without awaiting its historical scan, callback policy or delivery acknowledgements. Callback projections may start only after Core health, so replay cannot be an initial readiness dependency. The adapter owns its operation, durable cursor/outbox, retry and close drain. Historical scans yield after each committed 100-receipt page; acknowledged outbox deliveries yield before the next original request, allowing HTTP and shutdown to progress without losing custody.
+
+Health also reports `startup: { phase, elapsedMs, phaseElapsedMs }`, using a monotonic clock. The journal emits `type: core-startup` phase-bound observations with only release commit, scope count and durations. Phases distinguish scope adoption/activation, provider/memory/image/duty/Root adoption, callback/HTTP/provider/gateway transports and initial reconciliation. `ready` marks the first successful health reconciliation, not recipient delivery. An HTTP503 still carries its current phase; retain that body when a host health gate fails. No deadline is enlarged by these observations.
+
+`tests/core-adoption.test.ts` holds the actual notice adapter's policy response while verifying healthy HTTP and a close drain that still waits for that same operation. Set `PI_CORE_STARTUP_PROBE_PREDECESSOR=/absolute/immutable/orchestrator/dist/core/service.js` to bind its activation method to an exact predecessor and reproduce the readiness refusal. `tests/core-manager-relay.test.ts` covers checkpointed paging, stopped/restarted outbox IDs and acknowledgement fences; `tests/core-startup-clock.test.ts` covers phase timings.
+
 ## Operations
 
 ```text

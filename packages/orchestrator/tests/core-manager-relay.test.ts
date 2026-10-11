@@ -101,3 +101,52 @@ test("core skips silent notification settlements and retains real notice identit
   expect(listener).not.toBeNull();
   await restarted.close(); db.close();
 });
+
+test("historical notice scans yield after a durable page and Close preserves the restart cursor", async () => {
+  const db = openSqlite(":memory:");
+  const api = {
+    settlements: async (after: number) => ({ ok: true, value: { cursor: after < 1000 ? after + 100 : after,
+      items: after < 1000 ? Array.from({ length: 100 }, (_, n) => ({ seq: after + n + 1, threadId: "origin", executionId: `old-${after + n}`, workId: `work-${after + n}`, outcome: "complete", time: 1, finalMessage: null })) : [] } }),
+    attentionEvents: async (after: number) => ({ ok: true, value: { cursor: after, items: [] } }),
+    questionEvents: async (after: number) => ({ ok: true, value: { cursor: after, items: [] } }),
+    list: async () => { throw new Error("Classic notices do not resolve threads"); },
+  } as unknown as ThreadApi;
+  const directory = { managerNotificationPolicy: async () => ({ ok: true as const, value: { view: "classic" as const } }),
+    send: async () => { throw new Error("Classic historical scan has no deliveries"); } };
+  const config = { scopeId: "scan", notificationOwnerId: "original", adoptedCursors: { settlements: 0, attention: 0, questions: 0 }, subscribe: () => () => {}, feedback: () => {} };
+  const first = new CoreManagerNotices(config, db, api, directory);
+  const turn = new Promise<void>(resolve => setImmediate(resolve));
+  const scanning = first.start();
+  await turn;
+  expect(db.prepare("SELECT cursor FROM core_manager_notice_cursor WHERE kind='settlements'").get()).toMatchObject({ cursor: 100 });
+  await first.close(); await scanning;
+  expect(db.prepare("SELECT cursor FROM core_manager_notice_cursor WHERE kind='settlements'").get()).toMatchObject({ cursor: 100 });
+  const restarted = new CoreManagerNotices(config, db, api, directory);
+  expect((await restarted.start()).ok).toBe(true);
+  expect(db.prepare("SELECT cursor FROM core_manager_notice_cursor WHERE kind='settlements'").get()).toMatchObject({ cursor: 1000 });
+  await restarted.close(); db.close();
+});
+
+test("notice outbox yields between acknowledgements and stopped delivery restarts original remaining IDs only", async () => {
+  const db = openSqlite(":memory:");
+  const api = { settlements: async (after: number) => ({ ok: true, value: { cursor: after, items: [] } }),
+    attentionEvents: async (after: number) => ({ ok: true, value: { cursor: after, items: [] } }),
+    questionEvents: async (after: number) => ({ ok: true, value: { cursor: after, items: [] } }),
+    list: async () => { throw new Error("No historical lookups"); } } as unknown as ThreadApi;
+  const sent: string[] = [];
+  const directory = { managerNotificationPolicy: async () => ({ ok: true as const, value: { view: "classic" as const } }),
+    send: async (input: import("../src/threads/contracts.js").SendThread) => { sent.push(input.requestId); return { ok: true as const, value: {} as any }; } };
+  const config = { scopeId: "delivery", notificationOwnerId: "original", adoptedCursors: { settlements: 0, attention: 0, questions: 0 }, subscribe: () => () => {}, feedback: () => {} };
+  const first = new CoreManagerNotices(config, db, api, directory);
+  for (let n = 0; n < 200; n++) db.prepare("INSERT INTO core_manager_notice_outbox VALUES(?,?,?,NULL)").run("delivery", `original-${n}`, JSON.stringify({ requestId: `original-${n}`, threadId: "manager", text: `Exact ${n}` }));
+  const turn = new Promise<void>(resolve => setImmediate(resolve));
+  const delivery = first.start(); await turn;
+  expect(sent).toEqual(["original-0"]);
+  await first.close(); await delivery;
+  expect(db.prepare("SELECT count(*) AS count FROM core_manager_notice_outbox").get()).toMatchObject({ count: 199 });
+  const restarted = new CoreManagerNotices(config, db, api, directory);
+  expect((await restarted.start()).ok).toBe(true);
+  expect(sent).toEqual(Array.from({ length: 200 }, (_, n) => `original-${n}`));
+  expect(db.prepare("SELECT count(*) AS count FROM core_manager_notice_outbox").get()).toMatchObject({ count: 0 });
+  await restarted.close(); db.close();
+});

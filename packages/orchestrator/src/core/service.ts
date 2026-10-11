@@ -132,8 +132,11 @@ export class CoreService {
     }
     this.state = "serving";
     for (const owner of this.owners.values()) if (owner.notices) {
-      const started = await owner.notices.start();
-      if (!started.ok) continue; // Its durable outbox and subscribed retry retain custody while the peer is offline.
+      // Delivery is owned by the adapter's durable outbox, retry and close drain.
+      // A callback projection starts after Core readiness; replay cannot gate it.
+      void owner.notices.start().then(started => {
+        if (!started.ok) console.error(`Core notice delivery pending: ${started.error.code}`);
+      });
     }
     return { ok: true, value: undefined };
   }

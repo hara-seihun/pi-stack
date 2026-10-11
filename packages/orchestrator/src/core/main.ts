@@ -18,8 +18,11 @@ import { startCallbackTransports, type CallbackTransports } from "./callback-tra
 import { startGatewayTransports, type GatewayTransports } from "./gateway-transport.js";
 import { coreReadiness, observeCoreReconciliation, type CoreReconciliationHealth } from "./health.js";
 
+import { CoreStartupClock } from "./startup.js";
+
 export type RunningCore = { service: CoreService; close(): Promise<CoreResult<void>> };
 export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningCore>> {
+  const startup = new CoreStartupClock(() => performance.now(), observation => console.info(JSON.stringify({ type: "core-startup", releaseCommit: config.releaseCommit, scopeCount: config.scopes.length, ...observation })));
   const shutdown = new AbortController();
   const core = new CoreService(config, createCoreCustodyFactory(config.root.kind === "configured" ? [config.root.consultationScopeId, ...config.root.consultationOwners.map(owner => owner.scopeId)] : null));
   let provider: CoreProvider | undefined, root: CoreRootPlugin | null = null, images: CoreImages | undefined, memory: CoreMemoryAdapter | undefined;
@@ -35,6 +38,7 @@ export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningC
   const close = (): Promise<CoreResult<void>> => {
     if (closing) return closing;
     closing = (async (): Promise<CoreResult<void>> => {
+      if (!ready) startup.enter("failed");
       shutdown.abort();
       ready = false;
       if (clock) clearInterval(clock);
@@ -65,7 +69,8 @@ export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningC
   };
   try {
     const adopted = await core.start();
-    if (!adopted.ok) return adopted;
+    if (!adopted.ok) { startup.enter("failed"); return adopted; }
+    startup.enter("provider-adoption");
     if (config.broker.kind === "configured") {
       const built = createCoreProvider(config.broker, config.policy, config.principals, scopeId => {
         const owner = core.owner(scopeId);
@@ -74,6 +79,7 @@ export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningC
       if (!built.ok) { await close(); return built; }
       provider = built.value;
     }
+    startup.enter("memory-adoption");
     const memoryBuilt = await createCoreMemory({ config: config.memory, principals: config.principals, policy: config.policy, scopes: config.scopes, owner: id => core.owner(id), enabled: () => true, releaseCommit: config.releaseCommit });
     if (!memoryBuilt.ok) { await close(); return memoryBuilt; }
     const memoryOwner = memoryBuilt.value;
@@ -82,6 +88,7 @@ export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningC
       if (!ingress.ok) { res.writeHead(403, { "content-type": "application/json" }); res.end(JSON.stringify(ingress)); return; }
       memoryOwner.request(req, res);
     } };
+    startup.enter("image-adoption");
     if (config.images.kind === "configured") {
       if (!provider) { await close(); return { ok: false, error: { code: "invalid-config", message: "Image generation requires the configured shared provider owner" } }; }
       const imageScope = (id: string): CoreResult<CoreImageScope | null> => {
@@ -112,8 +119,10 @@ export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningC
       const started = await images.start();
       if (!started.ok) { await close(); return started; }
     }
+    startup.enter("duty-adoption");
     const adoptedDuties = await duties.start();
     if (!adoptedDuties.ok) { await close(); return adoptedDuties; }
+    startup.enter("root-adoption");
     const integrated = await createCoreRootIntegration(config.root, config.scopes, id => core.owner(id), { releaseCommit: config.releaseCommit, shutdownSignal: shutdown.signal,
       authorizeAdmin: (request, id, actions) => {
         const scope = config.scopes.find(scope => scope.id === id);
@@ -126,6 +135,7 @@ export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningC
       const ingress = core.authorizeIngress(request);
       return ingress.ok ? rootOwner.fetch(request) : Response.json(ingress, { status: 403 });
     } } : null;
+    startup.enter("callback-transports");
     const retained = await startCallbackTransports(config.callbacks, { root, memory: config.memory.kind === "configured" ? memory ?? null : null });
     if (!retained.ok) { await close(); return retained; }
     callbacks = retained.value;
@@ -143,7 +153,7 @@ export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningC
         let response: Response | undefined;
         if (path === "/health" || path === "/v1/health") {
           const health = coreReadiness(ready, shutdown.signal.aborted, reconciliationHealth);
-          response = Response.json({ ok: health.ready, ...health, reconciliation: reconciliationHealth, service: "pi-stack-core", releaseCommit: config.releaseCommit, scopeCount: config.scopes.length }, { status: health.ready ? 200 : 503 });
+          response = Response.json({ ok: health.ready, ...health, reconciliation: reconciliationHealth, startup: startup.snapshot(), service: "pi-stack-core", releaseCommit: config.releaseCommit, scopeCount: config.scopes.length }, { status: health.ready ? 200 : 503 });
         } else if (brokerRoute || path.startsWith("/v1/providers")) {
           const principal = core.authenticate(request);
           if (!principal.ok) response = Response.json(principal, { status: 401 });
@@ -164,20 +174,26 @@ export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningC
         else { res.writeHead(500, { "content-type": "application/json" }); res.end(JSON.stringify({ error: { code: "unavailable", message: "Core request failed; inspect existing request identity before retry" } })); }
       });
     };
+    startup.enter("http-listen");
     server = createServer(handleRequest);
     await new Promise<void>((resolve, reject) => { server!.once("error", reject); server!.listen(config.port, config.host, () => { server!.off("error", reject); resolve(); }); });
+    startup.enter("scope-activation");
     const activated = await core.activate();
     if (!activated.ok) { await close(); return activated; }
+    startup.enter("provider-transports");
     const transports = await provider?.startTransports();
     if (transports && !transports.ok) { await close(); return transports; }
+    startup.enter("gateway-transports");
     const admittedGateways = await startGatewayTransports(config.gatewayTransport, config.gatewayBindings, handleRequest);
     if (!admittedGateways.ok) { await close(); return admittedGateways; }
     gateways = admittedGateways.value;
     ready = true;
+    startup.enter("initial-reconciliation");
     const observeReconciliation = () => {
       if (!readinessResults) return;
       reconciliationHealth = observeCoreReconciliation(readinessResults[0], rootResult, readinessResults[1],
         { provider: provider !== undefined, root: root !== null, dutyCustodyErrors: duties.errors() });
+      if (coreReadiness(ready, shutdown.signal.aborted, reconciliationHealth).ready) startup.enter("ready");
     };
     const reconcile = () => {
       if (shutdown.signal.aborted) return;

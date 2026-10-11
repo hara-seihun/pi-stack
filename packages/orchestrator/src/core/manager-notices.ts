@@ -98,6 +98,7 @@ export class CoreManagerNotices {
       if (this.closed) return;
       this.checkpoint(kind, page.cursor, messages);
       if (page.items.length < 100) return;
+      await new Promise<void>(resolve => setImmediate(resolve));
     }
   }
   private async run(): Promise<Result<void>> {
@@ -115,6 +116,7 @@ export class CoreManagerNotices {
           throw new Error(result.error.message);
         }
         this.db.prepare("DELETE FROM core_manager_notice_outbox WHERE scope_id=? AND request_id=?").run(this.config.scopeId, row.request_id);
+        await new Promise<void>(resolve => setImmediate(resolve));
       }
       if (this.recovery) clearTimeout(this.recovery);
       this.recovery = null;

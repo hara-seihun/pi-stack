@@ -9,6 +9,8 @@ import { ThreadService } from "../src/threads/service.js";
 import { threadCapability } from "../src/threads/caller.js";
 import { CoreService, type CoreRuntime } from "../src/core/service.js";
 import { serveCore } from "../src/core/main.js";
+import * as custodyModule from "../src/core/custody.js";
+import { CoreManagerNotices } from "../src/core/manager-notices.js";
 import { CoreReloadOwner, validateCoreReload } from "../src/core/reload.js";
 import { acquireDatabaseOwnership, acquireScopeOwnership } from "../src/core/ownership.js";
 import { bindGatewayRequest, registerGatewaySocket, type GatewayBinding } from "../src/core/gateway.js";
@@ -34,6 +36,53 @@ async function fixture() {
   const runtime: CoreRuntime = { openSession: async () => { throw new Error("No execution during adoption"); }, attachSession: async () => null, recoverSession: async () => null, detach() {}, path: value => value, readImage: async () => ({ ok: false, error: { code: "unavailable", message: "No image reader in adoption fixture" } }) };
   return { scope, config, runtime, threadId: spawned.value.id, capability };
 }
+
+test("Core becomes healthy while manager notice callback is pending and still drains its original delivery on close", async () => {
+  const f = await fixture();
+  f.config.port = 20000 + Math.floor(Math.random() * 30000);
+  f.scope.managerRouting = { kind: "configured", relay: { scopeId: "alice", environmentId: "remote",
+    callbackUrl: "http://synthetic-callback.invalid", canonicalManager: null, remoteEnvironments: [], adoptedOrigins: [] },
+    notices: { notificationOwnerId: "original-owner", adoptedCursors: { settlements: 0, attention: 0, questions: 0 } } };
+  let release!: (value: import("../src/threads/contracts.js").Result<import("../src/threads/contracts.js").ManagerNotificationPolicy>) => void;
+  let entered!: () => void;
+  const pending = new Promise<import("../src/threads/contracts.js").Result<import("../src/threads/contracts.js").ManagerNotificationPolicy>>(resolve => { release = resolve; });
+  const called = new Promise<void>(resolve => { entered = resolve; });
+  const factory = spyOn(custodyModule, "createCoreCustodyFactory").mockReturnValue(async () => ({ ok: true, value: f.runtime }));
+  const predecessor = process.env.PI_CORE_STARTUP_PROBE_PREDECESSOR;
+  const activation = predecessor ? spyOn(CoreService.prototype, "activate").mockImplementation((await import(predecessor)).CoreService.prototype.activate) : null;
+  const originalStart = CoreManagerNotices.prototype.start;
+  const policy = spyOn(CoreManagerNotices.prototype, "start").mockImplementation(function(this: CoreManagerNotices) {
+    const directory = (this as unknown as { directory: Pick<import("../src/threads/contracts.js").ThreadApi, "managerNotificationPolicy"> }).directory;
+    directory.managerNotificationPolicy = () => { entered(); return pending; };
+    return originalStart.call(this);
+  });
+  let running: Awaited<ReturnType<typeof serveCore>> | undefined;
+  let serving: ReturnType<typeof serveCore> | undefined;
+  try {
+    serving = serveCore(f.config);
+    await called;
+    let completed = false;
+    void serving.then(() => { completed = true; });
+    for (let n = 0; n < 10 && !completed; n++) await new Promise<void>(resolve => setImmediate(resolve));
+    expect(completed).toBe(true);
+    running = await serving;
+    if (!running.ok) throw new Error(running.error.message);
+    const health = await fetch(`${running.value.service.url}/v1/health`);
+    expect(health.status).toBe(200);
+    expect(await health.json()).toMatchObject({ ready: true, startup: { phase: "ready" } });
+    let drained = false;
+    const closing = running.value.close().then(result => { drained = true; return result; });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(drained).toBe(false);
+    release({ ok: true, value: { view: "classic" } });
+    expect((await closing).ok).toBe(true);
+  } finally {
+    release({ ok: true, value: { view: "classic" } });
+    if (!running && serving) running = await serving;
+    if (running?.ok) await running.value.close();
+    policy.mockRestore(); factory.mockRestore(); activation?.mockRestore();
+  }
+}, 3000);
 
 test("one adopted writer preserves original thread, queue identity and scoped disclosure", async () => {
   const f = await fixture();
