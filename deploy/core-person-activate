@@ -125,7 +125,7 @@ def activate(user):
     registry = trusted(Path(f'/var/lib/pi-remote/persons/{user}.json'))
     if registry.get('user') != user:
         raise ValueError('folder registry user differs')
-    source = mounted_source(user, registry) if registry.get('unlock') is not None else None
+    source = mounted_source(user, registry) if scope['availability']['kind'] != 'adopt' and registry.get('unlock') is not None else None
     fresh = enrollment is not None and enrollment.get('state') in ('prepared', 'adopted')
     if enrollment is not None and (enrollment.get('version') != 1 or enrollment.get('user') != user or not fresh):
         raise ValueError('explicit prepared or adopted root enrollment required')
