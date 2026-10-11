@@ -14,6 +14,32 @@ function guarded(path: string) {
 }
 function write(path: string, body: string) { const fd = openSync(path, "wx", 0o600); try { writeFileSync(fd, body); fsyncSync(fd); } finally { closeSync(fd); } }
 function same(a: unknown, b: unknown): boolean { return isDeepStrictEqual(a, b); }
+function replace(path: string, value: unknown) {
+  const temporary = `${path}.${process.pid}.tmp`; write(temporary, JSON.stringify(value, null, 2) + "\n"); renameSync(temporary, path);
+  const fd = openSync(path.slice(0, path.lastIndexOf("/")), "r"); try { fsyncSync(fd); } finally { closeSync(fd); }
+}
+function amendOrigin(plan: Record<string, unknown>) {
+  if (Object.keys(plan).sort().join(",") !== ["version", "id", "source", "target", "origin", "previousOrigin", "credentialSha256"].sort().join(",") || typeof plan.id !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/.test(plan.id)) throw new Error("Exact same-identity origin amendment plan required");
+  const directory = `${ROOT}/${plan.id}`, path = `${directory}/binding.json`;
+  const before = parseManagerPolicyBinding(JSON.parse(guarded(path))); if (!before.ok) throw new Error(before.error.message);
+  const { previousOrigin, ...input } = plan;
+  const after = parseManagerPolicyBinding({ ...input, direction: before.value.direction, credentialFile: before.value.credentialFile }); if (!after.ok) throw new Error(after.error.message);
+  const original = { ...after.value, origin: previousOrigin };
+  if (!parseManagerPolicyBinding(original).ok || !(same(before.value, original) || same(before.value, after.value))) throw new Error("Origin amendment cannot alter enrolled identities or authority");
+  const token = guarded(after.value.credentialFile).trim(); if (!/^[a-f0-9]{64}$/.test(token) || createHash("sha256").update(token).digest("hex") !== after.value.credentialSha256) throw new Error("Original enrolled credential required");
+  if ((after.value.direction === "outgoing" ? after.value.source.host : after.value.target.host) !== hostname()) throw new Error("Origin amendment names another host");
+  const authority = managerPolicyAuthority(JSON.parse(readFileSync("/etc/pi-stack/core.json", "utf8")), after.value); if (!authority.ok) throw new Error(authority.error.message);
+  const store = JSON.parse(guarded(STORE));
+  if (!store || store.version !== 1 || !Array.isArray(store.bindings) || Object.keys(store).sort().join(",") !== "bindings,version" || store.bindings.some((b: unknown) => !parseManagerPolicyBinding(b).ok)) throw new Error("Protected binding store invalid");
+  const selected = store.bindings.filter((b: ManagerPolicyBinding) => b.id === after.value.id);
+  if (selected.length !== 1 || !(same(selected[0], original) || same(selected[0], after.value))) throw new Error("Origin amendment conflicts with protected route");
+  const intent = `${directory}/origin-amendment.json`, record = { version: 1, before: original, after: after.value };
+  if (existsSync(intent)) { if (!same(JSON.parse(guarded(intent)), record)) throw new Error("Another origin amendment owns this route"); }
+  else replace(intent, record);
+  if (!same(selected[0], after.value)) replace(STORE, { ...store, bindings: store.bindings.map((b: ManagerPolicyBinding) => b.id === after.value.id ? after.value : b) });
+  if (!same(before.value, after.value)) replace(path, after.value);
+  console.log(JSON.stringify({ state: "origin-amended", binding: after.value, previousOrigin, credentialChanged: false, managerIdentityChanged: false, uiGrantsChanged: false, runtimeLifecycle: false }));
+}
 async function main() {
   if (process.getuid?.() !== 0) throw new Error("Manager-policy enrollment requires the host owner");
   if (process.env.PI_MANAGER_POLICY_ENROLLMENT_LOCK !== "held") {
@@ -22,6 +48,10 @@ async function main() {
     process.exitCode = locked.status; return;
   }
   const [action, planPath, ...rest] = process.argv.slice(2);
+  if (action === "amend-origin") {
+    if (!planPath || rest.length) throw new Error("Use amend-origin PLAN");
+    amendOrigin(JSON.parse(readFileSync(planPath, "utf8"))); return;
+  }
   if (!["source", "target", "export-credential"].includes(action ?? "") || !planPath || rest.length !== (action === "target" ? 1 : 0) || action === "target" && rest[0] !== "--credential-stdin") throw new Error("Use source PLAN, target PLAN --credential-stdin, or export-credential PLAN");
   const plan: Record<string, unknown> = JSON.parse(readFileSync(planPath, "utf8"));
   if (!plan || Array.isArray(plan) || Object.keys(plan).sort().join(",") !== ["version", "id", "source", "target", "origin", ...(action === "target" || action === "export-credential" ? ["credentialSha256"] : [])].sort().join(",")) throw new Error("Exact source/target enrollment plan required");
