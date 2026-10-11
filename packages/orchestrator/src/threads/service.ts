@@ -3163,7 +3163,7 @@ export class ThreadService implements ThreadApi {
       if (this.get(id)?.metadata?.acknowledgementWait) return;
     }
     const recovery = this.get(id)?.metadata?.finalResultRecovery as Json | undefined;
-    if (runtime && execution && recovery?.executionId === execution.id) {
+    if (runtime && execution && recovery && recovery.executionId === execution.id) {
       // Recovery owns a final answer for its exact work IDs; later inputs belong to the next execution.
       if (runtime.busy) return;
       const state = await this.rpc(runtime, { type: "get_state" });
