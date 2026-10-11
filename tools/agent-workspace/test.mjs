@@ -765,10 +765,10 @@ test("a queued thread on one group member keeps both workspaces and their caches
     mkdirSync(application, { recursive: true });
     const databasePath = path.join(application, "threads.sqlite3");
     const db = new DatabaseSync(databasePath);
-    db.exec(`CREATE TABLE thread(id TEXT, cwd TEXT, state TEXT);
+    db.exec(`CREATE TABLE thread(id TEXT, cwd TEXT, state TEXT, metadata TEXT NOT NULL DEFAULT '{}');
       CREATE TABLE thread_work(thread_id TEXT, status TEXT);
       CREATE TABLE thread_execution(thread_id TEXT, ended_at INTEGER);`);
-    db.prepare("INSERT INTO thread VALUES(?,?,?)").run("worker", records[0].path, "idle");
+    db.prepare("INSERT INTO thread(id,cwd,state) VALUES(?,?,?)").run("worker", records[0].path, "idle");
     db.prepare("INSERT INTO thread_work VALUES(?,?)").run("worker", "queued");
     const previousLedger = process.env.PI_ORCHESTRATOR_LEDGER;
     process.env.PI_ORCHESTRATOR_LEDGER = path.join(f.root, "ledger.sqlite3");
@@ -2129,14 +2129,14 @@ test("classifies active systemd workspace references", () => {
   assert.deepEqual(unavailable, { units: [], available: false });
 });
 
-test("a released checkout stays until its owner's pending or running thread settles", () => {
+test("a released checkout stays until its owner's input, execution, wait and cancellation custody settles", () => {
   const f = fixture();
   try {
     const created = JSON.parse(run(["create", "--root", f.workspaces, "--name", "resubmitted",
       "--repo", f.remote, "--min-free-gib", "0", "--json"], f.env));
     const threadDatabase = path.join(f.root, "threads.sqlite3");
     const db = new DatabaseSync(threadDatabase);
-    db.exec(`CREATE TABLE thread(id TEXT PRIMARY KEY, cwd TEXT NOT NULL, state TEXT NOT NULL);
+    db.exec(`CREATE TABLE thread(id TEXT PRIMARY KEY, cwd TEXT NOT NULL, state TEXT NOT NULL, metadata TEXT NOT NULL DEFAULT '{}');
       CREATE TABLE thread_work(thread_id TEXT NOT NULL, status TEXT NOT NULL);
       CREATE TABLE thread_execution(thread_id TEXT NOT NULL, ended_at INTEGER);`);
     const insert = db.prepare("INSERT INTO thread(id,cwd,state) VALUES(?,?,?)");
@@ -2159,6 +2159,29 @@ test("a released checkout stays until its owner's pending or running thread sett
     db.prepare("INSERT INTO thread_execution(thread_id,ended_at) VALUES(?,NULL)").run("resubmitted-worker");
     assert.equal(JSON.parse(run(["release", "--id", created.id, "--json"], env)).inspection.classification, "referenced");
     db.prepare("UPDATE thread_execution SET ended_at=1").run();
+    const setMetadata = db.prepare("UPDATE thread SET metadata=? WHERE id='resubmitted-worker'");
+    const cache = path.join(created.path, "node_modules", "needed");
+    mkdirSync(path.dirname(cache));
+    writeFileSync(cache, "unfinished continuation needs this cache\n");
+    for (const agentWait of [
+      { kind: "agents", threadIds: ["peer"], since: 1 },
+      { kind: "message", fromThreadId: "peer", since: 1 },
+      { kind: "job", jobId: "accepted-job", since: 1 },
+      { kind: "deployment", publicationId: "accepted-publication", since: 1 },
+    ]) {
+      setMetadata.run(JSON.stringify({ agentWait }));
+      assert.equal(JSON.parse(run(["release", "--id", created.id, "--preserve-runtime", "--json"], env)).inspection.classification, "referenced");
+      assert.equal(existsSync(created.path), true);
+      assert.equal(JSON.parse(run(["reconcile", "--path", created.path, "--execute", "--preserve-runtime", "--json"], env))[0].inspection.classification, "referenced");
+      assert.equal(existsSync(created.path), true);
+      assert.equal(readFileSync(cache, "utf8"), "unfinished continuation needs this cache\n");
+    }
+    for (const cancellationRequest of ["close", "cancel"]) {
+      setMetadata.run(JSON.stringify({ cancellationRequest }));
+      assert.equal(JSON.parse(run(["release", "--id", created.id, "--preserve-runtime", "--json"], env)).inspection.classification, "referenced");
+      assert.equal(existsSync(cache), true);
+    }
+    setMetadata.run("{}");
     writeFileSync(path.join(f.root, "invalid-threads.sqlite3"), "not sqlite");
     assert.throws(() => run(["release", "--id", created.id, "--json"], {
       ...env, PI_THREAD_DATABASE: path.join(f.root, "invalid-threads.sqlite3"),

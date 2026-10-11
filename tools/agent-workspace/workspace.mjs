@@ -870,6 +870,8 @@ function threadSnapshot(paths = ownerThreadDatabases()) {
     const database = new DatabaseSync(databasePath, { readOnly: true });
     try {
       references.push(...database.prepare(`SELECT t.id, t.cwd FROM thread t WHERE t.state='running'
+        OR json_extract(t.metadata,'$.agentWait') IS NOT NULL
+        OR json_extract(t.metadata,'$.cancellationRequest') IS NOT NULL
         OR EXISTS(SELECT 1 FROM thread_work w WHERE w.thread_id=t.id AND w.status!='done')
         OR EXISTS(SELECT 1 FROM thread_execution e WHERE e.thread_id=t.id AND e.ended_at IS NULL)`)
         .all().map((row) => ({ id: row.id, cwd: row.cwd, database: databasePath })));
@@ -1159,7 +1161,7 @@ function inspectRecord(record, options = {}) {
   }
   const threads = (options.safety?.threads ?? []).filter((thread) => within(record.path, thread.cwd));
   if (threads.length > 0) {
-    return { classification: "referenced", reason: `${threads.length} pending or running thread(s) use this checkout: ${threads.map((thread) => thread.id).join(", ")}`,
+    return { classification: "referenced", reason: `${threads.length} thread(s) with unfinished custody use this checkout: ${threads.map((thread) => thread.id).join(", ")}`,
       threads, processes: [], containers: [], systemdUnits: [] };
   }
   const processes = processReferences(record.path, options.safety?.processes);
