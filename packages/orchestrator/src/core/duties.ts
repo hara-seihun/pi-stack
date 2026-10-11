@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { chownSync, closeSync, existsSync, fchownSync, fchmodSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute } from "node:path";
 import type { Result, Thread } from "../threads/contracts.js";
 import type { ThreadService } from "../threads/service.js";
@@ -18,18 +18,26 @@ export interface MarkdownDutyReceipt {
   path: string; receipt: string; wakeCount: number; watchCount: number; pendingOccurrenceIds: string[];
 }
 export interface MarkdownDutyAdoption {
-  service: ThreadService; watch?: WatchList; path: string;
+  service: ThreadService; watch?: WatchList; path: string; uid: number; gid: number;
 }
 const invalid = (message: string): Result<never> => ({ ok: false, error: { code: "invalid_request", message } });
 const digest = (payload: string): string => createHash("sha256").update(payload).digest("hex");
 
-function durableWrite(path: string, body: string): void {
+function durableWrite(path: string, body: string, owner: { uid: number; gid: number }): void {
   const directory = dirname(path);
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const missing: string[] = [];
+  for (let parent = directory; !existsSync(parent); parent = dirname(parent)) missing.push(parent);
+  for (const parent of missing.reverse()) {
+    mkdirSync(parent, { mode: 0o700 }); chownSync(parent, owner.uid, owner.gid);
+  }
+  const existing = existsSync(path) ? lstatSync(path) : null;
+  if (existing && !existing.isFile()) throw new Error("Duty Markdown must be an existing regular file or an explicit new output");
   const temporary = `${path}.${randomUUID()}.tmp`;
   let fd: number | undefined;
   try {
     fd = openSync(temporary, "wx", 0o600);
+    fchownSync(fd, existing?.uid ?? owner.uid, existing?.gid ?? owner.gid);
+    fchmodSync(fd, existing ? existing.mode & 0o777 : 0o600);
     writeFileSync(fd, body, "utf8"); fsyncSync(fd); closeSync(fd); fd = undefined;
     renameSync(temporary, path);
     const dir = openSync(directory, "r");
@@ -58,7 +66,7 @@ function snapshot(input: MarkdownDutyAdoption): DutySnapshot {
 
 /** The owning scope supplies the path and unlocked owners. Adoption never dispatches, ticks or releases a stop. */
 export function adoptMarkdownDuties(input: MarkdownDutyAdoption): Result<MarkdownDutyReceipt> {
-  if (!isAbsolute(input.path)) return invalid("Markdown duty adoption requires an explicit absolute owning path");
+  if (!isAbsolute(input.path) || !Number.isSafeInteger(input.uid) || input.uid < 0 || !Number.isSafeInteger(input.gid) || input.gid < 0) return invalid("Markdown duty adoption requires an explicit absolute owning path and UID/GID");
   try {
     const existing = existsSync(input.path) ? readFileSync(input.path, "utf8") : "";
     let adopted: DutySnapshot, receipt: string;
@@ -83,7 +91,7 @@ export function adoptMarkdownDuties(input: MarkdownDutyAdoption): Result<Markdow
         "The custody snapshot below is source data, not permission to resume work. Held or archived owners remain stopped. An unknown owner state is unresolved, not actionable. Accepted pending occurrences retain their exact IDs and receipts; do not regenerate or replay them.", "",
         START, "```json", JSON.stringify({ receipt, snapshot: adopted }), "```", END, "",
       ].join("\n");
-      durableWrite(input.path, notes);
+      durableWrite(input.path, notes, input);
     }
     const currentWakes = input.service.exportWakeDuties();
     for (const wake of adopted.wakes) {

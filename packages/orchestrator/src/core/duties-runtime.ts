@@ -94,7 +94,7 @@ export class CoreDuties {
             onError: () => {},
           });
         }
-        const adopted = adoptMarkdownDuties({ service: owner.threads, ...(watch ? { watch } : {}), path });
+        const adopted = adoptMarkdownDuties({ service: owner.threads, ...(watch ? { watch } : {}), path, uid: scope.custody.uid, gid: scope.custody.gid });
         if (!adopted.ok) {
           await watch?.close(); ownership?.close(); await this.close();
           return unavailable(`Duty Markdown custody ${scope.id}: ${adopted.error.message}`);

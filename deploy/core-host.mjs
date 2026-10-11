@@ -61,6 +61,21 @@ export function gatewayBinding(config, binding, uid, personOnly) {
     callbackSocket: scope.callbackGateway.kind === 'remote-callback' ? `/run/pi-stack/gateways/remote-${scope.id}/callback.sock` : null,
     url: `http://${config.host === '::1' ? '[::1]' : config.host}:${config.port}` } };
 }
+export function preflightResource(entry, resources, outputPaths) {
+  let path = entry.path, output = false;
+  try { statSync(path); }
+  catch (cause) {
+    if (cause.code !== 'ENOENT' || entry.kind !== 'file' || !outputPaths.includes(path)) throw cause;
+    output = true; path = dirname(path);
+    while (true) {
+      try { statSync(path); break; }
+      catch (error) { if (error.code !== 'ENOENT' || dirname(path) === path) throw error; path = dirname(path); }
+    }
+  }
+  const actual = statSync(path, { bigint: true }), registered = statSync(resources.directory(path), { bigint: true });
+  if (actual.dev !== registered.dev || actual.ino !== registered.ino || (output || entry.kind === 'directory' ? !actual.isDirectory() : !actual.isFile())) return failure('custody-resource-invalid', 'Declared resource or registered output ancestor differs from its owning view');
+  return { ok: true, value: { path: entry.path, state: output ? 'declared-output' : 'existing', observedAncestor: path } };
+}
 export async function coreHost(operation, artifact, configPath, bindingPath, requestId) {
   try {
     if (!['check', 'preflight', 'proof', 'install', 'bind-person', 'bind-gateway', 'provision'].includes(operation) || !isAbsolute(artifact) || !isAbsolute(configPath)) return failure('invalid-operation', 'check|preflight|proof|install|bind-person|bind-gateway requires absolute artifact and configuration paths');
@@ -117,10 +132,10 @@ export async function coreHost(operation, artifact, configPath, bindingPath, req
             if (key === 'sessionsDir' ? !actual.isDirectory() : !actual.isFile()) return failure('custody-storage-invalid', `Existing ${scope.id}/${key} has the wrong storage kind`);
             storage.push({ key, path, dev: String(actual.dev), ino: String(actual.ino) });
           }
+          const outputs = config.duties.kind === 'configured' ? config.duties.entries.filter(entry => entry.scopeId === scope.id).map(entry => entry.path) : [];
           for (const entry of scope.resources) {
-            const actual = statSync(entry.path, { bigint: true });
-            const registered = statSync(resources.directory(entry.path), { bigint: true });
-            if (actual.dev !== registered.dev || actual.ino !== registered.ino || (entry.kind === 'file' ? !actual.isFile() : !actual.isDirectory())) return failure('custody-resource-invalid', `Registered ${scope.id} resource is unavailable in the shared core view`);
+            const checked = preflightResource(entry, resources, outputs);
+            if (!checked.ok) return checked;
           }
           scopes.push({ scopeId: scope.id, availability: scope.availability, storage });
         } finally { resources.close(); }

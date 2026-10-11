@@ -43,7 +43,7 @@ Only Kenaznia can create a future duty reminder. Worker wake rows remain inert s
 [`core/duties.ts`](../src/core/duties.ts) exposes:
 
 ```ts
-adoptMarkdownDuties({ service, watch?, path: absoluteOwningMarkdownPath })
+adoptMarkdownDuties({ service, watch?, path: absoluteOwningMarkdownPath, uid: owningUid, gid: owningGid })
   // Result<{path, receipt, wakeCount, watchCount, pendingOccurrenceIds}>
 ```
 

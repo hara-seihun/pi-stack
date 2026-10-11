@@ -30,11 +30,11 @@ it("writes exact held duty custody before retirement and resumes a partially ret
       if (++calls === 2) return { ok: false, error: { code: "unavailable", message: "Simulated interrupted retirement" } };
       return original(id, receipt);
     });
-    const failed = adoptMarkdownDuties({ service, path });
+    const failed = adoptMarkdownDuties({ service, path, uid: process.getuid!(), gid: process.getgid!() });
     expect(failed.ok).toBe(false);
     expect(service.exportWakeDuties()).toHaveLength(1);
     const snapshot = readFileSync(path, "utf8");
-    const completed = adoptMarkdownDuties({ service, path });
+    const completed = adoptMarkdownDuties({ service, path, uid: process.getuid!(), gid: process.getgid!() });
     if (!completed.ok) throw new Error(completed.error.message);
     expect(completed.value.wakeCount).toBe(2);
     expect([...completed.value.pendingOccurrenceIds].sort()).toEqual(["occurrence-1", "occurrence-2"]);
@@ -56,7 +56,7 @@ describe("watch Markdown adoption", () => {
       db.prepare("INSERT INTO watch_item(id,body) VALUES(?,?)").run("watch-3", JSON.stringify({ id: "watch-3", what: "Check exchange", why: "Needed", nextDueAt: 3, addedBy: "unknown", createdAt: 1, updatedAt: 1 }));
       db.prepare("INSERT INTO watch_wake(id,input) VALUES(?,?)").run("check-3", JSON.stringify({ id: "check-3", requestId: "watch-wake:check-3", cwd: root }));
       const path = join(root, "duties.md"); writeFileSync(path, "# Person's notes\n\nKeep this paragraph.\n");
-      const adopted = adoptMarkdownDuties({ service, watch, path });
+      const adopted = adoptMarkdownDuties({ service, watch, path, uid: process.getuid!(), gid: process.getgid!() });
       if (!adopted.ok) throw new Error(adopted.error.message);
       const body = readFileSync(path, "utf8");
       expect(body).toContain("Keep this paragraph.");
@@ -64,7 +64,7 @@ describe("watch Markdown adoption", () => {
       expect(adopted.value.pendingOccurrenceIds).toEqual(["check-3"]);
       expect(watch.exportDuties().pendingOccurrences[0]!.id).toBe("check-3");
       expect(spawn).not.toHaveBeenCalled();
-      expect(adoptMarkdownDuties({ service, watch, path })).toEqual(adopted);
+      expect(adoptMarkdownDuties({ service, watch, path, uid: process.getuid!(), gid: process.getgid!() })).toEqual(adopted);
       expect(readFileSync(path, "utf8")).toBe(body);
     } finally { db.close(); await watch.close(); await service.close(); rmSync(root, { recursive: true, force: true }); }
   });
