@@ -89,7 +89,8 @@ async function open(options: PiSessionOptions & { socketPath: string; priority?:
   if (dirname(socketPath) !== join(dirname(controlPath), "..", "thread-sockets") || !basename(socketPath).startsWith(`${generation}.`)) throw new Error("Invalid thread socket");
   const env = { ...options.env };
   const spoolPath = `${socketPath}.events`;
-  const claimed = writers.acquireSessionWriter({ directory: env.PI_SESSION_WRITER_DIRECTORY, scope: env.PI_SESSION_WRITER_SCOPE, identity: `thread:${options.threadId}` });
+  if (!env.PI_SESSION_WRITER_SCOPE?.trim()) throw new Error("Native thread requires its registered SDK writer scope");
+  const claimed = writers.acquireSessionWriter({ directory: env.PI_SESSION_WRITER_DIRECTORY, scope: "pi-native-thread-owner-v1", identity: `thread:${options.threadId}` });
   if (!claimed.ok) throw claimed.error;
   const lease = claimed.value;
   let output: RuntimeOutput;
