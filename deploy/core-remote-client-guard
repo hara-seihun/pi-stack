@@ -24,11 +24,12 @@ def admit(path):
     plan = json.loads(protected(path, 0).read_bytes())
     if plan.get('version') != 1 or plan.get('protocol') != 'pi-core-thin-client-admission-v1' or plan.get('state') != 'selected':
         raise ValueError('explicit selected thin-client admission required')
-    release = plan['releaseCommit']
-    if len(release) != 40 or any(c not in '0123456789abcdef' for c in release):
-        raise ValueError('exact immutable release required')
-    remote = Path('/srv/pi/.pi-stack-releases/remote') / release
-    if Path('/srv/pi/pi-remote').resolve() != remote or (remote / '.pi-stack-commit').read_text().strip() != release:
+    release, remote_release = plan['releaseCommit'], plan['remoteReleaseCommit']
+    for commit in (release, remote_release):
+        if not isinstance(commit, str) or len(commit) != 40 or any(c not in '0123456789abcdef' for c in commit):
+            raise ValueError('exact immutable core and client releases required')
+    remote = Path('/srv/pi/.pi-stack-releases/remote') / remote_release
+    if Path('/srv/pi/pi-remote').resolve() != remote or (remote / '.pi-stack-commit').read_text().strip() != remote_release:
         raise ValueError('selected Remote differs from admitted thin client')
     source_owner = plan['sourceOwnerUid']
     for name in ('main.ts', 'server.ts', 'core-client.ts'):
@@ -49,7 +50,7 @@ def admit(path):
         health = json.load(response)
     if health.get('ok') is not True or health.get('service') != 'pi-stack-core' or health.get('releaseCommit') != release or health.get('scopeCount') != len(config['scopes']):
         raise ValueError('selected core is not healthy')
-    return {'protocol': plan['protocol'], 'scopeId': scope['id'], 'releaseCommit': release, 'nativeOwnerPreserved': True}
+    return {'protocol': plan['protocol'], 'scopeId': scope['id'], 'releaseCommit': release, 'remoteReleaseCommit': remote_release, 'nativeOwnerPreserved': True}
 
 
 if __name__ == '__main__':

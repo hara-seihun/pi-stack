@@ -84,7 +84,7 @@ export class InlineImages {
         const rejected = this.db.query("SELECT error FROM core_image_outbox WHERE state='rejected' LIMIT 1").get() as { error: string } | null;
         const message = rejected?.error ?? (synced.value.errors.length ? synced.value.errors.join("; ") : null);
         this.feedback(message);
-        return message ? failure("rejected", message) : { ok: true, value: undefined };
+        return rejected ? failure("rejected", rejected.error) : { ok: true, value: undefined };
       } catch (cause) { return failure("storage", `Core image outbox reconciliation failed: ${String(cause)}`); }
     })().finally(() => { this.pending = null; });
     return this.pending;
