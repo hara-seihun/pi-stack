@@ -42,8 +42,10 @@ def main():
             print(json.dumps(os.listdir(target)), flush=True)
         return
     value = info(target)
-    if value is None or not stat.S_ISSOCK(value['mode']):
-        raise ValueError('Native Unix socket is unavailable')
+    if value is None:
+        raise FileNotFoundError(errno.ENOENT, 'Native Unix socket is absent', target)
+    if not stat.S_ISSOCK(value['mode']):
+        raise OSError(errno.ENOTSOCK, 'Native resource is not a Unix socket', target)
     peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     peer.connect(target)
     os.write(1, b'{"connected":true}\n')
