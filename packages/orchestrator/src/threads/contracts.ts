@@ -197,6 +197,8 @@ export interface ThreadSettlement {
   outcome: WorkOutcome;
   /** Native turn settled, but its assignment still owns waits, dependencies or questions. */
   assignmentPending?: boolean;
+  /** Silent notification consumption, not an assignment result. */
+  notificationOnly?: true;
   time: number;
   finalMessage: Record<string, unknown> | null;
   error?: string;

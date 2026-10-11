@@ -64,14 +64,14 @@ test("manager reply pull follows only explicit canonical environment and its cur
   db.close();
 });
 
-test("core routes notices without Remote and retains exact outbox identity across uncertain acknowledgement", async () => {
+test("core skips silent notification settlements and retains real notice identity across uncertain acknowledgement", async () => {
   const db = openSqlite(":memory:");
   const thread = { id: "origin", title: "Task title" } as Thread;
   const attention = { seq: 3, threadId: thread.id, summary: "Act now", time: 3000 };
   let listener: (() => void) | null = null;
   const api = {
     list: async () => ({ ok: true, value: { threads: [thread] } }),
-    settlements: async (after: number) => ({ ok: true, value: { cursor: after, items: [] } }),
+    settlements: async (after: number) => ({ ok: true, value: { cursor: 9, items: after < 9 ? [{ seq: 9, threadId: thread.id, executionId: "notification-execution", workId: "notification-work", outcome: "complete", notificationOnly: true, time: 3000, finalMessage: { role: "assistant", content: [{ type: "text", text: "" }] } }] : [] } }),
     questionEvents: async (after: number) => ({ ok: true, value: { cursor: after, items: [] } }),
     attentionEvents: async (after: number) => ({ ok: true, value: { cursor: 3, items: after < 3 ? [attention] : [] } }),
   } as unknown as ThreadApi;
@@ -90,6 +90,7 @@ test("core routes notices without Remote and retains exact outbox identity acros
   expect(inputs).toHaveLength(1);
   expect(inputs[0]).toMatchObject({ requestId: "manager-notice:person:attention:3", threadId: "manager", senderId: thread.id });
   expect(db.prepare("SELECT cursor FROM core_manager_notice_cursor WHERE kind='attention'").get()).toMatchObject({ cursor: 3 });
+  expect(db.prepare("SELECT cursor FROM core_manager_notice_cursor WHERE kind='settlements'").get()).toMatchObject({ cursor: 9 });
   expect(db.prepare("SELECT count(*) AS count FROM core_manager_notice_outbox").get()).toMatchObject({ count: 1 });
   await first.close();
   acknowledged = true;

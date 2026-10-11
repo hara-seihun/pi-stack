@@ -42,10 +42,12 @@ including after their bounded retry budget settles an assignment as failed: losi
 native startup is not proof that external resources have been released. Automatic
 archive sweeps preserve that owner across restarts. Successful startup clears the
 failure; explicit Stop/close still takes effect and never resumes failed work.
-A native turn without nonempty final assistant text or a retained dependency/question
+An assignment turn without nonempty final assistant text or a retained dependency/question
 requests `state your final result in one short message` once in the same native
-conversation before failing. The original work, execution, settings and capacity custody
-remain owned; the original input and completed tools are not replayed. An accepted
+conversation before failing. Recovery owns its exact original work IDs through
+settlement. New steering input is accepted durably but dispatched in the next
+execution, so it cannot overwrite or inherit the recovered result.
+The original work, execution, settings and capacity custody remain owned; the original input and completed tools are not replayed. An accepted
 background operation retains continuation ownership until its terminal transition lands.
 A second empty final returns a failed settlement with `Native turn ended without a final
 result or a durable dependency wait`. A durable native recovery receipt fences the one
@@ -140,6 +142,12 @@ result notifications retain their execution identity; only a matching current
 assignment result clears an agent wait. Cross-owner delivery obtains bounded
 owner evidence, and an unavailable owner leaves the result subscription pending with a typed
 error. Historical notifications are still delivered, without releasing the wait.
+A completed, silent execution containing only notification inputs records
+`notificationOnly:true`: its turn and input receipts settle, but it is not an
+assignment result. It neither requests a final answer nor replies to old assignment
+senders, discharges result subscribers, satisfies an assignment await, or produces
+a manager completion notice. Outstanding waits remain owned by their registration.
+Mixed executions containing explicit input still require a result or durable wait.
 Bounded
 `thread_await` still reads historical results according to its explicit cursors.
 

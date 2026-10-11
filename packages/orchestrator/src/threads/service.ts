@@ -343,6 +343,7 @@ export class ThreadService implements ThreadApi {
     const executionColumns = this.sql("PRAGMA table_info(thread_execution)").all() as { name: string }[];
     if (!executionColumns.some(column => column.name === "retry_settings")) this.db.exec("ALTER TABLE thread_execution ADD COLUMN retry_settings TEXT");
     if (!executionColumns.some(column => column.name === "assignment_pending")) this.db.exec("ALTER TABLE thread_execution ADD COLUMN assignment_pending INTEGER NOT NULL DEFAULT 0");
+    if (!executionColumns.some(column => column.name === "notification_only")) this.db.exec("ALTER TABLE thread_execution ADD COLUMN notification_only INTEGER NOT NULL DEFAULT 0 CHECK(notification_only IN (0,1))");
     if (executionColumns.some(column => column.name === "state")) this.db.exec("ALTER TABLE thread_execution DROP COLUMN state");
     if (!(this.sql("PRAGMA table_info(thread_work)").all() as { name: string }[]).some(column => column.name === "input_origin")) {
       this.transaction(() => this.db.exec(`ALTER TABLE thread_work ADD COLUMN input_origin TEXT CHECK(input_origin IN ('human','machine'));
@@ -452,11 +453,11 @@ export class ThreadService implements ThreadApi {
   settlements(after = 0, limit = 100): Result<ThreadSettlements> {
     if (!Number.isSafeInteger(after) || after < 0 || !Number.isInteger(limit) || limit < 1 || limit > 1000) return bad("invalid_request", "Invalid settlement cursor or limit");
     const rows = this.sql("SELECT * FROM thread_execution WHERE settlement_seq>? ORDER BY settlement_seq LIMIT ?").all(after, limit) as Json[];
-    return good({ items: rows.map(row => ({ seq: row.settlement_seq, executionId: row.id, threadId: row.thread_id, workId: row.work_id, outcome: row.outcome, ...(row.assignment_pending ? { assignmentPending: true } : {}), time: row.ended_at, finalMessage: JSON.parse(row.final_message ?? "null"), ...(row.error ? { error: row.error } : {}) })), cursor: rows.at(-1)?.settlement_seq ?? after });
+    return good({ items: rows.map(row => ({ seq: row.settlement_seq, executionId: row.id, threadId: row.thread_id, workId: row.work_id, outcome: row.outcome, ...(row.assignment_pending ? { assignmentPending: true } : {}), ...(row.notification_only ? { notificationOnly: true } : {}), time: row.ended_at, finalMessage: JSON.parse(row.final_message ?? "null"), ...(row.error ? { error: row.error } : {}) })), cursor: rows.at(-1)?.settlement_seq ?? after });
   }
   settlementFor(threadId: string, workId: string): Result<ThreadSettlement | null> {
     const row = this.sql("SELECT * FROM thread_execution WHERE thread_id=? AND work_id=? AND settlement_seq IS NOT NULL ORDER BY settlement_seq DESC LIMIT 1").get(threadId, workId) as Json | undefined;
-    return good(row ? { seq: row.settlement_seq, executionId: row.id, threadId: row.thread_id, workId: row.work_id, outcome: row.outcome, time: row.ended_at, finalMessage: JSON.parse(row.final_message ?? "null"), ...(row.error ? { error: row.error } : {}) } : null);
+    return good(row ? { seq: row.settlement_seq, executionId: row.id, threadId: row.thread_id, workId: row.work_id, outcome: row.outcome, ...(row.assignment_pending ? { assignmentPending: true } : {}), ...(row.notification_only ? { notificationOnly: true } : {}), time: row.ended_at, finalMessage: JSON.parse(row.final_message ?? "null"), ...(row.error ? { error: row.error } : {}) } : null);
   }
   async await(input: AwaitThreads, signal?: AbortSignal): Promise<Result<ThreadAwaitResult>> {
     const valid = validateThreadAwait(input); if (!valid.ok) return valid;
@@ -477,8 +478,8 @@ export class ThreadService implements ThreadApi {
     });
     const completed = (): ThreadSettlement | null => {
       const rows = this.sql(`SELECT e.* FROM json_each(?) target JOIN thread_execution e ON e.thread_id=target.key
-        JOIN thread t ON t.id=e.thread_id WHERE e.settlement_seq>target.value AND e.assignment_pending=0
-        AND (?=0 OR e.settlement_seq=(SELECT MAX(latest.settlement_seq) FROM thread_execution latest WHERE latest.thread_id=e.thread_id))
+        JOIN thread t ON t.id=e.thread_id WHERE e.settlement_seq>target.value AND e.assignment_pending=0 AND e.notification_only=0
+        AND (?=0 OR e.settlement_seq=(SELECT MAX(latest.settlement_seq) FROM thread_execution latest WHERE latest.thread_id=e.thread_id AND latest.notification_only=0))
         ORDER BY e.settlement_seq LIMIT ?`).all(query, input.currentAssignment ? 1 : 0, input.currentAssignment ? input.threadIds.length : 1) as Json[];
       const row = rows.find(candidate => !input.currentAssignment || this.currentAssignmentResult(candidate));
       return row ? { seq: row.settlement_seq, executionId: row.id, threadId: row.thread_id, workId: row.work_id,
@@ -512,8 +513,8 @@ export class ThreadService implements ThreadApi {
   }
   private currentAssignmentResult(row: Json): boolean {
     const thread = this.get(row.thread_id);
-    if (!thread || row.assignment_pending) return false;
-    const latest = this.sql("SELECT MAX(settlement_seq) seq FROM thread_execution WHERE thread_id=?").get(thread.id) as { seq: number | null };
+    if (!thread || row.assignment_pending || row.notification_only) return false;
+    const latest = this.sql("SELECT MAX(settlement_seq) seq FROM thread_execution WHERE thread_id=? AND notification_only=0").get(thread.id) as { seq: number | null };
     if (latest.seq !== row.settlement_seq) return false;
     if (row.outcome === "cancelled" && (thread.metadata?.cancellationRequest || thread.metadata?.archived)) return true;
     if (thread.state !== "idle" || thread.metadata?.agentWait || thread.dependencies?.length) return false;
@@ -522,9 +523,9 @@ export class ThreadService implements ThreadApi {
       UNION ALL SELECT 1 FROM thread_question WHERE thread_id=? AND accepted_at IS NULL LIMIT 1`).get(thread.id, thread.id, thread.id);
   }
   live(id: string): Json | undefined { return this.projections.get(id)?.live; }
-  latestSettlement(id: string): import("./contracts.js").ThreadSettlement | null {
-    const row = this.sql("SELECT * FROM thread_execution WHERE thread_id=? AND ended_at IS NOT NULL ORDER BY ended_at DESC,settlement_seq DESC,id DESC LIMIT 1").get(id) as Json | undefined;
-    return row ? { seq: row.settlement_seq ?? 0, executionId: row.id, threadId: row.thread_id, workId: row.work_id, outcome: row.outcome, ...(row.assignment_pending ? { assignmentPending: true } : {}), time: row.ended_at, finalMessage: JSON.parse(row.final_message ?? "null"), ...(row.error ? { error: row.error } : {}) } : null;
+  latestSettlement(id: string, assignmentOnly = false): import("./contracts.js").ThreadSettlement | null {
+    const row = this.sql("SELECT * FROM thread_execution WHERE thread_id=? AND ended_at IS NOT NULL AND (?=0 OR notification_only=0) ORDER BY ended_at DESC,settlement_seq DESC,id DESC LIMIT 1").get(id, assignmentOnly ? 1 : 0) as Json | undefined;
+    return row ? { seq: row.settlement_seq ?? 0, executionId: row.id, threadId: row.thread_id, workId: row.work_id, outcome: row.outcome, ...(row.assignment_pending ? { assignmentPending: true } : {}), ...(row.notification_only ? { notificationOnly: true } : {}), time: row.ended_at, finalMessage: JSON.parse(row.final_message ?? "null"), ...(row.error ? { error: row.error } : {}) } : null;
   }
   private inputState(row: Json): import("./contracts.js").ThreadInputState {
     return { id: row.id, threadId: row.thread_id, senderId: row.sender_id, delivery: row.delivery, source: row.source, state: row.status,
@@ -2298,7 +2299,7 @@ export class ThreadService implements ThreadApi {
       else delete cursors[input.dependentId];
       this.sql("UPDATE thread SET metadata=json_set(metadata,'$.peerDependents',json(?),'$.peerSubscriberAfter',json(?)) WHERE id=?").run(JSON.stringify(dependents), JSON.stringify(cursors), current.id);
       if (input.active && !current.held && current.state === "idle" && !current.pendingMessages) {
-        const settlement = this.latestSettlement(current.id);
+        const settlement = this.latestSettlement(current.id, true);
         const result = settlement && this.sql("SELECT * FROM thread_execution WHERE id=?").get(settlement.executionId) as Json | undefined;
         if (settlement && result && this.currentAssignmentResult(result)) {
           this.queueResult(current, input.dependentId, settlement.executionId, settlement.workId, settlement.outcome, settlement.finalMessage, settlement.error);
@@ -3162,7 +3163,9 @@ export class ThreadService implements ThreadApi {
       if (this.get(id)?.metadata?.acknowledgementWait) return;
     }
     const recovery = this.get(id)?.metadata?.finalResultRecovery as Json | undefined;
-    if (runtime && execution && recovery?.executionId === execution.id && !runtime.busy) {
+    if (runtime && execution && recovery?.executionId === execution.id) {
+      // Recovery owns a final answer for its exact work IDs; later inputs belong to the next execution.
+      if (runtime.busy) return;
       const state = await this.rpc(runtime, { type: "get_state" });
       this.adoptReference(id, state); runtime.busy = this.busy(state);
       const works = this.sql("SELECT id FROM thread_work WHERE execution_id=? AND status!='done'").all(execution.id) as { id: string }[];
@@ -3171,6 +3174,7 @@ export class ThreadService implements ThreadApi {
       else if (!runtime.busy && state.finalResultRecovery?.commandId === recovery?.commandId)
         await this.finish(id, runtime, "failed", null, "Final result recovery was accepted but ended without a native settlement; original work will not be replayed");
       execution = this.execution(id);
+      if (execution?.id === recovery.executionId) return;
     }
     const batch = this.sql("SELECT * FROM thread_work WHERE thread_id=? AND status='queued' ORDER BY ordinal").all(id) as Json[];
     const work = batch[0];
@@ -3386,8 +3390,10 @@ export class ThreadService implements ThreadApi {
     const thread = this.get(id)!;
     const assignmentPending = outcome !== "cancelled" && !!(thread.metadata?.agentWait || thread.dependencies?.length
       || this.sql("SELECT 1 FROM thread_question WHERE thread_id=? AND accepted_at IS NULL LIMIT 1").get(id));
-    const incompleteResult = outcome === "complete" && !assignmentPending
-      && !(finalMessage?.role === "assistant" && finalText(finalMessage)?.trim());
+    const hasFinalResult = !!(finalMessage?.role === "assistant" && finalText(finalMessage)?.trim());
+    const notificationOnly = outcome === "complete" && !hasFinalResult
+      && !this.sql("SELECT 1 FROM thread_work WHERE execution_id=? AND source!='notification' LIMIT 1").get(execution.id);
+    const incompleteResult = outcome === "complete" && !assignmentPending && !notificationOnly && !hasFinalResult;
     if (incompleteResult) {
       if (nativeState?.backgroundOperationCount > 0) return;
       const commandId = `thread-final-result:${execution.id}`;
@@ -3417,23 +3423,23 @@ export class ThreadService implements ThreadApi {
       outcome = "failed";
       error ??= "Native turn ended without a final result or a durable dependency wait";
     }
-    const assignments = assignmentPending || thread.metadata?.manager === true ? [] : this.sql(`SELECT w.id,w.sender_id FROM thread_work w WHERE w.thread_id=? AND w.sender_id IS NOT NULL AND w.sender_id!=? AND w.source='explicit'
+    const assignments = assignmentPending || notificationOnly || thread.metadata?.manager === true ? [] : this.sql(`SELECT w.id,w.sender_id FROM thread_work w WHERE w.thread_id=? AND w.sender_id IS NOT NULL AND w.sender_id!=? AND w.source='explicit'
       AND (w.status='done' OR w.execution_id=?) AND w.landed_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM thread_assignment_reply r WHERE r.work_id=w.id)`).all(id, id, execution.id) as Array<{ id: string; sender_id: string }>;
-    const recipients = assignmentPending ? [] : [...new Set([...assignments.map(work => work.sender_id), ...((thread.metadata?.peerDependents as string[] | undefined) ?? [])])];
+    const recipients = assignmentPending || notificationOnly ? [] : [...new Set([...assignments.map(work => work.sender_id), ...((thread.metadata?.peerDependents as string[] | undefined) ?? [])])];
     this.capacityLedger?.retain(id, execution.id, execution.work_id, "work");
     let workIds: string[] = [];
     this.transaction(() => {
       this.capacityLedger?.requestRelease(id, execution.id);
       if (outcome !== "complete") this.sql("UPDATE thread_work SET status='queued',execution_id=NULL,inserted_at=NULL WHERE execution_id=? AND status='dispatched' AND landed_at IS NULL").run(execution.id);
       workIds = (this.sql("SELECT id FROM thread_work WHERE execution_id=? AND status!='done'").all(execution.id) as { id: string }[]).map(work => work.id);
-      this.sql("UPDATE thread_execution SET outcome=?,final_message=?,error=?,assignment_pending=?,ended_at=?,settlement_seq=(SELECT COALESCE(MAX(settlement_seq),0)+1 FROM thread_execution) WHERE id=? AND ended_at IS NULL").run(outcome, JSON.stringify(finalMessage), error ?? null, assignmentPending ? 1 : 0, Date.now(), execution.id);
+      this.sql("UPDATE thread_execution SET outcome=?,final_message=?,error=?,assignment_pending=?,notification_only=?,ended_at=?,settlement_seq=(SELECT COALESCE(MAX(settlement_seq),0)+1 FROM thread_execution) WHERE id=? AND ended_at IS NULL").run(outcome, JSON.stringify(finalMessage), error ?? null, assignmentPending ? 1 : 0, notificationOnly ? 1 : 0, Date.now(), execution.id);
       this.sql("UPDATE thread_work SET status='done',outcome=?,final_message=?,error=? WHERE execution_id=? AND status!='done'").run(outcome, JSON.stringify(finalMessage), error ?? null, execution.id);
       this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.providerWait','$.admissionWait','$.providerRetry','$.acknowledgementWait','$.incompleteResult') WHERE id=?").run(id);
       if (incompleteResult) this.sql("UPDATE thread SET metadata=json_set(metadata,'$.incompleteResult',json(?)) WHERE id=?").run(JSON.stringify({ executionId: execution.id, error }), id);
       this.sql("UPDATE thread SET state=CASE WHEN held=1 THEN 'idle' WHEN EXISTS(SELECT 1 FROM thread_work w WHERE w.thread_id=thread.id AND w.status!='done') THEN 'running' ELSE 'idle' END,revision=revision+1,updated_at=? WHERE id=?").run(Date.now(), id);
       for (const work of assignments) this.sql("INSERT INTO thread_assignment_reply(work_id,execution_id) VALUES(?,?)").run(work.id, execution.id);
       const delivered = recipients.filter(recipient => this.queueResult(thread, recipient, execution.id, execution.work_id, outcome, finalMessage, error));
-      if (!assignmentPending) this.dischargeSubscribers(id, delivered);
+      if (!assignmentPending && !notificationOnly) this.dischargeSubscribers(id, delivered);
       if (cancellation === "close" || cancellation === "cancel") this.sql("UPDATE thread SET metadata=json_set(metadata,'$.cancellationSettled',json('true')) WHERE id=?").run(id);
     });
     if (runtime) { runtime.executionId = undefined; runtime.busy = false; }
@@ -3447,7 +3453,7 @@ export class ThreadService implements ThreadApi {
     }
     void this.routeNotifications();
     const settled = this.sql("SELECT settlement_seq,ended_at FROM thread_execution WHERE id=?").get(execution.id) as Json;
-    for (const listener of this.listeners) listener({ threadId: id, event: { type: "thread_settled", seq: settled.settlement_seq, executionId: execution.id, workId: execution.work_id, workIds, outcome, ...(assignmentPending ? { assignmentPending: true } : {}), time: settled.ended_at, finalMessage, ...(error ? { error } : {}) } });
+    for (const listener of this.listeners) listener({ threadId: id, event: { type: "thread_settled", seq: settled.settlement_seq, executionId: execution.id, workId: execution.work_id, workIds, outcome, ...(assignmentPending ? { assignmentPending: true } : {}), ...(notificationOnly ? { notificationOnly: true } : {}), time: settled.ended_at, finalMessage, ...(error ? { error } : {}) } });
     if (runtime) await this.park(id, runtime);
   }
   private async park(id: string, runtime: Runtime): Promise<void> {
