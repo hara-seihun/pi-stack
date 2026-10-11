@@ -10,6 +10,8 @@ A stable agent ID survives retries and live handoffs. A capacity execution ID is
 
 The ledger never expires active entries. A dead process, missing heartbeat, unreachable host, lost HTTP response or cancellation error is not a settlement receipt. `inspect()` can recover an acquired lease after response loss. `withdraw()` only cancels unadmitted requests; it refuses active custody and fences requests that arrive after withdrawal. Global saturation and unavailable/configuration errors leave runnable work queued with the explicit capacity reason. The owner replays positive releases after reconnecting; losing a release acknowledgement cannot admit extra work.
 
+Dispatch candidates include only requested/held capacity rows whose logical identity has never been inserted in `thread_execution`. A failed pre-execution startup can record its original released identity once as a failure settlement, never dispatch it again. Release outboxes advance each row independently; one unavailable owner cannot prevent another row's positive release. Thread-scoped reconciliation wakes pending work even when its release returns a typed error.
+
 Thread owners keep capacity custody separate from provider leases. A dependency waiter first settles native work, then releases execution capacity. Provider retry waiting can release a positively idle native attempt without changing its accepted work identity. Non-observing native commands, including manual compaction and bash, require capacity too. Reading unloaded history does not execute an agent.
 
 ## Explicit configuration
@@ -47,7 +49,9 @@ Every host installs the public client manifest `/etc/pi-stack/agent-capacity-cli
 }
 ```
 
-The client selects the actual Unix UID. `PI_AGENT_CAPACITY_CONFIG` explicitly selects a different absolute manifest path. An explicit complete environment tuple (`PI_AGENT_CAPACITY_URL`, `PI_AGENT_CAPACITY_OWNER`, `PI_AGENT_CAPACITY_TOKEN_FILE`) selects a client directly; a partial tuple is an error. These are configuration routes, not failover authorities. Unset, unreadable, invalid, unauthorized or unreachable configuration fails closed. There is no production unmanaged fallback. Mock-only owners explicitly select unmanaged mode; installed Remote and Orchestrator owners use the shared client.
+Standalone clients select the actual Unix UID. Adopted Core scopes call `configuredAgentCapacity(env, { uid: scope.custody.uid })` and select only that declared UID's host-manifest owner, not Core's process identity or ambient owner credentials. Missing UID registration rejects explicitly. Existing leases acquired under another owner stay mismatches until their original owner supplies a matching positive release; scope adoption does not transfer them.
+
+`PI_AGENT_CAPACITY_CONFIG` explicitly selects a different absolute manifest path. An explicit complete environment tuple (`PI_AGENT_CAPACITY_URL`, `PI_AGENT_CAPACITY_OWNER`, `PI_AGENT_CAPACITY_TOKEN_FILE`) selects a client directly; a partial tuple is an error. These are configuration routes, not failover authorities. Unset, unreadable, invalid, unauthorized or unreachable configuration fails closed. There is no production unmanaged fallback. Mock-only owners explicitly select unmanaged mode; installed Remote and Orchestrator owners use the shared client.
 
 ## Initial cutover
 
