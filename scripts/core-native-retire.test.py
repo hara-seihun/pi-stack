@@ -30,6 +30,14 @@ class NativeRetirement(unittest.TestCase):
             self.assertFalse(retirement.acknowledged_self_exit(before, changed, trace))
         self.assertFalse(retirement.acknowledged_self_exit(before, closes, ''))
 
+    def test_launcher_argv_is_not_a_second_native_controller(self):
+        control='/data/thread-runners/abcdef0123456789.sock'
+        args=[b'/usr/local/bin/node',b'/release/dist/threads/runner-host.js',control.encode()]
+        self.assertTrue(retirement.native_owner_command(args,'/usr/local/bin/node',control))
+        for launcher in ('/usr/bin/systemd-run','/usr/bin/bash','/usr/bin/flock'):
+            self.assertFalse(retirement.native_owner_command(args,launcher,control))
+        self.assertFalse(retirement.native_owner_command(args,'/usr/local/bin/node',control+'.other'))
+
     def test_missing_pid_or_trace_is_not_a_positive_exit(self):
         self.assertTrue(retirement.normal_exit('exit_group(0) = ?\n+++ exited with 0 +++\n'))
         for trace in ['', '+++ exited with 0 +++', 'exit_group(0) = ?\n+++ killed by SIGTERM +++', 'exit_group(1) = ?\n+++ exited with 1 +++']:

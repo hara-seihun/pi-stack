@@ -35,6 +35,10 @@ def source_guard(host, adapter):
         raise ValueError('original SDK close must refuse active or background work before any halt')
 
 
+def native_owner_command(args, executable, control):
+    return Path(executable).name == 'node' and control.encode() in args and any(arg.startswith(b'/') and arg.endswith(b'/dist/threads/runner-host.js') for arg in args)
+
+
 def other_owners(pid, uid, control):
     owners = []
     for path in Path('/proc').iterdir():
@@ -42,7 +46,8 @@ def other_owners(pid, uid, control):
             continue
         try:
             args = path.joinpath('cmdline').read_bytes().split(b'\0')
-            if path.stat().st_uid == uid and control.encode() in args and any(arg.startswith(b'/') and arg.endswith(b'/dist/threads/runner-host.js') for arg in args):
+            # systemd-run and shell launchers can carry the same argv without owning a controller.
+            if path.stat().st_uid == uid and native_owner_command(args, str(path.joinpath('exe').resolve()), control):
                 owners.append(int(path.name))
         except OSError:
             continue
