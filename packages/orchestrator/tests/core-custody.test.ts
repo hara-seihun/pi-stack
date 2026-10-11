@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "vitest";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer, type Server } from "node:net";
@@ -55,6 +55,30 @@ test("registered old sockets attach through pinned namespace without replacing s
     expect(statSync(scope.storage.databasePath).ino).toBe(before.ino);
     expect(readFileSync(scope.storage.databasePath, "utf8")).toBe("original bytes");
   } finally { result.value.detach(); await drained; await close(native); await close(control); }
+});
+
+test("exact executable symlink requires its canonical target grant; directory children and retargeting remain fenced", async () => {
+  const scope = fixture();
+  const home = scope.storage.sessionsDir;
+  const executable = join(home, "pi");
+  const target = join(scope.custody.dataDir, "immutable-pi.mjs");
+  const foreign = join(scope.custody.dataDir, "private-file");
+  writeFileSync(target, "executable"); writeFileSync(foreign, "private");
+  symlinkSync(target, executable);
+  scope.resources.push({ path: executable, kind: "file" });
+  const rejected = await createCoreCustodyRuntime(scope);
+  expect(rejected.ok).toBe(false);
+  scope.resources.push({ path: target, kind: "file" });
+  const accepted = await createCoreCustodyRuntime(scope);
+  expect(accepted.ok).toBe(true);
+  if (!accepted.ok) throw new Error(accepted.error.message);
+  try {
+    expect(accepted.value.path(executable)).toBe(executable);
+    const implicit = join(home, "implicit"); symlinkSync(target, implicit);
+    expect(() => accepted.value.path(implicit)).toThrow("exact registered target");
+    unlinkSync(executable); symlinkSync(foreign, executable);
+    expect(() => accepted.value.path(executable)).toThrow("exact registered target");
+  } finally { accepted.value.detach(); }
 });
 
 test("fixed resource bridge streams large native frames without hosting execution", async () => {

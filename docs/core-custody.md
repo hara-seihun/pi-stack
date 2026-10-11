@@ -12,7 +12,7 @@ The shared core must start in a prepared static mount view where every persisted
 
 A new FUSE generation with a different physical database still requires the owning adoption barrier's trusted `generationTransfer` binding namespace identities, registered cipher/mountpoint and exact detached database/WAL hashes. Physical rebinding does not authorize cross-inode transfer, and the two variants cannot be combined. Content similarity alone is not a custody proof.
 
-`runtime.path()` admits configured exact files and descendants of declared directories. New outputs compare the nearest existing ancestor with the registered data namespace. Directory symlinks cannot escape their registered root. Resource registration does not grant conversational permission: unified policy still controls use.
+`runtime.path()` admits configured exact files and descendants of declared directories. New outputs compare the nearest existing ancestor with the registered data namespace. Directory symlinks cannot escape their registered root. An explicitly registered file symlink may cross that root only when its canonical resolved target is also an explicitly registered file, with namespace identity checked for both; changing it to another target is rejected. Resource registration does not grant conversational permission: unified policy still controls use.
 
 ## Native execution
 

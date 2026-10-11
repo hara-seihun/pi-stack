@@ -48,7 +48,12 @@ export function createCoreCustodyFactory(consultationScopeIds: string | readonly
         sameView(existing);
         if (root !== undefined) {
           const realRoot = realpathSync(root), actual = realpathSync(existing);
-          if (!inside(realRoot, actual)) throw new Error("Core resource symlink escapes its registered directory");
+          if (!inside(realRoot, actual)) {
+            if (existing !== logical || !exact.has(logical) || !scope.resources.some(entry => entry.kind === "file" && entry.path === actual))
+              throw new Error("Core resource symlink escapes its registered directory without an exact registered target");
+            sameView(actual);
+            if (!statSync(actual).isFile()) throw new Error("Registered symlink target is not a file");
+          }
         }
         return logical;
       };
