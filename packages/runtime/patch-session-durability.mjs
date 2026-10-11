@@ -356,7 +356,11 @@ async function createOwnedAgentSession(options = {}) {`, "SDK factory writer cle
 
 export function patchSessionCopies(nodeModules) {
   const base = join(nodeModules, "@earendil-works/pi-coding-agent/dist/core");
-  writeFileSync(join(base, "session-writer.mjs"), readFileSync(new URL("./session-writer.mjs", import.meta.url)));
+  for (const name of ["session-writer.mjs", "session-writer.d.mts"]) writeFileSync(join(base, name), readFileSync(new URL(`./${name}`, import.meta.url)));
+  const declarationPath = join(base, "session-manager.d.ts");
+  const declaration = readFileSync(declarationPath, "utf8");
+  const patchedDeclaration = replaceOnce(declaration, "export declare class SessionManager {", "export declare class SessionManager {\n    dispose(): void;", "SDK session writer disposal declaration");
+  if (declaration !== patchedDeclaration) writeFileSync(declarationPath, patchedDeclaration);
   for (const [name, patch] of [["session-manager", patchSessionDurability], ["agent-session", patchAgentSessionWriterDisposal], ["agent-session-runtime", patchSessionRuntimeWriter], ["sdk", patchSessionFactoryWriter]]) {
     const path = join(base, `${name}.js`);
     const source = readFileSync(path, "utf8"), patched = patch(source);

@@ -130,6 +130,10 @@ check_release() {
   runtime_required_pattern 'Claude client identity' "$release/node_modules/@pi-plugins/claude-oauth/dist/index.mjs" "const CLAUDE_CODE_VERSION = \"$claude_version\";"
   node --check "$release/node_modules/@earendil-works/pi-coding-agent/dist/modes/rpc/shared-rpc-mode.js"
   runtime_required_pattern 'durable SDK session rewrite' "$release/node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js" 'replaceSessionFileDurably(this.sessionFile'
+  runtime_required_pattern 'canonical SDK session writer' "$release/node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js" 'PiStack canonical session writer v1'
+  cmp -s "$runtime_source/session-writer.mjs" "$release/node_modules/@earendil-works/pi-coding-agent/dist/core/session-writer.mjs" || { echo 'canonical session writer helper does not match this release' >&2; return 66; }
+  cmp -s "$runtime_source/session-writer.d.mts" "$release/node_modules/@earendil-works/pi-coding-agent/dist/core/session-writer.d.mts" || { echo 'canonical session writer declarations do not match this release' >&2; return 66; }
+  node --check "$release/node_modules/@earendil-works/pi-coding-agent/dist/core/session-writer.mjs"
   for writer in session-manager settings-manager auth-storage; do
     runtime_required_pattern "shared SDK $writer custody" "$release/node_modules/@earendil-works/pi-coding-agent/dist/core/$writer.js" 'PiStack shared filesystem custody'
     node --check "$release/node_modules/@earendil-works/pi-coding-agent/dist/core/$writer.js"
@@ -251,7 +255,7 @@ cd "$root"
 pi_stack_as_root install -d -m 755 "$dependencies_root"
 dependency_hash=$({
   sha256sum deploy/runtime
-  sha256sum package.json package-lock.json packages/runtime/browser-doctor.mjs packages/runtime/browser-probe.mjs packages/runtime/browser-tab-restore-probe.mjs packages/runtime/model-selection-doctor.mjs packages/runtime/patch-browser-qa.mjs packages/runtime/patch-browser-sensitive-policy.mjs packages/runtime/patch-browser-managed-close.mjs packages/runtime/patch-browser-semantic-fill.mjs packages/runtime/patch-browser-batch-timeout.mjs packages/runtime/patch-codex-sse.mjs packages/runtime/patch-codex-service-recovery.mjs packages/runtime/codex-service-recovery.js packages/runtime/patch-compaction-errors.mjs packages/runtime/patch-bash-spill.mjs packages/runtime/patch-session-durability.mjs packages/runtime/patch-shared-custody.mjs packages/orchestrator/src/shared-custody.ts packages/runtime/patch-shared-rpc.mjs
+  sha256sum package.json package-lock.json packages/runtime/browser-doctor.mjs packages/runtime/browser-probe.mjs packages/runtime/browser-tab-restore-probe.mjs packages/runtime/model-selection-doctor.mjs packages/runtime/patch-browser-qa.mjs packages/runtime/patch-browser-sensitive-policy.mjs packages/runtime/patch-browser-managed-close.mjs packages/runtime/patch-browser-semantic-fill.mjs packages/runtime/patch-browser-batch-timeout.mjs packages/runtime/patch-codex-sse.mjs packages/runtime/patch-codex-service-recovery.mjs packages/runtime/codex-service-recovery.js packages/runtime/patch-compaction-errors.mjs packages/runtime/patch-bash-spill.mjs packages/runtime/patch-session-durability.mjs packages/runtime/session-writer.mjs packages/runtime/session-writer.d.mts packages/runtime/patch-shared-custody.mjs packages/orchestrator/src/shared-custody.ts packages/runtime/patch-shared-rpc.mjs
   sha256sum deploy/runtime packages/orchestrator/package.json
   sha256sum packages/runtime/patch-bash-cancellation.mjs packages/runtime/pi-shell-owner.mjs packages/runtime/pi-shell-owner.py packages/runtime/pi-bash-worker.py
   sha256sum packages/runtime/stack-pi.mjs packages/runtime/native-host.mjs packages/runtime/native-recovery.mjs packages/runtime/native-guardian.mjs packages/runtime/managed-agent.mjs packages/runtime/patch-managed-cli.mjs
