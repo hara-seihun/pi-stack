@@ -27,7 +27,7 @@ reconcile_cli_links() {
 }
 check_artifact() {
   test -f "$dest/dist/core/main.js" && test -f "$dest/dist/core/config.js" &&
-    test -f "$dest/host/core-host.mjs" && test -f "$dest/host/core-manager-policy-enroll.mjs" && test -x "$dest/host/core-runtime" && test -f "$dest/dist/cli.js" &&
+    test -f "$dest/host/core-host.mjs" && test -f "$dest/host/core-manager-policy-enroll.mjs" && test -f "$dest/host/core-manager-policy-forward.mjs" && test -x "$dest/host/core-runtime" && test -f "$dest/dist/cli.js" &&
     test -f "$dest/dist/agent-capacity-cli.js" || {
       echo "Shared core artifact is incomplete: $dest" >&2; return 66;
     }
@@ -62,6 +62,8 @@ install -m644 deploy/core-host.mjs deploy/core-broker-handoff.mjs deploy/core_na
 install -m755 deploy/core-runtime deploy/core-custody deploy/core-adopt deploy/core-person-activate deploy/core-plan deploy/core-native-census deploy/core-native-retire deploy/core-drain deploy/core-root-census deploy/core-remote-witness deploy/core-remote-client-guard deploy/core-remote-client-enter deploy/core-meet-drain deploy/core-provider-adopt deploy/core-adopt-batch deploy/core-bindings deploy/core-assemble deploy/core-aux-plan deploy/core-aux-run deploy/core-auxiliary-receipts deploy/core-image-handoff "$stage/release/host/"
 bun build deploy/core-auxiliary.ts --target=bun --outfile="$stage/release/host/core-auxiliary.js"
 bun build deploy/core-manager-policy-enroll.ts --target=bun --outfile="$stage/release/host/core-manager-policy-enroll.mjs"
+bun build deploy/core-manager-policy-forward.ts --target=bun --outfile="$stage/release/host/core-manager-policy-forward.mjs"
+install -m644 deploy/systemd/pi-stack-manager-policy-forward.service deploy/systemd/pi-stack-manager-policy-tunnel.service "$stage/release/host/"
 chmod 755 "$stage/release/dist/cli.js" "$stage/release/dist/agent-capacity-cli.js"
 ln -s "$dependencies" "$stage/release/node_modules"
 printf '%s\n' "$commit" > "$stage/release/.pi-stack-commit"

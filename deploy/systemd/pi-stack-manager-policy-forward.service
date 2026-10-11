@@ -1,0 +1,20 @@
+[Unit]
+Description=Exact canonical manager policy loopback endpoint
+After=pi-remote-router.service
+Wants=pi-remote-router.service
+
+[Service]
+Type=simple
+User=kenan
+Group=kenan
+ExecStart=/usr/local/bin/bun /usr/local/libexec/pi-stack-manager-policy/forward.mjs 18788
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
