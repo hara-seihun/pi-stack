@@ -25,6 +25,8 @@ class Native implements PiSession {
   commandBusy = false;
   accepted = new Set<string>();
   completed = new Set<string>();
+  finalResultRecovery: { commandId: string; workIds: string[] } | null = null;
+  recoveryCalls = 0;
   lastAssistantMessage: Record<string, unknown> | undefined;
   constructor(readonly options: PiSessionOptions, private output: (event: PiEvent) => void) { writeFileSync(options.sessionFile, ""); }
   bind(output: (event: PiEvent) => void) { this.output = output; }
@@ -37,16 +39,22 @@ class Native implements PiSession {
       this.output({ type: "thread_landed", workIds: command.workIds });
       this.output({ type: "agent_start" });
     }
+    if (command.type === "recover_final_result") {
+      this.recoveryCalls++;
+      this.finalResultRecovery = { commandId: command.id!, workIds: command.workIds as string[] };
+      for (const workId of this.finalResultRecovery.workIds) this.completed.delete(workId);
+      this.busy = true; this.output({ type: "agent_start" });
+    }
     if (command.type === "resume_pending") { this.busy = true; this.output({ type: "agent_start" }); }
     if (command.type === "compact") { this.busy = true; this.commandBusy = true; this.output({ type: "compaction_start" }); }
     if (command.type === "abort") { this.busy = false; this.commandBusy = false; }
     this.output({ type: "response", id: command.id, command: command.type, success: true,
-      data: command.type === "get_state" ? { nativeProtocolVersion: "batch-operations-v1", isStreaming: this.busy && !this.commandBusy, isCompacting: this.commandBusy, isBashRunning: false, localTools: 0, pendingCommandCount: 0, pendingMessageCount: 0, backgroundOperationCount: 0, acceptedWorkIds: [...this.accepted], landedWorkIds: [...this.accepted], completedWorkIds: [...this.completed], sessionFile: this.options.sessionFile, lastAssistantMessage: this.lastAssistantMessage } : {} });
+      data: command.type === "get_state" ? { nativeProtocolVersion: "batch-operations-v1", isStreaming: this.busy && !this.commandBusy, isCompacting: this.commandBusy, isBashRunning: false, localTools: 0, pendingCommandCount: 0, pendingMessageCount: 0, backgroundOperationCount: 0, acceptedWorkIds: [...this.accepted], landedWorkIds: [...this.accepted], completedWorkIds: [...this.completed], sessionFile: this.options.sessionFile, lastAssistantMessage: this.lastAssistantMessage, finalResultRecovery: this.finalResultRecovery } : {} });
   }
-  settle() {
+  settle(text = "done") {
     this.busy = false; this.commandBusy = false;
     for (const id of this.accepted) this.completed.add(id);
-    this.lastAssistantMessage = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }], timestamp: Date.now() };
+    this.lastAssistantMessage = { role: "assistant", stopReason: "stop", content: [{ type: "text", text }], timestamp: Date.now() };
     this.output({ type: "message_end", message: this.lastAssistantMessage });
     this.output({ type: "agent_settled", workIds: [...this.completed], outcome: "complete", lastAssistantMessage: this.lastAssistantMessage });
   }
@@ -96,6 +104,19 @@ it("one unlimited authority covers parallel owners, foreground/background and ar
   running.settle(); await until(() => shared.status().active === 125);
   for (const f of fixtures) { (f.service as any).db.exec("UPDATE thread SET metadata=json_remove(metadata,'$.admissionWait')"); f.service.reconcile(); }
   expect(shared.status()).toMatchObject({ active: 125, queued: 0 });
+});
+
+it("empty final recovery retains the same global lease until the original execution settles", async () => {
+  const shared = authority(), f = fixture(client(shared, "host-a/alice"));
+  unwrap(await f.service.spawn({ id: "result-agent", requestId: "result-work", cwd: f.root, message: "Complete work" }));
+  unwrap(await f.service.start()); await until(() => f.sessions.get("result-agent")?.busy === true);
+  const custody = shared.entries()[0]!, native = f.sessions.get("result-agent")!;
+  native.settle(""); await until(() => native.recoveryCalls === 1);
+  expect(f.service.latestSettlement("result-agent")).toBeNull();
+  expect(shared.entries()).toEqual([custody]);
+  native.settle("Finished result"); await until(() => shared.status().active === 0);
+  expect(f.service.latestSettlement("result-agent")).toMatchObject({ executionId: custody.executionId, workId: "result-work", outcome: "complete" });
+  expect(native.recoveryCalls).toBe(1);
 });
 
 it("closing an idle result waiter publishes cancellation without inventing native capacity custody", async () => {

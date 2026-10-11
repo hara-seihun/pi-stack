@@ -62,6 +62,34 @@ An already accepted input acknowledges without another user message. With `resum
 
 `PI_THREAD_REQUIRE_SESSION=1` makes a missing native file an error. The thread controller sets it when custody requires existing history. New sessions receive a durable native header before execution. Native opens and switches validate the header. Historical provider records and transfer provenance belong to the [thread import owner](../src/threads/import.ts); changing an engine label or replaying user requests is not a conversion.
 
+## Empty final result recovery
+
+The controller requests `recover_final_result` only after original work has positively
+settled without final text, a dependency/question or a background operation owning
+continuation. It retains the same execution and work IDs. Native admission requires
+settled, landed work and confirmed idleness, syncs `thread_final_result_recovery`
+with the stable command ID and original work IDs, then `thread_resume`, before
+acknowledging. A `thread_final_result_request` custom message asks only for the final
+result. It neither repeats the assignment nor retakes original input custody.
+
+`get_state.finalResultRecovery` reports that receipt. Repeated command identity
+acknowledges without another model request; changed work under that ID or another
+attempt for the same work is rejected. A second empty result settles failed through
+the controller's ordinary result path. Cold recovery with an accepted attempt but
+no native settlement fails explicitly, never resuming the original effects. Stop
+and durable waits retain their existing boundaries. A failed recovery retains its provider error and settles failed rather than entering
+another controller provider-resumption turn. Native transport retries remain unchanged.
+
+Focused offline checks:
+
+```sh
+node ../../node_modules/vitest/vitest.mjs run tests/thread-service.test.ts tests/pi-session-halt.test.ts tests/thread-capacity.test.ts --maxWorkers=1 -t 'substantive final result|empty final recovery|recovers a final result|recovers an empty final|final recovery|requests one final result|owns continuation'
+```
+
+Run from `packages/orchestrator` against the prepared shared-RPC SDK. The native
+fixture executes one real Bash effect, recovers the result and reopens the session
+without repeating that effect or the original input.
+
 ## Native command receipts
 
 Fork, clone, new-session, switch, compaction, shell commands and model/thinking cycles require stable command IDs. A synced `thread_command` native entry precedes execution. A changed payload under the same ID fails. `thread_command_result` records the exact response and resulting session file before the response reaches the controller.
