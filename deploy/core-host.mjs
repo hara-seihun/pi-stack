@@ -49,7 +49,7 @@ export function nativeModelBinding(config, binding, uid, readOriginal) {
 }
 export function gatewayBinding(config, binding, uid, personOnly) {
   if (binding?.version !== 1 || !/^[a-z_][a-z0-9_-]{0,31}$/.test(binding.user) || !/^[a-zA-Z0-9_.:-]+$/.test(binding.scopeId ?? '') ||
-      !/^[a-zA-Z0-9_.-]+$/.test(binding.gatewayId ?? '') || !Number.isSafeInteger(uid) || uid < 0 || config.gatewayTransport?.kind !== 'unix' || config.gatewayTransport.socketDir !== '/run/pi-stack/gateways') return failure('invalid-binding', 'Explicit configured Unix gateway, scope and actual UID required');
+      !/^[a-zA-Z0-9_.:-]+$/.test(binding.gatewayId ?? '') || !Number.isSafeInteger(uid) || uid < 0 || config.gatewayTransport?.kind !== 'unix' || config.gatewayTransport.socketDir !== '/run/pi-stack/gateways') return failure('invalid-binding', 'Explicit configured Unix gateway, scope and actual UID required');
   const scope = config.scopes.find(item => item.id === binding.scopeId);
   const owner = config.principals.find(item => item.id === scope?.principalId);
   const gateway = config.gatewayBindings.find(item => item.gatewayId === binding.gatewayId);

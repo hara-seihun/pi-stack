@@ -28,6 +28,20 @@ test('person transport binds exact kernel peer, principal, scope and reverse cal
   assert.equal(gatewayBinding(noCallback, binding, 1001, false).ok, true);
 });
 
+test('canonical colon gateway IDs preserve their exact declared scope without sanitizing', () => {
+  const scopeId = 'remote:first', gatewayId = 'remote-remote:first';
+  const declared = { ...config, scopes: [{ ...config.scopes[0], id: scopeId }],
+    gatewayBindings: [{ ...config.gatewayBindings[0], gatewayId, scopeIds: [scopeId] }] };
+  const input = { ...binding, scopeId, gatewayId };
+  const result = gatewayBinding(declared, input, 1001, true);
+  assert.equal(result.ok, true);
+  assert.equal(result.value.gatewayId, gatewayId);
+  assert.equal(result.value.callbackSocket, '/run/pi-stack/gateways/remote-remote:first/callback.sock');
+  for (const changed of ['remote-remote_first', '../remote-remote:first', 'remote-remote:first/other']) {
+    assert.equal(gatewayBinding(declared, { ...input, gatewayId: changed }, 1001, true).ok, false);
+  }
+});
+
 test('native model origin selects exact original UID listener, never gateway URL or first listener', () => {
   assert.equal(nativeModelBinding(config, binding, 1001, original).ok, true);
   for (const input of [{ ...binding, modelBrokerUrl: 'http://127.0.0.1:2470/v1/model-broker' }, { ...binding, modelBrokerPrincipalId: 'other' }, { ...binding, modelBrokerUid: 0 }]) {
