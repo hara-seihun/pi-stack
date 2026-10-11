@@ -228,7 +228,7 @@ export async function coreHost(operation, artifact, configPath, bindingPath, req
         chmodSync(config.gatewayTransport.socketDir, 0o755);
       }
       const helperSource = dirname(fileURLToPath(import.meta.url));
-      for (const name of ['core-host.mjs', 'core_namespace.py', 'core-adopt', 'core-person-activate']) atomic(`/usr/local/libexec/pi-stack-core-host/${name}`, readFileSync(join(helperSource, name), 'utf8'), name.endsWith('.mjs') || name.endsWith('.py') ? 0o644 : 0o755);
+      for (const name of ['core-host.mjs', 'core_namespace.py', 'core-capability-epoch.py', 'core-adopt', 'core-person-activate']) atomic(`/usr/local/libexec/pi-stack-core-host/${name}`, readFileSync(join(helperSource, name), 'utf8'), name.endsWith('.mjs') || name.endsWith('.py') ? 0o644 : 0o755);
       for (const name of ['pi-stack-core.service', 'pi-stack-core-custody.service']) atomic(`/etc/systemd/system/${name}`, readFileSync(join(artifact, 'host', name), 'utf8'), 0o644);
     } else {
       if (!isAbsolute(bindingPath ?? '')) return failure('invalid-binding', 'A root-owned binding file is required');
