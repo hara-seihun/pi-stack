@@ -1751,6 +1751,14 @@ function sourceCapacityPlan(repository, sourceCommit, intent, blockSize, mirror,
     }
     repository = mirror;
   }
+  const plan = sourceCheckoutCapacity(repository, sourceCommit, intent, blockSize, sparsePatterns);
+  const sourceImportBytes = sourceImportCapacity(repository, sourceCommit, mirror, sparsePatterns);
+  const constructionBytes = plan.constructionBytes + sourceImportBytes;
+  if (!Number.isSafeInteger(constructionBytes)) fail("source capacity estimate exceeds supported byte range");
+  return { ...plan, constructionBytes, sourceImportBytes };
+}
+
+function sourceCheckoutCapacity(repository, sourceCommit, intent, blockSize, sparsePatterns = []) {
   if (!Number.isSafeInteger(blockSize) || blockSize <= 0) fail("source capacity estimate unknown: invalid filesystem allocation unit");
   const filters = command("git", ["-C", repository, "config", "--get-regexp", "^filter\\..*\\.(smudge|process)$"]);
   if (filters.status !== 1) fail("source capacity estimate unknown: configured checkout filters need an independently budgeted installer");
@@ -1764,10 +1772,8 @@ function sourceCapacityPlan(repository, sourceCommit, intent, blockSize, mirror,
     const blobBytes = materialized && size !== undefined ? 2 * Math.ceil(Number(size) / blockSize) * blockSize : 0;
     constructionBytes += blobBytes + 4 * blockSize + Buffer.byteLength(name) * 2;
   }
-  const sourceImportBytes = sourceImportCapacity(repository, sourceCommit, mirror, sparsePatterns);
-  constructionBytes += sourceImportBytes;
   if (!Number.isSafeInteger(constructionBytes)) fail("source capacity estimate exceeds supported byte range");
-  return { ...intent, estimate: selected === null ? "whole-tree-upper-bound" : "git-sparse-upper-bound", constructionBytes, sourceImportBytes, sourceCommit };
+  return { ...intent, estimate: selected === null ? "whole-tree-upper-bound" : "git-sparse-upper-bound", constructionBytes, sourceImportBytes: 0, sourceCommit };
 }
 
 function sourceImportCapacity(repository, sourceCommit, mirror, sparsePatterns) {
@@ -2797,8 +2803,10 @@ function repriceCapacityCommand(database, args, statePath) {
     if (oldPlan.intent !== "unestimated" && !expandingBudget) fail("capacity repricing accepts unestimated plans or source-only/budgeted to budgeted expansion");
     capacityRequirement(oldPlan, []);
     if (record.durableSourceCommit === null) fail("capacity repricing requires immutable source custody");
-    const plan = expandingBudget ? { ...oldPlan, ...intent } : sourceCapacityPlan(record.path,
-      record.durableSourceCommit, intent, statfsSync(record.path).bsize, git(record.path, ["rev-parse", "--absolute-git-dir"]));
+    const creationRequest = database.prepare("SELECT creation_request FROM workspace WHERE id=?").get(record.id).creation_request;
+    const sparsePatterns = creationRequest === null ? [] : JSON.parse(creationRequest).sparsePatterns ?? [];
+    const plan = expandingBudget ? { ...oldPlan, ...intent } : sourceCheckoutCapacity(record.path,
+      record.durableSourceCommit, intent, statfsSync(record.path).bsize, sparsePatterns);
     if (!expandingBudget) plan.completedAllocationBytes = plan.constructionBytes;
     withResourceLock(statePath, `capacity:${row.device_id}`, () => {
       const measurement = cachedWorkspaceAllocation(database, record.id, record.path, row.device_id);

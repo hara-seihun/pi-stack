@@ -483,10 +483,19 @@ test("source preparation interruption leaves no destination reservation", () => 
   try {
     const args = ["create", "--root", f.workspaces, "--name", "preparing", "--repo", f.source,
       "--min-free-gib", "0", "--json"];
-    assert.throws(() => run(args, interruptCreation(f, "config")));
+    assert.throws(() => run(args, interruptCreation(f, "config")), /source preparation interrupted/);
     assert.deepEqual(JSON.parse(run(["status", "--json"], f.env)).records, []);
     assert.equal(existsSync(path.join(f.workspaces, "preparing")), false);
+    const preparationRoot = path.join(path.dirname(f.env.PI_WORKSPACE_STATE), "source-preparations");
+    const pointerFile = path.join(preparationRoot, readdirSync(preparationRoot).find(name => name.endsWith(".job.json")));
+    const pointer = readFileSync(pointerFile, "utf8");
+    const jobDirectory = path.join(preparationRoot, "jobs", JSON.parse(pointer).jobId);
+    assert.equal(existsSync(path.join(jobDirectory, "result.json")), false);
+    assert.equal(JSON.parse(readFileSync(path.join(jobDirectory, "attempt.json"))).number, 1);
     assert.equal(JSON.parse(run(args, f.env)).state, "active");
+    assert.equal(readFileSync(pointerFile, "utf8"), pointer);
+    assert.equal(JSON.parse(readFileSync(path.join(jobDirectory, "attempt.json"))).number, 2);
+    assert.equal(JSON.parse(readFileSync(path.join(jobDirectory, "result.json"))).state, "ready");
   } finally { f.close(); }
 });
 
@@ -939,6 +948,47 @@ test("fenced capacity repricing preserves live unestimated work and journals sam
     assert.throws(() => run(args.map(value => value === "budgeted" ? "source-only" : value), f.env), /accepts unestimated plans or source-only\/budgeted to budgeted expansion/);
     assert.equal(db.prepare("SELECT count(*) AS n FROM workspace_capacity_repricing").get().n, 1);
     db.close();
+  } finally { f.close(); }
+});
+
+for (const strategy of ["clone", "worktree"]) test(`completed unestimated ${strategy} repricing never imports history or needs its disposable source`, () => {
+  const f = fixture();
+  try {
+    const created = JSON.parse(run(["create", "--root", f.workspaces, "--name", "completed", "--repo", f.source,
+      "--strategy", strategy, "--min-free-gib", "0", "--json"], f.env));
+    writeFileSync(path.join(created.path, "notes.txt"), "unique live work\n");
+    const guard = forbidGitOperations(f, ["fetch", "rev-list"]);
+    rmSync(f.source, { recursive: true });
+    run(["measure-capacity", "--id", created.id, "--json"], guard);
+    const repriced = JSON.parse(run(["reprice-capacity", "--id", created.id, "--intent", "budgeted",
+      "--headroom-gib", "1", "--growth-mib", "8", "--json"], guard));
+    assert.equal(repriced.capacity.sourceImportBytes, 0);
+    assert.equal(repriced.capacity.sourceCommit, created.sourceCommit);
+    assert.equal(repriced.capacity.completedAllocationBytes, repriced.capacity.constructionBytes);
+    assert.equal(git(created.path, "rev-parse", "HEAD"), created.sourceCommit);
+    assert.equal(readFileSync(path.join(created.path, "notes.txt"), "utf8"), "unique live work\n");
+  } finally { f.close(); }
+});
+
+test("completed sparse unestimated repricing retains its selection without charging excluded checkout bytes", () => {
+  const f = fixture();
+  try {
+    writeFileSync(path.join(f.source, "excluded.bin"), Buffer.alloc(24 * 1024 ** 2));
+    git(f.source, "add", ".");
+    git(f.source, "commit", "-m", "excluded payload");
+    const created = JSON.parse(run(["create", "--root", f.workspaces, "--name", "sparse-reprice", "--repo", f.source,
+      "--sparse-pattern", "/file.txt", "--min-free-gib", "0", "--json"], f.env));
+    const selection = git(created.path, "sparse-checkout", "list");
+    const guard = forbidGitOperations(f, ["fetch", "rev-list"]);
+    run(["measure-capacity", "--id", created.id, "--json"], guard);
+    const repriced = JSON.parse(run(["reprice-capacity", "--id", created.id, "--intent", "budgeted",
+      "--headroom-gib", "1", "--growth-mib", "8", "--json"], guard));
+    assert.equal(repriced.capacity.sourceImportBytes, 0);
+    assert.equal(repriced.capacity.estimate, "git-sparse-upper-bound");
+    assert.ok(repriced.capacity.constructionBytes < 24 * 1024 ** 2);
+    assert.equal(git(created.path, "sparse-checkout", "list"), selection);
+    assert.equal(existsSync(path.join(created.path, "excluded.bin")), false);
+    assert.equal(readFileSync(path.join(created.path, "file.txt"), "utf8"), "source\n");
   } finally { f.close(); }
 });
 

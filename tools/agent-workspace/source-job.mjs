@@ -287,6 +287,9 @@ async function sourceWorker(directory) {
     });
     const completed = readTerminal(directory);
     if (completed) return { ok: true };
+    if (exit.kind === "exit" && exit.signal !== null) return { ok: false, error: {
+      code: "source-job-interrupted", message: `source preparation worker was interrupted by ${exit.signal}`,
+    } };
     return finishSourceJob(directory, failure(
       exit.kind === "spawn-failed" ? "source-job-worker-spawn-failed" : "source-job-worker-no-result",
       exit.kind === "spawn-failed" ? "source preparation worker could not start"
