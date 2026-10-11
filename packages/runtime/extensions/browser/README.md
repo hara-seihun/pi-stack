@@ -48,6 +48,32 @@ Native snapshot/value/text/HTML observations redact card numbers, expiry/month/y
 
 Evaluation and screenshot/PDF on tabs with detected sensitive controls or known sensitive state return `SENSITIVE_OUTPUT_UNSUPPORTED` before execution or artifact creation. Ordinary evaluation and captures on non-sensitive tabs remain supported. Continuous recording/tracing/profiling/HAR/streaming, inspect/expose and init-script routes are refused because a one-time inspection cannot protect future fills. Sensitive tabs also refuse state export, downloads, raw network/console/clipboard/storage observations and other unstructured page-data routes; use safe snapshots and typed getters. Saved native-wrapper `outputPath` results inherit the protected response. This is a DOM form-output boundary, not a general scanner for caller arguments, arbitrary page-owned data or downloads. Secret entry belongs to the private credential-fill transport, not plaintext tool arguments.
 
+## Private credential fill
+
+Use `privateCredential` as the tool's only input mode after selecting the intended tab and frame. Its arguments are references, never secret values:
+
+```json
+{
+  "privateCredential": {
+    "provider": "proton-pass",
+    "item": "Exact authorized vault item title",
+    "field": "number",
+    "selector": "input[autocomplete=cc-number]",
+    "target": "exact-active-CDP-targetId",
+    "frame": "exact-selected-frameId"
+  },
+  "timeoutMs": 240000
+}
+```
+
+Use `frame: "main"` for a top-level field. The selected native frame's identity must be explicit; a CSS selector naming an iframe is not its frame ID. Supported fields are `username`, `email`, `password`, fresh `totp`, `cardholder_name`, `number`, `verification_number`, `expiration_date`, `passport_number` and `phone_number`. Optional `format: "mm/yy"` converts only an expiration date inside the credential plugin; absent or `raw` preserves the vault value. Card entry requires an authorized purchase; this operation fills one field and never submits.
+
+[`private-credential.mjs`](private-credential.mjs) validates and compiles this mode into one native `auth fill --credential-provider PROVIDER --item TITLE --field FIELD --selector SELECTOR --target TARGET --frame FRAME [--format FORMAT]` call. Raw args support the same command. It rejects plaintext/value fields, conflicting input modes, stdin and fresh-session launches. No helper process or raw socket bypass is introduced: native wrapper session/restore-policy coordination and the existing external-action fence remain in the call path. A supplied `externalAction` is preserved and fenced exactly as the equivalent raw args invocation, including uncertain-outcome deduplication.
+
+The matched native executable must implement `auth fill`; an older executable returns an error, never an alternate credential path. Native owns the one-deadline plugin lookup and fill under its session lock, exact active target/selected frame checks before and after lookup, and metadata-only success/error output. Plugin protocol `credential.field.resolve` uses capability `credential.read` and request `{itemRef,field,format?,timeoutMs}`; its `{value}` response travels only over the private plugin pipe. The machine Proton plugin is separately owned by `/home/kenan/tools/agent-browser-pass-cli`, configured through the person's own `AGENT_BROWSER_PLUGINS`; unconfigured people do not acquire administrator vault access. No credential value enters tool args, native CLI argv, saved tool output or action payloads. A lost fill receipt is an unknown outcome, not permission to retry.
+
+The focused wrapper tests use synthetic references and a disposable authority; the machine plugin fixture uses synthetic secrets without reading Proton or a live browser.
+
 ## Authorized clean-tab restoration
 
 Generic browser state saves cookies/local storage, not tab-scoped session storage. To carry an authorized clean tab across worker replacement, use `state save-tab PATH ACCOUNT ORIGIN TTL_SECONDS`, then on a new `about:blank` tab use `state load-tab PATH ACCOUNT ORIGIN` before `open URL`. The capsule is owner-private, expiring and bound to the Unix owner, person context, explicit account and exact origin. Restoration installs that selected tab's session storage before application startup, only at the authorized origin. Each additional tab needs its own explicit load; nothing replays credentials globally.

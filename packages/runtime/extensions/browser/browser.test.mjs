@@ -59,6 +59,7 @@ function release(root, version) {
   copyFileSync(new URL("package.json", import.meta.url), join(extension, "package.json"));
   copyFileSync(new URL("index.mjs", import.meta.url), join(extension, "index.mjs"));
   copyFileSync(new URL("effects.mjs", import.meta.url), join(extension, "effects.mjs"));
+  copyFileSync(new URL("private-credential.mjs", import.meta.url), join(extension, "private-credential.mjs"));
   symlinkSync(dependencies, join(path, "node_modules"));
   return path;
 }
@@ -161,7 +162,10 @@ test("the stack doctor diagnoses native sources before probe dependencies and cl
   try {
     const runtime = release(root, "0.36.0");
     const owner = join(root, "native-owner.mjs"), fixture = join(root, "managed-fixture.mjs");
-    buildSync({ entryPoints: [fileURLToPath(new URL("../../../orchestrator/src/threads/native-session.ts", import.meta.url))], bundle: true, platform: "node", format: "esm", packages: "external", alias: { "pi-orchestrator/history": fileURLToPath(new URL("../../../orchestrator/src/threads/history.mjs", import.meta.url)) }, outfile: owner });
+    buildSync({ entryPoints: [fileURLToPath(new URL("../../../orchestrator/src/threads/native-session.ts", import.meta.url))], bundle: true, platform: "node", format: "esm", packages: "external", alias: {
+      "pi-orchestrator/history": fileURLToPath(new URL("../../../orchestrator/src/threads/history.mjs", import.meta.url)),
+      "pi-orchestrator/anthropic-narration": fileURLToPath(new URL("../../../orchestrator/src/threads/anthropic-narration.mjs", import.meta.url)),
+    }, outfile: owner });
     symlinkSync(fileURLToPath(new URL("../../../../node_modules", import.meta.url)), join(root, "node_modules"));
     writeFileSync(fixture, `import { createManagedAgentSession as create } from './native-owner.mjs'; export const createManagedAgentSession = (factory, options) => create(factory, {...options,capacity:{mode:'unmanaged'}});`);
     const scope = join(runtime, "node_modules/@earendil-works");
