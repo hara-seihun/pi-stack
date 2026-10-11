@@ -98,9 +98,11 @@ export function createAgentCapacityClient(options: AgentCapacityClientOptions): 
 
 export const AGENT_CAPACITY_CLIENT_CONFIG = "/etc/pi-stack/agent-capacity-client.json";
 export interface AgentCapacityClientManifest { authorityUrl: string; owners: { uid: number; ownerId: string; tokenFile: string }[] }
-export function configuredAgentCapacitySettings(env: NodeJS.ProcessEnv = process.env): Result<{ capacity: AgentCapacityStatusClient; ownerId: string }> {
+export function configuredAgentCapacitySettings(env: NodeJS.ProcessEnv = process.env, identity?: { uid: number }): Result<{ capacity: AgentCapacityStatusClient; ownerId: string }> {
   try {
     let url = env.PI_AGENT_CAPACITY_URL, ownerId = env.PI_AGENT_CAPACITY_OWNER, tokenFile = env.PI_AGENT_CAPACITY_TOKEN_FILE;
+    if (identity && (!Number.isSafeInteger(identity.uid) || identity.uid < 0)) return unavailable("Agent capacity requires a valid registered Unix identity");
+    if (identity && [url, ownerId, tokenFile].some(value => value !== undefined)) return unavailable("UID-bound capacity must select its owner from the host manifest, not environment credentials");
     const environmentConfigured = [url, ownerId, tokenFile].some(value => value !== undefined);
     if (!environmentConfigured) {
       const path = env.PI_AGENT_CAPACITY_CONFIG ?? AGENT_CAPACITY_CLIENT_CONFIG;
@@ -109,7 +111,7 @@ export function configuredAgentCapacitySettings(env: NodeJS.ProcessEnv = process
       if (!manifest || !text(manifest.authorityUrl) || !Array.isArray(manifest.owners)
         || manifest.owners.some(owner => !owner || !Number.isSafeInteger(owner.uid) || owner.uid < 0 || !text(owner.ownerId) || !text(owner.tokenFile) || !owner.tokenFile.startsWith("/"))
         || new Set(manifest.owners.map(owner => owner.uid)).size !== manifest.owners.length || new Set(manifest.owners.map(owner => owner.ownerId)).size !== manifest.owners.length) return unavailable("Invalid explicit host agent capacity client manifest");
-      const owner = manifest.owners.find(owner => owner.uid === userInfo().uid);
+      const owner = manifest.owners.find(owner => owner.uid === (identity ? identity.uid : userInfo().uid));
       if (!owner) return unavailable("This Unix identity has no registered global agent capacity owner");
       url = manifest.authorityUrl; ownerId = owner.ownerId; tokenFile = owner.tokenFile;
     }
@@ -124,10 +126,10 @@ export async function configuredAgentCapacityStatus(env: NodeJS.ProcessEnv = pro
 }
 
 /** Missing configuration queues work. There is deliberately no local authority or fail-open path. */
-export function configuredAgentCapacity(env: NodeJS.ProcessEnv = process.env): AgentCapacity {
+export function configuredAgentCapacity(env: NodeJS.ProcessEnv = process.env, identity?: { uid: number }): AgentCapacity {
   let configured: ReturnType<typeof configuredAgentCapacitySettings> | undefined;
   const current = () => {
-    if (!configured?.ok) configured = configuredAgentCapacitySettings(env);
+    if (!configured?.ok) configured = configuredAgentCapacitySettings(env, identity);
     return configured;
   };
   return {

@@ -970,6 +970,10 @@ export class ThreadService implements ThreadApi {
     const cleared = this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.admissionWait') WHERE id=? AND json_extract(metadata,'$.admissionWait') IS NOT NULL").run(id).changes;
     if (cleared) this.changed(id);
   }
+  private newExecutionId(id: string, workId: string): string {
+    const candidate = this.capacityLedger?.candidate(id, workId);
+    return candidate && !this.sql("SELECT 1 FROM thread_execution WHERE id=?").get(candidate) ? candidate : randomUUID();
+  }
   private async acquireCapacity(id: string, executionId: string, sourceId: string, kind: "work" | "command"): Promise<Result<void>> {
     if (!this.capacityLedger) return good(undefined);
     const acquired = await this.capacityLedger.acquire(id, executionId, sourceId, kind);
@@ -1009,6 +1013,10 @@ export class ThreadService implements ThreadApi {
     if (!runtime) await this.releaseCapacity(id);
   }
   private async recoverUnassignedCapacity(id: string): Promise<boolean> {
+    for (const row of this.capacityLedger?.current(id) ?? []) {
+      if (!row.entered_native && this.sql("SELECT 1 FROM thread_execution WHERE id=? AND ended_at IS NOT NULL").get(row.logical_execution_id))
+        await this.releaseUnenteredCapacity(id, row.logical_execution_id);
+    }
     await this.releaseFailedStartupCapacity(id);
     await this.recoverMissingStartupCapacity(id);
     if (this.capacityLedger && !this.execution(id) && this.get(id)?.metadata?.runnerReference && !this.capacityLedger.current(id).length)
@@ -1100,8 +1108,8 @@ export class ThreadService implements ThreadApi {
     if (this.capacityLedger) {
       const pending = this.sql("SELECT DISTINCT thread_id FROM thread_capacity WHERE state='releasing'").all() as { thread_id: string }[];
       for (const row of pending) void this.serial(row.thread_id, async () => {
-        this.capacityReleaseEvidence(row.thread_id, await this.capacityLedger!.flush());
-      });
+        this.capacityReleaseEvidence(row.thread_id, await this.capacityLedger!.flush(undefined, row.thread_id));
+      }).then(() => this.wake(row.thread_id));
     }
     for (const row of this.sql("SELECT id FROM thread WHERE json_extract(metadata,'$.dependencyUpdate') IS NOT NULL").all() as Array<{ id: string }>) {
       if (!this.dependencyOperations.has(row.id)) void this.recoverDependencies(row.id).then(result => {
@@ -3081,7 +3089,7 @@ export class ThreadService implements ThreadApi {
     }
     if (!stillNext()) { this.wake(id); return; }
     if (!execution) {
-      const settings = JSON.parse(work.settings) as ThreadSettings, executionId = this.capacityLedger?.candidate(id, work.id) ?? randomUUID();
+      const settings = JSON.parse(work.settings) as ThreadSettings, executionId = this.newExecutionId(id, work.id);
       this.phase(id, "admitting", "Acquiring global execution capacity");
       const capacity = await this.acquireCapacity(id, executionId, work.id, "work");
       if (!capacity.ok) { this.admissionWait(id, capacity.error); return; }
@@ -3194,12 +3202,17 @@ export class ThreadService implements ThreadApi {
       if (this.busy(state)) throw new Error("Native startup cancellation has not positively settled; global custody retained");
       this.adoptLanded(id, state);
     }
+    const pending = this.pending(id)[0];
+    const rejectedExecutionId = pending && this.capacityLedger
+      ? (this.sql(`SELECT c.logical_execution_id AS id FROM thread_capacity c WHERE c.thread_id=? AND c.source_id=? AND c.kind='work'
+          AND NOT EXISTS(SELECT 1 FROM thread_execution e WHERE e.id=c.logical_execution_id) ORDER BY c.rowid DESC LIMIT 1`).get(id, pending.id) as { id: string } | undefined)?.id
+      : undefined;
     await this.releaseCapacity(id);
     this.transaction(() => {
       if (this.execution(id)) return;
       const work = this.sql("SELECT id,settings FROM thread_work WHERE thread_id=? AND status='queued' ORDER BY ordinal LIMIT 1").get(id) as Json | undefined;
       if (!work) return;
-      const executionId = this.capacityLedger?.candidate(id, work.id) ?? randomUUID();
+      const executionId = work.id === pending?.id && rejectedExecutionId ? rejectedExecutionId : this.newExecutionId(id, work.id);
       this.sql("INSERT INTO thread_execution(id,thread_id,work_id,settings,created_at) VALUES(?,?,?,?,?)").run(executionId, id, work.id, work.settings, Date.now());
       this.sql("UPDATE thread_work SET status='dispatched',execution_id=? WHERE id=?").run(executionId, work.id);
     });

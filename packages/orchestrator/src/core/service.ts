@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { openSqlite } from "../sqlite.js";
+import { configuredAgentCapacity } from "../agent-capacity.js";
 import { authorize, type PermissionAction, type Principal, type Resource } from "../permissions.js";
 import { ThreadService, type ThreadServiceEvent } from "../threads/service.js";
 import { ThreadDirectory } from "../threads/directory.js";
@@ -131,6 +132,7 @@ export class CoreService {
       const callback = scopeCallbackTransport(this.config.scopes, scope, unixGatewayFetch);
       threads = new ThreadService({
         databasePath: runtime.path(scope.storage.databasePath), sessionsDir: runtime.path(scope.storage.sessionsDir), capability,
+        capacity: configuredAgentCapacity(process.env.PI_AGENT_CAPACITY_CONFIG === undefined ? {} : { PI_AGENT_CAPACITY_CONFIG: process.env.PI_AGENT_CAPACITY_CONFIG }, { uid: scope.custody.uid }),
         openSession: (options, output, exit) => runtime.openSession({ ...options, args: scope.environment.PI_THREAD_CONTEXT_EXTENSION ? [...options.args, "--extension", scope.environment.PI_THREAD_CONTEXT_EXTENSION] : options.args }, output, exit),
         attachSession: runtime.attachSession, recoverSession: runtime.recoverSession,
         environment: thread => ({ ...scope.environment, PI_THREAD_API_URL: `${this.url}/v1/scopes/${encodeURIComponent(scope.id)}/thread-owner`, PI_THREAD_ID: thread.id, PI_REMOTE_SESSION_ID: thread.id, PI_SESSION_ID: thread.id, PI_SESSION_FILE: thread.sessionFile, PI_THREAD_DATABASE: scope.storage.databasePath,

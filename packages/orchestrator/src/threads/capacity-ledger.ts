@@ -28,7 +28,7 @@ export class ThreadCapacityLedger {
   }
   current(threadId: string): ThreadCapacityRow[] { return this.rows("thread_id=? AND state!='released'", threadId); }
   candidate(threadId: string, workId: string): string | undefined {
-    return (this.db.prepare("SELECT logical_execution_id FROM thread_capacity WHERE thread_id=? AND source_id=? AND kind='work' ORDER BY rowid DESC LIMIT 1").get(threadId, workId) as { logical_execution_id: string } | undefined)?.logical_execution_id;
+    return (this.db.prepare("SELECT logical_execution_id FROM thread_capacity WHERE thread_id=? AND source_id=? AND kind='work' AND state IN ('requested','held') ORDER BY rowid DESC LIMIT 1").get(threadId, workId) as { logical_execution_id: string } | undefined)?.logical_execution_id;
   }
   retain(threadId: string, logicalExecutionId: string, sourceId: string, kind: ThreadCapacityRow["kind"]): void {
     if (this.db.prepare("SELECT 1 FROM thread_capacity WHERE thread_id=? AND logical_execution_id=?").get(threadId, logicalExecutionId)) return;
@@ -71,14 +71,16 @@ export class ThreadCapacityLedger {
   }
   async release(threadId: string, logicalExecutionId?: string): Promise<Result<void>> {
     this.requestRelease(threadId, logicalExecutionId);
-    return this.flush();
+    return this.flush(undefined, threadId);
   }
   async releaseUnentered(threadId: string, logicalExecutionId: string): Promise<Result<void>> {
     this.db.prepare("UPDATE thread_capacity SET state='releasing' WHERE thread_id=? AND logical_execution_id=? AND entered_native=0 AND state IN ('requested','held')").run(threadId, logicalExecutionId);
-    return this.flush();
+    return this.flush(undefined, threadId);
   }
-  async flush(executionId?: string): Promise<Result<void>> {
-    const rows = this.rows(`state='releasing' ${executionId === undefined ? "" : "AND execution_id=?"}`, ...executionId === undefined ? [] : [executionId]);
+  async flush(executionId?: string, threadId?: string): Promise<Result<void>> {
+    const rows = this.rows(`state='releasing' ${executionId === undefined ? "" : "AND execution_id=?"} ${threadId === undefined ? "" : "AND thread_id=?"}`,
+      ...executionId === undefined ? [] : [executionId], ...threadId === undefined ? [] : [threadId]);
+    let failure: Result<void> | undefined;
     for (const row of rows) {
       const execution = { agentId: row.thread_id, executionId: row.execution_id };
       let result: Result<void>;
@@ -94,10 +96,11 @@ export class ThreadCapacityLedger {
       }
       if (!result.ok) {
         this.db.prepare("UPDATE thread_capacity SET error=? WHERE execution_id=? AND state='releasing'").run(result.error.message, row.execution_id);
-        return result;
+        failure ??= result;
+        continue;
       }
       this.db.prepare("UPDATE thread_capacity SET state='released',error=NULL WHERE execution_id=? AND state='releasing'").run(row.execution_id);
     }
-    return good(undefined);
+    return failure ?? good(undefined);
   }
 }
