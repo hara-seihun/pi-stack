@@ -1,62 +1,54 @@
 # Web search
 
-Registers a native `web_search` tool and puts the search provider behind a plugin boundary. Agents see one tool whose shape never changes; the host decides which backend answers it.
-
-Before this extension, the only retrieval tool in the list was the browser, and Exa lived in a skill an agent had to notice and load first. Agents drove a browser to a search engine instead. The tool definition sets Pi's `promptSnippet`, so `web_search` appears in the default system prompt's available-tools section for every session, and `promptGuidelines` tells the agent when a browser is still the right instrument.
-
-## The tool
+Registers native `web_search` over an explicitly selected provider. The tool shape stays stable; the host owns provider selection and account access.
 
 ```
 web_search(query, numResults?, category?, includeDomains?, excludeDomains?, startPublishedDate?, text?)
 ```
 
-Results come back as a numbered list of title, URL, date, author and excerpt, with structured `details.results` for programmatic use. `text: true` returns extracted page text instead of an excerpt; it costs more and returns much more output, so the default is the excerpt. The tool runs in `parallel` execution mode: several searches in one batch proceed together.
+Results render as title, URL, date and excerpt. `text: true` requests page extraction through the selected provider and returns bounded full-page text. The tool uses parallel execution mode for independent searches. Use the browser for authenticated or interactive pages.
 
-## Backend selection
+## Provider selection
 
-`~/.pi/agent/web-search.json`, or the path in `PI_STACK_WEB_SEARCH`:
+Select in `~/.pi/agent/web-search.json`, or the path named by `PI_STACK_WEB_SEARCH`:
 
 ```json
-{ "version": 1, "backend": "exa", "defaultResults": 8 }
+{ "version": 1, "backend": "parallel", "defaultResults": 8 }
 ```
 
-- A built-in id (`exa`) selects a shipped backend.
-- `"none"` or `null` disables the tool.
-- An object supplies a host backend: `{ "id": "house", "module": "/opt/house/search.mjs", "options": { "endpoint": "http://localhost:9000" } }`. The module path must be absolute, or a URL.
-- No manifest file means the `exa` backend, so a new account gets web search without configuration.
+- `parallel` selects the shipped Parallel Web Systems transport adapter.
+- `"none"` or `null` explicitly disables search.
+- A host module is explicit: `{ "id": "house", "module": "/opt/house/search.mjs", "options": { "endpoint": "http://localhost:9000" } }`. Its path must be absolute or a module URL.
+- An absent manifest or unset backend is an error, not permission to select another provider.
 
-A manifest error, a backend that fails to import, or a backend reporting itself unavailable at startup leaves the tool unregistered and logs one line to stderr. `PI_STACK_WEB_SEARCH_QUIET=1` silences that line.
+Configuration, import or availability failures leave the tool unregistered and log a reason; `PI_STACK_WEB_SEARCH_QUIET=1` silences that log. An already registered tool rereads selection and status before every call. Provider/options/default count changes do not require a reload. Local entry modules are imported by source hash; changes to their dependencies require an immutable new module path. An in-flight call retains its original selected provider. Failed or disabled current selection never falls back to an earlier provider.
 
-An already registered tool rereads the host manifest and checks its current backend on every call. Provider selection, options and default result counts change without a session reload. Local backend entry modules are imported by source-content hash, so replacing an entry module also takes effect. Changes to its imported dependencies belong in an immutable new module/release path. An in-flight search completes with its own selected backend; the next call adopts the new one. Disabled, malformed or unavailable current configuration fails explicitly, never falling back to a previously loaded provider. The prompt stays provider-neutral; result details identify the provider used.
+## Parallel transport
 
-## Backend contract
+[`backends/parallel.mjs`](backends/parallel.mjs) sends exactly one native search request as JSON stdin to the account's existing `parallel-search` command. `options.command` may explicitly name another installation of that same transport. The adapter holds no credential, reads no private transcript and does not contact the provider directly. The child inherits the calling account's environment and task attribution.
 
-A backend module default-exports the backend object, or a factory taking `{ options, environment }` that returns one.
+The owning host transport retrieves its already-approved Parallel credential, maps domain/date constraints and category preferences, and owns Search/Extract endpoint calls. Its response is `{ results, notes, requestId?, usage? }`. Each result contains `title`, public HTTP `url` and `snippet`; `publishedDate` and bounded `text` are optional. A malformed receipt is an error, not an empty successful search. Provider refusals such as missing access or exhausted prepaid credit return their cause and never trigger another provider, new billing or account provisioning. Transport requests have a 45-second deadline and a 12 MiB receipt bound.
+
+Accounts without an executable authorized `parallel-search` command report unavailable. Provider selection does not grant another Unix account access to the host's credential. Before staged adoption, the host owner must establish explicit manifest selection and the approved account transport. Credential custody and any required access repair remain in the host's secret-store handbook; secrets never enter this manifest or repository.
+
+## Host backend contract
+
+A module default-exports an object, or a factory receiving `{ options, environment }`:
 
 ```js
 export default {
-  id: "house",
-  label: "House index",          // named in the tool description and prompt snippet
-  summary: "internal documents", // optional parenthetical in the description
+  id: "house", label: "House index", summary: "internal documents",
   async status({ options, environment }) {
-    return { available: true };  // or { available: false, reason: "..." }
+    return { available: true };
   },
   async search(request, { options, environment, signal }) {
-    return { results: [{ title, url, snippet, text, publishedDate, author, score }], notes: [] };
+    return { results: [{ title: "Title", url: "https://example.com", snippet: "Excerpt" }], notes: [] };
   },
 };
 ```
 
-`status()` runs at session start to decide whether the tool exists, then before every call using the current selection. `search()` receives the tool parameters with `numResults` already defaulted and `text` always boolean. `notes` are appended to the rendered output; `usage` and `requestId` are carried into `details`. Throwing from `search()` returns the message to the agent, so transport refusals should be raised verbatim rather than translated.
+`status` controls registration and per-call availability. `search` receives validated native tool fields, an explicit result count and boolean `text`. Notes render after results; usage and request identity travel in tool details. Provider transport failures remain explicit.
 
-## Exa backend
+## Offline proof
 
-[`backends/exa.mjs`](backends/exa.mjs) writes an ordinary Exa request body to the host's `exa-api search` transport. That transport owns the Proton Pass credential, the machine-wide daily spend governor and per-session task attribution; this extension holds no API key and makes no network call of its own. Attribution works because the child process inherits `PI_SESSION_ID`.
-
-Default requests ask for highlights rather than full text, which keeps an ordinary search inside the daily budget. `options.command` overrides the transport command and `options.type` overrides Exa's `auto` search type.
-
-An account without `exa-api` on its PATH gets `available: false` and no tool, which is the correct outcome for accounts that cannot reach the credential. The governor's ownership rule is unchanged: an autonomous Projects Research task outside the `research-literature` lane is refused by the transport, and the refusal text reaches the agent unmodified.
-
-## Tests
-
-`node --test web-search.test.mjs` covers manifest parsing, backend loading and rejection, a host-supplied backend module, Exa request construction and result mapping, transport refusal, rendering, and registration through a fake Pi. The transport tests run a stand-in `exa-api` on a temporary PATH and spend nothing.
+`node --test web-search.test.mjs` exercises explicit selection, actual child transport, query/filter/extraction preservation, receipt validation, provider refusal without fallback, rendering, registration and long-lived selection changes. Fixtures use synthetic executables and temporary manifests; no credentials, provider requests or paid usage occur.

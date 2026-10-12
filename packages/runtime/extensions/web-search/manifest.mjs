@@ -8,10 +8,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 /** Backends shipped with the stack, by id. */
 export const BUILT_IN_BACKENDS = {
-  exa: new URL("./backends/exa.mjs", import.meta.url).href,
+  parallel: new URL("./backends/parallel.mjs", import.meta.url).href,
 };
-
-export const DEFAULT_BACKEND = "exa";
 
 export function manifestPath(environment = process.env) {
   if (environment.PI_STACK_WEB_SEARCH) return environment.PI_STACK_WEB_SEARCH;
@@ -23,6 +21,7 @@ function fail(message) {
 }
 
 function parseBackend(backend) {
+  if (backend === undefined) fail("backend is required; select parallel, a host module, or none explicitly");
   if (backend === "none" || backend === null) return null;
   if (typeof backend === "string") {
     if (!BUILT_IN_BACKENDS[backend]) fail(`unknown backend ${backend}; built-in backends are ${Object.keys(BUILT_IN_BACKENDS).join(", ")}, or give a module path`);
@@ -30,6 +29,7 @@ function parseBackend(backend) {
   }
   if (typeof backend !== "object" || Array.isArray(backend)) fail("backend must be a backend id, an object, or \"none\"");
   const { id, module, options } = backend;
+  if (id === "exa") fail("unknown backend exa; select parallel or an authorized host module");
   if (typeof id !== "string" || !/^[a-z][a-z0-9-]*$/.test(id)) fail("backend.id must be a lowercase identifier");
   if (options !== undefined && (typeof options !== "object" || options === null || Array.isArray(options))) fail("backend.options must be an object");
   if (module === undefined) {
@@ -48,12 +48,12 @@ export function parseManifest(text) {
     fail("defaultResults must be an integer between 1 and 25");
   }
   return {
-    backend: parseBackend(raw.backend === undefined ? DEFAULT_BACKEND : raw.backend),
+    backend: parseBackend(raw.backend),
     defaultResults: raw.defaultResults ?? 8,
   };
 }
 
-/** The host's selection, or the default backend when no manifest exists. */
+/** The host's explicit selection. Unset configuration cannot select a provider. */
 export async function loadManifest(environment = process.env) {
   const path = manifestPath(environment);
   let text;
@@ -61,7 +61,7 @@ export async function loadManifest(environment = process.env) {
     text = await readFile(path, "utf8");
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
-    return { backend: parseBackend(DEFAULT_BACKEND), defaultResults: 8, path, missing: true };
+    fail(`no manifest configured at ${path}; select a backend explicitly`);
   }
   return { ...parseManifest(text), path, missing: false };
 }
@@ -80,6 +80,7 @@ export async function loadBackend(selection, context = {}) {
   const exported = imported.default ?? imported.backend;
   if (!exported) throw new Error(`backend ${selection.id} exports no default backend`);
   const backend = typeof exported === "function" ? await exported({ options: selection.options, environment: context.environment ?? process.env }) : exported;
+  if (backend?.id === "exa") throw new Error("backend exa is unavailable; select Parallel or an authorized host provider");
   if (typeof backend?.search !== "function") throw new Error(`backend ${selection.id} has no search(request, context) function`);
   return {
     id: backend.id ?? selection.id,

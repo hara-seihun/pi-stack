@@ -10,7 +10,7 @@ Reusable extensions for [Pi](https://pi.dev). The [stack manifest](../../package
 - [Claude OAuth runtime](extensions/claude-oauth/README.md) loads the upstream subscription adapter with the client version required by Opus 5.5, from the same immutable dependency tree as Pi.
 - [Browser runtime](extensions/browser/README.md) loads the native browser tool with its executable from the same immutable dependency tree.
 - [Codex compaction](extensions/codex-compaction/README.md) stores OpenAI's server-side checkpoints in Pi sessions while keeping Pi's tools and account routing. Stored JSONL remains readable through the [shared session reader](../../tools/read-condensed-session/README.md).
-- [Web search](extensions/web-search/README.md) registers a native `web_search` tool over a host-selected search backend, so every session has web search in its tool list instead of reaching for a skill or a browser. The shipped Exa backend sends requests through the host's governed `exa-api` transport.
+- [Web search](extensions/web-search/README.md) registers native `web_search` when the host explicitly selects an available authorized provider. The shipped Parallel Web Systems adapter delegates Search/Extract to the account's existing `parallel-search` transport; credentials and account access stay with that host owner.
 
 [Runtime wire dispatch](../../docs/runtime-wire.md) owns the closed SDK/runner/provider event domains and explicit diagnostics for unsupported values. A stored Codex compaction operation with an invalid state is a repair error, never automatically reinterpreted as failed/retryable. The invalid record remains intact; explicit compact may supersede it through its owning operation path.
 
