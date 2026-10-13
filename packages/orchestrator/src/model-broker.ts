@@ -3,6 +3,7 @@ import { allowanceRefusal, BROKER_USAGE_PATH, brokerUsageAcrossStores, WeeklyAll
 import { weekResetsAt } from "./person-usage.js";
 import { zstdDecompressSync } from "node:zlib";
 import { once } from "node:events";
+import { setTimeout as delay } from "node:timers/promises";
 import { readFileSync, statSync, unwatchFile, watchFile } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
@@ -16,7 +17,7 @@ import { completionHttpStatus, isCompletionInput, isCompletionRequestId } from "
 import { modelDrainsMeter } from "./catalog.js";
 import { allowsAccountUse, type UsageComponent } from "./domain.js";
 import { imageAuth } from "./image-service.js";
-import { chooseInteractiveAccount, eligibleInteractiveAccounts } from "./auth/account-selection.js";
+import { chooseInteractiveAccount, eligibleInteractiveAccounts, interactiveQuotaExhausted } from "./auth/account-selection.js";
 import { accountModelExcluded, noEntitledAccountError, recordAccountModelUnsupported } from "./auth/model-entitlement.js";
 import { codexTierExclusions } from "./auth/codex-capabilities.js";
 import { modelSpeedModes } from "./threads/speed.js";
@@ -62,6 +63,19 @@ export function validateBrokerConfig(value: unknown): value is ModelBrokerConfig
     && new Set(config.listeners.map(listener => listener.principal)).size === config.listeners.length;
 }
 
+/** Honor provider delay without silently shortening a long quota reset. */
+export function brokerRetryDelay(headers: Headers, attempt: number, now = Date.now()): number {
+  const milliseconds = Number(headers.get("retry-after-ms"));
+  if (headers.has("retry-after-ms") && Number.isFinite(milliseconds) && milliseconds >= 0) return milliseconds;
+  const value = headers.get("retry-after");
+  if (value !== null) {
+    const seconds = Number(value);
+    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+    const date = Date.parse(value);
+    if (Number.isFinite(date)) return Math.max(0, date - now);
+  }
+  return 1000 * 2 ** attempt;
+}
 const MAX_BODY = 64 * 1024 * 1024;
 const scoped = (principal: string, value: unknown) => createHash("sha256").update(`${principal}\0${String(value ?? "")}`).digest("hex");
 const json = (res: ServerResponse, status: number, error: string) => {
@@ -289,19 +303,20 @@ export function createModelBroker(config: ModelBrokerConfig, availability: Model
       if (ultrafast) exclude = await codexTierExclusions(store, shared, body.model, "ultrafast", exclude, signal, transport as typeof fetch);
       const affinity = scoped(listener.principal, body.prompt_cache_key ?? req.headers["session-id"] ?? req.headers["session_id"] ?? req.headers["x-claude-code-session-id"]);
       const retained = sticky.get(affinity);
-      const account = eligibleInteractiveAccounts(store, shared, family, exclude, body.model).find(account => account.id === retained)
+      const firstAccount = eligibleInteractiveAccounts(store, shared, family, exclude, body.model).find(account => account.id === retained)
         ?? chooseInteractiveAccount(store, shared, family, exclude, { includeCooling: true, model: body.model });
       const granted = store.accounts().filter(candidate => candidate.provider === family && !exclude.has(candidate.id) && shared.has(candidate.id));
-      if (!account && granted.length && granted.every(candidate => accountModelExcluded(store, candidate.id, body.model))) {
+      if (!firstAccount && granted.length && granted.every(candidate => accountModelExcluded(store, candidate.id, body.model))) {
         json(res, 400, noEntitledAccountError(family, body.model));
         return;
       }
-      if (!account) {
+      if (!firstAccount) {
         json(res, 503, ultrafast
           ? "No eligible shared model account advertises Ultrafast for this model. The granted pool is unavailable, out of quota, or not entitled; no slower tier was used."
           : "No eligible shared model account. The granted pool is unavailable or out of quota.");
         return;
       }
+      let account = firstAccount;
       if (sticky.size >= 4096) sticky.delete(sticky.keys().next().value!);
       sticky.set(affinity, account.id);
       lease = `broker:${listener.principal}:${randomUUID()}`;
@@ -345,32 +360,66 @@ export function createModelBroker(config: ModelBrokerConfig, availability: Model
         if (dispatchReceipt) { dispatchReceipt.httpStatus = response.status; dispatchReceipt.outcome = response.ok ? "accepted" : "rejected"; saveDispatch(dispatchReceipt); }
         return response;
       };
-      let response = await send();
+      let response: Response;
       let repaired = false, streamRejection: string | undefined;
-      if (!response.ok && credential.apiKey) {
-        const repairSignal = AbortSignal.any([signal, AbortSignal.timeout(30_000)]);
-        const repair = await repairProviderCredential(shared, account.id, await providerResponseFailure(response),
-          family === "openai-codex" && response.status === 404, repairSignal, credential.apiKey);
-        res.setHeader("x-pi-credential-repair", encodeURIComponent(repair.detail));
-        if (repair.outcome === "repaired") {
-          repaired = true;
+      const refusedAccounts = new Set<string>();
+      const retryDeadline = Date.now() + 25_000;
+      let sameAccountRetries = 0;
+      for (;;) {
+        response = await send();
+        if (!response.ok && credential.apiKey) {
+          const repairSignal = AbortSignal.any([signal, AbortSignal.timeout(30_000)]);
+          const repair = await repairProviderCredential(shared, account.id, await providerResponseFailure(response),
+            family === "openai-codex" && response.status === 404, repairSignal, credential.apiKey);
+          res.setHeader("x-pi-credential-repair", encodeURIComponent(repair.detail));
+          if (repair.outcome === "repaired") {
+            repaired = true;
+            await response.body?.cancel();
+            credential = await shared.resolve(account.id, signal);
+            authorize();
+            response = await send();
+            await quarantineProviderCredential(shared, account.id, await providerResponseFailure(response),
+              family === "openai-codex" && response.status === 404, repairSignal, credential.apiKey);
+          }
+        }
+        // Only explicit pre-stream refusal is replayable. Once any successful
+        // response reaches the client, its stream is owned by that one attempt.
+        if (response.status !== 429) break;
+        for (const { meterId, reading } of anthropicMeterReadings(Object.fromEntries(response.headers), Date.now())) {
+          store.recordMeter(account.id, meterId, reading.usedPercent, reading.resetAt, reading.at);
+        }
+        const waitMs = brokerRetryDelay(response.headers, sameAccountRetries);
+        store.setCooldown(account.id, Math.max(account.cooldownUntil ?? 0, Date.now() + waitMs), { model: body.model });
+        refusedAccounts.add(account.id);
+        const alternate = chooseInteractiveAccount(store, shared, family, new Set([...exclude, ...refusedAccounts]), { model: body.model });
+        if (alternate) {
           await response.body?.cancel();
+          store.endLease(lease!);
+          account = alternate;
+          sticky.set(affinity, account.id);
+          lease = `broker:${listener.principal}:${randomUUID()}`;
+          store.createLease(lease, account.id, "interactive");
+          usageReceipt!.accountId = account.id;
           credential = await shared.resolve(account.id, signal);
           authorize();
-          response = await send();
-          await quarantineProviderCredential(shared, account.id, await providerResponseFailure(response),
-            family === "openai-codex" && response.status === 404, repairSignal, credential.apiKey);
+          repaired = false;
+          continue;
         }
+        if (sameAccountRetries >= 2 || Date.now() + waitMs > retryDeadline
+          || response.headers.get("x-should-retry") === "false"
+          || interactiveQuotaExhausted(store, account.id, family, body.model)) break;
+        await response.body?.cancel();
+        await delay(waitMs, undefined, { signal });
+        sameAccountRetries++;
       }
       if (!response.ok && response.status !== 429) recordAccountModelUnsupported(store, account.id, body.model, await providerResponseFailure(response));
-      if (response.status === 429) store.setCooldown(account.id, Math.max(account.cooldownUntil ?? 0, Date.now() + 60_000), { model: body.model });
       // The provider admitted this request past its quota checks; a stream that fails later is not a quota refusal.
-      else if (response.ok) store.recordProviderSuccess(account.id, { model: body.model, startedAt, source: "model-broker" });
+      if (response.ok) store.recordProviderSuccess(account.id, { model: body.model, startedAt, source: "model-broker" });
       for (const { meterId, reading } of anthropicMeterReadings(Object.fromEntries(response.headers), Date.now())) {
         store.recordMeter(account.id, meterId, reading.usedPercent, reading.resetAt, reading.at);
       }
       const outgoing: Record<string, string> = dispatchReceipt ? { "x-pi-broker-dispatch-id": dispatchReceipt.id } : {};
-      for (const key of ["content-type", "retry-after", "x-request-id"]) {
+      for (const key of ["content-type", "retry-after", "retry-after-ms", "x-should-retry", "x-request-id", "request-id"]) {
         const value = response.headers.get(key);
         if (value) outgoing[key] = value;
       }

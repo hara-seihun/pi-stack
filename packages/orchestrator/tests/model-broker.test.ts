@@ -12,7 +12,7 @@ import { assignCompletion } from "../src/policy.js";
 import { noModelPolicy } from "./fixtures/model-availability.js";
 import { ModelAvailabilityStore } from "../src/threads/model-availability.js";
 import { brokerProvider, modelBrokerUrl, validateBrokerBody } from "../src/model-broker-contract.js";
-import { createModelBroker, validateBrokerConfig, type BrokerTransport } from "../src/model-broker.js";
+import { createModelBroker, validateBrokerConfig, brokerRetryDelay, type BrokerTransport } from "../src/model-broker.js";
 import { createSharedImageGenerationService } from "../src/image-service.js";
 import { loadConfig, modelBrokerUrl as publicModelBrokerUrl } from "../src/api.js";
 import * as codexUsage from "../src/meters-codex.js";
@@ -98,7 +98,7 @@ test("dispatch evidence is bounded, principal-local and distinguishes refusal fr
   await (await f.post(body())).text();
   let receipts = (await (await fetch(`${f.url}/v1/dispatches`)).json()).dispatches;
   expect(receipts).toHaveLength(128);
-  expect(receipts[0].id).toBe("seed-1");
+  expect(receipts[0].id).toBe("seed-3");
   expect(receipts.at(-1)).toMatchObject({ outcome: "rejected", httpStatus: 429 });
   status = 200;
   await (await f.post(body())).text();
@@ -669,4 +669,80 @@ test("a principal over her weekly allowance is refused before any provider call 
   await admitted.text();
   f.regrant(["shared", "anthropic-shared"]);
   expect((await (await fetch(`${f.url}/v1/usage`)).json()).allowance).toBeNull();
+});
+
+
+test("transient pre-stream 429 retries the same account after its provider delay", async () => {
+  const calls: number[] = [];
+  const f = await fixture(async () => {
+    calls.push(Date.now());
+    return calls.length === 1 ? new Response("temporary", { status: 429, headers: { "retry-after-ms": "30" } }) : sse({});
+  });
+  const response = await f.post(body());
+  expect(response.status).toBe(200); await response.text();
+  expect(calls).toHaveLength(2); expect(calls[1] - calls[0]).toBeGreaterThanOrEqual(25);
+  expect(f.store.activeLeases()).toHaveLength(0);
+});
+
+test("rate limited shared account immediately fails over to an eligible granted sibling", async () => {
+  const accounts: string[] = [];
+  const f = await fixture(async (_url, init) => {
+    const account = new Headers(init.headers).get("chatgpt-account-id")!; accounts.push(account);
+    return accounts.length === 1 ? new Response("temporary", { status: 429, headers: { "retry-after": "3600" } }) : sse({});
+  });
+  // Establish affinity to shared before adding its sibling.
+  f.store.recordMeter("owner-only", "codex-7d", 10, Date.now() + 60000, Date.now());
+  f.regrant(["shared", "owner-only"]);
+  const response = await f.post(body()); expect(response.status).toBe(200); await response.text();
+  expect(accounts).toEqual(["shared-account", "owner-account"]);
+  expect(f.store.activeLeases()).toHaveLength(0);
+  const receipts = (await (await fetch(`${f.url}/v1/dispatches`)).json()).dispatches;
+  expect(receipts.map((r: any) => [r.accountId,r.httpStatus])).toEqual([["shared",429],["owner-only",200]]);
+});
+
+test("long provider backoff is forwarded without shortening it or using an ungranted account", async () => {
+  let calls = 0;
+  const f = await fixture(async () => { calls++; return new Response("quota", { status: 429, headers: { "retry-after": "3600", "x-should-retry": "false" } }); });
+  const response = await f.post(body()); expect(response.status).toBe(429);
+  expect(response.headers.get("retry-after")).toBe("3600"); expect(response.headers.get("x-should-retry")).toBe("false");
+  expect(await response.text()).toBe("quota"); expect(calls).toBe(1);
+});
+
+test("an accepted stream carrying an error is never replayed", async () => {
+  let calls = 0;
+  const f = await fixture(async () => { calls++; return new Response('data: {"type":"error","error":{"type":"rate_limit_error","message":"429"}}\n\n', { headers: { "content-type": "text/event-stream" } }); });
+  const response = await f.post(body()); await response.text(); expect(calls).toBe(1);
+});
+
+test("provider delay parsing preserves HTTP dates and milliseconds", () => {
+  expect(brokerRetryDelay(new Headers({"retry-after-ms":"17"}),0,0)).toBe(17);
+  expect(brokerRetryDelay(new Headers({"retry-after":"Thu, 01 Jan 1970 00:01:00 GMT"}),0,0)).toBe(60000);
+  expect(brokerRetryDelay(new Headers(),1,0)).toBe(2000);
+});
+
+test("same-account retries are bounded even when the provider asks for immediate retry", async () => {
+  let calls = 0;
+  const f = await fixture(async () => { calls++; return new Response("busy", { status: 429, headers: { "retry-after-ms": "0" } }); });
+  const response = await f.post(body()); expect(response.status).toBe(429); await response.text();
+  expect(calls).toBe(3); expect(f.store.activeLeases()).toHaveLength(0);
+});
+
+test("fresh exhausted quota stops same-account replay", async () => {
+  let calls = 0;
+  const f = await fixture(async () => {
+    calls++; f.store.recordMeter("shared", "codex-7d", 100, Date.now() + 86400000, Date.now());
+    return new Response("quota exhausted", { status: 429, headers: { "retry-after-ms": "0" } });
+  });
+  const response = await f.post(body()); expect(response.status).toBe(429); await response.text();
+  expect(calls).toBe(1);
+});
+
+test("client disconnection cancels rate-limit sleep before another dispatch", async () => {
+  let calls = 0, sawRefusal!: () => void;
+  const refused = new Promise<void>(resolve => { sawRefusal = resolve; });
+  const f = await fixture(async () => { calls++; sawRefusal(); return new Response("busy", { status: 429, headers: { "retry-after": "10" } }); });
+  const cancel = new AbortController();
+  const response = fetch(`${f.url}/backend-api/codex/responses`, { method: "POST", headers: {"content-type":"application/json"}, body: JSON.stringify(body()), signal: cancel.signal });
+  await refused; cancel.abort(); await expect(response).rejects.toThrow();
+  await vi.waitFor(() => expect(f.store.activeLeases()).toHaveLength(0)); expect(calls).toBe(1);
 });
