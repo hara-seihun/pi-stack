@@ -746,3 +746,24 @@ test("client disconnection cancels rate-limit sleep before another dispatch", as
   await refused; cancel.abort(); await expect(response).rejects.toThrow();
   await vi.waitFor(() => expect(f.store.activeLeases()).toHaveLength(0)); expect(calls).toBe(1);
 });
+
+
+test("Claude over-quota headers preserve the refusal and prevent further dispatch", async () => {
+  let calls=0;
+  const reset=Math.floor(Date.now()/1000)+3600;
+  const f=await fixture(async()=>{calls++;return new Response("quota exhausted",{status:429,headers:{
+    "anthropic-ratelimit-unified-5h-utilization":"1.01",
+    "anthropic-ratelimit-unified-5h-reset":String(reset),
+    "retry-after":"3600",
+  }});});
+  const request={model:anthropicModel.id,stream:true,max_tokens:16,messages:[{role:"user",content:"hello"}]};
+  const response=await f.post(request,"/v1/messages");
+  expect(response.status).toBe(429);
+  expect(await response.text()).toBe("quota exhausted");
+  expect(f.store.latestReading("anthropic-shared","anthropic-5h")).toMatchObject({usedPercent:100,resetAt:reset*1000});
+  const next=await f.post(request,"/v1/messages");
+  expect(next.status).toBe(503);
+  expect(await next.text()).toContain("No eligible shared model account.");
+  expect(calls).toBe(1);
+  expect(f.store.activeLeases()).toHaveLength(0);
+});

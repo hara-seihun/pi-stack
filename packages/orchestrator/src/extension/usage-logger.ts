@@ -9,7 +9,20 @@ const environment=():NodeJS.ProcessEnv=>(globalThis as any)[Symbol.for("pi-stack
 export function defaultLedgerPath():string{return process.env.PI_ORCHESTRATOR_LEDGER??join(homedir(),".local/share/pi-orchestrator/ledger.sqlite3");}
 export function baseProvider(provider:string):string{return provider.replace(/-\d+$/u,"");}
 export interface MeterReading{readonly at:number;readonly usedPercent:number;readonly resetAt?:number;}
-export function anthropicMeterReadings(headers:Record<string,string>,at:number):{meterId:string;reading:MeterReading}[]{const values:ReturnType<typeof anthropicMeterReadings>=[];for(const window of ["5h","7d","7d_oi"]){const utilization=headers[`anthropic-ratelimit-unified-${window}-utilization`];if(utilization===undefined)continue;const reset=Number(headers[`anthropic-ratelimit-unified-${window}-reset`]);values.push({meterId:`anthropic-${window}`,reading:{at,usedPercent:Number(utilization)*100,resetAt:Number.isFinite(reset)?reset*1000:undefined}});}return values;}
+export function anthropicMeterReadings(headers:Record<string,string>,at:number):{meterId:string;reading:MeterReading}[]{
+  const values:ReturnType<typeof anthropicMeterReadings>=[];
+  for(const window of ["5h","7d","7d_oi"]){
+    const utilization=headers[`anthropic-ratelimit-unified-${window}-utilization`];
+    if(utilization===undefined||utilization.trim()==="")continue;
+    const fraction=Number(utilization);
+    if(!Number.isFinite(fraction)||fraction<0)continue;
+    const rawReset=headers[`anthropic-ratelimit-unified-${window}-reset`];
+    const reset=rawReset?.trim()?Number(rawReset)*1000:NaN;
+    // Provider overage (observed 1.01) means exhausted, not an invalid ledger row.
+    values.push({meterId:`anthropic-${window}`,reading:{at,usedPercent:Math.min(1,fraction)*100,resetAt:Number.isFinite(reset)&&reset>0?reset:undefined}});
+  }
+  return values;
+}
 
 export function recordModelUsage(store:Store,account:string,model:string,usage:Usage,sessionId:string):void{
   if(!store.account(account))return;
