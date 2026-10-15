@@ -3620,3 +3620,59 @@ test('sparse creation rejects linked worktrees without changing mirror configura
     assert.deepEqual(JSON.parse(run(['status', '--json'], f.env)).records, []);
   } finally { f.close(); }
 });
+
+
+test("capacity refusal recovery retains original job and admits unchanged ordinary request once under concurrency", async () => {
+  const f = fixture();
+  try {
+    const space = path.join(f.root, "space.json");
+    writeFileSync(space, JSON.stringify({ freeGiB: 1 }));
+    const loader = path.join(f.root, "capacity-loader.mjs");
+    writeFileSync(loader, `import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+const original=fs.statfsSync;
+fs.statfsSync=(...args)=>{const value=original(...args);const state=JSON.parse(fs.readFileSync(${JSON.stringify(space)},'utf8'));return {...value,bavail:Math.floor(state.freeGiB*1024**3/value.bsize)};};
+syncBuiltinESMExports();
+`);
+    const env = { ...f.env, NODE_OPTIONS: `--import=${loader}` };
+    // Build an actual source request from ordinary CLI preparation, then execute its durable worker at low capacity.
+    // Force foreground preparation into the durable path by delaying its tree scan past the bounded fast path.
+    const bin = path.join(f.root, "slow-tree"); mkdirSync(bin);
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    writeFileSync(path.join(bin, "git"), `#!${process.execPath}
+const cp=require('node:child_process');
+const args=process.argv.slice(2);
+if(!process.env.PI_WORKSPACE_SOURCE_JOB_DIR && args.includes('ls-tree')) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1800);
+const r=cp.spawnSync(${JSON.stringify(realGit)},args,{stdio:'inherit'});process.exit(r.status??1);
+`); chmodSync(path.join(bin,"git"),0o755);
+    env.PATH = `${bin}:${process.env.PATH}`;
+    const args = ["create", "--root", f.workspaces, "--name", "capacity-recovered", "--repo", f.source,
+      "--owner", "capacity-test", "--mode", "writer", "--intent", "source-only", "--headroom-gib", "8", "--growth-mib", "512", "--json"];
+    assert.throws(() => run(args, env), /GiB is free/);
+    const preparationRoot=path.join(path.dirname(f.env.PI_WORKSPACE_STATE),"source-preparations");
+    const jobs=path.join(preparationRoot,"jobs");
+    const originalJobs=readdirSync(jobs); assert.equal(originalJobs.length,1);
+    const originalDir=path.join(jobs,originalJobs[0]);
+    const preserved=Object.fromEntries(["request.json","progress.json","result.json"].map(name=>[name,readFileSync(path.join(originalDir,name),"utf8")]));
+    assert.equal(JSON.parse(preserved["result.json"]).error.code,"workspace-capacity-refused");
+    assert.equal(existsSync(path.join(f.workspaces,"capacity-recovered")),false);
+    assert.throws(() => run(args,env),/GiB is free/);
+    assert.equal(readdirSync(jobs).length,1,"unchanged shortage must not create a retry storm");
+    writeFileSync(space,JSON.stringify({freeGiB:103}));
+    const results=await Promise.all([runAsync(args,env),runAsync(args,env),runAsync(args,env)]);
+    const records=results.map(value=>JSON.parse(value));
+    assert.equal(new Set(records.map(record=>record.id)).size,1);
+    assert.equal(records[0].state,"active");
+    assert.equal(records[0].capacity.headroomBytes,8*1024**3);
+    assert.equal(records[0].capacity.growthBytes,512*1024**2);
+    assert.equal(readdirSync(jobs).length,2);
+    for(const [name,bytes] of Object.entries(preserved)) assert.equal(readFileSync(path.join(originalDir,name),"utf8"),bytes);
+    const retryId=readdirSync(jobs).find(id=>id!==originalJobs[0]);
+    const retry=JSON.parse(readFileSync(path.join(jobs,retryId,"request.json"),"utf8"));
+    assert.equal(retry.recovery.previousJobId,originalJobs[0]);
+    assert.equal(retry.recovery.observation.freeBytes,103*1024**3);
+    assert.equal(JSON.parse(readFileSync(path.join(jobs,retryId,"result.json"),"utf8")).state,"ready");
+    assert.equal(JSON.parse(run(["status","--json"],env)).records.length,1);
+    run(["release","--id",records[0].id,"--json"],env);
+  } finally { f.close(); }
+});

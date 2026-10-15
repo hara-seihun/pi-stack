@@ -26,7 +26,8 @@ import { homedir, tmpdir, userInfo } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
-import { runSourceJob, readSourceJobRequest, writeSourceJobProgress, finishSourceJob } from "./source-job.mjs";
+import { runSourceJob, readSourceJobRequest, writeSourceJobProgress, finishSourceJob, sourceJobId } from "./source-job.mjs";
+import { capacityRecovery } from "./capacity-recovery.mjs";
 
 class SourcePreparationRequired extends Error {}
 let sourcePreparationMode = null;
@@ -1960,7 +1961,7 @@ function assertCapacity(root, args, database, reservedPath, plan) {
   const freeBytes = stats.bavail * stats.bsize;
   const minimum = Math.ceil(numberFlag(args, "min-free-gib", DEFAULT_MIN_FREE_GIB) * 1024 ** 3);
   const requirement = capacityRequirement(plan ?? { intent: "unestimated", constructionBytes: minimum, headroomBytes: 0, growthBytes: 0 }, reservations.priced, reservations.headroomBytes);
-  if (freeBytes < requirement) fail(`${(freeBytes / 1024 ** 3).toFixed(2)} GiB is free; ${(requirement / 1024 ** 3).toFixed(2)} GiB is required${plan?.intent !== undefined && plan.intent !== "unestimated" ? " (source forecast + declared growth + operating headroom + other reservations)" : " (unestimated full work + other reservations)"}`);
+  if (freeBytes < requirement) throw Object.assign(new CliError(`${(freeBytes / 1024 ** 3).toFixed(2)} GiB is free; ${(requirement / 1024 ** 3).toFixed(2)} GiB is required${plan?.intent !== undefined && plan.intent !== "unestimated" ? " (source forecast + declared growth + operating headroom + other reservations)" : " (unestimated full work + other reservations)"}`), { code: "workspace-capacity-refused" });
   const freeInodes = stats.files > 0 ? 100 * stats.ffree / stats.files : 100;
   const minFreeInodes = numberFlag(args, "min-free-inodes-percent", DEFAULT_MIN_FREE_INODES_PERCENT);
   if (freeInodes < minFreeInodes) fail(`${freeInodes.toFixed(2)}% of inodes are free; ${minFreeInodes.toFixed(2)}% is required`);
@@ -2343,25 +2344,41 @@ function prepareCreationSource(database, args, input) {
   const pointerPath = path.join(directory, `${key}.job.json`);
   let pointer = existsSync(pointerPath) ? JSON.parse(readFileSync(pointerPath, "utf8")) : null;
   const observeJob = () => runSourceJob({ directory: path.join(directory, "jobs"), key,
-    request: { ...request, initialStamp: pointer.initialStamp, receipt },
+    request: { ...request, initialStamp: pointer.initialStamp, receipt, ...(pointer.recovery ? { recovery: pointer.recovery } : {}) },
     command: [process.execPath, new URL(import.meta.url).pathname, "source-prepare"], env: {}, waitMs: 2000, restartInterrupted: true });
   const accepted = job => {
     if (job.jobId && pointer.jobId !== job.jobId) writePreparationReceipt(pointerPath, { ...pointer, jobId: job.jobId });
-    if (job.state === "failed" || job.state === "interrupted") fail(`source preparation ${job.state}: ${job.error?.code}: ${job.error?.message}; progress ${job.progressPath}`);
+    if (job.state === "failed" || job.state === "interrupted") fail(`source preparation ${job.state}: ${job.error?.code}: ${job.error?.message}; job ${pointer.jobId}; progress ${job.progressPath ?? path.join(directory, "jobs", pointer.jobId, "progress.json")}`);
     return job;
   };
+  if (pointer !== null && !pointer.jobId) {
+    pointer = { ...pointer, jobId: sourceJobId(key, { ...request, initialStamp: pointer.initialStamp, receipt,
+      ...(pointer.recovery ? { recovery: pointer.recovery } : {}) }) };
+    writePreparationReceipt(pointerPath, pointer);
+  }
   if (pointer !== null && pointer.jobId) {
     const terminalPath = path.join(directory, "jobs", pointer.jobId, "result.json");
     if (!existsSync(terminalPath)) return accepted(observeJob());
     const terminal = JSON.parse(readFileSync(terminalPath, "utf8"));
-    if (terminal.state !== "ready") return accepted(observeJob());
-    if (terminal.value.stamp !== stamp) pointer = null;
+    if (terminal.state !== "ready") {
+      const stats = statfsSync(input.root);
+      const observation = { observedAt: Date.now(), device: String(statSync(input.root).dev),
+        freeBytes: stats.bavail * stats.bsize, freeInodes: stats.ffree, totalInodes: stats.files };
+      const recovery = capacityRecovery(terminal, pointer.jobId, observation);
+      if (recovery.state === "invalid") fail(`${recovery.error.code}: ${recovery.error.message}`);
+      if (recovery.state !== "retry") return accepted(observeJob());
+      const previous = pointer;
+      pointer = { initialStamp: stamp, recovery: recovery.value };
+      writePreparationReceipt(path.join(directory, "recoveries", `${recovery.value.id}.json`), { previous, next: pointer });
+      writePreparationReceipt(pointerPath, pointer);
+    }
+    if (terminal.state === "ready" && terminal.value.stamp !== stamp) pointer = null;
   }
   let value;
   try {
     sourcePreparationMode = "foreground";
     sourcePreparationDeadline = Date.now() + 1500;
-    value = prepareSourceValue(database, args, request);
+    if (!pointer?.recovery) value = prepareSourceValue(database, args, request);
   } catch (error) {
     if (!(error instanceof SourcePreparationRequired)) throw error;
   } finally {
@@ -2377,6 +2394,10 @@ function prepareCreationSource(database, args, input) {
     pointer = { initialStamp: stamp };
     writePreparationReceipt(pointerPath, pointer);
   }
+  const jobRequest = { ...request, initialStamp: pointer.initialStamp, receipt,
+    ...(pointer.recovery ? { recovery: pointer.recovery } : {}) };
+  pointer = { ...pointer, jobId: sourceJobId(key, jobRequest) };
+  writePreparationReceipt(pointerPath, pointer);
   const job = accepted(observeJob());
   if (job.state === "ready" && job.value.stamp !== objectStoreStamp(input.mirror)) fail("source changed during preparation; repeat the original request");
   return job;
@@ -2403,7 +2424,7 @@ function sourcePreparationWorker() {
     const result = finishSourceJob(directory, { state: "ready", value });
     if (!result.ok) fail(result.error.message);
   } catch (error) {
-    finishSourceJob(directory, { state: "failed", error: { code: "source-preparation-failed", message: error.message } });
+    finishSourceJob(directory, { state: "failed", error: { code: error.code === "workspace-capacity-refused" ? error.code : "source-preparation-failed", message: error.message } });
     throw error;
   } finally { database.close(); }
 }

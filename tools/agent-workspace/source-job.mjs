@@ -146,6 +146,10 @@ function readTerminal(directory) {
   return result.present ? terminal(result.value) : undefined;
 }
 
+export function sourceJobId(key, request) {
+  return createHash("sha256").update(canonical({ key, request })).digest("hex");
+}
+
 /** Sync, bounded submission/observation; only systemd owns the preparation process tree. */
 export function runSourceJob({ directory, key, request, command, env = {}, waitMs = 2000, restartInterrupted = false, cleanupCommand = [], restartAbnormal = false }) {
   let database;
@@ -167,7 +171,7 @@ export function runSourceJob({ directory, key, request, command, env = {}, waitM
     catch { return failure("source-job-invalid-request", "source job request must contain only finite JSON values"); }
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const root = realpathSync(directory);
-    const jobId = createHash("sha256").update(identity).digest("hex");
+    const jobId = sourceJobId(key, request);
     const jobDirectory = path.join(root, jobId);
     mkdirSync(jobDirectory, { recursive: true, mode: 0o700 });
     chmodSync(jobDirectory, 0o700);
