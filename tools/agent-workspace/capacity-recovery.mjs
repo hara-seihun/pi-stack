@@ -13,9 +13,6 @@ export function capacityRecovery(terminal, previousJobId, observation) {
     || !Number.isSafeInteger(observation.totalInodes)) {
     return { state: "invalid", error: { code: "capacity-recovery-invalid-observation", message: "capacity recovery requires fresh filesystem evidence and the original job identity" } };
   }
-  // Rounding uncertainty is one half display unit. The worker repeats every actual guard under its capacity fence.
-  const requiredUpperBytes = Math.ceil((Number(refusal[2]) + 0.005) * 1024 ** 3);
-  if (observation.freeBytes < requiredUpperBytes) return { state: "capacity-unavailable", observation };
   return { state: "retry", value: { kind: "capacity-recovery", id: randomUUID(), previousJobId,
-    originalRefusal: terminal.error, observation, requiredUpperBytes } };
+    originalRefusal: terminal.error, observation } };
 }

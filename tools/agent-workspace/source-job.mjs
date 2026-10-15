@@ -166,8 +166,7 @@ export function runSourceJob({ directory, key, request, command, env = {}, waitM
         || typeof value !== "string" || value.includes("\0"))) {
       return failure("source-job-invalid-request", "source job requires an absolute registry directory, key, JSON request, absolute command, string environment and bounded waitMs (0–5000)");
     }
-    let identity;
-    try { identity = canonical({ key, request }); }
+    try { canonical({ key, request }); }
     catch { return failure("source-job-invalid-request", "source job request must contain only finite JSON values"); }
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const root = realpathSync(directory);

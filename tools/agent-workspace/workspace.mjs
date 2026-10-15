@@ -1759,10 +1759,14 @@ function sourceCapacityPlan(repository, sourceCommit, intent, blockSize, mirror,
   return { ...plan, constructionBytes, sourceImportBytes };
 }
 
-function sourceCheckoutCapacity(repository, sourceCommit, intent, blockSize, sparsePatterns = []) {
-  if (!Number.isSafeInteger(blockSize) || blockSize <= 0) fail("source capacity estimate unknown: invalid filesystem allocation unit");
+function assertSourceCheckoutFilters(repository) {
   const filters = command("git", ["-C", repository, "config", "--get-regexp", "^filter\\..*\\.(smudge|process)$"]);
   if (filters.status !== 1) fail("source capacity estimate unknown: configured checkout filters need an independently budgeted installer");
+}
+
+function sourceCheckoutCapacity(repository, sourceCommit, intent, blockSize, sparsePatterns = []) {
+  if (!Number.isSafeInteger(blockSize) || blockSize <= 0) fail("source capacity estimate unknown: invalid filesystem allocation unit");
+  assertSourceCheckoutFilters(repository);
   const { entries, selected } = sourceTree(repository, sourceCommit, sparsePatterns);
   let constructionBytes = 16 * 1024 ** 2;
   for (const { size, name } of entries) {
@@ -1961,7 +1965,7 @@ function assertCapacity(root, args, database, reservedPath, plan) {
   const freeBytes = stats.bavail * stats.bsize;
   const minimum = Math.ceil(numberFlag(args, "min-free-gib", DEFAULT_MIN_FREE_GIB) * 1024 ** 3);
   const requirement = capacityRequirement(plan ?? { intent: "unestimated", constructionBytes: minimum, headroomBytes: 0, growthBytes: 0 }, reservations.priced, reservations.headroomBytes);
-  if (freeBytes < requirement) throw Object.assign(new CliError(`${(freeBytes / 1024 ** 3).toFixed(2)} GiB is free; ${(requirement / 1024 ** 3).toFixed(2)} GiB is required${plan?.intent !== undefined && plan.intent !== "unestimated" ? " (source forecast + declared growth + operating headroom + other reservations)" : " (unestimated full work + other reservations)"}`), { code: "workspace-capacity-refused" });
+  if (freeBytes < requirement) throw Object.assign(new CliError(`${(freeBytes / 1024 ** 3).toFixed(2)} GiB is free; ${(requirement / 1024 ** 3).toFixed(2)} GiB is required${plan?.intent !== undefined && plan.intent !== "unestimated" ? " (source forecast + declared growth + operating headroom + other reservations)" : " (unestimated full work + other reservations)"}`), { code: "workspace-capacity-refused", capacity: { freeBytes, requiredBytes: requirement, device, observedAt: Date.now() } });
   const freeInodes = stats.files > 0 ? 100 * stats.ffree / stats.files : 100;
   const minFreeInodes = numberFlag(args, "min-free-inodes-percent", DEFAULT_MIN_FREE_INODES_PERCENT);
   if (freeInodes < minFreeInodes) fail(`${freeInodes.toFixed(2)}% of inodes are free; ${minFreeInodes.toFixed(2)}% is required`);
@@ -2312,13 +2316,28 @@ function prepareSharedSourceClone(destination, repository, sourceCommit, input, 
 function prepareSourceValue(database, args, request) {
   const { statePath, root, destination, repository, upstream, mirror, intent, sparsePatterns, sourceCommit } = request;
   if (sourceJobDirectory !== null) writeSourceJobProgress(sourceJobDirectory, { phase: "forecasting", commit: sourceCommit });
-  let plan = intent === null
+  const blockSize = statfsSync(root).bsize;
+  const forecastPath = `${request.receipt}.forecast.json`;
+  const inputs = { repository, sourceCommit, intent, sparsePatterns, blockSize, stamp: objectStoreStamp(mirror) };
+  const cached = existsSync(forecastPath) ? JSON.parse(readFileSync(forecastPath, "utf8")) : null;
+  const fingerprint = sourceJobId("source-forecast", inputs);
+  let plan = cached !== null && cached.fingerprint === fingerprint ? cached.plan : intent === null
     ? { intent: "unestimated", estimate: "unknown", constructionBytes: Math.ceil(numberFlag(args, "min-free-gib", DEFAULT_MIN_FREE_GIB) * 1024 ** 3), growthBytes: 0, headroomBytes: 0 }
-    : sourceCapacityPlan(repository, sourceCommit, intent, statfsSync(root).bsize, mirror, sparsePatterns);
+    : sourceCapacityPlan(repository, sourceCommit, intent, blockSize, mirror, sparsePatterns);
+  if (cached !== null && cached.fingerprint === fingerprint && intent !== null) {
+    assertSourceCheckoutFilters(existsSync(repository) ? repository : mirror);
+  }
+  const forecast = { inputs, fingerprint, plan };
+  writePreparationReceipt(forecastPath, forecast);
   const device = String(statSync(root).dev);
   let resolvedCommit;
   withResourceLock(statePath, `capacity:${device}`, () => {
-    plan.admission = assertCapacity(root, args, database, destination, plan);
+    try { plan.admission = assertCapacity(root, args, database, destination, plan); }
+    catch (error) {
+      if (error.code === "workspace-capacity-refused") writePreparationReceipt(forecastPath,
+        { ...forecast, refusal: { code: error.code, capacity: error.capacity } });
+      throw error;
+    }
     resolvedCommit = resolveSource(statePath, mirror, repository, upstream, sourceCommit, sparsePatterns);
     if (!resolvedCommit.startsWith(sourceCommit)) fail("source preparation changed the requested commit");
   });
@@ -2367,8 +2386,19 @@ function prepareCreationSource(database, args, input) {
       const recovery = capacityRecovery(terminal, pointer.jobId, observation);
       if (recovery.state === "invalid") fail(`${recovery.error.code}: ${recovery.error.message}`);
       if (recovery.state !== "retry") return accepted(observeJob());
+      try {
+        sourcePreparationMode = "foreground";
+        sourcePreparationDeadline = Date.now() + 1500;
+        const fresh = prepareSourceValue(database, args, { ...request, receipt });
+        recovery.value.admission = fresh.plan.admission;
+      } catch (error) {
+        if (!(error instanceof SourcePreparationRequired)) throw error;
+      } finally {
+        sourcePreparationMode = null;
+        sourcePreparationDeadline = Infinity;
+      }
       const previous = pointer;
-      pointer = { initialStamp: stamp, recovery: recovery.value };
+      pointer = { initialStamp: objectStoreStamp(input.mirror), recovery: recovery.value };
       writePreparationReceipt(path.join(directory, "recoveries", `${recovery.value.id}.json`), { previous, next: pointer });
       writePreparationReceipt(pointerPath, pointer);
     }
@@ -2378,7 +2408,7 @@ function prepareCreationSource(database, args, input) {
   try {
     sourcePreparationMode = "foreground";
     sourcePreparationDeadline = Date.now() + 1500;
-    if (!pointer?.recovery) value = prepareSourceValue(database, args, request);
+    if (!pointer?.recovery) value = prepareSourceValue(database, args, { ...request, receipt });
   } catch (error) {
     if (!(error instanceof SourcePreparationRequired)) throw error;
   } finally {

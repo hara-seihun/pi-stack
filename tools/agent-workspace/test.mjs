@@ -3622,19 +3622,26 @@ test('sparse creation rejects linked worktrees without changing mirror configura
 });
 
 
-test("capacity refusal recovery retains original job and admits unchanged ordinary request once under concurrency", async () => {
+for (const recoveryMode of ["disk", "released-reservation", "exact-boundary"]) test(`capacity refusal recovery ${recoveryMode} retains original job and admits unchanged ordinary request once under concurrency`, async () => {
   const f = fixture();
   try {
     const space = path.join(f.root, "space.json");
-    writeFileSync(space, JSON.stringify({ freeGiB: 1 }));
+    writeFileSync(space, JSON.stringify({ freeGiB: recoveryMode === "released-reservation" ? 9 : 1 }));
     const loader = path.join(f.root, "capacity-loader.mjs");
     writeFileSync(loader, `import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 const original=fs.statfsSync;
-fs.statfsSync=(...args)=>{const value=original(...args);const state=JSON.parse(fs.readFileSync(${JSON.stringify(space)},'utf8'));return {...value,bavail:Math.floor(state.freeGiB*1024**3/value.bsize)};};
+fs.statfsSync=(...args)=>{const value=original(...args);const state=JSON.parse(fs.readFileSync(${JSON.stringify(space)},'utf8'));return {...value,bavail:Math.floor((state.freeBytes ?? state.freeGiB*1024**3)/value.bsize)};};
 syncBuiltinESMExports();
 `);
     const env = { ...f.env, NODE_OPTIONS: `--import=${loader}` };
+    let blocker = null;
+    if (recoveryMode === "released-reservation") {
+      writeFileSync(space,JSON.stringify({freeGiB:103}));
+      blocker = JSON.parse(run(["create", "--root", f.workspaces, "--name", "other-budget", "--repo", f.source,
+        "--intent", "budgeted", "--headroom-gib", "8", "--growth-mib", "2048", "--json"], env));
+      writeFileSync(space,JSON.stringify({freeGiB:9}));
+    }
     // Build an actual source request from ordinary CLI preparation, then execute its durable worker at low capacity.
     // Force foreground preparation into the durable path by delaying its tree scan past the bounded fast path.
     const bin = path.join(f.root, "slow-tree"); mkdirSync(bin);
@@ -3642,7 +3649,7 @@ syncBuiltinESMExports();
     writeFileSync(path.join(bin, "git"), `#!${process.execPath}
 const cp=require('node:child_process');
 const args=process.argv.slice(2);
-if(!process.env.PI_WORKSPACE_SOURCE_JOB_DIR && args.includes('ls-tree')) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1800);
+const fs=require('node:fs'); const marker=${JSON.stringify(path.join(f.root,'tree-delayed'))};\nif(!process.env.PI_WORKSPACE_SOURCE_JOB_DIR && args.includes('ls-tree') && !fs.existsSync(marker)) { fs.writeFileSync(marker,'once'); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1800); }
 const r=cp.spawnSync(${JSON.stringify(realGit)},args,{stdio:'inherit'});process.exit(r.status??1);
 `); chmodSync(path.join(bin,"git"),0o755);
     env.PATH = `${bin}:${process.env.PATH}`;
@@ -3651,28 +3658,44 @@ const r=cp.spawnSync(${JSON.stringify(realGit)},args,{stdio:'inherit'});process.
     assert.throws(() => run(args, env), /GiB is free/);
     const preparationRoot=path.join(path.dirname(f.env.PI_WORKSPACE_STATE),"source-preparations");
     const jobs=path.join(preparationRoot,"jobs");
-    const originalJobs=readdirSync(jobs); assert.equal(originalJobs.length,1);
+    const jobsBefore = readdirSync(jobs);
+    const originalJobs=jobsBefore.filter(id=>JSON.parse(readFileSync(path.join(jobs,id,"result.json"),"utf8")).state==="failed"); assert.equal(originalJobs.length,1);
     const originalDir=path.join(jobs,originalJobs[0]);
     const preserved=Object.fromEntries(["request.json","progress.json","result.json"].map(name=>[name,readFileSync(path.join(originalDir,name),"utf8")]));
     assert.equal(JSON.parse(preserved["result.json"]).error.code,"workspace-capacity-refused");
     assert.equal(existsSync(path.join(f.workspaces,"capacity-recovered")),false);
     assert.throws(() => run(args,env),/GiB is free/);
-    assert.equal(readdirSync(jobs).length,1,"unchanged shortage must not create a retry storm");
-    writeFileSync(space,JSON.stringify({freeGiB:103}));
+    assert.equal(readdirSync(jobs).length,jobsBefore.length,"unchanged shortage must not create a retry storm");
+    let recoveredBytes = 103 * 1024 ** 3;
+    if (recoveryMode === "released-reservation") {
+      run(["release","--id",blocker.id,"--json"],env);
+      recoveredBytes = 9 * 1024 ** 3;
+    } else if (recoveryMode === "exact-boundary") {
+      const forecastFile = readdirSync(preparationRoot).find(name=>name.endsWith(".forecast.json"));
+      const forecast = JSON.parse(readFileSync(path.join(preparationRoot,forecastFile),"utf8"));
+      const blockSize = forecast.inputs.blockSize;
+      recoveredBytes = (Math.ceil(forecast.refusal.capacity.requiredBytes/blockSize)+1)*blockSize;
+      assert.ok(recoveredBytes < (Number(JSON.parse(preserved["result.json"]).error.message.match(/; ([0-9.]+) GiB/)[1])+0.005)*1024**3);
+    }
+    writeFileSync(space,JSON.stringify({freeBytes:recoveredBytes}));
+    // A pre-update fast terminal pointer may lack jobId; reconstruct it without changing its original terminal.
+    const pointerFile=readdirSync(preparationRoot).find(name=>name.endsWith(".job.json") && JSON.parse(readFileSync(path.join(preparationRoot,name),"utf8")).jobId===originalJobs[0]);
+    const pointer=JSON.parse(readFileSync(path.join(preparationRoot,pointerFile),"utf8")); delete pointer.jobId;
+    writeFileSync(path.join(preparationRoot,pointerFile),JSON.stringify(pointer));
     const results=await Promise.all([runAsync(args,env),runAsync(args,env),runAsync(args,env)]);
     const records=results.map(value=>JSON.parse(value));
     assert.equal(new Set(records.map(record=>record.id)).size,1);
     assert.equal(records[0].state,"active");
     assert.equal(records[0].capacity.headroomBytes,8*1024**3);
     assert.equal(records[0].capacity.growthBytes,512*1024**2);
-    assert.equal(readdirSync(jobs).length,2);
+    assert.equal(readdirSync(jobs).length,jobsBefore.length+1);
     for(const [name,bytes] of Object.entries(preserved)) assert.equal(readFileSync(path.join(originalDir,name),"utf8"),bytes);
-    const retryId=readdirSync(jobs).find(id=>id!==originalJobs[0]);
+    const retryId=readdirSync(jobs).find(id=>!jobsBefore.includes(id));
     const retry=JSON.parse(readFileSync(path.join(jobs,retryId,"request.json"),"utf8"));
     assert.equal(retry.recovery.previousJobId,originalJobs[0]);
-    assert.equal(retry.recovery.observation.freeBytes,103*1024**3);
+    assert.equal(retry.recovery.observation.freeBytes,recoveredBytes);
     assert.equal(JSON.parse(readFileSync(path.join(jobs,retryId,"result.json"),"utf8")).state,"ready");
-    assert.equal(JSON.parse(run(["status","--json"],env)).records.length,1);
+    assert.equal(JSON.parse(run(["status","--json"],env)).records.filter(record=>record.state==="active").length,1);
     run(["release","--id",records[0].id,"--json"],env);
   } finally { f.close(); }
 });
