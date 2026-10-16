@@ -1,14 +1,33 @@
 #!/usr/bin/env bash
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
-[[ $# == 1 ]] || { echo 'usage: deploy/runtime-subscription-only PI_SERVICE_ROOT' >&2; exit 64; }
-base=$(realpath "$1")
+if [[ $# == 1 ]]; then
+  source_kind=checkout
+  base=$(realpath "$1")
+elif [[ $# == 3 && $1 == --artifact ]]; then
+  source_kind=artifact
+  base=$(realpath "$2")
+  manifest=$(realpath "$3")
+else
+  echo 'usage: deploy/runtime-subscription-only PI_SERVICE_ROOT | --artifact PI_SERVICE_ROOT MANIFEST' >&2; exit 64
+fi
 [[ $EUID == 0 ]] || { echo 'runtime installation requires the owning root account' >&2; exit 77; }
 exec 9>"$base/.pi-stack-deploy.lock"
 flock -n 9 || exit 75
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$root" GIT_OPTIONAL_LOCKS=0
-commit=$(git -C "$root" rev-parse HEAD)
-[[ -z $(git -C "$root" status --porcelain) ]] || { echo 'source must be committed and clean' >&2; exit 65; }
+if [[ $source_kind == checkout ]]; then
+  commit=$(git -C "$root" rev-parse HEAD)
+  [[ -z $(git -C "$root" status --porcelain) ]] || { echo 'source must be committed and clean' >&2; exit 65; }
+else
+  commit=$(node - "$root" "$manifest" <<'NODE'
+const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+const root=process.argv[2], m=JSON.parse(fs.readFileSync(process.argv[3],'utf8'));
+if(!/^[0-9a-f]{40}$/.test(m.source))throw Error('Invalid artifact source');
+for(const f of m.files){if(f.path.startsWith('/')||f.path.split('/').includes('..'))throw Error('Invalid artifact path');if(crypto.createHash('sha256').update(fs.readFileSync(path.join(root,f.path))).digest('hex')!==f.sha256)throw Error('Artifact hash mismatch');}
+console.log(m.source);
+NODE
+)
+fi
 runtime=$(readlink -f "$base/runtime")
 orchestrator=$(readlink -f "$base/pi-orchestrator")
 modules=$(readlink -f "$runtime/node_modules")
