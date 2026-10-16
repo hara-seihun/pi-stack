@@ -2,7 +2,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { runJobs } from "../../scripts/run-jobs.mjs";
 
 const shardCount = 24;
-export const workspaceChecks = [["agent workspace capacity recovery", process.execPath,
+export const workspaceChecks = [["agent workspace retained growth lifecycle", process.execPath, ["--test", fileURLToPath(new URL("./growth-lifecycle.test.mjs", import.meta.url))]], ["agent workspace capacity recovery", process.execPath,
   ["--test", fileURLToPath(new URL("./capacity-recovery.test.mjs", import.meta.url))]], ["agent workspace component deployment", process.execPath,
   ["--test", fileURLToPath(new URL("./deploy.test.mjs", import.meta.url))]],
   ["agent workspace durable source preparation", process.execPath,

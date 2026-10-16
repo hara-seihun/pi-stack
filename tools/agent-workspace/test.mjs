@@ -3779,3 +3779,51 @@ const r=cp.spawnSync(${JSON.stringify(realGit)},args,{stdio:'inherit'});process.
     run(["release","--id",records[0].id,"--json"],env);
   } finally { f.close(); }
 });
+
+test("capacity projection preserves admitted local-mirror writer on register and refused transitions", () => {
+  const f = fixture();
+  try {
+    const record = JSON.parse(run(["create", "--root", f.workspaces, "--name", "capacity-projection", "--repo", f.source,
+      "--owner", "author", "--intent", "budgeted", "--headroom-gib", "1", "--growth-mib", "8", "--json"], f.env));
+    writeFileSync(path.join(record.path, "file.txt"), "dirty source retained\n");
+    const alternate = path.join(record.path, ".git/objects/info/alternates");
+    const beforeAlternate = readFileSync(alternate, "utf8");
+    const database = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    const stored = () => ({workspace: database.prepare("SELECT * FROM workspace WHERE id=?").get(record.id),
+      capacity: database.prepare("SELECT * FROM workspace_capacity WHERE workspace_id=?").get(record.id),
+      sample: database.prepare("SELECT * FROM workspace_capacity_measurement WHERE workspace_id=?").get(record.id)});
+    const before = stored();
+    const refreshed = JSON.parse(run(["register", "--path", record.path, "--owner", "author", "--source-commit", record.sourceCommit, "--json"], f.env));
+    assert.deepEqual(refreshed.capacity, JSON.parse(before.capacity.plan_json));
+    const after = stored();
+    assert.deepEqual(after.capacity, before.capacity);
+    assert.deepEqual(after.sample, before.sample);
+    for (const field of Object.keys(before.workspace).filter(key => key !== "updated_at")) assert.deepEqual(after.workspace[field], before.workspace[field], field);
+    const status = JSON.parse(run(["status", "--path", record.path, "--json"], f.env)).records[0];
+    assert.deepEqual(status.capacity, refreshed.capacity);
+    for (const flags of [["--owner", "other"], ["--source-commit", "a".repeat(40)], ["--group", "conflict", "--owner", "other"]]) {
+      assert.throws(() => run(["register", "--path", record.path, ...flags, "--json"], f.env));
+      assert.deepEqual(stored(), after);
+    }
+    run(["measure-capacity", "--id", record.id, "--json"], f.env);
+    const measured = stored();
+    for (const [headroom, growth] of [["0.5", "1"], ["1", "1048576"]]) {
+      assert.throws(() => run(["reprice-capacity", "--id", record.id, "--intent", "budgeted", "--headroom-gib", headroom, "--growth-mib", growth, "--json"], f.env));
+      assert.deepEqual(stored(), measured);
+    }
+    assert.equal(readFileSync(path.join(record.path, "file.txt"), "utf8"), "dirty source retained\n");
+    assert.equal(readFileSync(alternate, "utf8"), beforeAlternate);
+    database.close();
+  } finally { f.close(); }
+});
+
+test("capacity projection explicitly reports unset for new and refreshed registration", () => {
+  const f = fixture();
+  try {
+    const first = JSON.parse(run(["register", "--path", f.source, "--owner", "author", "--json"], f.env));
+    assert.equal(first.capacity, null);
+    const refreshed = JSON.parse(run(["register", "--path", f.source, "--json"], f.env));
+    assert.equal(refreshed.capacity, null);
+    assert.equal(JSON.parse(run(["status", "--path", f.source, "--json"], f.env)).records[0].capacity, null);
+  } finally { f.close(); }
+});
