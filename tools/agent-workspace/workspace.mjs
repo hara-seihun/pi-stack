@@ -1827,8 +1827,11 @@ function importBaseCommits(repository, sourceCommit, mirror) {
     const tips = [...new Set(git(mirror, ["for-each-ref", "--sort=-committerdate", "--format=%(objectname)"]).split("\n").filter(Boolean))];
     // Bound qualification work; omitting older tips only overestimates import.
     for (const tip of tips.slice(0, 16)) {
-      if (command("git", ["-C", repository, "merge-base", "--is-ancestor", tip, sourceCommit]).status === 0
-        && hasObjectClosure(mirror, tip)) baseCommits.push(tip);
+      const common = command("git", ["-C", repository, "merge-base", "--all", tip, sourceCommit]);
+      if (common.status !== 0) continue;
+      for (const base of common.stdout.split("\n").filter(Boolean)) {
+        if (!baseCommits.includes(base) && hasObjectClosure(mirror, base)) baseCommits.push(base);
+      }
     }
   }
   return baseCommits;
@@ -2379,7 +2382,7 @@ function prepareSourceValue(database, args, request) {
   if (sourceJobDirectory !== null) writeSourceJobProgress(sourceJobDirectory, { phase: "forecasting", commit: sourceCommit });
   const blockSize = statfsSync(root).bsize;
   const forecastPath = `${request.receipt}.forecast.json`;
-  const inputs = { version: 2, repository, sourceCommit, intent, sparsePatterns, blockSize, stamp: objectStoreStamp(mirror) };
+  const inputs = { version: 3, repository, sourceCommit, intent, sparsePatterns, blockSize, stamp: objectStoreStamp(mirror) };
   const cached = existsSync(forecastPath) ? JSON.parse(readFileSync(forecastPath, "utf8")) : null;
   const fingerprint = sourceJobId("source-forecast", inputs);
   let plan = cached !== null && cached.fingerprint === fingerprint ? cached.plan : intent === null

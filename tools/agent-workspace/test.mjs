@@ -3838,6 +3838,14 @@ test("qualified ancestral custody prices and fetches only receiver delta", () =>
     const seed = JSON.parse(run(["create", "--root", f.workspaces, "--name", "delta-seed", "--repo", f.source, "--ref", base,
       "--intent", "source-only", "--headroom-gib", "1", "--growth-mib", "8", "--json"], f.env));
     const mirror = path.dirname(readFileSync(path.join(seed.path, ".git/objects/info/alternates"), "utf8").trim());
+    git(f.source, "checkout", "-b", "sibling");
+    writeFileSync(path.join(f.source, "sibling.txt"), "other branch\n");
+    git(f.source, "add", "."); git(f.source, "commit", "-m", "divergent sibling");
+    git(mirror, "fetch", f.source, "sibling:refs/heads/sibling");
+    for (const ref of git(mirror, "for-each-ref", "--format=%(refname)").split("\n")) {
+      if (ref !== "refs/heads/sibling") git(mirror, "update-ref", "-d", ref);
+    }
+    git(f.source, "checkout", "main");
     writeFileSync(path.join(f.source, "receiver.txt"), "receiver delta\n");
     git(f.source, "add", "."); git(f.source, "commit", "-m", "receiver delta");
     const receiver = git(f.source, "rev-parse", "HEAD");
