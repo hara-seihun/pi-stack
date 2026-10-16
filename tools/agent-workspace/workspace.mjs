@@ -50,6 +50,8 @@ const DEFAULT_CACHE_PATHS = [
   ".converge-cache",
   "build",
   "**/build",
+  ".gradle",
+  "**/.gradle",
   "**/__pycache__",
   "**/.pytest_cache",
   "**/.mypy_cache",
@@ -1078,7 +1080,7 @@ function repositoryManifestCachePaths(workspacePath) {
 }
 
 function effectiveCachePaths(record) {
-  return [...new Set([...record.cachePaths, ...repositoryManifestCachePaths(record.path)])];
+  return [...new Set([...DEFAULT_CACHE_PATHS, ...record.cachePaths, ...repositoryManifestCachePaths(record.path)])];
 }
 
 function stripCaches(record, statePath, invalidateCapacity) {
@@ -1389,9 +1391,10 @@ function groupReconciliation(database, records, options) {
 function blockedReconciliation(database, records, error, execute) {
   const detail = error instanceof Error ? error.message : String(error);
   return records.map((record) => {
-    if (execute && record.state !== "creating" && !(error instanceof ResourceBusyError)) updateState(database, record, "blocked", detail);
+    const current = execute && record.state !== "creating" && !(error instanceof ResourceBusyError)
+      ? updateState(database, record, "blocked", detail) : record;
     return {
-      record,
+      record: current,
       inspection: { classification: "blocked", reason: detail, processes: [], containers: [], systemdUnits: [] },
       action: "none",
     };
@@ -1432,7 +1435,11 @@ function reconcileRecords(database, selected, options) {
         const maintenance = duringInspection(options.deadline, () => new Map(current.map((record) => [record.id, maintainReferenceClone(record.path, options.execute, options.statePath)])));
         const reconciled = current.length > 1 ? groupReconciliation(database, current, options)
           : current.length === 1 ? [reconcileRecord(database, current[0], options)] : [];
-        return reconciled.map((result) => ({ ...result, gitMaintenance: maintenance.get(result.record.id) }));
+        return reconciled.map((result) => ({
+          ...result,
+          record: options.execute ? recordBy(database, { id: result.record.id }) : result.record,
+          gitMaintenance: maintenance.get(result.record.id),
+        }));
       }, selectedRecord.groupId, options.deadline));
     } catch (error) {
       results.push(...blockedReconciliation(database, records, error, error instanceof ResourceBusyError ? false : options.execute));

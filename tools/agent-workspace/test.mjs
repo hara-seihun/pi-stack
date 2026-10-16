@@ -2613,6 +2613,86 @@ test("keeps local commits but strips declared caches", () => {
   }
 });
 
+test("Gradle caches in existing records release without stale repair state", () => {
+  const f = fixture();
+  try {
+    const created = JSON.parse(run(["create", "--root", f.workspaces, "--name", "gradle",
+      "--repo", f.remote, "--mode", "writer", "--min-free-gib", "0", "--json"], f.env));
+    const db = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    db.prepare("UPDATE workspace SET cache_paths=? WHERE id=?")
+      .run(JSON.stringify(created.cachePaths.filter(value => !value.includes(".gradle"))), created.id);
+    db.close();
+    writeFileSync(path.join(created.path, ".git", "info", "exclude"), ".gradle/\nignored-output/\n");
+    for (const relative of [".gradle", "android/.gradle", "modules/library/.gradle", "ignored-output"]) {
+      mkdirSync(path.join(created.path, relative), { recursive: true });
+      writeFileSync(path.join(created.path, relative, "fixture"), "generated\n");
+    }
+    const retained = JSON.parse(run(["release", "--id", created.id, "--json"], f.env));
+    assert.equal(retained.inspection.classification, "repair-required");
+    assert.equal(retained.inspection.sourceRetention, false);
+    assert.equal(retained.record.state, "repair-required");
+    assert.match(retained.inspection.reason, /unclassified ignored output/);
+    for (const relative of [".gradle", "android/.gradle", "modules/library/.gradle"]) {
+      assert.equal(existsSync(path.join(created.path, relative)), false);
+    }
+    assert.equal(readFileSync(path.join(created.path, "ignored-output", "fixture"), "utf8"), "generated\n");
+    rmSync(path.join(created.path, "ignored-output"), { recursive: true });
+    const released = JSON.parse(run(["release", "--id", created.id, "--json"], f.env));
+    assert.equal(released.action, "released");
+    assert.equal(released.inspection.classification, "reclaimable");
+    assert.equal(released.record.state, "released");
+    assert.equal(released.record.leaseExpiresAt, 0);
+    const status = JSON.parse(run(["status", "--path", created.path, "--json"], f.env));
+    assert.equal(status.records[0].state, released.record.state);
+    assert.equal(status.records[0].detail, released.record.detail);
+    assert.equal(existsSync(created.path), false);
+    const repeated = JSON.parse(run(["release", "--id", created.id, "--json"], f.env));
+    assert.equal(repeated.record.state, "released");
+  } finally { f.close(); }
+});
+
+test("Gradle classification preserves tracked files and unpublished source", () => {
+  const f = fixture();
+  try {
+    const created = JSON.parse(run(["create", "--root", f.workspaces, "--name", "gradle-tracked",
+      "--repo", f.remote, "--mode", "writer", "--min-free-gib", "0", "--json"], f.env));
+    git(created.path, "config", "user.name", "Test");
+    git(created.path, "config", "user.email", "test@example.invalid");
+    mkdirSync(path.join(created.path, ".gradle"));
+    writeFileSync(path.join(created.path, ".gradle", "source.txt"), "unique source\n");
+    git(created.path, "add", ".gradle");
+    git(created.path, "commit", "-m", "unpublished tracked Gradle name");
+    mkdirSync(path.join(created.path, "android", ".gradle"), { recursive: true });
+    writeFileSync(path.join(created.path, "android", ".gradle", "fixture"), "generated\n");
+    const result = JSON.parse(run(["release", "--id", created.id, "--json"], f.env));
+    assert.equal(result.record.state, "repair-required");
+    assert.match(result.inspection.reason, /commits absent from remote refs/);
+    assert.equal(readFileSync(path.join(created.path, ".gradle", "source.txt"), "utf8"), "unique source\n");
+    assert.equal(existsSync(path.join(created.path, "android", ".gradle")), false);
+  } finally { f.close(); }
+});
+
+test("group reconciliation returns persisted retained and released states", () => {
+  const f = fixture();
+  try {
+    const records = ["one", "two"].map(name => JSON.parse(run(["create", "--root", f.workspaces,
+      "--name", name, "--repo", f.remote, "--group", "receipt-group", "--mode", "writer",
+      "--min-free-gib", "0", "--json"], f.env)));
+    writeFileSync(path.join(records[0].path, "file.txt"), "dirty\n");
+    const retained = JSON.parse(run(["release", "--id", records[0].id, "--json"], f.env));
+    assert.equal(retained.find(result => result.record.id === records[0].id).record.state, "repair-required");
+    assert.equal(retained.find(result => result.record.id === records[1].id).record.state, "blocked");
+    git(records[0].path, "restore", "file.txt");
+    const released = JSON.parse(run(["release", "--id", records[0].id, "--json"], f.env));
+    assert.equal(released.length, 2);
+    for (const result of released) {
+      assert.equal(result.action, "released-group");
+      assert.equal(result.record.state, "released");
+      assert.equal(existsSync(result.record.path), false);
+    }
+  } finally { f.close(); }
+});
+
 test("a tracked .agent-workspace-caches manifest classifies repository-generated output", () => {
   const f = fixture();
   try {
