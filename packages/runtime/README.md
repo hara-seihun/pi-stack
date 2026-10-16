@@ -488,3 +488,39 @@ PI_TEST_RUNTIME_ENTRY=file:///srv/pi/runtime/node_modules/@earendil-works/pi-cod
 ## License
 
 MIT
+
+## Subscription-only inference
+
+`patch-subscription-only.mjs` installs the mandatory nonvoice credential boundary in
+all eleven pinned concrete API adapters, both SDK ESM and CLI bundles. It runs
+without extensions. Metered keys, ADC/Bedrock, header credentials, env/stored auth,
+request overrides and generic remote proxy APIs return
+`nonvoice_metered_inference_forbidden` before dispatch. Subscription OAuth is bound
+to the Anthropic/Codex subscription endpoints; the Unix-user broker retains its
+public sentinels. Local OpenAI-compatible GPU engines require an exact provider and
+private-network endpoint in the existing local-engine manifest. Model cost metadata
+and caller-provided voice flags grant no exception. Separate realtime/telephone
+voice implementations are outside these nonvoice adapters.
+
+Normal `deploy/runtime` hashes and applies this boundary. For an existing shared
+dependency tree, `sudo deploy/runtime-subscription-only /srv/pi` copies the current
+immutable dependencies, patches and causally checks the successor, copies the two
+release projections and atomically switches their links without npm installation,
+service restarts or modifying existing processes. It prints previous link targets
+for rollback; already-running processes retain their loaded code. Existing commit
+markers still identify their original base; `.pi-stack-subscription-source` identifies
+the scoped successor source.
+
+`subscription-only-check.mjs` exports `checkRuntime(nodeModules)` returning an
+explicit `{ok,...}` result. It checks all 22 installed adapters and exact helper
+bytes, then runs the offline causal suite. CLI usage:
+
+```sh
+node packages/runtime/subscription-only-check.mjs /srv/pi/runtime/node_modules
+PI_TEST_NODE_MODULES=/srv/pi/runtime/node_modules node --test packages/runtime/subscription-only.test.mjs
+```
+
+The causal suite makes disposable copies, proves an unguarded adapter reaches an
+injected fake transport, then proves SDK and bundled entrypoints, stored/env/options
+auth and an actual `--no-extensions` CLI reject without transport. Allowed OAuth
+reaches only the fake transport. No credentials or inference requests are used.
