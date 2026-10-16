@@ -1,0 +1,1250 @@
+[
+  {
+    "caseId": "machine-populated",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-populated-phone-dark.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Quota percentages, risk bars, provider spending and active/cache counters fit. Scrolled phone bottom also reviewed: people, host, feature collection and connection remain readable. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-populated",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-populated-phone-light.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Quota percentages, risk bars, provider spending and active/cache counters fit. Scrolled phone bottom also reviewed: people, host, feature collection and connection remain readable. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-populated",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-populated-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Quota percentages, risk bars, provider spending and active/cache counters fit. Scrolled phone bottom also reviewed: people, host, feature collection and connection remain readable. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-populated",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-populated-tablet-light.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Quota percentages, risk bars, provider spending and active/cache counters fit. Scrolled phone bottom also reviewed: people, host, feature collection and connection remain readable. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-populated",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-populated-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Quota percentages, risk bars, provider spending and active/cache counters fit. Scrolled phone bottom also reviewed: people, host, feature collection and connection remain readable. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-populated",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-populated-desktop-light.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Quota percentages, risk bars, provider spending and active/cache counters fit. Scrolled phone bottom also reviewed: people, host, feature collection and connection remain readable. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-unmeasured",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-unmeasured-phone-dark.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Missing dashboard explicitly shows Host not measured rather than invented values; feature collection and connection remain legible. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-unmeasured",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-unmeasured-phone-light.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Missing dashboard explicitly shows Host not measured rather than invented values; feature collection and connection remain legible. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-unmeasured",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-unmeasured-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Missing dashboard explicitly shows Host not measured rather than invented values; feature collection and connection remain legible. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-unmeasured",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-unmeasured-tablet-light.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Missing dashboard explicitly shows Host not measured rather than invented values; feature collection and connection remain legible. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-unmeasured",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-unmeasured-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Missing dashboard explicitly shows Host not measured rather than invented values; feature collection and connection remain legible. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-unmeasured",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-unmeasured-desktop-light.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Missing dashboard explicitly shows Host not measured rather than invented values; feature collection and connection remain legible. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-syncing",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-syncing-phone-dark.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Null GPU/disk readings remain Not measured; numeric host readings and Syncing stay distinct and fit. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-syncing",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-syncing-phone-light.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Null GPU/disk readings remain Not measured; numeric host readings and Syncing stay distinct and fit. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-syncing",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-syncing-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Null GPU/disk readings remain Not measured; numeric host readings and Syncing stay distinct and fit. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-syncing",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-syncing-tablet-light.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Null GPU/disk readings remain Not measured; numeric host readings and Syncing stay distinct and fit. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-syncing",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-syncing-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Null GPU/disk readings remain Not measured; numeric host readings and Syncing stay distinct and fit. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-syncing",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-syncing-desktop-light.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Null GPU/disk readings remain Not measured; numeric host readings and Syncing stay distinct and fit. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-offline-long-errors",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-offline-long-errors-phone-dark.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Fixed clipped reconnect and dismiss controls and unbroken owner/message overflow. Long connection text wraps above Reconnect; all eight owner rows and Dismiss controls reviewed, including phone bottom. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-offline-long-errors",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-offline-long-errors-phone-light.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Fixed clipped reconnect and dismiss controls and unbroken owner/message overflow. Long connection text wraps above Reconnect; all eight owner rows and Dismiss controls reviewed, including phone bottom. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-offline-long-errors",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-offline-long-errors-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Fixed clipped reconnect and dismiss controls and unbroken owner/message overflow. Long connection text wraps above Reconnect; all eight owner rows and Dismiss controls reviewed, including phone bottom. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-offline-long-errors",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-offline-long-errors-tablet-light.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Fixed clipped reconnect and dismiss controls and unbroken owner/message overflow. Long connection text wraps above Reconnect; all eight owner rows and Dismiss controls reviewed, including phone bottom. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-offline-long-errors",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-offline-long-errors-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Fixed clipped reconnect and dismiss controls and unbroken owner/message overflow. Long connection text wraps above Reconnect; all eight owner rows and Dismiss controls reviewed, including phone bottom. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-offline-long-errors",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-offline-long-errors-desktop-light.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Fixed clipped reconnect and dismiss controls and unbroken owner/message overflow. Long connection text wraps above Reconnect; all eight owner rows and Dismiss controls reviewed, including phone bottom. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-allowance-exhausted",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-allowance-exhausted-phone-dark.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Zero allowance explicitly reads Used up, has a full danger bar and explains the pause/reset rather than dividing by zero. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-allowance-exhausted",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-allowance-exhausted-phone-light.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Zero allowance explicitly reads Used up, has a full danger bar and explains the pause/reset rather than dividing by zero. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-allowance-exhausted",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-allowance-exhausted-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Zero allowance explicitly reads Used up, has a full danger bar and explains the pause/reset rather than dividing by zero. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-allowance-exhausted",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-allowance-exhausted-tablet-light.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Zero allowance explicitly reads Used up, has a full danger bar and explains the pause/reset rather than dividing by zero. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-allowance-exhausted",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-allowance-exhausted-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Zero allowance explicitly reads Used up, has a full danger bar and explains the pause/reset rather than dividing by zero. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-allowance-exhausted",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-allowance-exhausted-desktop-light.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Zero allowance explicitly reads Used up, has a full danger bar and explains the pause/reset rather than dividing by zero. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-quotas-unavailable",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-quotas-unavailable-phone-dark.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Unavailable quota explicitly labels Usage unavailable and offers account details; host and collection fit. Separate account sheet was inspected and its long label wrapping repaired. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-quotas-unavailable",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-quotas-unavailable-phone-light.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Unavailable quota explicitly labels Usage unavailable and offers account details; host and collection fit. Separate account sheet was inspected and its long label wrapping repaired. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-quotas-unavailable",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-quotas-unavailable-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Unavailable quota explicitly labels Usage unavailable and offers account details; host and collection fit. Separate account sheet was inspected and its long label wrapping repaired. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-quotas-unavailable",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-quotas-unavailable-tablet-light.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Unavailable quota explicitly labels Usage unavailable and offers account details; host and collection fit. Separate account sheet was inspected and its long label wrapping repaired. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-quotas-unavailable",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-quotas-unavailable-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Unavailable quota explicitly labels Usage unavailable and offers account details; host and collection fit. Separate account sheet was inspected and its long label wrapping repaired. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-quotas-unavailable",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-quotas-unavailable-desktop-light.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Unavailable quota explicitly labels Usage unavailable and offers account details; host and collection fit. Separate account sheet was inspected and its long label wrapping repaired. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-people-empty",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-people-empty-phone-dark.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Empty usage remains a truthful no-recorded-use sentence; Day/Week controls, subscription total and host are readable. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-people-empty",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-people-empty-phone-light.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Empty usage remains a truthful no-recorded-use sentence; Day/Week controls, subscription total and host are readable. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-people-empty",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-people-empty-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Empty usage remains a truthful no-recorded-use sentence; Day/Week controls, subscription total and host are readable. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-people-empty",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-people-empty-tablet-light.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Empty usage remains a truthful no-recorded-use sentence; Day/Week controls, subscription total and host are readable. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-people-empty",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-people-empty-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Empty usage remains a truthful no-recorded-use sentence; Day/Week controls, subscription total and host are readable. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-people-empty",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-people-empty-desktop-light.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Empty usage remains a truthful no-recorded-use sentence; Day/Week controls, subscription total and host are readable. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-people-many-long",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-people-many-long-phone-dark.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Fixed long person-name wrapping and flexible meta rows. Share and spending remain visible. Generated repeated rows and final phone rows 16\u201318 were inspected without horizontal clipping. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-people-many-long",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-people-many-long-phone-light.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Fixed long person-name wrapping and flexible meta rows. Share and spending remain visible. Generated repeated rows and final phone rows 16\u201318 were inspected without horizontal clipping. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-people-many-long",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-people-many-long-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Fixed long person-name wrapping and flexible meta rows. Share and spending remain visible. Generated repeated rows and final phone rows 16\u201318 were inspected without horizontal clipping. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-people-many-long",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-people-many-long-tablet-light.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Fixed long person-name wrapping and flexible meta rows. Share and spending remain visible. Generated repeated rows and final phone rows 16\u201318 were inspected without horizontal clipping. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-people-many-long",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-people-many-long-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Fixed long person-name wrapping and flexible meta rows. Share and spending remain visible. Generated repeated rows and final phone rows 16\u201318 were inspected without horizontal clipping. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-people-many-long",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-people-many-long-desktop-light.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Fixed long person-name wrapping and flexible meta rows. Share and spending remain visible. Generated repeated rows and final phone rows 16\u201318 were inspected without horizontal clipping. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-feature-loading",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-feature-loading-phone-dark.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Feature loading is visible while host and connection still render. Refresh control now uses the production themed touch target. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-feature-loading",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-feature-loading-phone-light.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Feature loading is visible while host and connection still render. Refresh control now uses the production themed touch target. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-feature-loading",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-feature-loading-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Feature loading is visible while host and connection still render. Refresh control now uses the production themed touch target. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-feature-loading",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-feature-loading-tablet-light.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Feature loading is visible while host and connection still render. Refresh control now uses the production themed touch target. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-feature-loading",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-feature-loading-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Feature loading is visible while host and connection still render. Refresh control now uses the production themed touch target. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-feature-loading",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-feature-loading-desktop-light.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Feature loading is visible while host and connection still render. Refresh control now uses the production themed touch target. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-feature-error",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-feature-error-phone-dark.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Explicit storage error wraps long content without losing Refresh or connection details. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-feature-error",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-feature-error-phone-light.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Explicit storage error wraps long content without losing Refresh or connection details. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-feature-error",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-feature-error-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Explicit storage error wraps long content without losing Refresh or connection details. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-feature-error",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-feature-error-tablet-light.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Explicit storage error wraps long content without losing Refresh or connection details. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-feature-error",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-feature-error-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Explicit storage error wraps long content without losing Refresh or connection details. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-feature-error",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-feature-error-desktop-light.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Explicit storage error wraps long content without losing Refresh or connection details. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-feature-many",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-feature-many-phone-dark.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. All eighteen feature summaries are legible and disclosure controls are distinct. Expanded first three disclosures actually clicked and read at all three viewports: human enabled/disabled/not observed and agent unavailable. Supplemental machine-feature-expanded screenshots preserve those finite observation states; full eighteen expanded rows are not enumerated. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-feature-many",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-feature-many-phone-light.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. All eighteen feature summaries are legible and disclosure controls are distinct. Expanded first three disclosures actually clicked and read at all three viewports: human enabled/disabled/not observed and agent unavailable. Supplemental machine-feature-expanded screenshots preserve those finite observation states; full eighteen expanded rows are not enumerated. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-feature-many",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-feature-many-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. All eighteen feature summaries are legible and disclosure controls are distinct. Expanded first three disclosures actually clicked and read at all three viewports: human enabled/disabled/not observed and agent unavailable. Supplemental machine-feature-expanded screenshots preserve those finite observation states; full eighteen expanded rows are not enumerated. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-feature-many",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-feature-many-tablet-light.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. All eighteen feature summaries are legible and disclosure controls are distinct. Expanded first three disclosures actually clicked and read at all three viewports: human enabled/disabled/not observed and agent unavailable. Supplemental machine-feature-expanded screenshots preserve those finite observation states; full eighteen expanded rows are not enumerated. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-feature-many",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-feature-many-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. All eighteen feature summaries are legible and disclosure controls are distinct. Expanded first three disclosures actually clicked and read at all three viewports: human enabled/disabled/not observed and agent unavailable. Supplemental machine-feature-expanded screenshots preserve those finite observation states; full eighteen expanded rows are not enumerated. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "machine-feature-many",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/machine-feature-many-desktop-light.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. All eighteen feature summaries are legible and disclosure controls are distinct. Expanded first three disclosures actually clicked and read at all three viewports: human enabled/disabled/not observed and agent unavailable. Supplemental machine-feature-expanded screenshots preserve those finite observation states; full eighteen expanded rows are not enumerated. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-unset",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-unset-phone-dark.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Fixed browser-default tiny gray controls: primary editor action, workspace controls, exact-path input and Choose path now use themed 44px targets. Unset does not invent a selected entry. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-unset",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-unset-phone-light.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Fixed browser-default tiny gray controls: primary editor action, workspace controls, exact-path input and Choose path now use themed 44px targets. Unset does not invent a selected entry. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-unset",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-unset-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Fixed browser-default tiny gray controls: primary editor action, workspace controls, exact-path input and Choose path now use themed 44px targets. Unset does not invent a selected entry. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-unset",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-unset-tablet-light.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Fixed browser-default tiny gray controls: primary editor action, workspace controls, exact-path input and Choose path now use themed 44px targets. Unset does not invent a selected entry. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-unset",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-unset-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Fixed browser-default tiny gray controls: primary editor action, workspace controls, exact-path input and Choose path now use themed 44px targets. Unset does not invent a selected entry. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-unset",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-unset-desktop-light.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Fixed browser-default tiny gray controls: primary editor action, workspace controls, exact-path input and Choose path now use themed 44px targets. Unset does not invent a selected entry. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-loading",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-loading-phone-dark.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Inspecting exact path is distinct from success and wraps the long path. Themed controls remain available. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-loading",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-loading-phone-light.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Inspecting exact path is distinct from success and wraps the long path. Themed controls remain available. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-loading",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-loading-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Inspecting exact path is distinct from success and wraps the long path. Themed controls remain available. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-loading",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-loading-tablet-light.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Inspecting exact path is distinct from success and wraps the long path. Themed controls remain available. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-loading",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-loading-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Inspecting exact path is distinct from success and wraps the long path. Themed controls remain available. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-loading",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-loading-desktop-light.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Inspecting exact path is distinct from success and wraps the long path. Themed controls remain available. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-error",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-error-phone-dark.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Explicit inspection error is visibly red, wraps unbroken text and leaves path controls readable. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-error",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-error-phone-light.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Explicit inspection error is visibly red, wraps unbroken text and leaves path controls readable. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-error",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-error-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Explicit inspection error is visibly red, wraps unbroken text and leaves path controls readable. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-error",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-error-tablet-light.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Explicit inspection error is visibly red, wraps unbroken text and leaves path controls readable. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-error",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-error-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Explicit inspection error is visibly red, wraps unbroken text and leaves path controls readable. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-error",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-error-desktop-light.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Explicit inspection error is visibly red, wraps unbroken text and leaves path controls readable. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-directory",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-directory-phone-dark.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Directory offers Open in VS Code without an attachment action. Exact path and form controls fit. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-directory",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-directory-phone-light.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Directory offers Open in VS Code without an attachment action. Exact path and form controls fit. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-directory",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-directory-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Directory offers Open in VS Code without an attachment action. Exact path and form controls fit. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-directory",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-directory-tablet-light.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Directory offers Open in VS Code without an attachment action. Exact path and form controls fit. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-directory",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-directory-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Directory offers Open in VS Code without an attachment action. Exact path and form controls fit. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-directory",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-directory-desktop-light.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Directory offers Open in VS Code without an attachment action. Exact path and form controls fit. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-file",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-file-phone-dark.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Regular file offers both Open in VS Code and Attach to current chat with readable 44px controls. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-file",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-file-phone-light.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Regular file offers both Open in VS Code and Attach to current chat with readable 44px controls. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-file",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-file-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Regular file offers both Open in VS Code and Attach to current chat with readable 44px controls. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-file",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-file-tablet-light.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Regular file offers both Open in VS Code and Attach to current chat with readable 44px controls. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-file",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-file-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Regular file offers both Open in VS Code and Attach to current chat with readable 44px controls. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-file",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-file-desktop-light.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Regular file offers both Open in VS Code and Attach to current chat with readable 44px controls. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-other",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-other-phone-dark.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Irregular path states its limitation and does not offer file/editor actions for that entry. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-other",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-other-phone-light.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Irregular path states its limitation and does not offer file/editor actions for that entry. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-other",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-other-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Irregular path states its limitation and does not offer file/editor actions for that entry. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-other",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-other-tablet-light.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Irregular path states its limitation and does not offer file/editor actions for that entry. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-other",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-other-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Irregular path states its limitation and does not offer file/editor actions for that entry. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-other",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-other-desktop-light.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Irregular path states its limitation and does not offer file/editor actions for that entry. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-many-long",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-many-long-phone-dark.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Fixed unbroken workspace button overflow and tiny control targets. Fourteen shortcuts and long selected path wrap; phone bottom inspected to confirm both file actions remain reachable. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-many-long",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-many-long-phone-light.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Fixed unbroken workspace button overflow and tiny control targets. Fourteen shortcuts and long selected path wrap; phone bottom inspected to confirm both file actions remain reachable. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-many-long",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-many-long-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Fixed unbroken workspace button overflow and tiny control targets. Fourteen shortcuts and long selected path wrap; phone bottom inspected to confirm both file actions remain reachable. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-many-long",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-many-long-tablet-light.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Fixed unbroken workspace button overflow and tiny control targets. Fourteen shortcuts and long selected path wrap; phone bottom inspected to confirm both file actions remain reachable. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-many-long",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-many-long-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Fixed unbroken workspace button overflow and tiny control targets. Fourteen shortcuts and long selected path wrap; phone bottom inspected to confirm both file actions remain reachable. OS dark preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-many-long",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-many-long-desktop-light.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Fixed unbroken workspace button overflow and tiny control targets. Fourteen shortcuts and long selected path wrap; phone bottom inspected to confirm both file actions remain reachable. OS light preference; production palette is dark-only, not a synthetic light theme."
+  },
+  {
+    "caseId": "files-editor-config-loading",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-config-loading-phone-dark.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Configuration request is held pending. Clicked production Open VS Code shows disabled Opening\u2026 while the exact-path form remains legible. OS dark preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-config-loading",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-config-loading-phone-light.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Configuration request is held pending. Clicked production Open VS Code shows disabled Opening\u2026 while the exact-path form remains legible. OS light preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-config-loading",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-config-loading-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Configuration request is held pending. Clicked production Open VS Code shows disabled Opening\u2026 while the exact-path form remains legible. OS dark preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-config-loading",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-config-loading-tablet-light.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Configuration request is held pending. Clicked production Open VS Code shows disabled Opening\u2026 while the exact-path form remains legible. OS light preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-config-loading",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-config-loading-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Configuration request is held pending. Clicked production Open VS Code shows disabled Opening\u2026 while the exact-path form remains legible. OS dark preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-config-loading",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-config-loading-desktop-light.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Configuration request is held pending. Clicked production Open VS Code shows disabled Opening\u2026 while the exact-path form remains legible. OS light preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-grant-loading",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-grant-loading-phone-dark.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Editor grant request is held pending after valid configuration. Clicked production action shows disabled Opening\u2026 rather than claiming success. OS dark preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-grant-loading",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-grant-loading-phone-light.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Editor grant request is held pending after valid configuration. Clicked production action shows disabled Opening\u2026 rather than claiming success. OS light preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-grant-loading",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-grant-loading-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Editor grant request is held pending after valid configuration. Clicked production action shows disabled Opening\u2026 rather than claiming success. OS dark preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-grant-loading",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-grant-loading-tablet-light.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Editor grant request is held pending after valid configuration. Clicked production action shows disabled Opening\u2026 rather than claiming success. OS light preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-grant-loading",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-grant-loading-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Editor grant request is held pending after valid configuration. Clicked production action shows disabled Opening\u2026 rather than claiming success. OS dark preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-grant-loading",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-grant-loading-desktop-light.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Editor grant request is held pending after valid configuration. Clicked production action shows disabled Opening\u2026 rather than claiming success. OS light preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-unconfigured",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-unconfigured-phone-dark.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Clicked launch returns explicit no-editor-configured error; the action is enabled again, the message fits, and the failed popup was closed. OS dark preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-unconfigured",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-unconfigured-phone-light.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Clicked launch returns explicit no-editor-configured error; the action is enabled again, the message fits, and the failed popup was closed. OS light preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-unconfigured",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-unconfigured-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Clicked launch returns explicit no-editor-configured error; the action is enabled again, the message fits, and the failed popup was closed. OS dark preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-unconfigured",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-unconfigured-tablet-light.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Clicked launch returns explicit no-editor-configured error; the action is enabled again, the message fits, and the failed popup was closed. OS light preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-unconfigured",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-unconfigured-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Clicked launch returns explicit no-editor-configured error; the action is enabled again, the message fits, and the failed popup was closed. OS dark preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-unconfigured",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-unconfigured-desktop-light.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Clicked launch returns explicit no-editor-configured error; the action is enabled again, the message fits, and the failed popup was closed. OS light preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-grant-error",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-grant-error-phone-dark.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Clicked launch returns explicit issue-handoff error with retry instruction. Production controls recover to enabled and error text fits. OS dark preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-grant-error",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-grant-error-phone-light.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Clicked launch returns explicit issue-handoff error with retry instruction. Production controls recover to enabled and error text fits. OS light preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-grant-error",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-grant-error-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Clicked launch returns explicit issue-handoff error with retry instruction. Production controls recover to enabled and error text fits. OS dark preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-grant-error",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-grant-error-tablet-light.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Clicked launch returns explicit issue-handoff error with retry instruction. Production controls recover to enabled and error text fits. OS light preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-grant-error",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-grant-error-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Clicked launch returns explicit issue-handoff error with retry instruction. Production controls recover to enabled and error text fits. OS dark preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-grant-error",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-grant-error-desktop-light.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Clicked launch returns explicit issue-handoff error with retry instruction. Production controls recover to enabled and error text fits. OS light preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-invalid-handoff",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-invalid-handoff-phone-dark.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Malformed synthetic handoff is rejected by production editorLaunch and shown as Invalid editor handoff. The popup is closed rather than navigating to an invented origin. OS dark preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-invalid-handoff",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-invalid-handoff-phone-light.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Malformed synthetic handoff is rejected by production editorLaunch and shown as Invalid editor handoff. The popup is closed rather than navigating to an invented origin. OS light preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-invalid-handoff",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-invalid-handoff-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Malformed synthetic handoff is rejected by production editorLaunch and shown as Invalid editor handoff. The popup is closed rather than navigating to an invented origin. OS dark preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-invalid-handoff",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-invalid-handoff-tablet-light.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Malformed synthetic handoff is rejected by production editorLaunch and shown as Invalid editor handoff. The popup is closed rather than navigating to an invented origin. OS light preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-invalid-handoff",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-invalid-handoff-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Malformed synthetic handoff is rejected by production editorLaunch and shown as Invalid editor handoff. The popup is closed rather than navigating to an invented origin. OS dark preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-invalid-handoff",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-invalid-handoff-desktop-light.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Malformed synthetic handoff is rejected by production editorLaunch and shown as Invalid editor handoff. The popup is closed rather than navigating to an invented origin. OS light preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-ready",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-ready-phone-dark.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Clicked production launch submitted the exact synthetic form ticket to the loopback editor endpoint. Synthetic accepted markup is only handoff proof, not a production editor visual review. Close returned to the original production Files screen with its action enabled. OS dark preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-ready",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-ready-phone-light.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Clicked production launch submitted the exact synthetic form ticket to the loopback editor endpoint. Synthetic accepted markup is only handoff proof, not a production editor visual review. Close returned to the original production Files screen with its action enabled. OS light preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-ready",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-ready-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Clicked production launch submitted the exact synthetic form ticket to the loopback editor endpoint. Synthetic accepted markup is only handoff proof, not a production editor visual review. Close returned to the original production Files screen with its action enabled. OS dark preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-ready",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-ready-tablet-light.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Clicked production launch submitted the exact synthetic form ticket to the loopback editor endpoint. Synthetic accepted markup is only handoff proof, not a production editor visual review. Close returned to the original production Files screen with its action enabled. OS light preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-ready",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-ready-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Clicked production launch submitted the exact synthetic form ticket to the loopback editor endpoint. Synthetic accepted markup is only handoff proof, not a production editor visual review. Close returned to the original production Files screen with its action enabled. OS dark preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-ready",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-ready-desktop-light.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Clicked production launch submitted the exact synthetic form ticket to the loopback editor endpoint. Synthetic accepted markup is only handoff proof, not a production editor visual review. Close returned to the original production Files screen with its action enabled. OS light preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-expired",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-expired-phone-dark.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. A valid-shaped expired synthetic ticket was form-posted; the loopback endpoint rendered its explicit expired protocol outcome. The fake endpoint markup is not a production-editor review. Closing it returns to actual Files with the editor action enabled. OS dark preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-expired",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-expired-phone-light.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. A valid-shaped expired synthetic ticket was form-posted; the loopback endpoint rendered its explicit expired protocol outcome. The fake endpoint markup is not a production-editor review. Closing it returns to actual Files with the editor action enabled. OS light preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-expired",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-expired-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. A valid-shaped expired synthetic ticket was form-posted; the loopback endpoint rendered its explicit expired protocol outcome. The fake endpoint markup is not a production-editor review. Closing it returns to actual Files with the editor action enabled. OS dark preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-expired",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-expired-tablet-light.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. A valid-shaped expired synthetic ticket was form-posted; the loopback endpoint rendered its explicit expired protocol outcome. The fake endpoint markup is not a production-editor review. Closing it returns to actual Files with the editor action enabled. OS light preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-expired",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-expired-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. A valid-shaped expired synthetic ticket was form-posted; the loopback endpoint rendered its explicit expired protocol outcome. The fake endpoint markup is not a production-editor review. Closing it returns to actual Files with the editor action enabled. OS dark preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-expired",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-expired-desktop-light.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. A valid-shaped expired synthetic ticket was form-posted; the loopback endpoint rendered its explicit expired protocol outcome. The fake endpoint markup is not a production-editor review. Closing it returns to actual Files with the editor action enabled. OS light preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-window-closed",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-window-closed-phone-dark.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Closed the actual pending browser popup before completing the synthetic config request. Production Files reports The editor window was closed and restores its launch action. The extra complete-config control is a catalogue scenario driver, not production UI. OS dark preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-window-closed",
+    "viewport": "phone",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-window-closed-phone-light.png",
+    "judgment": "Viewed actual 390\u00d7844 capture. Closed the actual pending browser popup before completing the synthetic config request. Production Files reports The editor window was closed and restores its launch action. The extra complete-config control is a catalogue scenario driver, not production UI. OS light preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-window-closed",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-window-closed-tablet-dark.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Closed the actual pending browser popup before completing the synthetic config request. Production Files reports The editor window was closed and restores its launch action. The extra complete-config control is a catalogue scenario driver, not production UI. OS dark preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-window-closed",
+    "viewport": "tablet",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-window-closed-tablet-light.png",
+    "judgment": "Viewed actual 768\u00d71024 capture. Closed the actual pending browser popup before completing the synthetic config request. Production Files reports The editor window was closed and restores its launch action. The extra complete-config control is a catalogue scenario driver, not production UI. OS light preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-window-closed",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-window-closed-desktop-dark.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Closed the actual pending browser popup before completing the synthetic config request. Production Files reports The editor window was closed and restores its launch action. The extra complete-config control is a catalogue scenario driver, not production UI. OS dark preference; production palette is dark-only."
+  },
+  {
+    "caseId": "files-editor-window-closed",
+    "viewport": "desktop",
+    "theme": "light",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/machine-files/files-editor-window-closed-desktop-light.png",
+    "judgment": "Viewed actual 1440\u00d71000 capture. Closed the actual pending browser popup before completing the synthetic config request. Production Files reports The editor window was closed and restores its launch action. The extra complete-config control is a catalogue scenario driver, not production UI. OS light preference; production palette is dark-only."
+  }
+]

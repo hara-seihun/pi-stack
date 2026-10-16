@@ -1,0 +1,649 @@
+[
+  {
+    "caseId": "conversation-picker-root",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-picker-root-fixed.png",
+    "judgment": "Viewed at 1440×900. Fixed overflowing Open agent label; complete two-line label now fits between icon tiles and all controls remain separated.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-01.png"
+    ]
+  },
+  {
+    "caseId": "conversation-picker-empty",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-picker-empty.png",
+    "judgment": "Viewed at 1440×900. Empty archive message, search field and Back/Close controls fit cleanly with readable contrast.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-01.png"
+    ]
+  },
+  {
+    "caseId": "conversation-picker-many",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-picker-many.png",
+    "judgment": "Viewed at 1440×900. Long Unicode archive descriptions wrap within each row; bounded list keeps search and navigation visible.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-02.png"
+    ]
+  },
+  {
+    "caseId": "conversation-picker-loading",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-picker-loading.png",
+    "judgment": "Viewed at 1440×900. Loading indicator is readable below search; navigation remains distinct and available.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-02.png"
+    ]
+  },
+  {
+    "caseId": "conversation-picker-failure",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-picker-failure.png",
+    "judgment": "Viewed at 1440×900. Error, dismissal and full-width Retry are visible without crowding search or header actions.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-03.png"
+    ]
+  },
+  {
+    "caseId": "conversation-screen-empty",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-screen-empty.png",
+    "judgment": "Viewed at 1440×900. Empty transcript retains readable header and bottom composer; all attachment actions and disabled send are visible.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-03.png"
+    ]
+  },
+  {
+    "caseId": "conversation-screen-history",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-screen-history.png",
+    "judgment": "Viewed at 1440×900. Earlier-load error, markdown table, bounded code, newer-message action and composer have distinct space.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-04.png"
+    ]
+  },
+  {
+    "caseId": "conversation-screen-working",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-screen-working.png",
+    "judgment": "Viewed at 1440×900. Live thinking and unfinished markdown list render legibly; draft and Steer/send remain visible below transcript.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-04.png"
+    ]
+  },
+  {
+    "caseId": "conversation-screen-held",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-screen-held.png",
+    "judgment": "Viewed at 1440×900. Waiting chip is visible; transcript and draft composer remain within viewport with no control overlap.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-05.png"
+    ]
+  },
+  {
+    "caseId": "conversation-screen-offline",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-screen-offline.png",
+    "judgment": "Viewed at 1440×900. Reconnect is prominent in header; retained transcript and draft composer remain readable.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-05.png"
+    ]
+  },
+  {
+    "caseId": "conversation-screen-syncing",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-screen-syncing.png",
+    "judgment": "Viewed at 1440×900. Syncing spinner is visible without shifting header; retained transcript and disabled send remain legible.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-06.png"
+    ]
+  },
+  {
+    "caseId": "conversation-screen-expanded",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-screen-expanded.png",
+    "judgment": "Viewed at 1440×900. Expanded transcript composition retains readable notice, markdown and composer; baseline viewport shows lower transcript, not every earlier tool row.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-06.png"
+    ]
+  },
+  {
+    "caseId": "conversation-screen-slash",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-screen-slash.png",
+    "judgment": "Viewed at 1440×900. Two command rows fit above composer; long description truncates within its row and send remains visible.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-07.png"
+    ]
+  },
+  {
+    "caseId": "conversation-screen-errors",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-screen-errors.png",
+    "judgment": "Viewed at 1440×900. Control and upload errors wrap without obscuring dismiss buttons or composer; transcript remains legible between them.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-07.png"
+    ]
+  },
+  {
+    "caseId": "conversation-screen-reply",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-screen-reply.png",
+    "judgment": "Viewed at 1440×900. Fixed long quote width escape: reply composer now fits at 1404px, quote truncates with ellipsis, and themed 44px Cancel reply is visible at x1368.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-08.png",
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-screen-reply-fixed.png"
+    ]
+  },
+  {
+    "caseId": "conversation-screen-long-header",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-screen-long-header.png",
+    "judgment": "Viewed at 1440×900. Long title truncates within header while Back/Inspector remain visible; long composer placeholder wraps and send remains accessible.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-08.png"
+    ]
+  },
+  {
+    "caseId": "conversation-composer-empty",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-composer-empty.png",
+    "judgment": "Viewed at 1440×900. Attachment icons and disabled send have clear separation; placeholder remains readable.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-09.png"
+    ]
+  },
+  {
+    "caseId": "conversation-composer-long",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-composer-long.png",
+    "judgment": "Viewed at 1440×900. Long draft wraps in bounded input and scrolls independently; toolbar and enabled send remain outside text area.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-09.png"
+    ]
+  },
+  {
+    "caseId": "conversation-composer-uploading",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-composer-uploading.png",
+    "judgment": "Viewed at 1440×900. Long attachment name truncates within chip; removal and disabled send remain visible.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-10.png"
+    ]
+  },
+  {
+    "caseId": "conversation-composer-many",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-composer-many.png",
+    "judgment": "Viewed at 1440×900. Attachment strip is horizontally bounded; filenames truncate within chips and prompt/send retain their space.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-10.png"
+    ]
+  },
+  {
+    "caseId": "conversation-composer-readonly",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-composer-readonly.png",
+    "judgment": "Viewed at 1440×900. Retained Unicode draft is readable; attachment actions and send clearly show disabled state.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-11.png"
+    ]
+  },
+  {
+    "caseId": "conversation-composer-stop",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-composer-stop.png",
+    "judgment": "Viewed at 1440×900. Red stop action is distinct and fully visible beside attachment toolbar.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-11.png"
+    ]
+  },
+  {
+    "caseId": "conversation-composer-resume",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-composer-resume.png",
+    "judgment": "Viewed at 1440×900. Orange resume action is distinct and fully visible beside attachment toolbar.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-12.png"
+    ]
+  },
+  {
+    "caseId": "conversation-composer-hidden",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-composer-hidden.png",
+    "judgment": "Viewed at 1440×900. Attachment actions are absent as intended; Unicode prompt and enabled send remain aligned.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-12.png"
+    ]
+  },
+  {
+    "caseId": "conversation-status-matrix",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-status-matrix.png",
+    "judgment": "Viewed at 1440×900. All activity, held/cancelling, unread, archived, offline and tool-count variants fit in four columns; error explanations wrap without collisions.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-13.png"
+    ]
+  },
+  {
+    "caseId": "conversation-queue-empty",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-queue-empty.png",
+    "judgment": "Viewed at 1440×900. Empty queue explanation and close control fit cleanly in centered sheet.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-13.png"
+    ]
+  },
+  {
+    "caseId": "conversation-queue-variants",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-queue-variants.png",
+    "judgment": "Viewed at 1440×900. All six delivery/acknowledgement rows are readable; hard-steer click exposes full Stop current work and send now confirmation without overlap.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-14.png",
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-queue-confirm.png"
+    ]
+  },
+  {
+    "caseId": "conversation-queue-held",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-queue-held.png",
+    "judgment": "Viewed at 1440×900. Held wording and explicit QUEUED/STEER/HARD STEER labels remain distinct; inappropriate steering actions are absent.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-14.png"
+    ]
+  },
+  {
+    "caseId": "conversation-queue-pending",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-queue-pending.png",
+    "judgment": "Viewed at 1440×900. Action buttons are visibly disabled while status rows and close remain readable.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-15.png"
+    ]
+  },
+  {
+    "caseId": "conversation-queue-long",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-queue-long.png",
+    "judgment": "Viewed at 1440×900. Long message text stays in bounded inner scrollers; action rows remain visible and do not overlap prose.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-15.png"
+    ]
+  },
+  {
+    "caseId": "conversation-inspector-idle",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-inspector-idle.png",
+    "judgment": "Viewed at 1440×900. Thread metadata and long directory wrap within right sheet; Settings button was fixed to themed 44px control and recaptured; Timeline long event detail wraps.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-16.png",
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-inspector-settings-fixed.png",
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-inspector-timeline.png"
+    ]
+  },
+  {
+    "caseId": "conversation-inspector-archived",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-inspector-archived.png",
+    "judgment": "Viewed at 1440×900. Restore action and archived status are distinct; long directory stays within sheet.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-16.png"
+    ]
+  },
+  {
+    "caseId": "conversation-inspector-agents",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-inspector-agents.png",
+    "judgment": "Viewed at 1440×900. Long wait reason wraps within metadata column; peer link is visible; remaining metadata continues in sheet scroller.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-17.png"
+    ]
+  },
+  {
+    "caseId": "conversation-inspector-job",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-inspector-job.png",
+    "judgment": "Viewed at 1440×900. Job wait reason and long job identifier wrap within right sheet without horizontal escape.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-17.png"
+    ]
+  },
+  {
+    "caseId": "conversation-inspector-deployment",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-inspector-deployment.png",
+    "judgment": "Viewed at 1440×900. Publication wait reason and long publication identifier wrap within right sheet without horizontal escape.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-18.png"
+    ]
+  },
+  {
+    "caseId": "conversation-inspector-message",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-inspector-message.png",
+    "judgment": "Viewed at 1440×900. Collaborator wait reason/link are readable; long directory wraps and lower metadata remains in scroller.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-18.png"
+    ]
+  },
+  {
+    "caseId": "conversation-inspector-error",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-inspector-error.png",
+    "judgment": "Viewed at 1440×900. Execution error and long detail remain within metadata column; actions and close remain visible.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-19.png"
+    ]
+  },
+  {
+    "caseId": "conversation-inspector-children",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-inspector-children.png",
+    "judgment": "Viewed at 1440×900. Long directory wraps; actual sheet scroll exposes child names, descriptions and placement, all within sheet width.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-19.png",
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-inspector-children-scrolled.png"
+    ]
+  },
+  {
+    "caseId": "conversation-paste-empty",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-paste-empty.png",
+    "judgment": "Viewed at 1440×900. Centered dialog keeps both labeled fields and Cancel/disabled Attach visible.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-20.png"
+    ]
+  },
+  {
+    "caseId": "conversation-paste-long",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-paste-long.png",
+    "judgment": "Viewed at 1440×900. Long filename scrolls within input; document text stays in bounded textarea and action row remains visible.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-20.png"
+    ]
+  },
+  {
+    "caseId": "conversation-paste-failure",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-paste-failure.png",
+    "judgment": "Viewed at 1440×900. After actual Attach click, retained fields, scrollable long error, dismissal and enabled retry Attach are visible in dialog.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-21.png"
+    ]
+  },
+  {
+    "caseId": "conversation-paste-pending",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-paste-pending.png",
+    "judgment": "Viewed at 1440×900. After actual Attach click, retained fields are disabled and Attaching label is visible; no false attached-success state.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-21.png"
+    ]
+  },
+  {
+    "caseId": "conversation-drawing-blank",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-drawing-blank.png",
+    "judgment": "Viewed at 1440×900. White paper fills viewport; close, undo, colour and disabled Attach sit visibly above blank canvas.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-22.png"
+    ]
+  },
+  {
+    "caseId": "conversation-drawing-image",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-drawing-image.png",
+    "judgment": "Viewed at 1440×900. Decoded image remains proportional with visible close/undo/colour/Attach and Download controls.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-22.png"
+    ]
+  },
+  {
+    "caseId": "conversation-drawing-failure",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-drawing-failure.png",
+    "judgment": "Viewed at 1440×900. Failed-image error and Retry image remain readable across bottom; attachment controls are visibly disabled.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-23.png"
+    ]
+  },
+  {
+    "caseId": "conversation-drawing-colour",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-drawing-colour.png",
+    "judgment": "Viewed at 1440×900. Enabled/disabled swatches are distinct; actual opened HSV palette is fully inside viewport with hue wheel and brightness slider readable.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-23.png",
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-drawing-colour-open.png"
+    ]
+  },
+  {
+    "caseId": "conversation-speech-idle",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-speech-idle.png",
+    "judgment": "Viewed at 1440×900. Idle speech correctly renders no control bar; screenshot is intentionally empty dark fixture.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-24.png"
+    ]
+  },
+  {
+    "caseId": "conversation-speech-loading",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-speech-loading.png",
+    "judgment": "Viewed at 1440×900. Preparing label, voice selector, rate and stop fit within centered bar.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-24.png"
+    ]
+  },
+  {
+    "caseId": "conversation-speech-playing",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-speech-playing.png",
+    "judgment": "Viewed at 1440×900. Pause, full 123:04 position, voice selector, rate and stop fit with no overlap.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-25.png"
+    ]
+  },
+  {
+    "caseId": "conversation-speech-paused",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-speech-paused.png",
+    "judgment": "Viewed at 1440×900. Paused label and full 123:04 position remain readable alongside play, voice, rate and stop.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-25.png"
+    ]
+  },
+  {
+    "caseId": "conversation-speech-error",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-speech-error.png",
+    "judgment": "Viewed at 1440×900. Long red error truncates within bar while rate and stop remain visible; no horizontal escape.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-26.png"
+    ]
+  },
+  {
+    "caseId": "conversation-outbox-variants",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-outbox-variants-fixed.png",
+    "judgment": "Viewed at 1440×900. Fixed native gray buttons to themed rounded 44px controls; saved/checking rows and scrolled rejected row remain readable within bounded outbox.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-26.png",
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-outbox-variants-scrolled.png"
+    ]
+  },
+  {
+    "caseId": "conversation-outbox-storage-loading",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-outbox-storage-loading.png",
+    "judgment": "Viewed at 1440×900. Storage-opening explanation is readable and states draft retention.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-27.png"
+    ]
+  },
+  {
+    "caseId": "conversation-outbox-storage-failed",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-outbox-storage-failed-fixed.png",
+    "judgment": "Viewed at 1440×900. Fixed tiny native Retry storage to rounded 44px control; long storage error wraps and retained-draft explanation remains visible.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-27.png"
+    ]
+  },
+  {
+    "caseId": "conversation-message-literal",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-message-literal.png",
+    "judgment": "Viewed at 1440×900. Unicode prose and long unbroken text wrap within message width; metrics remain readable below.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-28.png"
+    ]
+  },
+  {
+    "caseId": "conversation-message-markdown",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-message-markdown.png",
+    "judgment": "Viewed at 1440×900. Heading, list, table, horizontally bounded code, link and paragraph render without width escape.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-28.png"
+    ]
+  },
+  {
+    "caseId": "conversation-message-media",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-message-media.png",
+    "judgment": "Viewed at 1440×900. Image, audio, failed video and long file link fit after actual fixture scroll; tiny native Retry was fixed to themed rounded 44px control and recaptured.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-29.png",
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-message-media-scrolled.png",
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-message-media-fixed.png"
+    ]
+  },
+  {
+    "caseId": "conversation-message-reply",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/conversation-message-reply.png",
+    "judgment": "Viewed at 1440×900. Quoted sender/text truncates within message; markdown, failed delivery and reaction chips remain readable with no overlap.",
+    "additionalEvidence": [
+      "/home/kenan/data/pi-ui-review-20261009/conversation/desktop/sheet-29.png"
+    ]
+  }
+]

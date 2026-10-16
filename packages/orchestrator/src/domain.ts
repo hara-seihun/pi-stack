@@ -1,8 +1,11 @@
-import type { AccountReservation } from "./account-reservation.js";
+import type { ModelCandidate } from "./catalog.js";
+import type { AccountReservation } from "./admission-reservation.js";
+import type { ThinkingLevel } from "./threads/contracts.js";
+
 export type BudgetClass = "background" | "force" | "live";
 export type RunSource = "direct" | "lane";
 export type RunExecution = "user" | "root-repair";
-export const ISOLATED_TOOLS = ["read", "write", "append", "edit", "bash", "grep", "find", "ls", "agent_browser"] as const;
+export const ISOLATED_TOOLS = ["read", "write", "edit", "bash", "grep", "find", "ls", "agent_browser"] as const;
 export type RunContext = { readonly tools: readonly string[]; readonly extensions?: readonly string[] };
 export type RunState = "queued" | "starting" | "running" | "done" | "failed" | "aborted";
 export type LeaseKind = "fleet" | "interactive" | "voice";
@@ -21,6 +24,35 @@ export interface Account {
 
 export function allowsAccountUse(account: Account, kind: LeaseKind): boolean {
   return account.enabled && (account.use !== "voice" || kind === "voice") && (!account.reservation || kind === "fleet");
+}
+
+export interface LaneSpec {
+  readonly id: string;
+  readonly prompt: string;
+  readonly cwd: string;
+  readonly profile: string;
+  readonly weight: number;
+  /** Optional ceiling on durable lane custody, independent of quota admission. */
+  readonly maxActive?: number;
+  readonly priority?: number;
+  readonly admission?: BudgetClass;
+  /** Held by every worker this lane starts, instead of the model's default. */
+  readonly thinkingLevel?: ThinkingLevel;
+  readonly doctrineUrl?: string;
+  readonly openingProbe?: string;
+  readonly repair?: { readonly readinessCommand: string };
+}
+
+export interface LaneReadiness {
+  readonly revision:string;
+  readonly lanes:Readonly<Record<string,{readonly ready:boolean}>>;
+}
+
+export interface LaneManifest {
+  readonly version: 2;
+  readonly budget?: BudgetClass;
+  readonly snapshotCommand?:string;
+  readonly lanes: readonly (LaneSpec | (Omit<LaneSpec,"prompt"> & { readonly promptFile:string }))[];
 }
 
 export interface Run {
@@ -92,10 +124,12 @@ export interface OrchestratorConfig {
   readonly port?: number;
   readonly listenHost?: string;
   readonly peers: Readonly<Record<string, PeerHost>>;
+  readonly profiles: Readonly<Record<string, readonly ModelCandidate[]>>;
   readonly meterMaxAgeMs: number;
   readonly reconcileIntervalMs: number;
   readonly stallAfterMs: number;
   readonly killAfterMs: number;
+  readonly taskManifest?: string;
   readonly authPath: string;
   readonly agentDir: string;
 }

@@ -91,7 +91,7 @@ interface AttachmentRow { id: string; conversation_id: string; message_id: strin
 interface Backend { config: MessagingBackendConfig; info: MessagingBackendInfo; plugin?: MessagingPlugin; attempts: number; retry?: ReturnType<typeof setTimeout> }
 type ReactionReceipt = MessagingResult<MessageReaction[]>;
 interface ReactionRequestRow { request_body: string; receipt: string | null }
-export type MessagingActionStore = Pick<ActionStore, "submit" | "followup" | "claim" | "dispatch" | "finish" | "inspect" | "reconcile" | "holdRecipient" | "linkRecipients" | "close">;
+export type MessagingActionStore = Pick<ActionStore, "submit" | "followup" | "claim" | "dispatch" | "finish" | "inspect" | "holdRecipient" | "linkRecipients" | "close">;
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const validPurpose = (value: MessagingPurpose): boolean =>
   (value.intentKey === undefined || typeof value.intentKey === "string" && !!value.intentKey.trim() && value.intentKey.length <= 1000)
@@ -388,19 +388,7 @@ export class MessagingService {
     const linked = this.actions.linkRecipients(identities, "messaging-provider-directory");
     if (!linked.ok) throw new MessagingFailure(linked.message, 503, `action_${linked.error}`);
   }
-  private resolveHistoricalPurpose(requestId: string, action: ActionRecord): void {
-    if (action.state !== "succeeded" || action.resolved || action.transport !== "signal" || action.submittingThreadId !== null
-      || action.result !== null || action.evidence?.kind !== "provider-receipt" || action.evidence.reference !== `historical-signal:${requestId}`) return;
-    const resolved = this.actions.reconcile(action.id, action.revision, "resolve-purpose", action.evidence, "messaging-migration");
-    if (!resolved.ok) throw new Error(resolved.message);
-  }
   private adoptOutboundRequests(): void {
-    const imported = this.db.query("SELECT request_id,action_id FROM messaging_action_requests WHERE ticket IS NULL").all() as { request_id: string; action_id: string }[];
-    for (const request of imported) {
-      const action = this.actions.inspect(request.action_id);
-      if (!action.ok) throw new Error(action.message);
-      this.resolveHistoricalPurpose(request.request_id, action.value);
-    }
     const pending: Array<Parameters<MessagingService["adoptRequest"]>> = [];
     const rows = this.db.query(`SELECT m.* FROM messages m LEFT JOIN messaging_action_requests r ON r.request_id=m.id
       WHERE m.request_body IS NOT NULL AND r.request_id IS NULL AND NOT EXISTS(SELECT 1 FROM messaging_action_refusals f WHERE f.request_id=m.id) ORDER BY m.seq DESC`).all() as MessageRow[];
@@ -453,9 +441,6 @@ export class MessagingService {
       if (!claim.ok) throw new Error(claim.message);
       const finished = this.actions.finish(claim.value, state, null, { kind: state === "succeeded" ? "provider-receipt" : state === "failed-before-effect" ? "provider-rejection" : "operator-observation", reference: `historical-signal:${requestId}`, detail: detail.slice(0, 1000) || "Historical native receipt" });
       if (!finished.ok) throw new Error(finished.message);
-      this.resolveHistoricalPurpose(requestId, finished.value);
-    } else {
-      this.resolveHistoricalPurpose(requestId, reservation.action);
     }
     this.db.query("INSERT INTO messaging_action_requests VALUES(?,?,NULL,?)").run(requestId, reservation.action.id, kind);
   }

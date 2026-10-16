@@ -15,6 +15,6 @@ const alias = ["./", "../kenan-memory/"].flatMap(directory => {
 export default defineConfig({
   resolve: { alias },
   test: {
-    setupFiles: [fileURLToPath(new URL("./tests/setup.ts", import.meta.url))],
+    setupFiles: ["./tests/setup.ts"],
   },
 });

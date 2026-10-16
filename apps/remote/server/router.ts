@@ -21,12 +21,10 @@ import { handleAgentRooms, roomPersonUids } from "./agent-rooms";
 import { handleAgentSignal, isSignalProductPath } from "./agent-signal";
 import { handleAgentActions } from "./agent-actions";
 import { handleAgentManager } from "./agent-manager";
-import { incomingManagerPolicy, outgoingManagerPolicy, incomingManagerNotice, outgoingManagerNotice, MANAGER_NOTICE_PATH, MANAGER_POLICY_PATH } from "./canonical-manager-policy";
 import { oneKenanEnabled } from "kenan-memory/config";
-import { oneKenanConfig, custodyAuthenticate, custodyStatus, custodyVerify } from "./one-kenan";
+import { oneKenanConfig, custodyAuthenticate, custodyStatus } from "./one-kenan";
 import { EditorAccess, editorOriginAllowed, editorSocket } from "./editor-access";
 import { editorResponse } from "./editor-proxy";
-import { activatePersonalCore, preparedSupervisorHealth } from "./core-readiness";
 
 const PORT = Number(process.env.PI_REMOTE_ROUTER_PORT ?? "8788");
 const HOST = process.env.PI_REMOTE_ROUTER_HOST ?? "127.0.0.1";
@@ -116,19 +114,18 @@ async function systemctl(...args: string[]): Promise<{ ok: boolean; message: str
   return { ok: code === 0, message: (err || out).trim() };
 }
 
-async function supervisorHealthy(person: Person, scopeId: string): Promise<boolean> {
+async function supervisorHealthy(person: Person): Promise<boolean> {
   try {
     const response = await fetch(`http://127.0.0.1:${person.port}/v1/health`, { signal: AbortSignal.timeout(1_500) });
-    const ready = response.ok && preparedSupervisorHealth(await response.json(), scopeId);
-    if (ready) activeUsers.add(person.user);
-    return ready;
+    if (response.ok) activeUsers.add(person.user);
+    return response.ok;
   } catch { return false; }
 }
 
-async function waitForSupervisor(person: Person, scopeId: string): Promise<boolean> {
+async function waitForSupervisor(person: Person): Promise<boolean> {
   const deadline = Date.now() + UNLOCK_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    if (await supervisorHealthy(person, scopeId)) return true;
+    if (await supervisorHealthy(person)) return true;
     const state = await activeState(person);
     if (state === "failed" || state === "inactive") break;
     await Bun.sleep(200);
@@ -139,17 +136,8 @@ async function waitForSupervisor(person: Person, scopeId: string): Promise<boole
 
 type StartResult = { ok: true } | { ok: false; error: string; status: number };
 async function start(person: Person, key: string): Promise<StartResult> {
-  const custody = oneKenanConfig();
-  if (person.unlock && custody && await unitActive(person)) {
-    const verified = await custodyVerify(custody, person.user, key);
-    if (!verified.ok) return verified;
-    const prepared = await activatePersonalCore(person.user);
-    if (!prepared.ok) { activeUsers.delete(person.user); return prepared; }
-    return await waitForSupervisor(person, prepared.value.scopeId)
-      ? { ok: true }
-      : { ok: false, error: "The supervisor did not become ready", status: 503 };
-  }
   const personal = await startPersonal(person, key);
+  const custody = oneKenanConfig();
   if (personal.ok && custody && person.unlock) {
     void custodyAuthenticate(custody, person.user, key).then(captured => {
       if (!captured.ok) console.error(`Kenan custody capture for ${person.user} did not finish: ${captured.error}`);
@@ -167,27 +155,26 @@ async function startPersonal(person: Person, key: string): Promise<StartResult> 
       const supplied = Buffer.from(key);
       if (retained.length !== supplied.length || !timingSafeEqual(retained, supplied)) return { ok: false, error: "Wrong key", status: 403 };
     }
-  } else {
-    await mkdir(KEY_DIR, { recursive: true, mode: 0o700 });
-    await chmod(KEY_DIR, 0o700);
-    await writeFile(join(KEY_DIR, person.user), key, { mode: 0o600 });
-    try {
-      const started = await systemctl("start", unit(person));
-      if (!started.ok) {
-        await forget(person);
-        return { ok: false, error: "Wrong key, or the supervisor could not start", status: 400 };
-      }
-    } catch {
-      await forget(person);
-      return { ok: false, error: "Could not start the supervisor", status: 500 };
-    }
+    return await waitForSupervisor(person)
+      ? { ok: true }
+      : { ok: false, error: "The supervisor did not become ready", status: 503 };
   }
-  // The root resource owner waits for the exact private mount, activates its
-  // registered core scope, and only then permits a projection readiness probe.
-  const prepared = await activatePersonalCore(person.user);
-  if (!prepared.ok) { activeUsers.delete(person.user); return prepared; }
-  if (await waitForSupervisor(person, prepared.value.scopeId)) return { ok: true };
-  return { ok: false, error: "Your folder is open, but its shared core projection is not ready. Retry unlocking with the same account.", status: 503 };
+  await mkdir(KEY_DIR, { recursive: true, mode: 0o700 });
+  await chmod(KEY_DIR, 0o700);
+  await writeFile(join(KEY_DIR, person.user), key, { mode: 0o600 });
+  try {
+    const started = await systemctl("start", unit(person));
+    if (!started.ok) {
+      await forget(person);
+      return { ok: false, error: "Wrong key, or the supervisor could not start", status: 400 };
+    }
+    if (await waitForSupervisor(person)) return { ok: true };
+    await forget(person);
+    return { ok: false, error: person.unlock ? "Wrong key, or the folder would not open" : "The supervisor did not come up", status: 400 };
+  } catch {
+    await forget(person);
+    return { ok: false, error: "Could not start the supervisor", status: 500 };
+  }
 }
 
 async function forget(person: Person): Promise<{ ok: boolean; message: string }> {
@@ -341,7 +328,7 @@ async function editorRoute(person: Person, req: Request, url: URL, server: Bun.S
   if (!await unitActive(person)) { sessions.revoke(person.user); return deny("Your folder is locked", 423); }
   const websocket = req.headers.get("upgrade")?.toLowerCase() === "websocket";
   if ((websocket || !["GET", "HEAD"].includes(req.method)) && !editorOriginAllowed(req, person)) return deny("Editor origin does not match", 403);
-  if (!websocket) return editorResponse(person, req, url, identity.signal, editorSocket(person.user), identity.parentOrigin);
+  if (!websocket) return editorResponse(person, req, url, identity.signal, editorSocket(person.user));
   const protocols = (req.headers.get("sec-websocket-protocol") ?? "").split(",").map(value => value.trim()).filter(Boolean);
   const headers = new Headers({ host: new URL(person.editor!.origin).host, origin: person.editor!.origin });
   const upstream = await openUpstream(`ws+unix://${editorSocket(person.user)}:${url.pathname}${url.search}`, protocols, person.user, identity.signal, undefined, headers);
@@ -487,20 +474,10 @@ async function oauthRoute(req: Request, url: URL): Promise<Response> {
 const consentBridge = rootConsentHandler({ capability: rootConsentCapability, persons: listPersons,
   roomsOrigin: process.env.PI_REMOTE_ROOMS_OWNER_URL });
 async function route(req: Request, url: URL, peer?: { uid: number }): Promise<Response> {
-  if (url.pathname === MANAGER_NOTICE_PATH) return incomingManagerNotice(req, ENVIRONMENT_ID, user => byUser.get(user), (person, input, sourceEnvironment, signal) => {
-    const origin = `http://127.0.0.1:${person.port}`;
-    const target = new URL("/v1/manager-relay/send", origin);
-    return proxy(person, origin, new Request(req.url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input), signal }), target, signal, undefined, sourceEnvironment);
-  });
-  if (url.pathname === MANAGER_POLICY_PATH) return incomingManagerPolicy(req, ENVIRONMENT_ID, user => byUser.get(user), (person, signal) => {
-    const origin = `http://127.0.0.1:${person.port}`;
-    const target = new URL("/v1/manager-relay/managerNotificationPolicy", origin);
-    return proxy(person, origin, new Request(req.url, { method: "POST", headers: { "content-type": "application/json" }, body: "{}", signal }), target, signal);
-  });
   if (/^\/v1\/agent-rooms(?:\/|$)/.test(url.pathname)) return handleAgentRooms(req, peer, roomPeople, activeRooms());
   if (/^\/v1\/agent-manager(?:\/|$)/.test(url.pathname)) return handleAgentManager(req, peer, roomPeople, user => byUser.get(user),
     user => grants.get(user) ?? [], ENVIRONMENT_ID,
-    (person, origin, request, target, upstream, sourceEnvironment) => proxy(person, origin, request, target, request.signal, upstream, sourceEnvironment), outgoingManagerPolicy, outgoingManagerNotice);
+    (person, origin, request, target, upstream, sourceEnvironment) => proxy(person, origin, request, target, request.signal, upstream, sourceEnvironment));
   if (/^\/v1\/(?:manager-relay|remotes\/[^/]+\/v1\/manager-relay)(?:\/|$)/.test(url.pathname)) return Response.json({ error: "Use the account-bound manager relay" }, { status: 403 });
   if (url.pathname === "/v1/external-actions") return handleAgentActions(req, peer, roomPeople, user => byUser.get(user),
     user => grants.get(user) ?? [], ENVIRONMENT_ID,
@@ -588,7 +565,7 @@ async function route(req: Request, url: URL, peer?: { uid: number }): Promise<Re
         await systemctl("stop", `pi-editor@${person.user}.service`);
         return locked(person.user);
       }
-      const handoff = editors.issue(person, identity.session!, body.path, body.kind, req, login?.settings.publicUrl ?? null);
+      const handoff = editors.issue(person, identity.session!, body.path, body.kind);
       return handoff.ok ? Response.json(handoff) : Response.json({ error: handoff.error, code: "editor_session_ended" }, { status: 423 });
     });
   }

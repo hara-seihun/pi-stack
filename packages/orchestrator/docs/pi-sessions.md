@@ -10,7 +10,7 @@ Production controllers use [`createSharedPiSessionOpener({dataDir})`](../src/thr
 
 `attachSession(reference, output, exit)` reconnects only to an existing session using its recorded `{control, socketPath}`. Both socket paths must belong to this controller's data directory. Attachment makes a control `status` request and attaches to the session socket; it never checks cwd, requests admission, launches a runner, or sends `open`. A missing reference or a socket connection rejected with `ENOENT` or `ECONNREFUSED` returns `null`. Timeouts, premature disconnects, malformed replies and other errors throw because they do not establish absence. This lets Stop reach a retained native session after its checkout has been reclaimed, without recreating that checkout or initializing Pi.
 
-Both opening and attachment emit `runner_attached` and use the same command, output replay, close and connection ownership code. `close` requests native disposal before detaching its connection; opener `detach` only disconnects. Cancellation crosses both pending opening and pending attachment before reading the published runtime: its presence is not proof that the native command client is initialized.
+Both opening and attachment emit `runner_attached` and use the same command, output replay, close and connection ownership code. `close` requests native disposal before detaching its connection; opener `detach` only disconnects.
 
 The controller calls `detach` during handoff. This disconnects its channels without stopping accepted work. Reopening the same thread attaches to the same session and replays unacknowledged output. Each channel's output spool is transient delivery state, not conversation history. Native JSONL and the thread database remain authoritative. A dead runner loses its in-memory tools and queues; the controller recovers using native work receipts.
 
@@ -19,18 +19,6 @@ The controller calls `detach` during handoff. This disconnects its channels with
 A shared host stays resident when empty, keeping SDK code loaded for the next agent. Per-application isolated hosts are not retained empty because each cwd is a distinct process boundary. Controller detach drains its generation when empty; current-generation opens can retain it again. Generation, selected account/environment and model compatibility are checked before idle reuse. Active recovery can attach to an older generation without disturbing accepted work, but its next assignment reopens under the selected generation. Older runners without residency negotiation retain their accepted execution contract and unload at settlement. Shutdown refuses to discard active sessions.
 
 Runner files live under the owning controller's data directory in `thread-runners/` and `thread-sockets/`. The compiled entry is `dist/threads/runner-host.js`. Startup inherits the owning Unix account. An isolated application's runner starts with its scrubbed HOME and credential environment before loading extensions. Root-repair execution retains its own account boundary and full normal context.
-
-## Core outage reconciliation
-
-The thread HTTP client retries a replay-safe request within its existing deadline using the same body and identity. A longer Core outage returns the exact `requestId` with acceptance uncertainty; it does not create another identity or replay native input. After connectivity returns, `thread_send` and `thread_wait` accept that original caller-bound `requestId` with the unchanged original parameters. The owner checks operation and normalized payload digest and returns the original durable receipt. Changed destination, text, dependency or operation is a conflict; another caller's identity is rejected.
-
-A retained native adapter keeps its cached tool schemas across future-factory selection. The selected CLI provides the same recovery route without replacing that adapter:
-
-- Original CLI send: `pi-orchestrator send RECIPIENT --prompt ORIGINAL_TEXT --request-id ORIGINAL_ID`, under the original caller and scope.
-- Original native tool send: the same command plus `--source explicit`. It requires the original `PI_THREAD_ID`, `PI_THREAD_TOKEN` and own-call ID prefix, preserving the tool's source field and normalized digest.
-- Original native wait: `pi-orchestrator wait-recover --request-id ORIGINAL_ID --input ORIGINAL_JSON`, with the original typed tool parameters and original thread capability. It cannot generate a new identity. Its CLI receipt is not itself a native turn-termination gesture; the agent ends its turn after an active registered wait, or continues on `resumed`/`already_arrived`.
-
-An accepted receipt can be returned after Stop/Close without unarchiving or resubmitting its pending work. These routes do not resend a research assignment or external effect. Focused proofs in `thread-outage-reconciliation.test.ts`, `send-recovery-command.test.ts` and `retained-attachment.test.ts` cover lost acceptance followed by owner restart, request-budget expiry, exact tool-to-CLI receipt matching, changed/foreign identity rejection and gated native attachment.
 
 ## Durable runner memory and shell custody
 
@@ -74,82 +62,11 @@ An already accepted input acknowledges without another user message. With `resum
 
 `PI_THREAD_REQUIRE_SESSION=1` makes a missing native file an error. The thread controller sets it when custody requires existing history. New sessions receive a durable native header before execution. Native opens and switches validate the header. Historical provider records and transfer provenance belong to the [thread import owner](../src/threads/import.ts); changing an engine label or replaying user requests is not a conversion.
 
-## Empty final result recovery
-
-The controller requests `recover_final_result` only after original work has positively
-settled without final text, a dependency/question or a background operation owning
-continuation. It retains the same execution and work IDs. Native admission requires
-settled, landed work and confirmed idleness, syncs `thread_final_result_recovery`
-with the stable command ID and original work IDs, then `thread_resume`, before
-acknowledging. A `thread_final_result_request` custom message asks only for the final
-result. It neither repeats the assignment nor retakes original input custody.
-
-[`pi-final-result-recovery.ts`](../src/threads/pi-final-result-recovery.ts) owns the
-single recovery policy used by fresh adapters and adopted residents.
-`get_state.finalResultRecoveryProtocol` identifies `final-result-recovery-v1`;
-`get_state.finalResultRecovery` reports its receipt. Repeated command identity
-acknowledges without another model request; changed work under that ID or another
-attempt for the same work is rejected. A second empty result settles failed through
-the controller's ordinary result path. Cold recovery with an accepted attempt but
-no native settlement fails explicitly, never resuming the original effects. Stop
-and durable waits retain their existing boundaries. A failed recovery retains its provider error and settles failed rather than entering
-another controller provider-resumption turn. Native transport retries remain unchanged.
-
-Focused offline checks:
-
-```sh
-node ../../node_modules/vitest/vitest.mjs run tests/thread-service.test.ts tests/pi-session-halt.test.ts tests/thread-capacity.test.ts --maxWorkers=1 -t 'substantive final result|empty final recovery|recovers a final result|recovers an empty final|final recovery|requests one final result|owns continuation'
-```
-
-Run from `packages/orchestrator` against the prepared shared-RPC SDK. The native
-fixture executes one real Bash effect, recovers the result and reopens the session
-without repeating that effect or the original input.
-
-## Retained resident final-result adoption
-
-[`pi-final-result-adoption.ts`](../src/threads/pi-final-result-adoption.ts) exports
-`adoptResidentFinalResultRecovery(targets, approved)`. Its finite bootstrap accepts
-exact retained objects and SHA256-approved predecessor methods, preflights the whole
-cohort, then replaces only each adapter's command method and its event sink's publish
-method. It preserves SDK/session manager objects, original command/close ownership,
-history, tools, active executions, environment scope and input identities. Installation
-neither appends native history nor executes commands. Errors identify contract,
-source-identity or installation failure; successful repeated installation is idempotent.
-
-For the audited batch-protocol predecessor, traverse the retained host's
-`resident.close` closure to `adapter` and the `RuntimeOutput` sink named `output`.
-Traverse `adapter.command` to `runtime`, `inbox`, `execution`, `env`, native projection
-`output` and `settle`; take the original module's `piEnvironmentScope`. Capture exact
-command/publish/resume function objects, their approved source hashes, SDK object,
-header ID and canonical session path before installation. Never substitute candidate
-module environment scope or a newly opened SDK session for those bindings.
-
-Recovery observes original `get_state`, requires positively idle native/execution
-state, then calls original `resume_pending` under a private stable command identity.
-Its audited synchronous registration updates original active-work/settler custody.
-Only during that synchronous call, the retained `inbox.resume` is shadowed with a
-no-op and restored before awaiting anything, preventing the predecessor's original
-assignment continuation. The shared recovery policy then sends the short final request.
-Private acknowledgements are correlated and hidden from the ordinary channel; all
-other original native events retain the same spool owner and sequence.
-
-Coverage is per exact SDK/header/file binding, advertised as
-`finalResultRecoveryAdoption.state: covered`. Native session replacement revokes it
-as `unsupported` and removes the capability until current closure bindings receive
-adoption. A future-factory upgrade alone does not cover existing adapters. Pre-batch
-residents without the audited `inbox`/`resume_pending` contract are explicitly
-unsupported, including the 9cb predecessor; they need a separately proven source route.
-
-`tests/pi-final-result-adoption.test.ts` proves adoption during a real Bash/model
-turn without replacing native objects or repeating the effect, whole-cohort rejection,
-source guarding, one attempt per work, and coverage invalidation after actual native
-new-session/switch/fork. Run it directly through Vitest against the prepared SDK.
-
 ## Native command receipts
 
 Fork, clone, new-session, switch, compaction, shell commands and model/thinking cycles require stable command IDs. A synced `thread_command` native entry precedes execution. A changed payload under the same ID fails. `thread_command_result` records the exact response and resulting session file before the response reaches the controller.
 
-Replacement writes a pending command receipt into its target and a target reference into its source before emitting `session_changed`. Completion writes its result to both native files. SDK replacement disposes the original manager; receipts retain only its canonical path and cwd. Source receipt writes reacquire that file through `SessionManager.open`, hold its exclusive writer lease for the append/checkpoint, then dispose the temporary manager. They never write through a released manager. A custody or persistence failure yields `command-receipt-unconfirmed` with the actual source/target paths and original native response; the target replacement identity remains authoritative and mutation is never repeated. Retrying from the source can therefore adopt the recorded target and replay the response without another fork. A pending receipt without a result is an explicit unconfirmed outcome. It never authorizes a retry, a new request ID or a guess about whether compaction completed.
+Replacement writes a pending command receipt into its target and a target reference into its source before emitting `session_changed`. Completion writes its result to both native files. Retrying from the source can therefore adopt the recorded target and replay the response without another fork. A pending receipt without a result is an explicit unconfirmed outcome. It never authorizes a retry, a new request ID or a guess about whether compaction completed.
 
 These are native execution receipts; the thread service still owns command admission. External tool effects are not transactions. A process can stop after an external effect but before its result, so recovery inspects current state rather than promising exactly-once external effects.
 

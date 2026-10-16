@@ -121,18 +121,6 @@ pi_stack_dependency_key() {
   )
 }
 
-pi_stack_prepare_source_sdk() {
-  local root=$1
-  if [[ ! -d $root/packages/runtime ]]; then return 0; fi
-  if [[ -L $root/node_modules ]]; then
-    echo "Source SDK preparation requires an isolated owning dependency tree: $root" >&2
-    return 65
-  fi
-  node "$root/packages/runtime/patch-session-durability.mjs" "$root/node_modules" || return
-  node "$root/packages/runtime/patch-shared-custody.mjs" "$root/node_modules" || return
-  node "$root/packages/runtime/patch-shared-rpc.mjs" "$root/node_modules" || return
-}
-
 pi_stack_prepare_dependencies() {
   local root=$1 key stamp hidden_lock hidden_hash expected
   key=$(pi_stack_dependency_key "$root") || return
@@ -157,17 +145,11 @@ process.exit(Object.entries(lock.packages ?? {}).every(([name, spec]) =>
 ) ? 0 : 1);
 JS
     then
-      pi_stack_prepare_source_sdk "$root" || exit
       exit 0
     fi
   fi
-  if [[ -L $root/node_modules ]]; then
-    echo "Dependency refresh requires an isolated build checkout; borrowed node_modules is immutable: $root" >&2
-    exit 65
-  fi
   rm -f "$stamp" || exit
   (cd "$root" && npm ci --ignore-scripts --prefer-offline --no-audit --no-fund) || exit
-  pi_stack_prepare_source_sdk "$root" || exit
   hidden_hash=$(sha256sum "$hidden_lock" | cut -d' ' -f1) || exit
   printf '%s %s\n' "$key" "$hidden_hash" > "$stamp" || exit
   ) || return
@@ -256,6 +238,24 @@ pi_stack_users() {
     fi
   } | awk 'NF && !seen[$0]++'
 }
+pi_stack_daemon_units() {
+  local running user state fleet
+  running=$(pi_stack_as_root systemctl list-units --type=service --state=running --no-legend 'pi-orchestrator@*.service') || return
+  fleet=$(pi_stack_fleet_user) || return
+  local -a units=()
+  [[ -z $fleet ]] || units+=("pi-orchestrator@$fleet.service")
+  # list-unit-files lists templates, not their enabled instances on NixOS.
+  for user in "$@"; do
+    state=$(pi_stack_as_root systemctl show --property=UnitFileState --value "pi-orchestrator@$user.service") || return
+    case "$state" in
+      enabled|enabled-runtime) units+=("pi-orchestrator@$user.service");;
+    esac
+  done
+  {
+    printf '%s\n' "$running" | awk '$1 ~ /^pi-orchestrator@.+\.service$/ {print $1}'
+    printf '%s\n' "${units[@]}"
+  } | awk 'NF' | sort -u
+}
 # Another account may not be able to read the checkout's .git; the parent hands
 # the commit down instead.
 pi_stack_commit() { printf '%s\n' "${PI_STACK_COMMIT:-$(git -C "${PI_STACK_ROOT_DIR:-.}" rev-parse HEAD)}"; }
@@ -312,12 +312,6 @@ pi_stack_publish_release() {
     if ! pi_stack_as_root rsync -a --delete --chmod=D755,Fu=rwX,Fgo=rX "$stage/" "$root_stage/"; then
       pi_stack_as_root rm -rf "$root_stage"
       return 1
-    fi
-    if [[ $name == remote ]]; then
-      if ! pi_stack_as_root node "$root/deploy/custody-verifier.mjs" "$root_stage/server/one-kenan-verify.ts" "$root/apps/remote/server/one-kenan-verify.ts" prepare; then
-        pi_stack_as_root rm -rf "$root_stage"
-        return 66
-      fi
     fi
     pi_stack_as_root mv -T "$root_stage" "$release"
   fi

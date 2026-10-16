@@ -4,11 +4,8 @@ import type { ExecutionActivitySnapshot } from "./execution-activity.js";
 import type { ThreadLifecycle } from "./lifecycle.js";
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: ThreadError };
-export type SpawnReceipt = { requestId: string; threadId: string; state: "accepted" | "unconfirmed" };
-export type ThreadError = { code: "not_found" | "invalid_request" | "conflict" | "no_pending_messages" | "unavailable" | "cancellation_failed" | "oversized"; message: string; retryable?: boolean; retryAt?: number; requestId?: string; spawnReceipt?: SpawnReceipt };
-export type Delivery = "pending" | "queue" | "steer" | "hardSteer";
-export type PendingDelivery = "pending";
-export type { ThreadRole } from "./roles.js";
+export type ThreadError = { code: "not_found" | "invalid_request" | "conflict" | "no_pending_messages" | "unavailable" | "cancellation_failed" | "oversized"; message: string; retryable?: boolean; retryAt?: number; requestId?: string };
+export type Delivery = "queue" | "steer" | "hardSteer";
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = typeof THINKING_LEVELS[number];
 export const isThinkingLevel = (value: unknown): value is ThinkingLevel => THINKING_LEVELS.some(level => level === value);
@@ -31,8 +28,8 @@ export interface Thread {
   id: string;
   ownerId?: string;
   parentId: string | null;
-  role?: import("./roles.js").ThreadRole;
-  /** Historical identity, retained only in exact history; current identity is the task title. */
+  role?: "agent" | "conversation" | "worker";
+  /** Immutable generated identity; historical threads may not have one. */
   agentName?: string;
   /** Authoritative unresolved result subscriptions; terminal acceptance removes the peer. */
   dependencies?: string[];
@@ -52,7 +49,6 @@ export interface Thread {
   updatedAt: number;
   /** Latest accepted person input; absent before any person input. Excludes agent sends and notifications. */
   lastUserMessageAt?: number;
-  /** Accepted, not-yet-landed inputs only; execution receipts are not a pending queue. */
   pendingMessages: number;
   executionActivity?: ExecutionActivitySnapshot & { activeTools: string[] };
   wakeSchedule?: ThreadWakeSchedule;
@@ -126,7 +122,7 @@ export interface QuestionEvents {
   items: Array<{ seq: number; questionId: string; threadId: string; question: string; time: number }>;
 }
 export interface ThreadMessage {
-  /** Recorded ingress provenance; all inputs are delivered in accepted ordinal order. */
+  /** Owner-assigned admission tier; FIFO within each tier. */
   priority: "human" | "manager" | "normal";
   id: string;
   threadId: string;
@@ -170,8 +166,8 @@ export interface SendThread {
   source?: "explicit" | "notification";
   replyTo?: string;
 }
-export function resolveDelivery(_input: Pick<SendThread, "senderId" | "delivery">): PendingDelivery {
-  return "pending";
+export function resolveDelivery(input: Pick<SendThread, "senderId" | "delivery">): Delivery {
+  return input.delivery ?? "steer";
 }
 export interface ThreadList {
   id?: string;
@@ -188,7 +184,7 @@ export type ArchivedThreadsQuery = { kind: "count" } | {
 };
 export type ArchivedThreadsResult = { kind: "count"; total: number } | { kind: "page"; total: number; revision: string; threads: Thread[] };
 export interface ThreadRead { threadId: string; cursor?: string; limit?: number; entryId?: string; offset?: number }
-export interface ThreadHistory { entries: Record<string, unknown>[]; nextCursor?: string; integrity?: import("pi-orchestrator/history").NativeHistoryQuarantineIntegrity }
+export interface ThreadHistory { entries: Record<string, unknown>[]; nextCursor?: string }
 export interface ThreadSettlement {
   seq: number;
   executionId: string;
@@ -197,8 +193,6 @@ export interface ThreadSettlement {
   outcome: WorkOutcome;
   /** Native turn settled, but its assignment still owns waits, dependencies or questions. */
   assignmentPending?: boolean;
-  /** Silent notification consumption, not an assignment result. */
-  notificationOnly?: true;
   time: number;
   finalMessage: Record<string, unknown> | null;
   error?: string;
@@ -404,7 +398,7 @@ export function validateWaitDependency(input: unknown): Result<WaitDependency> {
 }
 export interface ThreadWakeSchedule {
   reason: string; cadenceMs: number; nextDueAt: number;
-  /** Last accepted occurrence; changing a duty never withdraws its accepted input. */
+  /** Queued wake input that cancel withdraws. */
   lastMessageId?: string;
 }
 export type ThreadWakeRequest = { threadId: string } & (
@@ -453,21 +447,11 @@ export interface ThreadApi {
 
 /** `emittedAt`: epoch ms when the Pi process produced the event, set by the thread owner. */
 export type PiEvent = Record<string, unknown> & { type: string; emittedAt?: number };
-export interface PendingThreadInput {
-  workId: string; message: string; images?: unknown[]; inputOrigin?: "human" | "machine";
-}
-export interface ThreadInputBatch {
-  type: "input_batch"; id?: string; batchId: string; inputs: PendingThreadInput[];
-}
 export type PiCommand = Record<string, unknown> & { type: string; id?: string };
 export interface PiSession {
-  nativeOwnership?: { kind: "fresh" } | { kind: "retained"; reference: PiRunnerReference; pid: number; startTicks: string };
   /** Reserve execution capacity, or release it while retaining an idle native session. */
   setActive?(active: boolean): Promise<void>;
   command(command: PiCommand): Promise<void>;
-  /** Stop this controller's observation/reconnect loop only; retain native execution and history.
-   * Absent on in-process sessions that own no independently reconnecting observer. */
-  detach?(): void;
   close(): Promise<void>;
 }
 export interface PiSessionOptions {

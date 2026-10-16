@@ -96,13 +96,6 @@ export class AgentCapacityAuthority {
     if (row.state === "active") return { ok: true, value: { state: "active", custody: { ...execution, leaseId: row.lease_id! } } };
     return { ok: true, value: { state: row.state } };
   }
-  recordedOwner(execution: AgentExecution, allowedOwners: readonly string[]): Result<{ kind: "absent" } | { kind: "recorded"; ownerId: string }> {
-    if (!isAgentExecution(execution)) return fail("invalid_request", "Exact agent and execution identities are required");
-    const row = this.db.prepare("SELECT agent_id,owner_id FROM capacity_request WHERE execution_id=?").get(execution.executionId) as Pick<Row, "agent_id" | "owner_id"> | undefined;
-    if (!row) return { ok: true, value: { kind: "absent" } };
-    if (row.agent_id !== execution.agentId || !allowedOwners.includes(row.owner_id)) return fail("unavailable", "Recorded custody is outside the declared migration host grant");
-    return { ok: true, value: { kind: "recorded", ownerId: row.owner_id } };
-  }
   withdraw(ownerId: string, execution: AgentExecution): Result<void> {
     return this.transaction(() => {
       const observation = this.inspect(ownerId, execution);
@@ -129,7 +122,6 @@ export class AgentCapacityAuthority {
 export interface AgentCapacityAuthorityConfig {
   databasePath: string; listenHost: string; port: number;
   owners: { id: string; host: string; tokenFile: string }[];
-  migrations?: { ownerId: string; ownerIds: string[] }[];
 }
 export function readAgentCapacityAuthorityConfig(path: string): AgentCapacityAuthorityConfig {
   const value = JSON.parse(readFileSync(path, "utf8")) as AgentCapacityAuthorityConfig;
@@ -137,20 +129,11 @@ export function readAgentCapacityAuthorityConfig(path: string): AgentCapacityAut
     || !Number.isSafeInteger(value.port) || value.port < 1024 || value.port > 65535 || !Array.isArray(value.owners) || !value.owners.length
     || value.owners.some(owner => !owner || !nonempty(owner.id) || !nonempty(owner.host) || !nonempty(owner.tokenFile) || !owner.tokenFile.startsWith("/"))
     || new Set(value.owners.map(owner => owner.id)).size !== value.owners.length) throw new Error("Invalid explicit global agent capacity authority configuration");
-  if (value.migrations !== undefined && (!Array.isArray(value.migrations) || new Set(value.migrations.map(grant => grant.ownerId)).size !== value.migrations.length
-    || value.migrations.some(grant => !grant || !Array.isArray(grant.ownerIds) || !grant.ownerIds.length || new Set(grant.ownerIds).size !== grant.ownerIds.length
-      || !value.owners.some(owner => owner.id === grant.ownerId) || grant.ownerIds.some(id => !value.owners.some(owner => owner.id === id && owner.host === value.owners.find(migration => migration.id === grant.ownerId)!.host)))))
-    throw new Error("Capacity migrations require explicit same-host registered owner grants");
   return value;
 }
 const digest = (value: string) => createHash("sha256").update(value).digest();
-export function createAgentCapacityServer(authority: AgentCapacityAuthority, owners: { id: string; token: string; host?: string }[], migrations: { ownerId: string; ownerIds: string[] }[] = []): Server {
+export function createAgentCapacityServer(authority: AgentCapacityAuthority, owners: { id: string; token: string }[]): Server {
   if (!owners.length || owners.some(owner => !nonempty(owner.id) || !nonempty(owner.token)) || new Set(owners.map(owner => owner.id)).size !== owners.length || new Set(owners.map(owner => owner.token)).size !== owners.length) throw new Error("Every capacity owner needs a unique identity and credential");
-  if (new Set(migrations.map(grant => grant.ownerId)).size !== migrations.length || migrations.some(grant => {
-    const migration = owners.find(owner => owner.id === grant.ownerId);
-    return !migration || !nonempty(migration.host) || !grant.ownerIds.length || new Set(grant.ownerIds).size !== grant.ownerIds.length
-      || grant.ownerIds.some(id => !owners.some(owner => owner.id === id && owner.host === migration.host));
-  })) throw new Error("Capacity migration server grants require exact registered same-host ownership");
   const credentials = owners.map(owner => ({ id: owner.id, digest: digest(owner.token) }));
   const send = (response: ServerResponse, status: number, result: Result<unknown>) => { response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify({ authority: AGENT_CAPACITY_AUTHORITY, result: result.ok && result.value === undefined ? { ok: true, value: null } : result })); };
   async function request(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -159,7 +142,7 @@ export function createAgentCapacityServer(authority: AgentCapacityAuthority, own
     const owner = presented && credentials.find(owner => timingSafeEqual(owner.digest, presented));
     if (!owner) { send(response, 403, fail("unavailable", "Owner credential rejected; work remains queued")); return; }
     if (request.method === "GET" && request.url === "/v1/status") { send(response, 200, { ok: true, value: authority.status() }); return; }
-    if (request.method !== "POST" || !["/v1/acquire", "/v1/release", "/v1/inspect", "/v1/withdraw", "/v1/recorded-owner"].includes(request.url!)) { send(response, 404, fail("invalid_request", "Unknown capacity operation")); return; }
+    if (request.method !== "POST" || !["/v1/acquire", "/v1/release", "/v1/inspect", "/v1/withdraw"].includes(request.url!)) { send(response, 404, fail("invalid_request", "Unknown capacity operation")); return; }
     let input: unknown;
     try {
       const chunks: Buffer[] = []; let size = 0;
@@ -167,11 +150,6 @@ export function createAgentCapacityServer(authority: AgentCapacityAuthority, own
       input = JSON.parse(Buffer.concat(chunks).toString("utf8"));
     } catch { send(response, 400, fail("invalid_request", "Invalid capacity request JSON")); return; }
     if (!input || typeof input !== "object" || (input as { ownerId?: unknown }).ownerId !== owner.id) { send(response, 403, fail("unavailable", "Owner identity does not match credential")); return; }
-    if (request.url === "/v1/recorded-owner") {
-      const grant = migrations.find(grant => grant.ownerId === owner.id);
-      send(response, grant ? 200 : 403, grant ? authority.recordedOwner(input as AgentExecution, grant.ownerIds) : fail("unavailable", "This owner has no explicit migration grant"));
-      return;
-    }
     const result = request.url === "/v1/acquire" ? authority.acquire(owner.id, input as AgentExecution)
       : request.url === "/v1/release" ? authority.release(owner.id, input as CapacityCustody)
       : request.url === "/v1/inspect" ? authority.inspect(owner.id, input as AgentExecution)
@@ -183,7 +161,7 @@ export function createAgentCapacityServer(authority: AgentCapacityAuthority, own
 
 export async function runAgentCapacityAuthority(path: string): Promise<void> {
   const config = readAgentCapacityAuthorityConfig(path), authority = new AgentCapacityAuthority(config.databasePath);
-  const server = createAgentCapacityServer(authority, config.owners.map(owner => ({ id: owner.id, host: owner.host, token: readFileSync(owner.tokenFile, "utf8").trim() })), config.migrations);
+  const server = createAgentCapacityServer(authority, config.owners.map(owner => ({ id: owner.id, token: readFileSync(owner.tokenFile, "utf8").trim() })));
   try {
     await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(config.port, config.listenHost, resolve); });
     await new Promise<void>(resolve => { for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, resolve); });

@@ -87,57 +87,6 @@ async function fixture(prepare?: (session: AgentSession) => void, extension?: st
   return { get session() { return session; }, get native() { return native; }, events, command, waitFor, reply, message, providerStream, reopen };
 }
 
-it("recovers a final result once without replaying input or completed tool effects, including after reopen", async () => {
-  const f = await fixture();
-  const effect = join(f.native.sessionFile!, "..", "effect.txt");
-  let calls = 0;
-  f.native.agent.streamFunction = () => {
-    calls++;
-    return f.reply(f.message(calls === 1 ? [{ type: "toolCall", id: "original-effect", name: "bash", arguments: { command: `printf x >> ${effect}`, timeout: 1 } }]
-      : calls === 2 ? [] : [{ type: "text", text: "Work finished" }], calls === 1 ? "toolUse" : "stop"));
-  };
-  expect(await f.command("input_batch", { batchId: "original-batch", inputs: [{ workId: "original-work", message: "Do the work" }] })).toMatchObject({ success: true });
-  await f.waitFor(event => event.type === "agent_settled");
-  const recovery = { type: "recover_final_result", id: "original-final-result", workIds: ["original-work"] };
-  await f.session.command(recovery);
-  await f.waitFor(event => event.type === "agent_settled" && (event.lastAssistantMessage as any)?.content?.[0]?.text === "Work finished");
-  await f.session.command(recovery);
-  expect(calls).toBe(3);
-  expect(readFileSync(effect, "utf8")).toBe("x");
-  const state = await f.command("get_state");
-  expect(state).toMatchObject({ data: { completedWorkIds: ["original-work"], finalResultRecovery: { commandId: recovery.id, workIds: recovery.workIds } } });
-  const entries = f.native.sessionManager.getBranch();
-  expect(entries.filter(entry => entry.type === "custom" && entry.customType === "thread_input_batch_accepted")).toHaveLength(1);
-  expect(entries.filter(entry => entry.type === "custom" && entry.customType === "thread_final_result_recovery")).toHaveLength(1);
-  expect(entries.filter(entry => entry.type === "custom_message" && entry.customType === "thread_final_result_request")).toMatchObject([{ content: "state your final result in one short message" }]);
-  await f.reopen();
-  const provider = vi.fn(() => f.reply(f.message([{ type: "text", text: "must not run" }], "stop")));
-  f.native.agent.streamFunction = provider;
-  await f.session.command(recovery);
-  expect(provider).not.toHaveBeenCalled();
-  expect(readFileSync(effect, "utf8")).toBe("x");
-}, 3000);
-
-it("records an empty final recovery as settled and refuses a second attempt under another identity", async () => {
-  const f = await fixture();
-  const provider = vi.fn(() => f.reply(f.message([], "stop")));
-  f.native.agent.streamFunction = provider;
-  await f.command("input_batch", { batchId: "empty-batch", inputs: [{ workId: "empty-work", message: "Work" }] });
-  await f.waitFor(event => event.type === "agent_settled");
-  expect(await f.command("recover_final_result", { workIds: ["empty-work"] })).toMatchObject({ success: true });
-  await f.waitFor(event => event.type === "agent_settled" && f.events.filter(event => event.type === "agent_settled").length === 2);
-  expect(await f.command("get_state")).toMatchObject({ data: { completedWorkIds: ["empty-work"], isStreaming: false } });
-  expect(await f.command("recover_final_result", { workIds: ["empty-work"] })).toMatchObject({ success: false, error: "Final result recovery was already attempted for this work" });
-  expect(provider).toHaveBeenCalledTimes(2);
-}, 3000);
-
-it("rejects final recovery of unknown work before making native changes", async () => {
-  const f = await fixture();
-  const before = readFileSync(f.native.sessionFile!, "utf8");
-  expect(await f.command("recover_final_result", { workIds: ["unknown-work"] })).toMatchObject({ success: false });
-  expect(readFileSync(f.native.sessionFile!, "utf8")).toBe(before);
-}, 3000);
-
 it("isolates the canonical manager marker from shared runner defaults and other native sessions", async () => {
   const previous = process.env.PI_THREAD_MANAGER;
   process.env.PI_THREAD_MANAGER = "1";

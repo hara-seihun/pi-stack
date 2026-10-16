@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { actionRequest, type ActionAuthority } from "kenan-memory/actions";
 import type { ThreadCaller } from "pi-orchestrator/api";
-import { sameToken } from "./phone/protocol";
+import { sameToken } from "./phone/dispatcher";
 
 export type ExternalActionCaller =
   | { kind: "denied" }

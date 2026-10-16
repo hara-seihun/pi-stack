@@ -1,6 +1,6 @@
 # Settings
 
-Remote's `#/settings` is the settings area. Machine reports usage and measured host state. The thread inspector links to Settings rather than owning a second editor.
+Remote's `#/settings` is the settings area. Machine reports usage and measured host state. The thread inspector links to Settings rather than owning a second editor. Attention retains calendar events; subscriptions, feed access and timezone configuration live in Settings.
 
 [`shared/settings.ts`](../shared/settings.ts) is the typed registry: stable ID, person/system scope, kind, validation, owning component, executable/location and activation semantics. The frontend and [`server/settings-store.ts`](../server/settings-store.ts) use those definitions. `GET /v1/settings` returns registered entries as set, unset or unavailable. `PUT /v1/settings/:id` accepts exactly `{value}`. Unknown IDs, wrong types, owner-managed writes and unauthorized administration return explicit error codes. There is no arbitrary JSON/configuration editor.
 
@@ -10,7 +10,7 @@ The supervisor reads/writes only its own person's data. Ordinary accounts never 
 
 Personal timezone and auto-collapse belong to `$PI_REMOTE_DATA/settings.json`, with schema version 1 and mode `0600` in the owner's state directory. Unset fields are explicit `null`. Existing per-device auto-collapse choices migrate only when the person preference is unset, then the previous local value is removed. Thread model/thinking/speed/timeout choices remain in ThreadService; Settings uses its existing GET/PUT API. Model availability remains in its existing policy file. Machine action switches reconcile through their configured status/on/off commands and report the confirmed result. No adapter copies an owner's value into another settings database.
 
-The Android phone enabled state and overlay visibility remain in the native owning bridge. Android permission grants are separate observations/actions: enabling phone control does not grant permissions or require every grant. A permission request rechecks actual Android status after returning, and an identity change invalidates its result. Notifications, app updates, speech playback and account/environment selection use their existing client/native owners. Calendar datasets use the granted [structured memory operations](../../../packages/kenan-memory/README.md#structured-memory-data).
+The Android phone enabled state and overlay visibility remain in the native owning bridge. Android permission grants are separate observations/actions: enabling phone control does not grant permissions or require every grant. A permission request rechecks actual Android status after returning, and an identity change invalidates its result. Notifications, app updates, speech playback and account/environment selection use their existing client/native owners. Calendar subscriptions and feed access use the own-person CalendarStore API.
 
 ## Timezone
 
@@ -18,11 +18,11 @@ The Android phone enabled state and overlay visibility remain in the native owni
 
 Authenticated app bootstrap observes the client's actual `Intl.DateTimeFormat().resolvedOptions().timeZone`. A configured selection always wins over observations. Observations remain valid until replaced by a later actual observation; there is no fabricated expiry fallback. Clearing a selection sets it to null; a later client observation can establish it again. Message-delivery consumers receive a trusted owning settings path from their launcher; a read failure is distinct from an unconfigured timezone.
 
-Individual calendar events and subscriptions retain their own explicit zones in the structured memory dataset.
+CalendarStore migrates an existing explicit calendar timezone as `configured`, preserving it before removing the duplicate calendar settings row. The calendar timezone API writes this same person store. Failed migration retains its source row and becomes a supervisor owner error. Calendar responses expose timezone-read failures rather than silently inventing a zone. Individual events and subscriptions retain their own explicit zones.
 
 ## Host-managed inventory
 
-The registry inventories account/grant/weekly-limit configuration, host topology, catalog/provider routing and capacity, destinations/workspaces, execution/lifecycle, router/login/private-network, phone/call/overlay services, voice/speech/external meeting services, memory/custody/rooms/journal, update artifacts, publication/build declarations and feature-service environment configuration. Per-person agent packages/models/instructions, own browser profiles and memory custody are also indexed by owner.
+The registry inventories account/grant/weekly-limit configuration, host topology, catalog/provider routing and capacity, destinations/workspaces, execution/lifecycle, router/login/private-network, phone/call/overlay services, voice/speech/external meeting services, memory/custody/rooms/journal, update artifacts, publication/build declarations and feature-service environment configuration. Per-person agent packages/models/instructions, own browser profiles and life policy are also indexed by owner.
 
 Only adapters with an actual browser write/read path are editable. Other entries explicitly say browser editing is unavailable and display the owning file/API/tool and its activation action. They do not claim their values are unset, pretend to save, reveal secrets or create a competing configuration framework. Host-only configuration still needs the named owner operation/reconciliation; a Settings UI visit does not activate a host change.
 

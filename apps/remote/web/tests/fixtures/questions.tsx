@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { QuestionsComposer } from "../../src/features/conversation/questions";
+import { NeedsYouCard } from "../../src/needs-you";
 import type { ThreadQuestion } from "../../../server/protocol";
+import "../../src/attention.css";
 
 window.PiRemotePerson = { get: () => "question-fixture" } as typeof window.PiRemotePerson;
 const question: ThreadQuestion = {
@@ -18,8 +20,8 @@ function Fixture() {
   const [mode, setMode] = useState("short");
   const selected = mode === "long" ? longQuestion : question;
   return <>
-    <div className="fixture-controls"><button onClick={() => setMode("short")}>Short question</button><button onClick={() => setMode("long")}>Long question</button></div>
-    <div className="fixture-transcript">The appointment options are ready.</div><QuestionsComposer sessionId="fixture" questions={[selected]} onAccepted={() => {}} />
+    <div className="fixture-controls"><button onClick={() => setMode("short")}>Short question</button><button onClick={() => setMode("long")}>Long question</button><button onClick={() => setMode("attention")}>Attention</button></div>
+    {mode === "attention" ? <main className="attention-screen"><NeedsYouCard item={{ id: "question:fixture:formatting", kind: "question", title: question.question, consequence: null, deadline: null, recommendation: question.suggestions[0]!.text, nextAction: null, commitmentId: null, location: { threadId: "fixture", questionId: question.id }, dismissal: { kind: "question", threadId: "fixture", questionId: question.id } }} busy={false} onDismiss={() => {}} /></main> : <><div className="fixture-transcript">The appointment options are ready.</div><QuestionsComposer sessionId="fixture" questions={[selected]} onAccepted={() => {}} /></>}
   </>;
 }
 createRoot(document.getElementById("root")!).render(<Fixture />);
