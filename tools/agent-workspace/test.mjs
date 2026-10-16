@@ -19,24 +19,80 @@ let testIndex = 0;
 const test = (name, body) => nodeTest(name, { skip: testIndex++ % shardCount !== shardIndex }, body);
 const entry = new URL("./main", import.meta.url).pathname;
 
-function run(args, env, cwd) {
-  return execFileSync(entry, args, {
-    cwd,
-    env: { ...process.env, ...env },
-    encoding: "utf8",
-    timeout: 30_000,
-  }).trim();
+function preparingSource(args, output, previous) {
+  if (args[0] !== "create" || !output.startsWith("{")) return null;
+  const receipt = JSON.parse(output);
+  if (!["preparing", "creating"].includes(receipt.state)) return null;
+  assert.equal(receipt.ok, true);
+  assert.equal(typeof receipt.jobId, "string");
+  assert.ok(receipt.jobId.length > 0);
+  assert.equal(typeof receipt.progressPath, "string");
+  assert.ok(path.isAbsolute(receipt.progressPath));
+  assert.ok(existsSync(receipt.progressPath));
+  const identity = { state: receipt.state, jobId: receipt.jobId, progressPath: receipt.progressPath };
+  if (previous !== null && previous.state === identity.state) assert.deepEqual(identity, previous, "create retries must retain their job identity");
+  return identity;
 }
 
-function runAsync(args, env, cwd) {
-  return new Promise((resolve, reject) => {
-    execFile(entry, args, {
-      cwd,
-      env: { ...process.env, ...env },
-      encoding: "utf8",
-      timeout: 30_000,
-    }, (error, stdout) => error ? reject(error) : resolve(stdout.trim()));
-  });
+function pendingFailureOutput(args, error) {
+  if (args[0] !== "create" || (error.status !== 75 && error.code !== 75) || typeof error.stdout !== "string") return null;
+  const output = error.stdout.trim();
+  let receipt;
+  try { receipt = JSON.parse(output); } catch { return null; }
+  return ["preparing", "creating"].includes(receipt?.state) ? output : null;
+}
+
+function run(args, env, cwd) {
+  const deadline = Date.now() + 30_000;
+  let preparing = null;
+  while (true) {
+    assert.ok(Date.now() < deadline, `source preparation did not finish within 30s: ${JSON.stringify(preparing)}`);
+    let output;
+    try {
+      output = execFileSync(entry, args, {
+        cwd,
+        env: { ...process.env, ...env },
+        encoding: "utf8",
+        timeout: Math.max(1, deadline - Date.now()),
+      }).trim();
+    } catch (error) {
+      output = pendingFailureOutput(args, error);
+      if (output === null) {
+        if (["clone", "checkout"].includes(env?.PI_WORKSPACE_TEST_PREEXISTING_STAGE)) {
+          materializedPendingFixture(args, env);
+        }
+        throw error;
+      }
+    }
+    preparing = preparingSource(args, output, preparing);
+    if (preparing === null) return output;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(50, Math.max(1, deadline - Date.now())));
+  }
+}
+
+async function runAsync(args, env, cwd) {
+  const deadline = Date.now() + 30_000;
+  let preparing = null;
+  while (true) {
+    assert.ok(Date.now() < deadline, `source preparation did not finish within 30s: ${JSON.stringify(preparing)}`);
+    const output = await new Promise((resolve, reject) => {
+      execFile(entry, args, {
+        cwd,
+        env: { ...process.env, ...env },
+        encoding: "utf8",
+        timeout: Math.max(1, deadline - Date.now()),
+      }, (error, stdout) => {
+        if (!error) return resolve(stdout.trim());
+        error.stdout = stdout;
+        const pending = pendingFailureOutput(args, error);
+        if (pending === null) reject(error);
+        else resolve(pending);
+      });
+    });
+    preparing = preparingSource(args, output, preparing);
+    if (preparing === null) return output;
+    await new Promise(resolve => setTimeout(resolve, Math.min(50, Math.max(1, deadline - Date.now()))));
+  }
 }
 
 function git(cwd, ...args) {
@@ -73,6 +129,26 @@ function fixture() {
   };
 }
 
+function forbidGitOperations(f, operations, { mirrorOnly = false } = {}) {
+  const bin = mkdtempSync(path.join(f.root, "git-guard-"));
+  const realGit = execFileSync("which", ["git"], { encoding: "utf8", timeout: 30_000 }).trim();
+  const log = path.join(bin, "operations.jsonl");
+  writeFileSync(path.join(bin, "git"), `#!${process.execPath}
+const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + '\\n');
+if ((!${JSON.stringify(mirrorOnly)} || args.includes('--git-dir')) && ${JSON.stringify(operations)}.some(operation => args.includes(operation))) {
+  console.error('Git operation forbidden by closure fixture: ' + args.join(' '));
+  process.exit(99);
+}
+const result = spawnSync(${JSON.stringify(realGit)}, args, { stdio: 'inherit' });
+process.exit(result.status ?? 1);
+`);
+  chmodSync(path.join(bin, "git"), 0o755);
+  return { ...f.env, PI_WORKSPACE_TEST_GIT_LOG: log, PATH: `${bin}:${process.env.PATH}` };
+}
+
 function interruptCreation(f, stage) {
   const bin = path.join(f.root, "bin");
   mkdirSync(bin);
@@ -91,7 +167,31 @@ if (result.status === 0 && args.includes(${JSON.stringify(stage)}) && !fs.exists
 process.exit(result.status ?? 1);
 `);
   chmodSync(wrapper, 0o755);
-  return { ...f.env, PATH: `${bin}:${process.env.PATH}` };
+  return { ...f.env, PATH: `${bin}:${process.env.PATH}`, PI_WORKSPACE_TEST_PREEXISTING_STAGE: stage };
+}
+
+// Retained materialized creations from earlier releases still need conservative resume coverage.
+function materializedPendingFixture(args, env) {
+  const database = new DatabaseSync(env.PI_WORKSPACE_STATE);
+  const record = database.prepare("SELECT * FROM workspace WHERE state='creating' ORDER BY created_at DESC LIMIT 1").get();
+  database.close();
+  if (!record || existsSync(record.path)) return;
+  const input = JSON.parse(record.creation_request);
+  mkdirSync(record.path, { recursive: true });
+  git(record.path, "init");
+  git(record.path, "fetch", "--no-tags", input.repository, record.source_commit);
+  git(record.path, "remote", "add", "origin", input.repository);
+  git(record.path, "update-ref", "--no-deref", "HEAD", record.source_commit);
+  git(record.path, "tag", `pi-workspace-source-${record.source_commit}`, record.source_commit);
+  if (input.sparsePatterns?.length) {
+    mkdirSync(path.join(record.path, ".git", "info"), { recursive: true });
+    writeFileSync(path.join(record.path, ".git", "info", "sparse-checkout"), `${input.sparsePatterns.join("\n")}\n`);
+    git(record.path, "config", "core.sparseCheckout", "true");
+    git(record.path, "config", "core.sparseCheckoutCone", "false");
+  }
+  if (env.PI_WORKSPACE_TEST_PREEXISTING_STAGE === "checkout") {
+    git(record.path, "checkout", "--force", ...(input.mode === "review" ? ["--detach"] : ["-B", input.branch]), record.source_commit);
+  }
 }
 
 for (const stage of ["clone", "checkout"]) test(`creation resumes after interruption following ${stage}`, () => {
@@ -213,7 +313,7 @@ if (result.status === 0 && args.includes('checkout')) {
   } finally { f.close(); }
 });
 
-for (const budget of ["0", "901", "NaN", "Infinity"]) test(`creation rejects unbounded or invalid timeout ${budget}`, () => {
+for (const budget of ["0", "86401", "NaN", "Infinity"]) test(`creation rejects unbounded or invalid timeout ${budget}`, () => {
   const f = fixture();
   try {
     assert.throws(() => run(["create", "--root", f.workspaces, "--name", "invalid", "--repo", f.remote,
@@ -413,10 +513,19 @@ test("source preparation interruption leaves no destination reservation", () => 
   try {
     const args = ["create", "--root", f.workspaces, "--name", "preparing", "--repo", f.source,
       "--min-free-gib", "0", "--json"];
-    assert.throws(() => run(args, interruptCreation(f, "config")));
+    assert.throws(() => run(args, interruptCreation(f, "config")), /source preparation interrupted/);
     assert.deepEqual(JSON.parse(run(["status", "--json"], f.env)).records, []);
     assert.equal(existsSync(path.join(f.workspaces, "preparing")), false);
+    const preparationRoot = path.join(path.dirname(f.env.PI_WORKSPACE_STATE), "source-preparations");
+    const pointerFile = path.join(preparationRoot, readdirSync(preparationRoot).find(name => name.endsWith(".job.json")));
+    const pointer = readFileSync(pointerFile, "utf8");
+    const jobDirectory = path.join(preparationRoot, "jobs", JSON.parse(pointer).jobId);
+    assert.equal(existsSync(path.join(jobDirectory, "result.json")), false);
+    assert.equal(JSON.parse(readFileSync(path.join(jobDirectory, "attempt.json"))).number, 1);
     assert.equal(JSON.parse(run(args, f.env)).state, "active");
+    assert.equal(readFileSync(pointerFile, "utf8"), pointer);
+    assert.equal(JSON.parse(readFileSync(path.join(jobDirectory, "attempt.json"))).number, 2);
+    assert.equal(JSON.parse(readFileSync(path.join(jobDirectory, "result.json"))).state, "ready");
   } finally { f.close(); }
 });
 
@@ -695,10 +804,10 @@ test("a queued thread on one group member keeps both workspaces and their caches
     mkdirSync(application, { recursive: true });
     const databasePath = path.join(application, "threads.sqlite3");
     const db = new DatabaseSync(databasePath);
-    db.exec(`CREATE TABLE thread(id TEXT, cwd TEXT, state TEXT);
+    db.exec(`CREATE TABLE thread(id TEXT, cwd TEXT, state TEXT, metadata TEXT NOT NULL DEFAULT '{}');
       CREATE TABLE thread_work(thread_id TEXT, status TEXT);
       CREATE TABLE thread_execution(thread_id TEXT, ended_at INTEGER);`);
-    db.prepare("INSERT INTO thread VALUES(?,?,?)").run("worker", records[0].path, "idle");
+    db.prepare("INSERT INTO thread(id,cwd,state) VALUES(?,?,?)").run("worker", records[0].path, "idle");
     db.prepare("INSERT INTO thread_work VALUES(?,?)").run("worker", "queued");
     const previousLedger = process.env.PI_ORCHESTRATOR_LEDGER;
     process.env.PI_ORCHESTRATOR_LEDGER = path.join(f.root, "ledger.sqlite3");
@@ -869,6 +978,47 @@ test("fenced capacity repricing preserves live unestimated work and journals sam
     assert.throws(() => run(args.map(value => value === "budgeted" ? "source-only" : value), f.env), /accepts unestimated plans or source-only\/budgeted to budgeted expansion/);
     assert.equal(db.prepare("SELECT count(*) AS n FROM workspace_capacity_repricing").get().n, 1);
     db.close();
+  } finally { f.close(); }
+});
+
+for (const strategy of ["clone", "worktree"]) test(`completed unestimated ${strategy} repricing never imports history or needs its disposable source`, () => {
+  const f = fixture();
+  try {
+    const created = JSON.parse(run(["create", "--root", f.workspaces, "--name", "completed", "--repo", f.source,
+      "--strategy", strategy, "--min-free-gib", "0", "--json"], f.env));
+    writeFileSync(path.join(created.path, "notes.txt"), "unique live work\n");
+    const guard = forbidGitOperations(f, ["fetch", "rev-list"]);
+    rmSync(f.source, { recursive: true });
+    run(["measure-capacity", "--id", created.id, "--json"], guard);
+    const repriced = JSON.parse(run(["reprice-capacity", "--id", created.id, "--intent", "budgeted",
+      "--headroom-gib", "1", "--growth-mib", "8", "--json"], guard));
+    assert.equal(repriced.capacity.sourceImportBytes, 0);
+    assert.equal(repriced.capacity.sourceCommit, created.sourceCommit);
+    assert.equal(repriced.capacity.completedAllocationBytes, repriced.capacity.constructionBytes);
+    assert.equal(git(created.path, "rev-parse", "HEAD"), created.sourceCommit);
+    assert.equal(readFileSync(path.join(created.path, "notes.txt"), "utf8"), "unique live work\n");
+  } finally { f.close(); }
+});
+
+test("completed sparse unestimated repricing retains its selection without charging excluded checkout bytes", () => {
+  const f = fixture();
+  try {
+    writeFileSync(path.join(f.source, "excluded.bin"), Buffer.alloc(24 * 1024 ** 2));
+    git(f.source, "add", ".");
+    git(f.source, "commit", "-m", "excluded payload");
+    const created = JSON.parse(run(["create", "--root", f.workspaces, "--name", "sparse-reprice", "--repo", f.source,
+      "--sparse-pattern", "/file.txt", "--min-free-gib", "0", "--json"], f.env));
+    const selection = git(created.path, "sparse-checkout", "list");
+    const guard = forbidGitOperations(f, ["fetch", "rev-list"]);
+    run(["measure-capacity", "--id", created.id, "--json"], guard);
+    const repriced = JSON.parse(run(["reprice-capacity", "--id", created.id, "--intent", "budgeted",
+      "--headroom-gib", "1", "--growth-mib", "8", "--json"], guard));
+    assert.equal(repriced.capacity.sourceImportBytes, 0);
+    assert.equal(repriced.capacity.estimate, "git-sparse-upper-bound");
+    assert.ok(repriced.capacity.constructionBytes < 24 * 1024 ** 2);
+    assert.equal(git(created.path, "sparse-checkout", "list"), selection);
+    assert.equal(existsSync(path.join(created.path, "excluded.bin")), false);
+    assert.equal(readFileSync(path.join(created.path, "file.txt"), "utf8"), "source\n");
   } finally { f.close(); }
 });
 
@@ -1158,6 +1308,248 @@ process.exit(result.status ?? 1);
     assert.equal(resumed.id, created.id);
     assert.equal(resumed.capacity.sourceImportBytes, 0);
     assert.equal(resumed.capacity.constructionBytes, expected.constructionBytes);
+  } finally { f.close(); }
+});
+
+for (const sparse of [false, true])
+for (const missing of ["HEAD^{tree}", "HEAD:selected", "HEAD:selected/result.md", "HEAD:excluded.bin"])
+for (const repair of ["local-priced", "remote-unestimated"]) test(`${sparse ? "sparse" : "full"} incomplete mirror closure ${missing} ${sparse && missing === "HEAD:excluded.bin" ? "is admitted without refetch" : `is refused then refetched by ${repair}`}`, () => {
+  const f = fixture();
+  try {
+    const repository = `file://${f.remote}`;
+    git(f.source, "remote", "set-url", "origin", repository);
+    mkdirSync(path.join(f.source, "selected"));
+    writeFileSync(path.join(f.source, "selected", "result.md"), "selected result\n");
+    writeFileSync(path.join(f.source, "excluded.bin"), "excluded but still owned\n");
+    git(f.source, "add", "."); git(f.source, "commit", "-m", "closure fixture");
+    git(f.source, "push", "origin", "main");
+    const commit = git(f.source, "rev-parse", "HEAD");
+    const selection = sparse ? ["--sparse-pattern", "/selected/"] : [];
+    const base = ["create", "--root", f.workspaces, "--repo", repository, "--ref", commit, ...selection, "--json"];
+    const seed = JSON.parse(run([...base, "--name", "seed", "--min-free-gib", "0"], f.env));
+    const mirror = path.dirname(readFileSync(path.join(seed.path, ".git", "objects", "info", "alternates"), "utf8").trim());
+    // Keep the commit and source ref, but remove one reachable object from actual custody.
+    const objects = git(f.source, "rev-list", "--objects", "--no-object-names", commit).split("\n");
+    for (const id of objects) {
+      const relative = path.join(id.slice(0, 2), id.slice(2));
+      mkdirSync(path.join(mirror, "objects", id.slice(0, 2)), { recursive: true });
+      if (!existsSync(path.join(mirror, "objects", relative))) writeFileSync(path.join(mirror, "objects", relative), readFileSync(path.join(f.source, ".git", "objects", relative)));
+    }
+    rmSync(path.join(mirror, "objects", "pack"), { recursive: true, force: true });
+    const absent = git(f.source, "rev-parse", missing);
+    rmSync(path.join(mirror, "objects", absent.slice(0, 2), absent.slice(2)));
+    assert.equal(git(mirror, "rev-parse", `${commit}^{commit}`), commit);
+    const priced = ["--intent", "source-only", "--headroom-gib", "1", "--growth-mib", "8"];
+    if (sparse && missing === "HEAD:excluded.bin") {
+      const offline = forbidGitOperations(f, ["fetch", "ls-remote"]);
+      for (const name of ["sparse-with-missing-excluded", "sparse-with-missing-excluded-peer"]) {
+        const admitted = JSON.parse(run([...base, "--name", name, ...priced], offline));
+        assert.equal(admitted.state, "active");
+        assert.equal(admitted.capacity.sourceImportBytes, 0);
+        assert.equal(readFileSync(path.join(admitted.path, "selected", "result.md"), "utf8"), "selected result\n");
+        assert.equal(existsSync(path.join(admitted.path, "excluded.bin")), false);
+        assert.equal(existsSync(path.join(mirror, "objects", absent.slice(0, 2), absent.slice(2))), false);
+      }
+      const full = base.filter((arg, index) => arg !== "--sparse-pattern" && base[index - 1] !== "--sparse-pattern");
+      assert.throws(() => run([...full, "--name", "full-must-not-reuse-sparse-proof", ...priced], offline), /remote commit closure.*unestimated/);
+      assert.equal(existsSync(path.join(f.workspaces, "full-must-not-reuse-sparse-proof")), false);
+      return;
+    }
+    assert.throws(() => run([...base, "--name", "must-not-admit", ...priced], f.env), /remote commit closure.*unestimated/);
+    assert.equal(JSON.parse(run(["status", "--json"], f.env)).records.length, 1);
+    assert.equal(existsSync(path.join(f.workspaces, "must-not-admit")), false);
+    if (repair === "local-priced") {
+      if (missing === "HEAD^{tree}") {
+        rmSync(f.remote, { recursive: true });
+        assert.throws(() => run([...base, "--name", "failed-refetch", "--min-free-gib", "0"], f.env), /fetch.*failed/s);
+        assert.equal(JSON.parse(run(["status", "--json"], f.env)).records.length, 1);
+        assert.equal(existsSync(path.join(f.workspaces, "failed-refetch")), false);
+      }
+      // The no-source-ref shortcut must reject the same incomplete object store.
+      for (const ref of git(mirror, "for-each-ref", "--format=%(refname)", "refs/pi-workspace/sources").split("\n").filter(Boolean)) git(mirror, "update-ref", "-d", ref);
+    }
+    const fixed = JSON.parse(run(["create", "--root", f.workspaces, "--name", "fixed", "--repo",
+      repair === "local-priced" ? f.source : repository, "--ref", commit, ...selection,
+      ...(repair === "local-priced" ? priced : ["--min-free-gib", "0"]), "--json"], f.env));
+    assert.equal(fixed.state, "active");
+    assert.equal(readFileSync(path.join(fixed.path, "selected", "result.md"), "utf8"), "selected result\n");
+    assert.equal(existsSync(path.join(fixed.path, "excluded.bin")), !sparse);
+    assert.equal(git(mirror, "cat-file", "-t", absent), missing.endsWith(".md") || missing.endsWith(".bin") ? "blob" : "tree");
+    if (repair === "local-priced") assert.ok(fixed.capacity.sourceImportBytes > 0);
+    const recovered = JSON.parse(run([...base, "--name", "priced-after-repair", ...priced], f.env));
+    assert.equal(recovered.capacity.sourceImportBytes, 0);
+  } finally { f.close(); }
+});
+
+test("sparse custody admission never walks history or reads a large excluded blob", () => {
+  const f = fixture();
+  try {
+    const repository = `file://${f.remote}`;
+    git(f.source, "remote", "set-url", "origin", repository);
+    mkdirSync(path.join(f.source, "selected"));
+    writeFileSync(path.join(f.source, "selected", "result.md"), "selected result\n");
+    writeFileSync(path.join(f.source, "excluded.bin"), Buffer.alloc(24 * 1024 ** 2, 97));
+    git(f.source, "add", ".");
+    git(f.source, "commit", "-m", "large excluded closure fixture");
+    const ancestor = git(f.source, "rev-parse", "HEAD");
+    git(f.source, "commit", "--allow-empty", "-m", "requested snapshot");
+    const commit = git(f.source, "rev-parse", "HEAD");
+    const excluded = git(f.source, "rev-parse", "HEAD:excluded.bin");
+    git(f.source, "push", "origin", "main");
+    const seed = JSON.parse(run(["create", "--root", f.workspaces, "--name", "seed", "--repo", repository,
+      "--ref", commit, "--min-free-gib", "0", "--json"], f.env));
+    const mirror = path.dirname(readFileSync(path.join(seed.path, ".git", "objects", "info", "alternates"), "utf8").trim());
+    const objects = git(f.source, "rev-list", "--objects", "--no-object-names", commit).split("\n");
+    for (const id of objects) {
+      mkdirSync(path.join(mirror, "objects", id.slice(0, 2)), { recursive: true });
+      const destination = path.join(mirror, "objects", id.slice(0, 2), id.slice(2));
+      if (!existsSync(destination)) writeFileSync(destination,
+        readFileSync(path.join(f.source, ".git", "objects", id.slice(0, 2), id.slice(2))));
+    }
+    rmSync(path.join(mirror, "objects", "pack"), { recursive: true, force: true });
+    for (const id of [excluded, ancestor]) rmSync(path.join(mirror, "objects", id.slice(0, 2), id.slice(2)));
+    rmSync(f.source, { recursive: true });
+    rmSync(f.remote, { recursive: true });
+    const offline = forbidGitOperations(f, ["rev-list", "fetch", "ls-remote"], { mirrorOnly: true });
+    const args = ["create", "--root", f.workspaces, "--repo", repository, "--ref", commit,
+      "--sparse-pattern", "/selected/", "--intent", "source-only", "--headroom-gib", "1", "--growth-mib", "8", "--json"];
+    for (const name of ["sparse-first", "sparse-peer"]) {
+      const created = JSON.parse(run([...args, "--name", name], offline));
+      assert.equal(created.state, "active");
+      assert.equal(created.sourceCommit, commit);
+      assert.equal(created.capacity.sourceImportBytes, 0);
+      assert.equal(readFileSync(path.join(created.path, "selected", "result.md"), "utf8"), "selected result\n");
+      assert.equal(existsSync(path.join(created.path, "excluded.bin")), false);
+    }
+    const operations = readFileSync(offline.PI_WORKSPACE_TEST_GIT_LOG, "utf8").trim().split("\n").map(line => JSON.parse(line));
+    assert.equal(operations.some(args => args.includes("--git-dir") && args.includes("rev-list")), false);
+    assert.equal(operations.some(args => args.includes("fetch") || args.includes("ls-remote")), false);
+    const rootChecks = operations.filter(args => args.includes("--git-dir") && args.includes("cat-file") && args.includes("-e"));
+    assert.equal(rootChecks.length, 1, "the first sparse request verifies the root; its peer reuses the persisted proof");
+    assert.equal(existsSync(path.join(mirror, "objects", excluded.slice(0, 2), excluded.slice(2))), false);
+    assert.equal(existsSync(path.join(mirror, "objects", ancestor.slice(0, 2), ancestor.slice(2))), false);
+  } finally { f.close(); }
+});
+
+test("fresh durable source import retains its received pack instead of unpacking loose objects", () => {
+  const f = fixture();
+  try {
+    const commit = git(f.source, "rev-parse", "HEAD");
+    const created = JSON.parse(run(["create", "--root", f.workspaces, "--name", "packed-import", "--repo", `file://${f.remote}`,
+      "--ref", commit, "--min-free-gib", "0", "--json"], f.env));
+    assert.equal(created.state, "active");
+    const objects = readFileSync(path.join(created.path, ".git", "objects", "info", "alternates"), "utf8").trim();
+    const packs = readdirSync(path.join(objects, "pack")).filter(name => name.endsWith(".pack"));
+    assert.ok(packs.length > 0, "a first import must retain Git's received pack");
+    for (const pack of packs) assert.equal(existsSync(path.join(objects, "pack", pack.replace(/\.pack$/u, ".idx"))), true);
+    const loose = readdirSync(objects).filter(name => /^[0-9a-f]{2}$/u.test(name))
+      .flatMap(name => readdirSync(path.join(objects, name)).filter(file => /^[0-9a-f]{38}$/u.test(file)));
+    assert.equal(loose.length, 0, "received source objects must not be expanded into loose encrypted-storage files");
+    assert.equal(readFileSync(path.join(created.path, "file.txt"), "utf8"), "source\n");
+  } finally { f.close(); }
+});
+
+test("slow first import returns one durable preparing job before registering a workspace", () => {
+  const f = fixture();
+  const release = path.join(f.root, "release-import");
+  const marker = path.join(f.root, "import-running");
+  const finished = path.join(f.root, "import-finished");
+  let progressPath = null;
+  try {
+    const bin = path.join(f.root, "slow-git");
+    mkdirSync(bin);
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8", timeout: 30_000 }).trim();
+    writeFileSync(path.join(bin, "git"), `#!${process.execPath}
+const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+if (args.includes('fetch')) {
+  fs.writeFileSync(${JSON.stringify(marker)}, 'running');
+  const deadline = Date.now() + 15000;
+  while (!fs.existsSync(${JSON.stringify(release)})) {
+    if (Date.now() >= deadline) { console.error('import fixture release deadline exceeded'); process.exit(98); }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  }
+}
+const result = spawnSync(${JSON.stringify(realGit)}, args, { stdio: 'inherit' });
+if (args.includes('fetch')) fs.writeFileSync(${JSON.stringify(finished)}, 'finished');
+process.exit(result.status ?? 1);
+`);
+    chmodSync(path.join(bin, "git"), 0o755);
+    const env = { ...f.env, PATH: `${bin}:${process.env.PATH}` };
+    const args = ["create", "--root", f.workspaces, "--name", "durable-import", "--repo", `file://${f.remote}`,
+      "--ref", git(f.source, "rev-parse", "HEAD"), "--min-free-gib", "0"];
+    const callOnce = () => {
+      try {
+        execFileSync(entry, args, { env: { ...process.env, ...env }, encoding: "utf8", timeout: 10_000 });
+      } catch (error) {
+        assert.equal(error.status, 75, "preparing is temporary-unavailable, never a successful active checkout");
+        const output = pendingFailureOutput(args, error);
+        assert.notEqual(output, null, "exit 75 must carry a JSON preparing receipt");
+        return output;
+      }
+      assert.fail("gated source preparation must exit 75");
+    };
+    const started = Date.now();
+    const first = JSON.parse(callOnce());
+    progressPath = first.progressPath;
+    assert.ok(Date.now() - started < 8000, "foreground create must not wait for the gated import");
+    const identity = preparingSource(args, JSON.stringify(first), null);
+    assert.notEqual(identity, null);
+    assert.equal(existsSync(marker), true);
+    assert.equal(existsSync(path.join(f.workspaces, "durable-import")), false);
+    assert.deepEqual(JSON.parse(run(["status", "--json"], f.env)).records, []);
+    const mirrorRoot = path.join(path.dirname(f.env.PI_WORKSPACE_STATE), "mirrors");
+    const mirrors = readdirSync(mirrorRoot).filter(name => name.endsWith(".git"));
+    assert.equal(mirrors.length, 1);
+    const mirror = path.join(mirrorRoot, mirrors[0]);
+    const added = git(mirror, "hash-object", "-w", marker);
+    assert.equal(git(mirror, "cat-file", "-t", added), "blob");
+    const repeated = JSON.parse(callOnce());
+    assert.deepEqual(preparingSource(args, JSON.stringify(repeated), identity), identity);
+    writeFileSync(release, "continue");
+    const completed = run(args, env);
+    const records = JSON.parse(run(["status", "--json"], f.env)).records;
+    assert.equal(records.length, 1);
+    const [created] = records;
+    assert.equal(created.state, "active");
+    assert.equal(readFileSync(path.join(created.path, "file.txt"), "utf8"), "source\n");
+    assert.equal(run(args, env), completed);
+  } finally {
+    writeFileSync(release, "continue");
+    const deadline = Date.now() + 5000;
+    const terminal = progressPath === null ? finished : path.join(path.dirname(progressPath), "result.json");
+    while (existsSync(marker) && !existsSync(terminal) && Date.now() < deadline) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
+    assert.ok(!existsSync(marker) || existsSync(terminal), "durable import must settle before fixture removal");
+    f.close();
+  }
+});
+
+test("repeated full custody admission reuses verified closure without another history walk", () => {
+  const f = fixture();
+  try {
+    const repository = `file://${f.remote}`;
+    git(f.source, "remote", "set-url", "origin", repository);
+    const commit = git(f.source, "rev-parse", "HEAD");
+    const args = ["create", "--root", f.workspaces, "--repo", repository, "--ref", commit, "--json"];
+    const seed = JSON.parse(run([...args, "--name", "full-seed", "--min-free-gib", "0"], f.env));
+    const mirror = path.dirname(readFileSync(path.join(seed.path, ".git", "objects", "info", "alternates"), "utf8").trim());
+    rmSync(f.source, { recursive: true });
+    rmSync(f.remote, { recursive: true });
+    const offline = forbidGitOperations(f, ["rev-list", "fetch", "ls-remote"], { mirrorOnly: true });
+    for (const name of ["full-peer-one", "full-peer-two"]) {
+      const created = JSON.parse(run([...args, "--name", name,
+        "--intent", "source-only", "--headroom-gib", "1", "--growth-mib", "8"], offline));
+      assert.equal(created.state, "active");
+      assert.equal(created.capacity.sourceImportBytes, 0);
+      assert.equal(readFileSync(path.join(created.path, "file.txt"), "utf8"), "source\n");
+      assert.equal(path.dirname(readFileSync(path.join(created.path, ".git", "objects", "info", "alternates"), "utf8").trim()), mirror);
+    }
+    const operations = readFileSync(offline.PI_WORKSPACE_TEST_GIT_LOG, "utf8").trim().split("\n").map(line => JSON.parse(line));
+    assert.equal(operations.some(args => args.includes("--git-dir") && args.includes("rev-list")), false);
+    assert.equal(operations.some(args => args.includes("fetch") || args.includes("ls-remote")), false);
   } finally { f.close(); }
 });
 
@@ -1817,14 +2209,14 @@ test("classifies active systemd workspace references", () => {
   assert.deepEqual(unavailable, { units: [], available: false });
 });
 
-test("a released checkout stays until its owner's pending or running thread settles", () => {
+test("a released checkout stays until its owner's input, execution, wait and cancellation custody settles", () => {
   const f = fixture();
   try {
     const created = JSON.parse(run(["create", "--root", f.workspaces, "--name", "resubmitted",
       "--repo", f.remote, "--min-free-gib", "0", "--json"], f.env));
     const threadDatabase = path.join(f.root, "threads.sqlite3");
     const db = new DatabaseSync(threadDatabase);
-    db.exec(`CREATE TABLE thread(id TEXT PRIMARY KEY, cwd TEXT NOT NULL, state TEXT NOT NULL);
+    db.exec(`CREATE TABLE thread(id TEXT PRIMARY KEY, cwd TEXT NOT NULL, state TEXT NOT NULL, metadata TEXT NOT NULL DEFAULT '{}');
       CREATE TABLE thread_work(thread_id TEXT NOT NULL, status TEXT NOT NULL);
       CREATE TABLE thread_execution(thread_id TEXT NOT NULL, ended_at INTEGER);`);
     const insert = db.prepare("INSERT INTO thread(id,cwd,state) VALUES(?,?,?)");
@@ -1847,6 +2239,29 @@ test("a released checkout stays until its owner's pending or running thread sett
     db.prepare("INSERT INTO thread_execution(thread_id,ended_at) VALUES(?,NULL)").run("resubmitted-worker");
     assert.equal(JSON.parse(run(["release", "--id", created.id, "--json"], env)).inspection.classification, "referenced");
     db.prepare("UPDATE thread_execution SET ended_at=1").run();
+    const setMetadata = db.prepare("UPDATE thread SET metadata=? WHERE id='resubmitted-worker'");
+    const cache = path.join(created.path, "node_modules", "needed");
+    mkdirSync(path.dirname(cache));
+    writeFileSync(cache, "unfinished continuation needs this cache\n");
+    for (const agentWait of [
+      { kind: "agents", threadIds: ["peer"], since: 1 },
+      { kind: "message", fromThreadId: "peer", since: 1 },
+      { kind: "job", jobId: "accepted-job", since: 1 },
+      { kind: "deployment", publicationId: "accepted-publication", since: 1 },
+    ]) {
+      setMetadata.run(JSON.stringify({ agentWait }));
+      assert.equal(JSON.parse(run(["release", "--id", created.id, "--preserve-runtime", "--json"], env)).inspection.classification, "referenced");
+      assert.equal(existsSync(created.path), true);
+      assert.equal(JSON.parse(run(["reconcile", "--path", created.path, "--execute", "--preserve-runtime", "--json"], env))[0].inspection.classification, "referenced");
+      assert.equal(existsSync(created.path), true);
+      assert.equal(readFileSync(cache, "utf8"), "unfinished continuation needs this cache\n");
+    }
+    for (const cancellationRequest of ["close", "cancel"]) {
+      setMetadata.run(JSON.stringify({ cancellationRequest }));
+      assert.equal(JSON.parse(run(["release", "--id", created.id, "--preserve-runtime", "--json"], env)).inspection.classification, "referenced");
+      assert.equal(existsSync(cache), true);
+    }
+    setMetadata.run("{}");
     writeFileSync(path.join(f.root, "invalid-threads.sqlite3"), "not sqlite");
     assert.throws(() => run(["release", "--id", created.id, "--json"], {
       ...env, PI_THREAD_DATABASE: path.join(f.root, "invalid-threads.sqlite3"),
@@ -2196,6 +2611,86 @@ test("keeps local commits but strips declared caches", () => {
   } finally {
     f.close();
   }
+});
+
+test("Gradle caches in existing records release without stale repair state", () => {
+  const f = fixture();
+  try {
+    const created = JSON.parse(run(["create", "--root", f.workspaces, "--name", "gradle",
+      "--repo", f.remote, "--mode", "writer", "--min-free-gib", "0", "--json"], f.env));
+    const db = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    db.prepare("UPDATE workspace SET cache_paths=? WHERE id=?")
+      .run(JSON.stringify(created.cachePaths.filter(value => !value.includes(".gradle"))), created.id);
+    db.close();
+    writeFileSync(path.join(created.path, ".git", "info", "exclude"), ".gradle/\nignored-output/\n");
+    for (const relative of [".gradle", "android/.gradle", "modules/library/.gradle", "ignored-output"]) {
+      mkdirSync(path.join(created.path, relative), { recursive: true });
+      writeFileSync(path.join(created.path, relative, "fixture"), "generated\n");
+    }
+    const retained = JSON.parse(run(["release", "--id", created.id, "--json"], f.env));
+    assert.equal(retained.inspection.classification, "repair-required");
+    assert.equal(retained.inspection.sourceRetention, false);
+    assert.equal(retained.record.state, "repair-required");
+    assert.match(retained.inspection.reason, /unclassified ignored output/);
+    for (const relative of [".gradle", "android/.gradle", "modules/library/.gradle"]) {
+      assert.equal(existsSync(path.join(created.path, relative)), false);
+    }
+    assert.equal(readFileSync(path.join(created.path, "ignored-output", "fixture"), "utf8"), "generated\n");
+    rmSync(path.join(created.path, "ignored-output"), { recursive: true });
+    const released = JSON.parse(run(["release", "--id", created.id, "--json"], f.env));
+    assert.equal(released.action, "released");
+    assert.equal(released.inspection.classification, "reclaimable");
+    assert.equal(released.record.state, "released");
+    assert.equal(released.record.leaseExpiresAt, 0);
+    const status = JSON.parse(run(["status", "--path", created.path, "--json"], f.env));
+    assert.equal(status.records[0].state, released.record.state);
+    assert.equal(status.records[0].detail, released.record.detail);
+    assert.equal(existsSync(created.path), false);
+    const repeated = JSON.parse(run(["release", "--id", created.id, "--json"], f.env));
+    assert.equal(repeated.record.state, "released");
+  } finally { f.close(); }
+});
+
+test("Gradle classification preserves tracked files and unpublished source", () => {
+  const f = fixture();
+  try {
+    const created = JSON.parse(run(["create", "--root", f.workspaces, "--name", "gradle-tracked",
+      "--repo", f.remote, "--mode", "writer", "--min-free-gib", "0", "--json"], f.env));
+    git(created.path, "config", "user.name", "Test");
+    git(created.path, "config", "user.email", "test@example.invalid");
+    mkdirSync(path.join(created.path, ".gradle"));
+    writeFileSync(path.join(created.path, ".gradle", "source.txt"), "unique source\n");
+    git(created.path, "add", ".gradle");
+    git(created.path, "commit", "-m", "unpublished tracked Gradle name");
+    mkdirSync(path.join(created.path, "android", ".gradle"), { recursive: true });
+    writeFileSync(path.join(created.path, "android", ".gradle", "fixture"), "generated\n");
+    const result = JSON.parse(run(["release", "--id", created.id, "--json"], f.env));
+    assert.equal(result.record.state, "repair-required");
+    assert.match(result.inspection.reason, /commits absent from remote refs/);
+    assert.equal(readFileSync(path.join(created.path, ".gradle", "source.txt"), "utf8"), "unique source\n");
+    assert.equal(existsSync(path.join(created.path, "android", ".gradle")), false);
+  } finally { f.close(); }
+});
+
+test("group reconciliation returns persisted retained and released states", () => {
+  const f = fixture();
+  try {
+    const records = ["one", "two"].map(name => JSON.parse(run(["create", "--root", f.workspaces,
+      "--name", name, "--repo", f.remote, "--group", "receipt-group", "--mode", "writer",
+      "--min-free-gib", "0", "--json"], f.env)));
+    writeFileSync(path.join(records[0].path, "file.txt"), "dirty\n");
+    const retained = JSON.parse(run(["release", "--id", records[0].id, "--json"], f.env));
+    assert.equal(retained.find(result => result.record.id === records[0].id).record.state, "repair-required");
+    assert.equal(retained.find(result => result.record.id === records[1].id).record.state, "blocked");
+    git(records[0].path, "restore", "file.txt");
+    const released = JSON.parse(run(["release", "--id", records[0].id, "--json"], f.env));
+    assert.equal(released.length, 2);
+    for (const result of released) {
+      assert.equal(result.action, "released-group");
+      assert.equal(result.record.state, "released");
+      assert.equal(existsSync(result.record.path), false);
+    }
+  } finally { f.close(); }
 });
 
 test("a tracked .agent-workspace-caches manifest classifies repository-generated output", () => {
@@ -3203,5 +3698,84 @@ test('sparse creation rejects linked worktrees without changing mirror configura
     assert.throws(() => run(['create', '--root', f.workspaces, '--name', 'invalid', '--repo', f.source,
       '--strategy', 'worktree', '--sparse-pattern', '*.md', '--min-free-gib', '0'], f.env), /requires --strategy clone/);
     assert.deepEqual(JSON.parse(run(['status', '--json'], f.env)).records, []);
+  } finally { f.close(); }
+});
+
+
+for (const recoveryMode of ["disk", "released-reservation", "exact-boundary"]) test(`capacity refusal recovery ${recoveryMode} retains original job and admits unchanged ordinary request once under concurrency`, async () => {
+  const f = fixture();
+  try {
+    const space = path.join(f.root, "space.json");
+    writeFileSync(space, JSON.stringify({ freeGiB: recoveryMode === "released-reservation" ? 9 : 1 }));
+    const loader = path.join(f.root, "capacity-loader.mjs");
+    writeFileSync(loader, `import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+const original=fs.statfsSync;
+fs.statfsSync=(...args)=>{const value=original(...args);const state=JSON.parse(fs.readFileSync(${JSON.stringify(space)},'utf8'));return {...value,bavail:Math.floor((state.freeBytes ?? state.freeGiB*1024**3)/value.bsize)};};
+syncBuiltinESMExports();
+`);
+    const env = { ...f.env, NODE_OPTIONS: `--import=${loader}` };
+    let blocker = null;
+    if (recoveryMode === "released-reservation") {
+      writeFileSync(space,JSON.stringify({freeGiB:103}));
+      blocker = JSON.parse(run(["create", "--root", f.workspaces, "--name", "other-budget", "--repo", f.source,
+        "--intent", "budgeted", "--headroom-gib", "8", "--growth-mib", "2048", "--json"], env));
+      writeFileSync(space,JSON.stringify({freeGiB:9}));
+    }
+    // Build an actual source request from ordinary CLI preparation, then execute its durable worker at low capacity.
+    // Force foreground preparation into the durable path by delaying its tree scan past the bounded fast path.
+    const bin = path.join(f.root, "slow-tree"); mkdirSync(bin);
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    writeFileSync(path.join(bin, "git"), `#!${process.execPath}
+const cp=require('node:child_process');
+const args=process.argv.slice(2);
+const fs=require('node:fs'); const marker=${JSON.stringify(path.join(f.root,'tree-delayed'))};\nif(!process.env.PI_WORKSPACE_SOURCE_JOB_DIR && args.includes('ls-tree') && !fs.existsSync(marker)) { fs.writeFileSync(marker,'once'); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1800); }
+const r=cp.spawnSync(${JSON.stringify(realGit)},args,{stdio:'inherit'});process.exit(r.status??1);
+`); chmodSync(path.join(bin,"git"),0o755);
+    env.PATH = `${bin}:${process.env.PATH}`;
+    const args = ["create", "--root", f.workspaces, "--name", "capacity-recovered", "--repo", f.source,
+      "--owner", "capacity-test", "--mode", "writer", "--intent", "source-only", "--headroom-gib", "8", "--growth-mib", "512", "--json"];
+    assert.throws(() => run(args, env), /GiB is free/);
+    const preparationRoot=path.join(path.dirname(f.env.PI_WORKSPACE_STATE),"source-preparations");
+    const jobs=path.join(preparationRoot,"jobs");
+    const jobsBefore = readdirSync(jobs);
+    const originalJobs=jobsBefore.filter(id=>JSON.parse(readFileSync(path.join(jobs,id,"result.json"),"utf8")).state==="failed"); assert.equal(originalJobs.length,1);
+    const originalDir=path.join(jobs,originalJobs[0]);
+    const preserved=Object.fromEntries(["request.json","progress.json","result.json"].map(name=>[name,readFileSync(path.join(originalDir,name),"utf8")]));
+    assert.equal(JSON.parse(preserved["result.json"]).error.code,"workspace-capacity-refused");
+    assert.equal(existsSync(path.join(f.workspaces,"capacity-recovered")),false);
+    assert.throws(() => run(args,env),/GiB is free/);
+    assert.equal(readdirSync(jobs).length,jobsBefore.length,"unchanged shortage must not create a retry storm");
+    let recoveredBytes = 103 * 1024 ** 3;
+    if (recoveryMode === "released-reservation") {
+      run(["release","--id",blocker.id,"--json"],env);
+      recoveredBytes = 9 * 1024 ** 3;
+    } else if (recoveryMode === "exact-boundary") {
+      const forecastFile = readdirSync(preparationRoot).find(name=>name.endsWith(".forecast.json"));
+      const forecast = JSON.parse(readFileSync(path.join(preparationRoot,forecastFile),"utf8"));
+      const blockSize = forecast.inputs.blockSize;
+      recoveredBytes = (Math.ceil(forecast.refusal.capacity.requiredBytes/blockSize)+1)*blockSize;
+      assert.ok(recoveredBytes < (Number(JSON.parse(preserved["result.json"]).error.message.match(/; ([0-9.]+) GiB/)[1])+0.005)*1024**3);
+    }
+    writeFileSync(space,JSON.stringify({freeBytes:recoveredBytes}));
+    // A pre-update fast terminal pointer may lack jobId; reconstruct it without changing its original terminal.
+    const pointerFile=readdirSync(preparationRoot).find(name=>name.endsWith(".job.json") && JSON.parse(readFileSync(path.join(preparationRoot,name),"utf8")).jobId===originalJobs[0]);
+    const pointer=JSON.parse(readFileSync(path.join(preparationRoot,pointerFile),"utf8")); delete pointer.jobId;
+    writeFileSync(path.join(preparationRoot,pointerFile),JSON.stringify(pointer));
+    const results=await Promise.all([runAsync(args,env),runAsync(args,env),runAsync(args,env)]);
+    const records=results.map(value=>JSON.parse(value));
+    assert.equal(new Set(records.map(record=>record.id)).size,1);
+    assert.equal(records[0].state,"active");
+    assert.equal(records[0].capacity.headroomBytes,8*1024**3);
+    assert.equal(records[0].capacity.growthBytes,512*1024**2);
+    assert.equal(readdirSync(jobs).length,jobsBefore.length+1);
+    for(const [name,bytes] of Object.entries(preserved)) assert.equal(readFileSync(path.join(originalDir,name),"utf8"),bytes);
+    const retryId=readdirSync(jobs).find(id=>!jobsBefore.includes(id));
+    const retry=JSON.parse(readFileSync(path.join(jobs,retryId,"request.json"),"utf8"));
+    assert.equal(retry.recovery.previousJobId,originalJobs[0]);
+    assert.equal(retry.recovery.observation.freeBytes,recoveredBytes);
+    assert.equal(JSON.parse(readFileSync(path.join(jobs,retryId,"result.json"),"utf8")).state,"ready");
+    assert.equal(JSON.parse(run(["status","--json"],env)).records.filter(record=>record.state==="active").length,1);
+    run(["release","--id",records[0].id,"--json"],env);
   } finally { f.close(); }
 });
