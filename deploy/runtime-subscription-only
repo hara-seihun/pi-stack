@@ -6,6 +6,7 @@ base=$(realpath "$1")
 [[ $EUID == 0 ]] || { echo 'runtime installation requires the owning root account' >&2; exit 77; }
 exec 9>"$base/.pi-stack-deploy.lock"
 flock -n 9 || exit 75
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$root" GIT_OPTIONAL_LOCKS=0
 commit=$(git -C "$root" rev-parse HEAD)
 [[ -z $(git -C "$root" status --porcelain) ]] || { echo 'source must be committed and clean' >&2; exit 65; }
 runtime=$(readlink -f "$base/runtime")
