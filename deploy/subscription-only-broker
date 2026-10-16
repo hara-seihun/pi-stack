@@ -4,6 +4,7 @@ set -euo pipefail
 [[ $# == 3 ]] || { echo 'usage: deploy/subscription-only-broker BASE DEST SERVICE|none' >&2; exit 64; }
 base=$(realpath "$1"); dest=$2; service=$3
 root=$(cd "$(dirname "$0")/.." && pwd)
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$root" GIT_OPTIONAL_LOCKS=0
 commit=$(git -C "$root" rev-parse HEAD)
 [[ -z $(git -C "$root" status --porcelain) ]] || { echo 'uncommitted source' >&2; exit 65; }
 [[ ! -e $dest ]] || { echo 'immutable destination exists' >&2; exit 65; }
