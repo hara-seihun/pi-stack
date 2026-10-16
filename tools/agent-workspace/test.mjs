@@ -1158,7 +1158,10 @@ test("sourceCapacityPlan prices Git non-cone selections without changing source 
     assert.ok(empty.constructionBytes > 16 * 1024 ** 2);
     const blobBytes = names => names.filter(name => name !== "module")
       .reduce((bytes, name) => bytes + 2 * Math.ceil(Number(git(f.source, "cat-file", "-s", `${sourceCommit}:${name}`)) / blockSize) * blockSize, 0);
-    assert.equal(full.constructionBytes - empty.constructionBytes, blobBytes([...files, ".gitignore", "file.txt", "link.txt"]));
+    assert.equal(full.checkoutAllocation.materializedBlobBytes, blobBytes([...files, ".gitignore", "file.txt", "link.txt"]));
+    assert.equal(full.checkoutAllocation.indexBytes, empty.checkoutAllocation.indexBytes);
+    assert.equal(full.checkoutAllocation.topologyBytes, empty.checkoutAllocation.topologyBytes);
+    assert.equal(empty.checkoutAllocation.materializedMetadataBytes, 0);
     const cases = [
       ["ordered exclusions and reinclusions", ["/*", "!/docs/", "/docs/", "!/docs/private/", "/docs/private/", "!/docs/private/*", "/docs/private/keep.md"]],
       ["anchored directory", ["/docs/"]],
@@ -1191,7 +1194,12 @@ test("sourceCapacityPlan prices Git non-cone selections without changing source 
         if (label === "gitlink and symlink") assert.deepEqual(selected.sort(), ["link.txt", "module"], label);
         const plan = price(patterns);
         assert.equal(plan.estimate, "git-sparse-upper-bound", label);
-        assert.equal(plan.constructionBytes - empty.constructionBytes, blobBytes(selected), label);
+        assert.equal(plan.checkoutAllocation.materializedBlobBytes, blobBytes(selected), label);
+        assert.equal(plan.checkoutAllocation.indexBytes, empty.checkoutAllocation.indexBytes, label);
+        assert.equal(plan.checkoutAllocation.topologyBytes, empty.checkoutAllocation.topologyBytes, label);
+        const allocation = workspaceTesting.allocatedWorkspaceBytes(oracle, String(statSync(oracle).dev), { deadline: Date.now() + 5000, maxEntries: 50000 });
+        assert.equal(allocation.ok, true, label);
+        assert.ok(plan.constructionBytes >= allocation.bytes, `${label}: forecast must cover actual exclusive allocated blocks`);
         assert.equal(plan.sourceImportBytes, full.sourceImportBytes, label);
         assert.equal(plan.sourceCommit, sourceCommit, label);
         const missingMirror = path.join(f.root, "missing-mirror.git");
@@ -1207,6 +1215,28 @@ test("sourceCapacityPlan prices Git non-cone selections without changing source 
     assert.deepEqual(sharedIndexes(), sharedIndexesBefore);
     assert.equal(git(f.source, "rev-parse", "HEAD"), sourceCommit);
   } finally { f.close(); }
+});
+
+test("sparse construction prices excluded index records without inventing file inodes", () => {
+  const blockSize = 4096;
+  const entries = Array.from({ length: 100000 }, (_, i) => ({ name: `archive/group${i % 100}/evidence-${i}.json`, size: 1024 }));
+  entries.push({ name: "results/深い/a/b/report.md", size: 8193 });
+  const selected = new Set([entries.at(-1).name]);
+  const sparse = workspaceTesting.checkoutConstructionCapacity(entries, selected, blockSize);
+  const empty = workspaceTesting.checkoutConstructionCapacity(entries, new Set(), blockSize);
+  const full = workspaceTesting.checkoutConstructionCapacity(entries, null, blockSize);
+  assert.equal(sparse.sourcePaths, 100001);
+  assert.equal(sparse.indexBytes, empty.indexBytes);
+  assert.equal(sparse.topologyBytes, empty.topologyBytes);
+  assert.equal(sparse.materializedDirectories, 4);
+  assert.equal(sparse.materializedMetadataBytes, 5 * 4 * blockSize);
+  assert.equal(sparse.materializedBlobBytes, 6 * blockSize);
+  assert.equal(empty.materializedMetadataBytes, 0);
+  assert.ok(sparse.totalBytes < 100 * 1024 ** 2, "100k excluded paths must not consume a GiB of imaginary inodes");
+  assert.ok(full.totalBytes > sparse.totalBytes + 2 * 1024 ** 3, "materializing the excluded files is still fully charged");
+  const intent = { headroomBytes: 8 * 1024 ** 3, growthBytes: 512 * 1024 ** 2, constructionBytes: sparse.totalBytes };
+  assert.ok(workspaceTesting.capacityRequirement(intent, []) < 9 * 1024 ** 3);
+  assert.ok(workspaceTesting.capacityRequirement({ ...intent, constructionBytes: full.totalBytes }, []) > 10 * 1024 ** 3);
 });
 
 test("sourceCapacityPlan retains full tree metadata while excluded blob sizes change", () => {
@@ -1292,6 +1322,7 @@ process.exit(result.status ?? 1);
     assert.equal(created.state, "active");
     assert.equal(created.sourceCommit, commit);
     assert.equal(created.capacity.estimate, "git-sparse-upper-bound");
+    assert.equal(created.capacity.checkoutPricingVersion, 4);
     assert.equal(created.capacity.sourceImportBytes, 0);
     assert.equal(created.capacity.constructionBytes, expected.constructionBytes);
     assert.equal(readFileSync(path.join(created.path, "AGENTS.md"), "utf8"), "source instructions\n");
@@ -1594,7 +1625,7 @@ test("budgeted source creation shares existing objects and records immutable spa
     const blockSize = statfsSync(f.workspaces).bsize;
     const ignoredBytes = Number(git(f.source, "cat-file", "-s", `${selectedSource}:.gitignore`));
     assert.equal(full.capacity.constructionBytes - shared.capacity.constructionBytes,
-      6 * 1024 ** 2 + 2 * Math.ceil(ignoredBytes / blockSize) * blockSize);
+      6 * 1024 ** 2 + 2 * Math.ceil(ignoredBytes / blockSize) * blockSize + 8 * blockSize);
     assert.equal(created.capacity.constructionBytes - created.capacity.sourceImportBytes, shared.capacity.constructionBytes);
     assert.equal(git(shared.path, "cat-file", "-s", `${selectedSource}:excluded.bin`), String(3 * 1024 ** 2));
     assert.equal(git(shared.path, "show", `${selectedSource}~:file.txt`), "source");
@@ -1643,9 +1674,9 @@ test("budgeted source creation shares existing objects and records immutable spa
     rmSync(path.join(created.path, "generated.bin"));
     run(["measure-capacity", "--id", created.id, "--json"], f.env);
     assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [8 * 1024 ** 2], headroomBytes: 1024 ** 3, unpricedDormant: 0 });
-    db.prepare("UPDATE workspace SET state='creating' WHERE id=?").run(created.id);
-    rmSync(created.path, { recursive: true });
-    run(["cancel-creation", "--id", created.id], f.env);
+    // End the real completed allocation through its ordinary lifecycle. Faking
+    // a pending row can race a durable checkout's terminal receipt writer.
+    run(["release", "--id", created.id], f.env);
     assert.deepEqual(workspaceTesting.capacityReservations(db, device), { priced: [], headroomBytes: 0, unpricedDormant: 0 });
     db.close();
   } finally { f.close(); }
