@@ -18,6 +18,8 @@ for name in subscription-only shared-oauth pooled-only anthropic-files-provider;
 done
 /srv/pi/runtime/node_modules/esbuild/bin/esbuild "$root/packages/orchestrator/src/model-broker.ts" --outfile="$stage/dist/model-broker.js" --format=esm --platform=node --target=node24
 cp "$root/packages/orchestrator/src/model-broker.ts" "$stage/src/"
+/srv/pi/runtime/node_modules/esbuild/bin/esbuild "$root/packages/orchestrator/src/experiment-custody.ts" --outfile="$stage/dist/experiment-custody.js" --format=esm --platform=node --target=node24
+cp "$root/packages/orchestrator/src/experiment-custody.ts" "$stage/src/"
 cp "$root/deploy/subscription-only-check.mjs" "$stage/subscription-only-check.mjs"
 printf '{"source":"%s","base":"%s"}\n' "$commit" "$base" > "$stage/subscription-only-binding.json"
 node "$stage/subscription-only-check.mjs" "$stage"

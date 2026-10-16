@@ -1,3 +1,4 @@
+import { ExperimentCustody, validExperimentPolicy, type ExperimentPolicy, type ExperimentAttempt } from "./experiment-custody.js";
 import { createHash, randomUUID } from "node:crypto";
 import { allowanceRefusal, BROKER_USAGE_PATH, brokerUsageAcrossStores, WeeklyAllowances } from "./broker-usage.js";
 import { weekResetsAt } from "./person-usage.js";
@@ -6,6 +7,7 @@ import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 import { readFileSync, statSync, unwatchFile, watchFile } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
+import { modelsWithCustomDefinitions } from "./models.js";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { createParser } from "eventsource-parser";
 import { Store } from "./store.js";
@@ -44,6 +46,7 @@ export interface ModelBrokerConfig {
   authPath: string;
   listeners: BrokerListener[];
   grantOwner?: string;
+  experimentPolicy?: ExperimentPolicy;
 }
 export function validateBrokerConfig(value: unknown): value is ModelBrokerConfig {
   if (!value || typeof value !== "object") return false;
@@ -52,6 +55,7 @@ export function validateBrokerConfig(value: unknown): value is ModelBrokerConfig
   return typeof config.ledgerPath === "string" && config.ledgerPath.startsWith("/")
     && typeof config.authPath === "string" && config.authPath.startsWith("/")
     && (config.grantOwner === undefined || typeof config.grantOwner === "string" && /^[a-z][a-z0-9-]{0,63}$/.test(config.grantOwner))
+    && (config.experimentPolicy === undefined || validExperimentPolicy(config.experimentPolicy))
     && Array.isArray(config.listeners) && config.listeners.length > 0
     && config.listeners.every(listener => listener && /^[a-z_][a-z0-9_-]*$/.test(listener.principal)
       && Number.isInteger(listener.port) && listener.port > 1023 && listener.port <= 65535
@@ -154,6 +158,8 @@ export function createModelBroker(config: ModelBrokerConfig, availability: Model
   };
   const providers = new Map(builtinProviders().filter(provider => provider.id in BROKER_ROUTES).map(provider => [provider.id, provider]));
   const auth = new Map([...providers].map(([id, provider]) => [id, providerOAuth(provider, config.authPath)]));
+  const experiments = config.experimentPolicy ? new ExperimentCustody(store, config.experimentPolicy) : undefined;
+  const experimentCancels = new Map<string, AbortController>();
   const active = new Set<Promise<void>>();
   const inflight = new Map<string, number>();
   const sticky = new Map<string, string>();
@@ -172,6 +178,19 @@ export function createModelBroker(config: ModelBrokerConfig, availability: Model
 
   const request = async (listener: BrokerListener, req: IncomingMessage, res: ServerResponse) => {
     const grant = grants.get(listener.principal)!;
+    if((req.headers['x-pi-experiment-id']!==undefined || req.headers['x-pi-logical-request-id']!==undefined) && req.url!==BROKER_ROUTES['openai-codex'].path){json(res,400,'Tagged scientific requests require the counted Codex ingress','experiment_route_invalid');return;}
+    const experimentRoute = /^\/v1\/experiments\/([A-Za-z0-9._-]+)(?:\/(stop|requests\/[^/?]+))?$/.exec(req.url ?? '');
+    if (experimentRoute) {
+      const reply = (status:number,value:unknown) => {res.writeHead(status,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify(value));};
+      if (!experiments || listener.principal!==experiments.policy.principal || experimentRoute[1]!==experiments.policy.experimentId) {json(res,403,'Experiment is not admitted by the owning root policy','experiment_not_admitted');return;}
+      if(req.method==='GET' && !experimentRoute[2]){const r=experiments.summary();reply(r?200:404,r??{error:{code:'experiment_not_registered'},policy:experiments.policy});return;}
+      if(req.method==='GET' && experimentRoute[2]?.startsWith('requests/')){let logical:string;try{logical=decodeURIComponent(experimentRoute[2]!.slice(9));}catch{json(res,400,'Invalid logical ID encoding','experiment_logical_id_invalid');return;}const r=experiments.get()?.attempts.find(a=>a.logicalId===logical);reply(r?200:404,r??{error:{code:'experiment_request_unset'}});return;}
+      if(req.method==='POST' && experimentRoute[2]==='stop'){const result=experiments.stop();for(const cancel of experimentCancels.values())cancel.abort();reply(result.ok?200:409,result);return;}
+      if(req.method==='PUT' && !experimentRoute[2]){
+        try{let n=0;const chunks:Buffer[]=[];for await(const chunk of req){n+=chunk.length;if(n>4096){json(res,413,'Binding exceeds4096 bytes');return;}chunks.push(Buffer.from(chunk));}const result=experiments.register(JSON.parse(Buffer.concat(chunks).toString('utf8')));reply(result.ok?200:409,result);}catch{json(res,400,'Invalid experiment binding','experiment_binding_invalid');}return;
+      }
+      json(res,405,'Unsupported experiment operation');return;
+    }
     if (req.method === "GET" && req.url === "/v1/dispatches") {
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
       res.end(JSON.stringify({ dispatches: dispatches(listener.principal) }));
@@ -259,9 +278,17 @@ export function createModelBroker(config: ModelBrokerConfig, availability: Model
     const count = inflight.get(listener.principal) ?? 0;
     if (count >= listener.maxInFlight) { json(res, 503, "Your shared model request limit is full. Wait for an active request to finish."); return; }
     inflight.set(listener.principal, count + 1);
+    const experimentId = req.headers['x-pi-experiment-id'];
+    const logicalId = req.headers['x-pi-logical-request-id'];
+    const scientific = experimentId !== undefined || logicalId !== undefined;
+    if(scientific && (!experiments || listener.principal!==experiments.policy.principal || experimentId!==experiments.policy.experimentId || typeof logicalId!=='string')) {inflight.set(listener.principal,count);json(res,403,'Experiment is not admitted by the owning root policy','experiment_not_admitted');return;}
     const cancel = new AbortController();
     const signal = AbortSignal.any([shutdown.signal, cancel.signal, AbortSignal.timeout(30 * 60_000)]);
-    const disconnected = () => { if (!res.writableFinished) cancel.abort(); };
+    const disconnected = () => { if (!scientific && !res.writableFinished) cancel.abort(); };
+    let experimentAttempt: ExperimentAttempt | undefined;
+    let observedCharge: ExperimentAttempt['charge'] = {kind:'unknown'};
+    let experimentTerminal = false;
+    let experimentRates: {input:number;output:number;cacheRead:number;cacheWrite:number;tiers?:{inputTokensAbove:number;input:number;output:number;cacheRead:number;cacheWrite:number}[]} | undefined;
     res.on("close", disconnected);
     let lease: string | undefined;
     let dispatchReceipt: DispatchReceipt | undefined;
@@ -295,6 +322,17 @@ export function createModelBroker(config: ModelBrokerConfig, availability: Model
       if (ultrafast && !modelSpeedModes(family, body.model).includes("ultrafast")) { json(res, 400, "Ultrafast is only available for Codex Astra or Sol models"); return; }
       const refusal = overAllowance(listener.principal);
       if (refusal) { json(res, 403, refusal); return; }
+      if(scientific){
+        if(family!=='openai-codex' || body.service_tier!==undefined && !['auto','default'].includes(body.service_tier)) {json(res,400,'Scientific route requires Codex standard tier','experiment_route_invalid');return;}
+        const provider=providers.get(family);
+        const rates=provider?modelsWithCustomDefinitions(provider).find(model=>model.id===body.model)?.cost:undefined;
+        if(!rates || rates.input<=0 || rates.output<=0 || !['input','output','cacheRead','cacheWrite'].every(key=>Number.isFinite(rates[key as keyof typeof rates]) && rates[key as keyof typeof rates]>=0)){json(res,400,'Scientific cost rates are unset','experiment_rates_unset');return;}
+        experimentRates={input:rates.input,output:rates.output,cacheRead:rates.cacheRead,cacheWrite:rates.cacheWrite,...(rates.tiers?{tiers:rates.tiers}:{})};
+        const reservation=experiments!.reserve(logicalId as string,requestBytes);
+        if(!reservation.ok){json(res,409,reservation.error.message,reservation.error.code);return;}
+        if(reservation.value.kind==='saved'){const saved=reservation.value.response;res.writeHead(saved.status,{...saved.headers,'x-pi-experiment-replay':'saved-response','x-pi-physical-attempt-id':reservation.value.attempt.physicalId});res.end(Buffer.from(saved.bodyBase64,'base64'));return;}
+        experimentAttempt=reservation.value.attempt;experimentCancels.set(experimentAttempt.physicalId,cancel);
+      }
       const shared = auth.get(family)!;
       let exclude = new Set(store.accounts().filter(account => !grant.accounts.includes(account.id)
         || !allowsAccountUse(account, "interactive")
@@ -356,7 +394,14 @@ export function createModelBroker(config: ModelBrokerConfig, availability: Model
             at: startedAt, updatedAt: startedAt, outcome: "dispatched" };
           saveDispatch(dispatchReceipt);
         }
-        const response = await transport(BROKER_ROUTES[family].upstream, { method: "POST", headers, body: outgoingBody, signal, redirect: "error" });
+        if(experimentAttempt){
+          if(Buffer.byteLength(outgoingBody)>32768)throw Object.assign(new Error('Complete upstream request exceeds32768 UTF8bytes'),{code:'experiment_request_bytes_exceeded'});
+          if(experiments!.get()?.state!=='active')throw Object.assign(new Error('Experiment stopped'),{code:'experiment_stopped'});
+          headers.set('x-client-request-id',experimentAttempt.physicalId);
+        }
+        const pendingResponse = transport(BROKER_ROUTES[family].upstream, { method: "POST", headers, body: outgoingBody, signal, redirect: "error" });
+        if(experimentAttempt){const marked=experiments!.forwarded(experimentAttempt.physicalId);if(!marked.ok){cancel.abort();await pendingResponse.catch(()=>undefined);throw Object.assign(new Error(marked.error.message),{code:marked.error.code});}}
+        const response = await pendingResponse;
         if (dispatchReceipt) { dispatchReceipt.httpStatus = response.status; dispatchReceipt.outcome = response.ok ? "accepted" : "rejected"; saveDispatch(dispatchReceipt); }
         return response;
       };
@@ -367,6 +412,7 @@ export function createModelBroker(config: ModelBrokerConfig, availability: Model
       let sameAccountRetries = 0;
       for (;;) {
         response = await send();
+        if(scientific) break;
         if (!response.ok && credential.apiKey) {
           const repairSignal = AbortSignal.any([signal, AbortSignal.timeout(30_000)]);
           const repair = await repairProviderCredential(shared, account.id, await providerResponseFailure(response),
@@ -423,7 +469,10 @@ export function createModelBroker(config: ModelBrokerConfig, availability: Model
         const value = response.headers.get(key);
         if (value) outgoing[key] = value;
       }
-      res.writeHead(response.status, outgoing);
+      if(experimentAttempt){outgoing['x-pi-experiment-id']=experiments!.policy.experimentId;outgoing['x-pi-logical-request-id']=experimentAttempt.logicalId;outgoing['x-pi-physical-attempt-id']=experimentAttempt.physicalId;}
+      if(!scientific)res.writeHead(response.status, outgoing);
+      const savedChunks:Buffer[]=[];
+      let savedLength=0;
       const parser = createParser({ onEvent(event) {
         let value: any;
         try { value = JSON.parse(event.data); } catch { return; }
@@ -438,7 +487,17 @@ export function createModelBroker(config: ModelBrokerConfig, availability: Model
           if (isRejectedTokenError(detail)) streamRejection = detail;
         }
         const usage = value.type === "response.completed" ? value.response?.usage : value.type === "message_start" ? value.message?.usage : value.type === "message_delta" ? value.usage : undefined;
+        if(value.type==='response.completed')experimentTerminal=true;
         if (!usage) return;
+        if(experimentAttempt && value.type==='response.completed' && Number.isInteger(usage.input_tokens) && Number.isInteger(usage.output_tokens) && usage.input_tokens>=0 && usage.output_tokens>=0){
+          const cached=usage.input_tokens_details?.cached_tokens ?? 0;
+          if(Number.isInteger(cached) && cached>=0 && cached<=usage.input_tokens){
+            const selectedTier=experimentRates!.tiers?.filter(tier=>usage.input_tokens>tier.inputTokensAbove).sort((a,b)=>b.inputTokensAbove-a.inputTokensAbove)[0];
+            const rates=selectedTier ?? experimentRates!;
+            const usd=((usage.input_tokens-cached)*rates.input+usage.output_tokens*rates.output+cached*rates.cacheRead)/1_000_000;
+            if(Number.isFinite(usd) && usd>=0)observedCharge={kind:'observed',usd,usage:{providerUsage:usage,model:body.model,ratesPerMillion:rates,selectedInputTierAbove:selectedTier?.inputTokensAbove ?? null,costDefinitionSha256:createHash('sha256').update(JSON.stringify(experimentRates)).digest('hex'),basis:'observed-usage-catalog-list-usd'}};
+          }
+        }
         const cached = Number(usage.input_tokens_details?.cached_tokens ?? usage.cache_read_input_tokens ?? 0);
         const input = Number(usage.input_tokens ?? 0) - (family === "openai-codex" ? cached : 0);
         for (const [component, tokens] of Object.entries({ input, output: Number(usage.output_tokens ?? 0), cacheRead: cached, cacheWrite: Number(usage.cache_creation_input_tokens ?? 0) })) {
@@ -449,16 +508,26 @@ export function createModelBroker(config: ModelBrokerConfig, availability: Model
       const decoder = new TextDecoder();
       if (response.body) for await (const chunk of response.body) {
         if (response.ok) parser.feed(decoder.decode(chunk, { stream: true }));
-        if (!res.write(chunk)) await once(res, "drain", { signal });
+        if(scientific){savedChunks.push(Buffer.from(chunk));savedLength+=chunk.length;if(savedLength>MAX_BODY)throw new Error('Experiment response exceeds64MiB retained limit');}
+        else if (!res.write(chunk)) await once(res, "drain", { signal });
       }
-      if (streamRejection) {
+      if(scientific){
+        if(!experimentTerminal)observedCharge={kind:'unknown'};
+        const value={status:response.status,headers:outgoing,bodyBase64:Buffer.concat(savedChunks).toString('base64')};
+        const settled=experiments!.settle(experimentAttempt!.physicalId,value,observedCharge);
+        if(!settled.ok)throw Object.assign(new Error(settled.error.message),{code:settled.error.code});
+        if(!res.destroyed){res.writeHead(response.status,outgoing);res.end(Buffer.concat(savedChunks));}
+      }
+      if (streamRejection && !scientific) {
         const repairSignal = AbortSignal.any([signal, AbortSignal.timeout(30_000)]);
         if (repaired) await quarantineProviderCredential(shared, account.id, streamRejection, false, repairSignal, credential.apiKey);
         else await repairProviderCredential(shared, account.id, streamRejection, false, repairSignal, credential.apiKey);
       }
-      res.end();
+      if(!scientific)res.end();
     } catch (error) {
       if (!signal.aborted) console.error(`Model broker request failed for ${listener.principal}: ${error instanceof Error ? error.name : "unknown error"}`);
+      const experimentError = error instanceof Error && 'code' in error && String(error.code).startsWith('experiment_');
+      if(experimentError){json(res,409,error.message,String(error.code));return;}
       const policy = error instanceof Error && "code" in error && ["metered_inference_forbidden", "subscription_credential_unset", "subscription_credential_invalid"].includes(String(error.code));
       json(res, policy ? 403 : signal.aborted ? 499 : 502, policy ? error.message : signal.aborted ? "Model request cancelled" : "Model broker request failed; inspect the broker service and account authentication", policy ? String(error.code) : undefined);
     } finally {
@@ -466,6 +535,7 @@ export function createModelBroker(config: ModelBrokerConfig, availability: Model
         dispatchReceipt.outcome = signal.aborted ? "cancelled" : "indeterminate";
         saveDispatch(dispatchReceipt);
       }
+      if(experimentAttempt)experimentCancels.delete(experimentAttempt.physicalId);
       clearInterval(timer);
       if (lease && usageReceipt) for (const [component, tokens] of Object.entries(usageReceipt.tokens)) {
         if (tokens > 0) store.recordUsage({ accountId: usageReceipt.accountId, hour: Math.floor(Date.now() / 3_600_000) * 3_600_000, source: "interactive", runId: lease, model: usageReceipt.model, component: component as UsageComponent, tokens });
