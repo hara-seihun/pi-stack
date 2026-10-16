@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+[[ $# == 1 ]] || { echo 'usage: deploy/runtime-subscription-only PI_SERVICE_ROOT' >&2; exit 64; }
+base=$(realpath "$1")
+[[ $EUID == 0 ]] || { echo 'runtime installation requires the owning root account' >&2; exit 77; }
+exec 9>"$base/.pi-stack-deploy.lock"
+flock -n 9 || exit 75
+commit=$(git -C "$root" rev-parse HEAD)
+[[ -z $(git -C "$root" status --porcelain) ]] || { echo 'source must be committed and clean' >&2; exit 65; }
+runtime=$(readlink -f "$base/runtime")
+orchestrator=$(readlink -f "$base/pi-orchestrator")
+modules=$(readlink -f "$runtime/node_modules")
+[[ $(readlink -f "$orchestrator/node_modules") == "$modules" ]] || { echo 'runtime and orchestrator dependency identities differ' >&2; exit 65; }
+source_dependency=$(dirname "$modules")
+id=$(printf '%s\n%s\n' "$commit" "$modules" | sha256sum | cut -d' ' -f1)
+dependency="$base/dependencies/subscription-$id"
+runtime_release="$base/.pi-stack-releases/runtime-subscription/$id"
+orchestrator_release="$base/.pi-stack-releases/orchestrator-subscription/$id"
+[[ ! -e $dependency && ! -e $runtime_release && ! -e $orchestrator_release ]] || { echo 'scoped installation already prepared; inspect its retained identity before repeating' >&2; exit 73; }
+cp -a --reflink=auto "$source_dependency" "$dependency"
+node "$root/packages/runtime/patch-subscription-only.mjs" "$dependency/node_modules"
+node "$root/packages/runtime/subscription-only-check.mjs" "$dependency/node_modules"
+mkdir -p "$(dirname "$runtime_release")" "$(dirname "$orchestrator_release")"
+cp -a "$runtime" "$runtime_release"
+cp -a "$orchestrator" "$orchestrator_release"
+python3 - "$source_dependency" "$dependency" "$runtime_release" "$orchestrator_release" <<'PY'
+import os,sys
+old,new,*roots=sys.argv[1:]
+for root in roots:
+ for parent, dirs, files in os.walk(root,followlinks=False):
+  for name in dirs+files:
+   path=os.path.join(parent,name)
+   if os.path.islink(path):
+    target=os.readlink(path)
+    if target==old or target.startswith(old+'/'):
+     os.unlink(path);os.symlink(new+target[len(old):],path)
+PY
+printf '%s\n' "$commit" > "$runtime_release/.pi-stack-subscription-source"
+printf '%s\n' "$commit" > "$orchestrator_release/.pi-stack-subscription-source"
+ln -s "$runtime_release" "$base/.runtime-subscription-next"
+ln -s "$orchestrator_release" "$base/.orchestrator-subscription-next"
+trap 'ln -sfn "$runtime" "$base/.runtime-subscription-rollback"; mv -Tf "$base/.runtime-subscription-rollback" "$base/runtime"' ERR
+mv -Tf "$base/.runtime-subscription-next" "$base/runtime"
+mv -Tf "$base/.orchestrator-subscription-next" "$base/pi-orchestrator"
+trap - ERR
+printf '{"ok":true,"source":"%s","dependency":"%s","previousRuntime":"%s","previousOrchestrator":"%s","servicesRestarted":false}\n' "$commit" "$dependency" "$runtime" "$orchestrator"
