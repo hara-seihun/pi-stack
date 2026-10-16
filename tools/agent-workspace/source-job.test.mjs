@@ -290,3 +290,20 @@ test("worker command change on same identity is rejected; JSON key order has no 
     assert.equal(runSourceJob({ ...f.options, waitMs: 55000 }).error.code, "source-job-invalid-request");
   } finally { f.restore(); }
 });
+
+test("user-manager discovery fills absent connection variables without changing caller configuration", async () => {
+  const { userManagerEnvironment } = await import("./source-job.mjs");
+  const input = { PATH: process.env.PATH, HOME: process.env.HOME };
+  const resolved = userManagerEnvironment(input);
+  assert.equal(resolved.ok, true, JSON.stringify(resolved));
+  assert.equal(resolved.value.XDG_RUNTIME_DIR, `/run/user/${process.geteuid()}`);
+  assert.equal(resolved.value.DBUS_SESSION_BUS_ADDRESS, `unix:path=/run/user/${process.geteuid()}/bus`);
+  assert.deepEqual(Object.keys(input).sort(), ["HOME", "PATH"]);
+  assert.deepEqual(userManagerEnvironment(resolved.value), resolved);
+  for (const override of [{ XDG_RUNTIME_DIR: "" }, { XDG_RUNTIME_DIR: "/tmp" },
+    { XDG_RUNTIME_DIR: "/no-such-user-runtime-546" }, { DBUS_SESSION_BUS_ADDRESS: "" }]) {
+    const invalid = userManagerEnvironment({ ...input, ...override });
+    assert.equal(invalid.ok, false);
+    assert.equal(invalid.error.code, "source-job-user-environment");
+  }
+});

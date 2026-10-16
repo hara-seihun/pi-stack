@@ -3,7 +3,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync, closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync,
-  readFileSync, realpathSync, renameSync, rmSync, writeFileSync,
+  readFileSync, realpathSync, renameSync, rmSync, lstatSync, writeFileSync,
 } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -98,8 +98,40 @@ export function finishSourceJob(directory, result) {
   } catch (error) { return { ok: false, error: ioError(error) }; }
 }
 
+export function userManagerEnvironment(environment = process.env) {
+  const invalid = message => ({ ok: false, error: { code: "source-job-user-environment", message } });
+  if (typeof process.geteuid !== "function") return invalid("systemd user jobs require a Unix effective user");
+  const uid = process.geteuid();
+  const runtime = environment.XDG_RUNTIME_DIR === undefined ? `/run/user/${uid}` : environment.XDG_RUNTIME_DIR;
+  if (typeof runtime !== "string" || !path.isAbsolute(runtime) || runtime.includes("\0")) {
+    return invalid("XDG_RUNTIME_DIR must name the effective user's absolute runtime directory");
+  }
+  try {
+    const directory = lstatSync(runtime);
+    if (!directory.isDirectory() || directory.uid !== uid || (directory.mode & 0o077) !== 0) {
+      return invalid("systemd runtime directory must be private and owned by the effective user");
+    }
+    let address = environment.DBUS_SESSION_BUS_ADDRESS;
+    if (address === undefined) {
+      const bus = path.join(runtime, "bus");
+      const socket = lstatSync(bus);
+      if (!socket.isSocket() || socket.uid !== uid) {
+        return invalid("systemd user bus must be an existing socket owned by the effective user");
+      }
+      address = `unix:path=${bus}`;
+    } else if (typeof address !== "string" || address.length === 0 || address.includes("\0")) {
+      return invalid("DBUS_SESSION_BUS_ADDRESS is explicitly set but invalid");
+    }
+    return { ok: true, value: { ...environment, XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: address } };
+  } catch (error) {
+    return invalid(`systemd user environment is unavailable (${error.code ?? "invalid-state"}); no job was submitted`);
+  }
+}
+
 function systemCommand(executable, args) {
-  const result = spawnSync(executable, args, { encoding: "utf8", timeout: 2500, maxBuffer: 64 * 1024 });
+  const environment = userManagerEnvironment();
+  if (!environment.ok) return environment;
+  const result = spawnSync(executable, args, { env: environment.value, encoding: "utf8", timeout: 2500, maxBuffer: 64 * 1024 });
   if (result.error?.code === "ENOENT") return { ok: false, error: {
     code: "source-job-unsupported", message: `${executable} is required for durable source preparation`,
   } };
@@ -217,7 +249,9 @@ export function runSourceJob({ directory, key, request, command, env = {}, waitM
       };
     }
     const environmentPath = path.join(jobDirectory, "environment.json");
-    atomicJson(environmentPath, { ...process.env, ...env });
+    const managerEnvironment = userManagerEnvironment();
+    if (!managerEnvironment.ok) return { state: "failed", error: managerEnvironment.error };
+    atomicJson(environmentPath, { ...managerEnvironment.value, ...env });
     const number = attempt.present ? attempt.value.number + 1 : 1;
     const namespace = createHash("sha256").update(root).digest("hex").slice(0, 16);
     const unit = `pi-workspace-source-${namespace}-${jobId}-a${number}.service`;
