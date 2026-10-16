@@ -28,6 +28,7 @@ import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import { runSourceJob, readSourceJobRequest, writeSourceJobProgress, finishSourceJob, sourceJobId } from "./source-job.mjs";
 import { capacityRecovery } from "./capacity-recovery.mjs";
+import { GrowthLifecycleError, digest, growthError, retainedGrowth, validateRetirement } from "./growth-lifecycle.mjs";
 
 class SourcePreparationRequired extends Error {}
 let sourcePreparationMode = null;
@@ -484,6 +485,7 @@ function registrationInspection(workspace, statePath) {
 function registerWorkspace(database, input, inspectedInfo) {
   const now = Date.now();
   const existing = database.prepare(`SELECT workspace.*, ${ASSIGNMENT_SOURCE} FROM workspace WHERE path = ?`).get(path.resolve(input.path));
+  if (existing !== undefined && recordRetainsCustody(database, existing.id)) growthError("growth-admission-required", "retained custody cannot register/adopt until fresh resume-growth admission");
   if (existing !== undefined && existing.state !== "released") {
     const recorded = rowToRecord(existing);
     for (const [field, requested] of Object.entries(input.assertMetadata ?? {})) {
@@ -491,6 +493,7 @@ function registerWorkspace(database, input, inspectedInfo) {
     }
   }
   if (existing?.state === "creating") return rowToRecord(existing);
+  if (retainedParent(database,input.path)) growthError("growth-admission-required", "shared Git parent growth is retired");
   const info = inspectedInfo ?? registrationInspection(input.path, registryPaths.get(database));
   if (existing !== undefined && existing.state !== "released") {
     if (input.groupId != null && existing.group_id !== null && existing.group_id !== input.groupId) {
@@ -584,14 +587,14 @@ function within(root, candidate) {
   return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }
 
-function processSnapshot() {
-  if (!existsSync("/proc")) return [];
+function processSnapshot(strict = false, workspacePath = null) {
+  if (!existsSync("/proc")) { if (strict) growthError("growth-writer-unknown", "/proc unavailable"); return []; }
   const ignored = processAncestry();
   const uid = process.getuid?.();
-  if (uid === undefined) return [];
+  if (uid === undefined) { if (strict) growthError("growth-writer-unknown", "process identity unavailable"); return []; }
   const processes = [];
   let entries;
-  try { entries = readdirSync("/proc"); } catch { return []; }
+  try { entries = readdirSync("/proc"); } catch (error) { if (strict) throw error; return []; }
   for (const entry of entries) {
     if (!/^\d+$/u.test(entry)) continue;
     const pid = Number(entry);
@@ -600,16 +603,34 @@ function processSnapshot() {
     try {
       const status = readFileSync(`${root}/status`, "utf8");
       const owner = Number(status.match(/^Uid:\s+(\d+)/mu)?.[1]);
-      if (owner !== uid) continue;
+      if (strict && !Number.isSafeInteger(owner)) growthError("growth-writer-unknown", `unknown process owner ${pid}`);
+      if (owner !== uid && !strict) continue;
       const commandLine = readFileSync(`${root}/cmdline`, "utf8").split("\0").filter(Boolean);
+      if (strict && readLink(`${root}/cwd`) === null && commandLine.length > 0) growthError("growth-writer-unknown", `unknown cwd for process ${pid}`);
+      const writableFiles = [];
+      const cwd = readLink(`${root}/cwd`), executable = readLink(`${root}/exe`);
+      if (strict && commandLine.length > 0) {
+        for (const fd of readdirSync(`${root}/fd`)) {
+          let target;
+          try { target = readlinkSync(`${root}/fd/${fd}`).replace(/ \(deleted\)$/u, ""); }
+          catch (error) { if (error.code === "ENOENT") continue; throw error; }
+          if (workspacePath && path.isAbsolute(target) && (Array.isArray(workspacePath) ? workspacePath : [workspacePath]).some(root => within(root, target))) {
+            const flags = readFileSync(`${root}/fdinfo/${fd}`, "utf8").match(/^flags:\s+([0-7]+)$/mu)?.[1];
+            if (flags === undefined) growthError("growth-writer-unknown", `unknown fd flags ${pid}/${fd}`);
+            if ((parseInt(flags,8) & 3) !== 0) writableFiles.push(target);
+          }
+        }
+      }
       processes.push({
+        writableFiles,
         pid,
         command: commandLine[0] ?? "unknown",
         commandLine,
-        cwd: readLink(`${root}/cwd`),
-        executable: readLink(`${root}/exe`),
+        cwd,
+        executable,
       });
-    } catch {
+    } catch (error) {
+      if (strict && (!["ENOENT", "ESRCH"].includes(error.code) || existsSync(root))) growthError("growth-writer-unknown", `cannot inspect process ${pid}: ${error.message}`);
       continue;
     }
   }
@@ -618,7 +639,7 @@ function processSnapshot() {
 
 function processReferences(workspacePath, snapshot = processSnapshot()) {
   return snapshot.flatMap((processRecord) => {
-    const matches = [];
+    const matches = (processRecord.writableFiles ?? []).filter(file => within(workspacePath, file)).map(file => `write-fd:${file}`);
     if (processRecord.cwd !== null && within(workspacePath, processRecord.cwd)) matches.push(`cwd:${processRecord.cwd}`);
     if (processRecord.executable !== null && within(workspacePath, processRecord.executable)) matches.push(`exe:${processRecord.executable}`);
     if (processRecord.commandLine.some((argument) => argument === workspacePath || argument.includes(`${workspacePath}/`) || argument.includes(`=${workspacePath}`))) matches.push("argument");
@@ -1211,6 +1232,7 @@ function inspectRecord(record, options = {}) {
 }
 
 function reconcileRecord(database, record, options) {
+  if (recordRetainsCustody(database, record.id) || retainedParent(database,record.path)) return retainedCustodyResult(record);
   let safety = options.safety;
   let inspection = inspectRecord(record, { ignoreLease: options.ignoreLease, safety, deadline: options.deadline });
   if (inspection.classification === "active") return { record, inspection, action: "none" };
@@ -1289,6 +1311,7 @@ function groupInspectionOptions(record, records, options) {
 }
 
 function groupReconciliation(database, records, options) {
+  if (records.some(record => recordRetainsCustody(database, record.id) || retainedParent(database,record.path))) return records.map(retainedCustodyResult);
   const now = Date.now();
   let safety = options.safety;
   const groupId = records[0]?.groupId;
@@ -1503,6 +1526,7 @@ function reassignWorkspace(database, input) {
   const row = database.prepare(`SELECT workspace.*, ${ASSIGNMENT_SOURCE} FROM workspace WHERE id = ?`).get(input.id);
   if (row === undefined) return refuse("workspace-not-registered", input.id);
   const record = rowToRecord(row);
+  if (recordRetainsCustody(database, record.id)) return refuse("growth-admission-required", "resume-growth admission required before reassignment");
   if (record.path !== input.path) return refuse("path-mismatch", `recorded ${record.path}, requested ${input.path}`);
   if (!["active", "referenced", "blocked", "repair-required"].includes(record.state)) {
     return refuse("state-not-reassignable", record.state);
@@ -1523,6 +1547,7 @@ function reassignWorkspace(database, input) {
   let info;
   try {
     info = gitInfo(record.path);
+    if (retainedParent(database,record.path)) return refuse("growth-admission-required", "shared Git parent growth is retired");
     if (info.checkoutType !== record.checkoutType) return refuse("checkout-type-mismatch", `recorded ${record.checkoutType}, observed ${info.checkoutType}`);
     if (info.repository === null || info.repository !== record.repository) {
       return refuse("repository-mismatch", `recorded ${record.repository}, observed ${info.repository}`);
@@ -1684,6 +1709,10 @@ function adoptCommand(database, args, statePath) {
     replaceCachePaths: bool(args, "replace-cache"),
   }));
   withAdoptionLocks(database, registrations, () => {
+    for (const registration of registrations) {
+      const row = database.prepare("SELECT id FROM workspace WHERE path=?").get(registration.path);
+      if ((row && recordRetainsCustody(database,row.id)) || retainedParent(database,registration.path)) growthError("growth-admission-required", "retained custody cannot be adopted or maintained before admission");
+    }
     const prepared = registrations
       .filter((registration) => existsSync(registration.path) && gitRoot(registration.path))
       .map((registration) => ({
@@ -1869,6 +1898,10 @@ function allocatedWorkspaceBytes(workspacePath, device, { deadline = Date.now() 
 
 function remainingCapacityBytes(plan, state, measurement) {
   capacityRequirement(plan, []);
+  if (retainedGrowth(plan)) {
+    if (state === "creating") growthError("invalid-growth-lifecycle", "pending creation cannot have retired growth");
+    return 0;
+  }
   const budget = plan.growthBytes + (state === "creating" ? plan.constructionBytes : 0);
   if (!Number.isSafeInteger(budget)) fail("capacity ledger total exceeds supported byte range");
   if (budget === 0 || !measurement.ok) return budget;
@@ -1945,6 +1978,7 @@ function capacityReservations(database, device, reservedPath, measure) {
       headroomBytes = Math.max(headroomBytes, plan.headroomBytes,
         plan.intent === "unestimated" ? plan.constructionBytes : 0);
       const budget = plan.growthBytes + (row.state === "creating" ? plan.constructionBytes : 0);
+      if (retainedGrowth(plan)) return remainingCapacityBytes(plan, row.state, {ok:false});
       if (budget === 0) return 0;
       const measurement = measure === undefined ? cachedWorkspaceAllocation(database, row.id, row.path, device) : measure(row.path, device);
       if (!measurement.ok) measurementFailures.push({ path: row.path, error: measurement.error, reservedBytes: budget });
@@ -2528,6 +2562,7 @@ function createWorkspace(database, args, statePath) {
   const upstream = repositoryRemotes(repository);
   const mirror = mirrorFor(statePath, intent === null ? repository : upstream.fetch);
   let row = database.prepare("SELECT * FROM workspace WHERE path = ?").get(destination);
+  if (row !== undefined && recordRetainsCustody(database, row.id)) growthError("growth-admission-required", "retained growth requires fresh resume-growth admission");
   if (row !== undefined && row.state !== "released") {
     if (row.creation_request !== request) fail(`workspace already exists with a different creation request: ${destination}${row.state === "creating" ? "; resume the original request, or use cancel-creation if its destination is absent" : ""}`);
     if (row.state === "active" && existsSync(destination)) {
@@ -2896,16 +2931,48 @@ function heartbeatCommand(database, args) {
   const expires = now + numberFlag(args, "lease-seconds", DEFAULT_LEASE_SECONDS) * 1000;
   const records = recordsInGroup(database, record);
   if (records.some((candidate) => candidate.state === "creating")) fail("workspace group has a pending creation; resume it before renewal");
+  for (const candidate of records) assertGrowthWritable(database,candidate);
   const statement = database.prepare("UPDATE workspace SET lease_expires_at = ?, updated_at = ?, state = 'active', detail = 'lease renewed' WHERE id = ?");
   for (const candidate of records) statement.run(expires, now, candidate.id);
   const renewed = records.map((candidate) => recordBy(database, { id: candidate.id }));
   print(renewed.length === 1 ? renewed[0] : renewed, bool(args, "json"));
 }
 
+function recordRetainsCustody(database, id) {
+  const row = database.prepare("SELECT plan_json FROM workspace_capacity WHERE workspace_id=?").get(id);
+  return row !== undefined && retainedGrowth(JSON.parse(row.plan_json));
+}
+function retainedParent(database, workspacePath) {
+  if (!existsSync(workspacePath)) return false;
+  const common = path.resolve(workspacePath, git(workspacePath,["rev-parse","--git-common-dir"]));
+  if (common === path.join(workspacePath,".git")) return false;
+  const parent = database.prepare("SELECT id FROM workspace WHERE path=?").get(path.dirname(common));
+  return parent !== undefined && recordRetainsCustody(database,parent.id);
+}
+function assertGrowthWritable(database, record) {
+  if (recordRetainsCustody(database,record.id) || retainedParent(database,record.path)) growthError("growth-admission-required", "workspace or shared Git parent retains custody; fresh resume-growth admission required");
+}
+function withGrowthBorrowerLocks(database,record,action) {
+  const dependencies = gitDependencySnapshot(database);
+  const ids = new Set([...dependencies.alternates.filter(value => value.recordId !== record.id && within(record.path,value.objectDirectory)),
+    ...dependencies.linkedWorktrees.filter(value => value.recordId !== record.id && within(record.path,value.commonDirectory))].map(value => value.recordId));
+  const borrowers = [...ids].sort().map(id => recordBy(database,{id}));
+  const next = index => index === borrowers.length ? action() : withWorkspaceLock(database,borrowers[index].path,()=>next(index+1),borrowers[index].groupId);
+  return next(0);
+}
+function retainedCustodyResult(record) {
+  return {record, action:"none", inspection:{classification:"blocked", reason:"explicit retained source/runtime custody; resume-growth admission required before cleanup or writing", processes:[], containers:[], systemdUnits:[]}};
+}
+
 function releaseCommand(database, args, statePath) {
   assertOnly(args, ["id", "path", "reap-expired", "preserve-runtime", "json"]);
   const record = recordBy(database, selectorFrom(args));
   const records = recordsInGroup(database, record);
+  if (records.some(candidate => recordRetainsCustody(database, candidate.id) || retainedParent(database,candidate.path))) {
+    const results = records.map(retainedCustodyResult);
+    print(results.length === 1 ? results[0] : results, bool(args,"json"));
+    return;
+  }
   const statement = database.prepare("UPDATE workspace SET lease_expires_at = 0, updated_at = ?, detail = 'owner released lease' WHERE id = ?");
   const updatedAt = Date.now();
   for (const candidate of records) statement.run(updatedAt, candidate.id);
@@ -2941,8 +3008,8 @@ function pruneReleased(database, now = Date.now(), root) {
   return pruned;
 }
 
-function repriceCapacityCommand(database, args, statePath) {
-  assertOnly(args, ["id", "path", "intent", "headroom-gib", "growth-mib", "json"]);
+function repriceCapacityCommand(database, args, statePath, resume = false) {
+  assertOnly(args, ["id", "path", "intent", "headroom-gib", "growth-mib", "json", ...(resume ? ["owner", "expected-plan-sha256"] : [])]);
   const intent = capacityIntent(args);
   if (intent === null) fail("reprice-capacity requires explicit intent, headroom and remaining growth");
   const selected = recordBy(database, selectorFrom(args));
@@ -2952,6 +3019,10 @@ function repriceCapacityCommand(database, args, statePath) {
     const row = database.prepare("SELECT device_id,plan_json FROM workspace_capacity WHERE workspace_id=?").get(record.id);
     if (row === undefined) fail("capacity repricing requires an existing capacity plan");
     const oldPlan = JSON.parse(row.plan_json);
+    const retired = retainedGrowth(oldPlan);
+    if (retainedParent(database,record.path)) growthError("growth-admission-required", "shared Git parent requires resume-growth admission");
+    if (retired !== resume) growthError("growth-admission-required", retired ? "use explicit resume-growth admission" : "growth is not retired");
+    if (resume && (record.owner !== required(args, "owner") || digest(row.plan_json) !== required(args, "expected-plan-sha256"))) growthError("stale-growth-disposition", "resume owner or plan changed");
     const expandingBudget = ["source-only", "budgeted"].includes(oldPlan.intent) && intent.intent === "budgeted";
     if (oldPlan.intent !== "unestimated" && !expandingBudget) fail("capacity repricing accepts unestimated plans or source-only/budgeted to budgeted expansion");
     capacityRequirement(oldPlan, []);
@@ -2961,6 +3032,7 @@ function repriceCapacityCommand(database, args, statePath) {
     const plan = expandingBudget ? { ...oldPlan, ...intent } : sourceCheckoutCapacity(record.path,
       record.durableSourceCommit, intent, statfsSync(record.path).bsize, sparsePatterns);
     if (!expandingBudget) plan.completedAllocationBytes = plan.constructionBytes;
+    if (resume) delete plan.growthLifecycle;
     withResourceLock(statePath, `capacity:${row.device_id}`, () => {
       const measurement = cachedWorkspaceAllocation(database, record.id, record.path, row.device_id);
       if (!measurement.ok) fail(`capacity repricing requires a fresh allocated-block sample: ${measurement.error}; run measure-capacity first`);
@@ -2968,7 +3040,7 @@ function repriceCapacityCommand(database, args, statePath) {
       const sampledGrowthBytes = Math.max(0, sample.bytes - capacityAllocationBaseline(plan, record.state));
       plan.growthBytes += sampledGrowthBytes;
       capacityRequirement(plan, []);
-      if (expandingBudget && (plan.headroomBytes < oldPlan.headroomBytes || plan.growthBytes < oldPlan.growthBytes)) {
+      if (expandingBudget && (plan.headroomBytes < oldPlan.headroomBytes || (!resume && plan.growthBytes < oldPlan.growthBytes))) {
         fail("budget expansion cannot reduce headroom or total growth budget");
       }
       plan.repricing = { priorIntent: oldPlan.intent, sampledGrowthBytes, remainingGrowthBytes: intent.growthBytes,
@@ -2987,6 +3059,136 @@ function repriceCapacityCommand(database, args, statePath) {
       } catch (error) { database.exec("ROLLBACK"); throw error; }
     });
     print(creationRecord(database, record.id), bool(args, "json"));
+  }, selected.groupId);
+}
+
+
+function growthBinding(database, record) {
+  const row = database.prepare("SELECT device_id,plan_json FROM workspace_capacity WHERE workspace_id=?").get(record.id);
+  const measurement = database.prepare("SELECT measurement_json FROM workspace_capacity_measurement WHERE workspace_id=?").get(record.id);
+  if (!row || !measurement) growthError("growth-sample-required", "existing plan and allocated-block sample required");
+  const plan = JSON.parse(row.plan_json);
+  capacityRequirement(plan, []);
+  retainedGrowth(plan);
+  const root = lstatSync(record.path);
+  if (!root.isDirectory() || String(root.dev) !== row.device_id) growthError("growth-identity-changed", "root is not the reserved directory/filesystem");
+  const dependencies = gitDependencySnapshot(database);
+  const borrowerRows = [...new Set([...dependencies.alternates.filter(value => value.recordId !== record.id && within(record.path,value.objectDirectory)),
+    ...dependencies.linkedWorktrees.filter(value => value.recordId !== record.id && within(record.path,value.commonDirectory))].map(value => value.recordId))]
+    .sort().map(id => recordBy(database,{id}));
+  const binding = { borrowersSha256:digest(JSON.stringify(borrowerRows)), id: record.id, path: record.path, owner: record.owner, sourceCommit: record.sourceCommit,
+    durableSourceCommit: record.durableSourceCommit, head:git(record.path, ["rev-parse", "HEAD"]), state: record.state, updatedAt: record.updatedAt,
+    leaseExpiresAt: record.leaseExpiresAt, device: row.device_id, inode: String(root.ino),
+    planSha256: digest(row.plan_json), sampleSha256: digest(measurement.measurement_json) };
+  return { binding, row, plan, measurement };
+}
+
+function growthSelected(database, args) {
+  const record = recordBy(database, { id: required(args, "id") });
+  if (record.path !== path.resolve(required(args, "path"))) growthError("growth-identity-changed", "id and path do not name the same workspace");
+  return record;
+}
+
+function growthStatusCommand(database, args, statePath) {
+  assertOnly(args, ["id", "path", "json"]);
+  const selected = growthSelected(database, args);
+  withWorkspaceLock(database, selected.path, () => {
+    const {binding, plan, measurement} = growthBinding(database, recordBy(database, {id:selected.id}));
+    const sampleStatus = cachedWorkspaceAllocation(database, selected.id, selected.path, binding.device);
+    print({ok:true, binding, plan, sample:JSON.parse(measurement.measurement_json), sampleStatus}, bool(args, "json"));
+  }, selected.groupId);
+}
+
+function growthProcessReferences(paths) {
+  const snapshot = processSnapshot(true,paths);
+  return paths.flatMap(root => processReferences(root,snapshot).map(reference => ({...reference,root})));
+}
+function growthSafety(database, record) {
+  const isolated = process.env.NODE_TEST_CONTEXT !== undefined && process.env.PI_WORKSPACE_TEST_EXTERNAL_SAFETY === "empty";
+  const dependencies = gitDependencySnapshot(database);
+  const retainedBorrowers = [...dependencies.alternates.filter(value => value.recordId !== record.id && within(record.path, value.objectDirectory)),
+    ...dependencies.linkedWorktrees.filter(value => value.recordId !== record.id && within(record.path, value.commonDirectory))];
+  const borrowers = new Map(retainedBorrowers.map(value => [value.workspacePath, recordBy(database,{id:value.recordId})]));
+  // Include Git's complete linked-worktree list, not just registered borrowers.
+  const common = path.resolve(record.path, git(record.path,["rev-parse","--git-common-dir"]));
+  if (common === path.join(record.path,".git")) for (const line of git(record.path,["worktree","list","--porcelain"]).split("\n")) {
+    if (!line.startsWith("worktree ")) continue;
+    const borrowerPath = line.slice(9);
+    if (borrowerPath !== record.path && !borrowers.has(borrowerPath)) growthError("growth-writer-unknown", `unregistered linked borrower ${borrowerPath}`);
+  }
+  const paths = [record.path,...borrowers.keys()];
+  let processes = [];
+  if (!isolated) {
+    if (process.getuid?.() === 0) processes = growthProcessReferences(paths);
+    else {
+      const observed = command("sudo", ["-n", process.execPath, new URL(import.meta.url).pathname,
+        "growth-process-snapshot", ...paths.flatMap(value => ["--path",value])], {timeout:10_000});
+      if (observed.status !== 0) growthError("growth-writer-unknown", `privileged process observation failed: ${observed.stderr}`);
+      try { processes = JSON.parse(observed.stdout); } catch { growthError("growth-writer-unknown", "invalid process observation"); }
+      if (!Array.isArray(processes)) growthError("growth-writer-unknown", "process observation is not an array");
+    }
+  }
+  const docker = isolated ? {containers:[], available:false} : dockerSnapshot();
+  const systemd = isolated ? {units:[], available:false} : systemdSnapshot();
+  const threads = isolated && !process.env.PI_THREAD_DATABASE ? [] : threadSnapshot();
+  const containers = dockerReferences(record.path, docker);
+  const units = systemdReferences(record.path, systemd);
+  return {errors:[docker.error, systemd.error].filter(value => value !== undefined),
+    references:[...processes, ...containers.references, ...units.references,
+      ...threads.filter(thread => paths.some(root => within(root, thread.cwd))),
+      ...[...borrowers.values()].filter(borrower => borrower.leaseExpiresAt > Date.now()).map(borrower => ({kind:"borrower-writing-lease",id:borrower.id})),
+      ...[...borrowers.keys()].flatMap(root => [...dockerReferences(root,docker).references, ...systemdReferences(root,systemd).references])],
+    // Borrowing Git objects is retention, not a growth writer in the parent's checkout.
+    retainedBorrowers,
+    observedAt:Date.now()};
+}
+
+function retireGrowthCommand(database, args, statePath) {
+  assertOnly(args, ["id", "path", "owner", "disposition", "disposition-sha256", "json"]);
+  const selected = growthSelected(database, args);
+  const evidence = readFileSync(required(args, "disposition"), "utf8");
+  const evidenceSha256 = digest(evidence);
+  if (evidenceSha256 !== required(args, "disposition-sha256")) growthError("growth-evidence-changed", "disposition bytes do not match the expected SHA256");
+  let disposition;
+  try { disposition = JSON.parse(evidence); } catch { growthError("invalid-growth-disposition", "disposition must be JSON"); }
+  withWorkspaceLock(database, selected.path, () => {
+    const record = recordBy(database, {id:selected.id});
+    if (!["active", "referenced", "blocked", "repair-required"].includes(record.state)) growthError("invalid-growth-state", `cannot retire growth from ${record.state}`);
+    if (record.owner !== required(args, "owner") || !record.owner || !record.durableSourceCommit) growthError("stale-growth-disposition", "current owning identity and immutable source required");
+    const initial = growthBinding(database, record);
+    withGrowthBorrowerLocks(database,record,()=>withResourceLock(statePath, `capacity:${initial.binding.device}`, () => {
+      const {binding, plan, row, measurement} = growthBinding(database, record);
+      if (!["source-only", "budgeted"].includes(plan.intent)) growthError("invalid-growth-state", "retirement requires an explicitly priced plan");
+      if (retainedGrowth(plan)) growthError("growth-already-retired", "growth is already retired; no replay");
+      const cached = cachedWorkspaceAllocation(database, record.id, record.path, row.device_id);
+      if (!cached.ok) growthError("growth-sample-required", cached.error);
+      const safety = duringInspection(Date.now()+40_000, () => growthSafety(database, record));
+      validateRetirement(disposition, binding, safety);
+      const next = {...plan, growthLifecycle:{kind:"retired-future-growth", remainingGrowthBytes:0,
+        retainedUse:disposition.retainedUse, dispositionSha256:evidenceSha256, retiredAt:Date.now()}};
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        const current = growthBinding(database, recordBy(database, {id:record.id}));
+        validateRetirement(disposition, current.binding, safety);
+        const fresh = cachedWorkspaceAllocation(database, record.id, record.path, row.device_id);
+        if (!fresh.ok) growthError("growth-sample-required", fresh.error);
+        database.exec(`CREATE TABLE IF NOT EXISTS workspace_growth_retirement (
+          sequence INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT NOT NULL, occurred_at INTEGER NOT NULL,
+          record_json TEXT NOT NULL, old_plan_json TEXT NOT NULL, new_plan_json TEXT NOT NULL,
+          measurement_json TEXT NOT NULL, disposition_json TEXT NOT NULL, safety_json TEXT NOT NULL)`);
+        const changed = database.prepare("UPDATE workspace_capacity SET plan_json=? WHERE workspace_id=? AND plan_json=?")
+          .run(JSON.stringify(next), record.id, row.plan_json).changes;
+        if (changed !== 1) growthError("stale-growth-disposition", "capacity plan CAS failed");
+        const journal = database.prepare("INSERT INTO workspace_growth_retirement(workspace_id,occurred_at,record_json,old_plan_json,new_plan_json,measurement_json,disposition_json,safety_json) VALUES(?,?,?,?,?,?,?,?)")
+          .run(record.id, Date.now(), JSON.stringify(record), row.plan_json, JSON.stringify(next), measurement.measurement_json, evidence, JSON.stringify(safety));
+        const relinquished = database.prepare("UPDATE workspace SET lease_expires_at=0,updated_at=? WHERE id=? AND lease_expires_at=? AND updated_at=?")
+          .run(Date.now(), record.id, record.leaseExpiresAt, record.updatedAt).changes;
+        if (relinquished !== 1) growthError("stale-growth-disposition", "writing lease CAS failed");
+        database.exec("COMMIT");
+        print({ok:true, kind:"retired-future-growth", sequence:Number(journal.lastInsertRowid),
+          record:creationRecord(database, record.id), dispositionSha256:evidenceSha256, safety}, bool(args,"json"));
+      } catch (error) { database.exec("ROLLBACK"); throw error; }
+    }));
   }, selected.groupId);
 }
 
@@ -3182,6 +3384,9 @@ function help() {
                             [--budget-ms 20000] [--max-groups 32] [--after ID|start]
   agent-workspace measure-capacity [--root PATH | --path PATH | --id ID] [--budget-ms 40000] [--json]
   agent-workspace reprice-capacity (--id ID|--path PATH) --intent source-only|budgeted --headroom-gib N --growth-mib N [--json]
+  agent-workspace growth-status --id ID --path PATH [--json]
+  agent-workspace retire-growth --id ID --path PATH --owner OWNER --disposition FILE --disposition-sha256 SHA [--json]
+  agent-workspace resume-growth (--id ID|--path PATH) --owner OWNER --expected-plan-sha256 SHA --intent budgeted --headroom-gib N --growth-mib N [--json]
   agent-workspace maintain [--root PATH | --path PATH] [--execute] [--json]
   agent-workspace status [--root PATH] [--path SUBSTRING] [--owner SUBSTRING] [--limit 100] [--after CURSOR|start] [--json]
   agent-workspace list ...                    alias for status
@@ -3203,6 +3408,15 @@ Records outlive the directory, so status explains what became of a checkout that
 export const workspaceTesting = { allocatedWorkspaceBytes, workspaceAllocationSample, cachedWorkspaceAllocation, remainingCapacityBytes, capacityRequirement, capacityReservations, sourceCapacityPlan, cacheTargets, dockerEndpointScope, dockerSnapshot, groupReconciliation, maintainReferenceClone, parseSystemdUnits, pruneReleased, systemdManagerSnapshot, systemdReferences, ownerThreadDatabases, threadSnapshot };
 
 export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
+  if (argv[0] === "growth-process-snapshot") {
+    if (process.getuid?.() !== 0) growthError("growth-writer-unknown", "privileged process observation requires root");
+    const args = parseArgs(argv.slice(1));
+    assertOnly(args, ["path"]);
+    const paths = many(args, "path");
+    if (!paths.length || paths.some(target => !path.isAbsolute(target))) growthError("invalid-growth-disposition", "absolute paths required");
+    print(growthProcessReferences(paths), true);
+    return;
+  }
   if (argv[0] === "source-prepare") return sourcePreparationWorker();
   const [commandName, ...rest] = argv;
   if (
@@ -3256,7 +3470,7 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
   }
   const database = openRegistry(statePath);
   try {
-    if (!["status", "list", "maintain", "cancel-creation", "finalize-creation", "reassign"].includes(commandName)
+    if (!["status", "list", "maintain", "cancel-creation", "finalize-creation", "reassign", "release", "growth-status", "retire-growth", "resume-growth"].includes(commandName)
       && (commandName !== "reconcile" || bool(args, "execute"))) {
       const scopedRoot = commandName === "reconcile" ? one(args, "root") : undefined;
       const scopedIds = scopedRoot === undefined ? undefined
@@ -3278,6 +3492,9 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
     }
     else if (commandName === "reconcile") reconcileCommand(database, args, statePath);
     else if (commandName === "measure-capacity") measureCapacityCommand(database, args, statePath);
+    else if (commandName === "growth-status") growthStatusCommand(database, args, statePath);
+    else if (commandName === "retire-growth") retireGrowthCommand(database, args, statePath);
+    else if (commandName === "resume-growth") repriceCapacityCommand(database, args, statePath, true);
     else if (commandName === "reprice-capacity") repriceCapacityCommand(database, args, statePath);
     else if (commandName === "maintain") maintainCommand(database, args);
     else if (commandName === "status" || commandName === "list") statusCommand(database, args);
@@ -3307,14 +3524,14 @@ if (process.argv[1] !== undefined && existsSync(process.argv[1])
         process.stdout.write(`${JSON.stringify({ ok: false, error: {
           code: error.code, field: error.field, requested: error.requested, recorded: error.recorded,
         } })}\n`);
-      } else if (process.argv[2] === "reassign") {
+      } else if (["reassign", "retire-growth", "growth-status", "resume-growth"].includes(process.argv[2]) || error instanceof GrowthLifecycleError) {
         process.stdout.write(`${JSON.stringify({ ok: false, error: {
-          code: error instanceof ResourceBusyError ? "resource-busy" : error instanceof CliError ? "invalid-request" : "reassignment-failed",
+          code: error instanceof GrowthLifecycleError ? error.code : error instanceof ResourceBusyError ? "resource-busy" : error instanceof CliError ? "invalid-request" : "lifecycle-failed",
           detail: error instanceof Error ? error.message : String(error),
         } })}\n`);
       }
     }
     process.stderr.write(`agent-workspace: ${error instanceof Error ? error.message : String(error)}\n`);
-    process.exit(error instanceof ResourceBusyError ? 75 : error instanceof CliError ? 2 : 1);
+    process.exit(error instanceof ResourceBusyError ? 75 : (error instanceof CliError || error instanceof GrowthLifecycleError) ? 2 : 1);
   }
 }

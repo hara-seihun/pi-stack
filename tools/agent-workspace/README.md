@@ -194,3 +194,71 @@ New clone checkouts publish atomically from tool-owned staging. Repeat the origi
 Repeating an ordinary creation after disk-space recovery can start a new capacity-recovery generation. Only a typed disk-capacity refusal (or the exact pre-typed deployed disk-refusal receipt) is eligible. The fresh filesystem observation and original job ID/refusal are retained in `source-preparations/recoveries/` and the successor job request. Original request, progress and terminal result files never change. The active preparation pointer selects the new generation under the destination preparation fence; submission remains single-writer under the source job fence.
 
 Recovery eligibility is evidence for a new attempt, never admission. The durable worker recomputes the source forecast, filesystem/reservation/inode guards and source custody under the existing capacity fence. Checkout registration checks them again. Ordinary source-only 8 GiB headroom / 512 MiB growth is unchanged. Forecasts are retained before admission, keyed by immutable source, repository, custody stamp, sparse selection, intent and allocation unit; refusals retain the exact capacity snapshot. Every explicit retry first attempts a bounded current forecast and fresh fenced admission; a fresh refusal stays failed without changing the original job. A slow forecast transfers to a linked durable generation to finish the same guards. Historical rounded requirements never gate retries. Non-capacity failures remain terminal. Interrupted workers still resume the same job identity; they are distinct from a terminal capacity recovery. A ready/failed-fast worker now has its deterministic job identity retained before submission too.
+
+## Retained custody without future build growth
+
+`retire-growth` is an explicit owner lifecycle transition, not disposal or a smaller
+historical allocation. It keeps the original plan's growth/construction/baseline,
+physical allocation sample, source, refs, unpublished work, ignored runtime trees
+and Git borrowers. Admission charges zero **future** growth for that row while
+keeping its entire existing headroom floor. It never calls release, cache stripping,
+service control or Git configuration writes. Unestimated/pending/unknown states
+cannot retire; price an unestimated plan through its existing supported route first.
+
+1. Obtain the current exact binding (no host walk):
+   `agent-workspace growth-status --id ID --path PATH --json`.
+   A stale sample requires only a targeted `measure-capacity --id ID` refresh.
+2. The current owner supplies a disposition JSON, with `binding` copied exactly
+   from that result, plus:
+   ```json
+   {"kind":"retire-future-growth","retainedUse":"source","remainingGrowthBytes":0,
+    "growthWriters":"none","writingLease":"retire","observedAt":1792160000000,
+    "reason":"future local build/install/generation work completed",
+    "ownerEvidence":"exact current-owner terminal disposition receipt","binding":{}}
+   ```
+   `retainedUse` is `source` or `runtime` custody, not permission to assume a live
+   process is read-only. Use the actual current millisecond observation time;
+   the example's time and empty binding are intentionally not executable evidence.
+3. Execute `agent-workspace retire-growth --id ID --path PATH --owner OWNER
+   --disposition FILE --disposition-sha256 SHA256 --json`.
+
+The SHA binds the exact disposition bytes. Current owner, working/durable source,
+HEAD, path/id, state/update epoch, writing lease, root device/inode, exact plan and
+sample SHA, and registered borrower epochs are compare-and-swapped under lifecycle
+and filesystem locks. The successful sample and owner observation must be current
+(15 minutes) and not future-dated. A still-valid or expired writing lease may be
+explicitly relinquished with `writingLease:retire`; expiration itself proves nothing.
+The transition atomically sets that lease to zero and journals its prior value.
+All other workspace custody fields remain unchanged. The append-only
+`workspace_growth_retirement` journal keeps the exact old/new plan, sample,
+workspace record, disposition bytes and relevant safety observations. Replays fail
+with `growth-already-retired`; stale inputs never silently refresh or mutate.
+
+Strict, bounded observation checks all-UID processes (through passwordless root
+read-only `/proc` observation), writable file descriptors, containers, user/system
+units and unfinished thread custody. Inspection errors, active references, active
+borrower leases and unknown linked worktrees refuse retirement. Registered dormant
+linked/alternate borrowers are preserved without treating their topology as proof
+of read-only use; their lifecycle fences and runtime paths are checked too. No raw
+process argument inventory is returned or journalled. Missing root observation
+privilege yields `growth-writer-unknown`, not an empty-safe result.
+
+Ordinary heartbeat, create replay, registration/adoption and reassignment cannot
+resume retired writing; ordinary release/reconcile, including group reaping, cannot
+strip or delete retained custody. A linked borrower cannot renew/register/reassign
+while its shared Git parent is retained. These are custody guards, not publication
+or deletion evidence. Resume the parent first if its shared Git objects will grow.
+
+To resume growth, take fresh priced admission explicitly:
+`agent-workspace resume-growth --id ID --owner OWNER --expected-plan-sha256 SHA
+--intent budgeted --headroom-gib N --growth-mib N --json`.
+This uses the current root-bound sample, original baseline and normal filesystem
+admission; headroom cannot fall. New declared remaining growth is added to sampled
+consumed growth, and the prior plan remains in `workspace_capacity_repricing`.
+Refusal preserves retirement. Successful admission removes the retirement marker;
+only then can normal writing/heartbeat and later ordinary disposal proceed. This
+is admission accounting, not a filesystem quota or authority to resume stopped work.
+
+Focused proof: `node --test tools/agent-workspace/growth-lifecycle.test.mjs`.
+Managed-host read-only process observer proof:
+`node tools/agent-workspace/growth-process-installed.mjs` (private disposable fixture).
