@@ -78,10 +78,10 @@ export function brokerRetryDelay(headers: Headers, attempt: number, now = Date.n
 }
 const MAX_BODY = 64 * 1024 * 1024;
 const scoped = (principal: string, value: unknown) => createHash("sha256").update(`${principal}\0${String(value ?? "")}`).digest("hex");
-const json = (res: ServerResponse, status: number, error: string) => {
+const json = (res: ServerResponse, status: number, error: string, code?: string) => {
   if (res.headersSent) { res.destroy(); return; }
   res.writeHead(status, { "content-type": "application/json" });
-  res.end(JSON.stringify({ error: { message: error, type: "model_broker_error" } }));
+  res.end(JSON.stringify({ error: { message: error, type: "model_broker_error", ...(code === undefined ? {} : { code }) } }));
 };
 
 const refuseModel = (res: ServerResponse, refusal: SharedModelRefusal) => {
@@ -459,7 +459,8 @@ export function createModelBroker(config: ModelBrokerConfig, availability: Model
       res.end();
     } catch (error) {
       if (!signal.aborted) console.error(`Model broker request failed for ${listener.principal}: ${error instanceof Error ? error.name : "unknown error"}`);
-      json(res, signal.aborted ? 499 : 502, signal.aborted ? "Model request cancelled" : "Model broker request failed; inspect the broker service and account authentication");
+      const policy = error instanceof Error && "code" in error && ["metered_inference_forbidden", "subscription_credential_unset", "subscription_credential_invalid"].includes(String(error.code));
+      json(res, policy ? 403 : signal.aborted ? 499 : 502, policy ? error.message : signal.aborted ? "Model request cancelled" : "Model broker request failed; inspect the broker service and account authentication", policy ? String(error.code) : undefined);
     } finally {
       if (dispatchReceipt && ["dispatched", "accepted"].includes(dispatchReceipt.outcome)) {
         dispatchReceipt.outcome = signal.aborted ? "cancelled" : "indeterminate";

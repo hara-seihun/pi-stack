@@ -1,3 +1,4 @@
+import { subscriptionBoundaryError } from "./subscription-only.js";
 import type { Provider } from "@earendil-works/pi-ai";
 
 /**
@@ -26,7 +27,7 @@ export function pooledOnlyProvider(family: Provider): Provider {
       apiKey: {
         name: `${family.name} shared account pool`,
         async check() { return undefined; },
-        async resolve() { throw new Error(refusal); },
+        async resolve() { throw subscriptionBoundaryError({ code: "metered_inference_forbidden", message: refusal }); },
       },
     },
   };

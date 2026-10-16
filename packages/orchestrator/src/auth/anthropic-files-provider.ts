@@ -1,3 +1,4 @@
+import { subscriptionBoundaryError } from "./subscription-only.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Model, Provider, StreamOptions } from "@earendil-works/pi-ai";
@@ -11,7 +12,7 @@ export function anthropicFilesHeaders(model: Model<any>, options?: StreamOptions
   const headers = new Headers({ "anthropic-version": "2023-06-01" });
   if (options?.apiKey) {
     if (options.apiKey.includes("sk-ant-oat")) headers.set("authorization", `Bearer ${options.apiKey}`);
-    else headers.set("x-api-key", options.apiKey);
+    else throw subscriptionBoundaryError({ code: "metered_inference_forbidden", message: "Anthropic Files requires shared subscription OAuth." });
   }
   for (const source of [model.headers, options?.headers]) {
     for (const [key, value] of Object.entries(source ?? {})) {

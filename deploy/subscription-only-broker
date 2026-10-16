@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Scoped immutable broker update. No Core/Remote/campaign activation.
+[[ $# == 3 ]] || { echo 'usage: deploy/subscription-only-broker BASE DEST SERVICE|none' >&2; exit 64; }
+base=$(realpath "$1"); dest=$2; service=$3
+root=$(cd "$(dirname "$0")/.." && pwd)
+commit=$(git -C "$root" rev-parse HEAD)
+[[ -z $(git -C "$root" status --porcelain) ]] || { echo 'uncommitted source' >&2; exit 65; }
+[[ ! -e $dest ]] || { echo 'immutable destination exists' >&2; exit 65; }
+[[ $EUID == 0 ]] || { echo 'root required' >&2; exit 77; }
+stage=$(mktemp -d "${dest}.stage.XXXX")
+trap 'rm -rf "$stage"' EXIT
+cp -a "$base/." "$stage/"
+for name in subscription-only shared-oauth pooled-only anthropic-files-provider; do
+  /srv/pi/runtime/node_modules/esbuild/bin/esbuild "$root/packages/orchestrator/src/auth/$name.ts" --outfile="$stage/dist/auth/$name.js" --format=esm --platform=node --target=node24
+  cp "$root/packages/orchestrator/src/auth/$name.ts" "$stage/src/auth/"
+done
+/srv/pi/runtime/node_modules/esbuild/bin/esbuild "$root/packages/orchestrator/src/model-broker.ts" --outfile="$stage/dist/model-broker.js" --format=esm --platform=node --target=node24
+cp "$root/packages/orchestrator/src/model-broker.ts" "$stage/src/"
+cp "$root/deploy/subscription-only-check.mjs" "$stage/subscription-only-check.mjs"
+printf '{"source":"%s","base":"%s"}\n' "$commit" "$base" > "$stage/subscription-only-binding.json"
+node "$stage/subscription-only-check.mjs" "$stage"
+mv "$stage" "$dest"
+if [[ $service != none ]]; then
+  [[ $service == pi-model-broker.service ]] || { echo 'unsupported active broker owner' >&2; exit 65; }
+  mkdir -p "/etc/systemd/system/$service.d"
+  printf '[Service]\nExecStart=\nExecStart=/usr/local/bin/node %s/dist/cli.js model-broker /etc/pi-model-broker.json\nTimeoutStopSec=30min\n' "$dest" > "/etc/systemd/system/$service.d/zzzzzzz-subscription-only.conf"
+  systemctl daemon-reload
+  # Existing requests drain under the broker's native close() before replacement.
+  systemctl restart "$service"
+  systemctl is-active --quiet "$service"
+fi
+printf 'installed %s from %s\n' "$dest" "$commit"

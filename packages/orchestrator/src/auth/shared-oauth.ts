@@ -1,3 +1,4 @@
+import { subscriptionCredential, subscriptionBoundaryError } from "./subscription-only.js";
 import { custodyMkdirSync as mkdirSync, custodyOpenSync as openSync, custodyWriteFileSync as writeFileSync } from "../shared-custody.js";
 import {
   chmodSync,
@@ -258,8 +259,9 @@ export class SharedOAuthAuth {
     const release = await acquireLock(this.#path, signal);
     try {
       const auth = readAuth(this.#path);
-      const current = oauthCredential(auth[alias]);
-      if (current === undefined) throw new Error(`${alias} has no shared ${this.#providerId} OAuth credential`);
+      const selected = subscriptionCredential(this.#providerId, auth[alias], oauthCredential);
+      if (!selected.ok) throw subscriptionBoundaryError(selected.error);
+      const current = selected.value;
       const state = rejection(current);
       if (state && (state.state === "login-required" || (state.retryAt ?? 0) > this.#now())) throw unavailable(alias, state);
       if (!state && current.expires > this.#now() + minLifetimeMs) return current;
@@ -301,8 +303,9 @@ export class SharedOAuthAuth {
     const release = await acquireLock(this.#path, signal);
     try {
       const auth = readAuth(this.#path);
-      const current = oauthCredential(auth[alias]);
-      if (current === undefined) throw new Error(`${alias} has no shared ${this.#providerId} OAuth credential`);
+      const selected = subscriptionCredential(this.#providerId, auth[alias], oauthCredential);
+      if (!selected.ok) throw subscriptionBoundaryError(selected.error);
+      const current = selected.value;
       const state = rejection(current);
       if (state && (state.state === "login-required" || (state.retryAt ?? 0) > this.#now())) throw unavailable(alias, state);
       if (!state && current.access !== rejectedAccessToken) return current;
@@ -368,6 +371,8 @@ export function dropLocalCredential(agentAuthPath: string, alias: string): boole
 }
 
 export function providerOAuth(family: Provider, path: string): SharedOAuthAuth {
+  const allowed = family.id === "openai-codex" || family.id === "anthropic";
+  if (!allowed) throw subscriptionBoundaryError({ code: "metered_inference_forbidden", message: "Only shared subscription providers can resolve inference credentials." });
   const oauth = family.auth.oauth;
   if (!oauth) throw new Error(`${family.id} has no OAuth provider`);
   return new SharedOAuthAuth({
