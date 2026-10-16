@@ -54,8 +54,7 @@ Bun.serve({
     if (!body || typeof body.owner !== "string" || typeof body.threadId !== "string") return failure("Voice owner and Pi thread are required");
     if (req.method === "POST" && url.pathname === "/sessions") {
       if (typeof body.sdp !== "string" || typeof body.instructions !== "string") return failure("SDP and instructions are required");
-      if (body.delegation !== "client" && body.delegation !== "none") return failure("An explicit Live delegation policy is required");
-      const result = await broker.negotiate(body.sdp, body.instructions, body.delegation);
+      const result = await broker.negotiate(body.sdp, body.instructions);
       if (!result.ok) return failure(result.error, result.status);
       db.query("INSERT INTO sessions(id,owner,thread_id,expires_at) VALUES(?,?,?,?)")
         .run(result.value.session.id, body.owner, body.threadId, Date.now() + 90_000);

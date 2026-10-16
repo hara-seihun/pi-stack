@@ -1,6 +1,6 @@
-import { installMessageDelivery, type PiEvent } from "pi-orchestrator/api";
-import { createCoreNativeServices, createCoreNativeSession, coreSessionEnvironment } from "pi-orchestrator/core-native";
-import { managedRootSession, RootCapacityUnavailable, RootReplyUnavailable, type ConsultationOwner, type ConsultationOwnerResolver } from "./managed-session.js";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { installMessageDelivery, type AgentCapacity, type PiEvent } from "pi-orchestrator/api";
+import { managedRootSession, RootCapacityUnavailable, RootReplyUnavailable } from "./managed-session.js";
 import { QUESTION_AUTHORING_POLICY, QUESTION_TEXT_DESCRIPTION } from "pi-orchestrator/question-policy";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import type { ConsentInput, ConsentRequest, NotificationInput, NotificationRequest } from "./consent.js";
@@ -30,7 +30,7 @@ export type RootSessionFactory = (spec: RootSessionSpec) => Promise<RootSession>
 export type RootExecution = { reply: string; subjects: string[] };
 export type RootExecutionResult = MemoryResult<RootExecution> | { ok: false; error: "capacity-unavailable"; message: string; retryAt: number };
 export type RootExecutor = (admission: RootAdmission, request: string, onExecution?: () => void) => Promise<RootExecutionResult>;
-export const ROOT_TOOLS = ["read", "write", "edit", "bash", "memory_search", "memory_read", "memory_write", "memory_forget", "memory_disclosures", "memory_log_disclosure", "memory_data", "action_inspect", "action_submit", "action_reconcile", "root_request_consent", "root_notify", "root_reply"];
+export const ROOT_TOOLS = ["read", "write", "edit", "bash", "memory_search", "memory_read", "memory_write", "memory_forget", "memory_disclosures", "memory_log_disclosure", "life_read", "life_write", "life_policy", "life_steering", "action_inspect", "action_submit", "action_reconcile", "root_request_consent", "root_notify", "root_reply"];
 
 export function readRootConfig(path = process.env.PI_KENAN_ROOT_CONFIG ?? "/etc/pi-stack/kenan-root.json"): RootConfig {
   const config = JSON.parse(readFileSync(path, "utf8")) as RootConfig;
@@ -43,13 +43,11 @@ export function readRootConfig(path = process.env.PI_KENAN_ROOT_CONFIG ?? "/etc/
   return config;
 }
 
-export function createRootExecutor(config: RootConfig, options: { factory?: RootSessionFactory; consultationOwner?: ConsultationOwner; consultationOwnerFor?: ConsultationOwnerResolver; env?: NodeJS.ProcessEnv; prompt?: string; report?: InfrastructureReporter; consent?: (admission: RootAdmission, request: string, input: ConsentInput) => ReturnType<ConsentRequest>; notify?: (admission: RootAdmission, toolCallId: string, input: NotificationInput) => ReturnType<NotificationRequest> } = {}): RootExecutor {
+export function createRootExecutor(config: RootConfig, options: { factory?: RootSessionFactory; capacity?: AgentCapacity | { mode: "unmanaged" }; env?: NodeJS.ProcessEnv; prompt?: string; report?: InfrastructureReporter; consent?: (admission: RootAdmission, request: string, input: ConsentInput) => ReturnType<ConsentRequest>; notify?: (admission: RootAdmission, toolCallId: string, input: NotificationInput) => ReturnType<NotificationRequest> } = {}): RootExecutor {
   const hostPrompt = options.prompt ?? readFileSync(config.promptFile, "utf8");
   const factory = options.factory ?? createFixedSession;
-  const baseEnv = { ...options.env };
+  const baseEnv = { ...process.env, ...options.env };
   return async (admission, request, onExecution) => {
-    if (!options.consultationOwner && !options.consultationOwnerFor) return { ok: false, error: "unavailable", message: "Private consultations require the shared core owner" };
-    if (options.consultationOwner && options.consultationOwnerFor) return { ok: false, error: "unavailable", message: "Private consultation ownership is ambiguous" };
     if (!/^[0-9a-f-]{36}$/.test(admission.rootSessionId)) return { ok: false, error: "invalid-request", message: "Invalid admitted root session" };
     const directory = join(config.sessionsDir, admission.rootSessionId);
     let session: RootSession | undefined;
@@ -58,16 +56,11 @@ export function createRootExecutor(config: RootConfig, options: { factory?: Root
     let stage: InfrastructureEvent["stage"] = "persist-admission";
     try {
       const priorPath = join(directory, "admission.json");
-      const existing = existsSync(directory);
-      if (existing) {
+      if (existsSync(directory)) {
         const prior = JSON.parse(readFileSync(priorPath, "utf8"));
         if (prior.person !== admission.person || prior.threadId !== admission.threadId || JSON.stringify(prior.recipients) !== JSON.stringify(admission.recipients)) throw new Error("Root admission changed during recovery");
         if (existsSync(join(directory, "reply.json"))) return { ok: true, value: JSON.parse(readFileSync(join(directory, "reply.json"), "utf8")) };
-      }
-      const custody = options.consultationOwnerFor ? options.consultationOwnerFor(admission.rootSessionId, existing ? "existing" : "new")
-        : { ok: true as const, value: options.consultationOwner! };
-      if (!custody.ok) return { ok: false, error: "unavailable", message: custody.message };
-      if (!existing) mkdirSync(directory, { recursive: false, mode: 0o700 });
+      } else mkdirSync(directory, { recursive: false, mode: 0o700 });
       const env = { ...baseEnv,
         PI_PERSON_SETTINGS_DATA: undefined, PI_REMOTE_DATA: undefined, PI_PERSON_TIMEZONE_FILE: undefined,
         PI_MODEL_DELIVERY_TIMEZONE: Object.hasOwn(admission, "timezone") ? JSON.stringify(admission.timezone) : undefined,
@@ -83,7 +76,7 @@ export function createRootExecutor(config: RootConfig, options: { factory?: Root
       stage = "create-session";
       session = managedRootSession({ id: admission.rootSessionId, person: admission.person, recipients: [...admission.recipients], prompt,
         request, config, directory, env, onExecution, requestConsent: options.consent ? input => options.consent!(admission, request, input) : undefined,
-        notify: options.notify ? (toolCallId, input) => options.notify!(admission, toolCallId, input) : undefined }, async spec => { const native = await factory(spec); stage = "model-turn"; return native; }, custody.value);
+        notify: options.notify ? (toolCallId, input) => options.notify!(admission, toolCallId, input) : undefined }, async spec => { const native = await factory(spec); stage = "model-turn"; return native; }, options.capacity);
       await session.prompt(`A person asked Kenan the following. Consider it on its merits and answer only what you choose to disclose.\n\n${JSON.stringify({ request })}`);
       const reply = session.reply();
       if (typeof reply !== "string" || !reply.trim()) {
@@ -107,22 +100,23 @@ export function createRootExecutor(config: RootConfig, options: { factory?: Root
 }
 
 async function createFixedSession(spec: RootSessionSpec): Promise<RootSession> {
-  const { SettingsManager, SessionManager, createBashTool, defineTool } = await import("@earendil-works/pi-coding-agent");
+  const { createAgentSessionServices, createAgentSessionFromServices, SettingsManager, SessionManager, createBashTool, defineTool } = await import("@earendil-works/pi-coding-agent");
   const { Type } = await import("typebox");
   const { memoryExtension } = await import("kenan-memory/tools");
-  const scope = coreSessionEnvironment;
+  const scopeKey = Symbol.for("pi-stack.session-environment");
+  const globals = globalThis as typeof globalThis & { [scopeKey]?: AsyncLocalStorage<NodeJS.ProcessEnv> };
+  const scope = globals[scopeKey] ??= new AsyncLocalStorage<NodeJS.ProcessEnv>();
   return scope.run(spec.env, async () => {
-    let native: import("@earendil-works/pi-coding-agent").AgentSession | undefined;
+    let native: Awaited<ReturnType<typeof createAgentSessionFromServices>>["session"] | undefined;
     try {
     const settings = SettingsManager.inMemory({ retry: { enabled: true, maxRetries: 2 }, compaction: { enabled: true } });
     const routing = new URL("./extension/routing.ts", import.meta.resolve("pi-orchestrator/api")).pathname;
-    const initialized = await createCoreNativeServices({ cwd: spec.config.cwd, agentDir: spec.config.agentDir, settingsManager: settings,
+    const services = await createAgentSessionServices({ cwd: spec.config.cwd, agentDir: spec.config.agentDir, settingsManager: settings,
       resourceLoaderOptions: { noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
         systemPromptOverride: () => spec.prompt, appendSystemPromptOverride: () => [],
         additionalExtensionPaths: [routing], extensionFactories: [memoryExtension({ env: spec.env,
           ask: async () => ({ clarificationRequired: true, message: "Ask the subject before forgetting; no change was made" }) })] } });
-    if (!initialized.ok) throw new RootInitializationError("resources-unavailable");
-    const services = initialized.value;
+    if (services.diagnostics.some(diagnostic => diagnostic.type === "error") || services.resourceLoader.getExtensions().errors.length) throw new RootInitializationError("resources-unavailable");
     const model = services.modelRuntime.getModels().find(model => model.provider === spec.config.provider && model.id === spec.config.model);
     if (!model) throw new RootInitializationError("model-unavailable");
     const bash = createBashTool(spec.config.cwd, { spawnHook: context => ({ ...context, env: { ...context.env, ...spec.env } }) });
@@ -138,14 +132,12 @@ async function createFixedSession(spec: RootSessionSpec): Promise<RootSession> {
       parameters: Type.Object({ recipient: Type.String({ minLength: 1 }), text: Type.String({ minLength: 1, maxLength: 24000 }), subjects: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 100 }), obviouslyPrivate: Type.Boolean() }),
       execute: async (id, input) => { const result = spec.notify ? await spec.notify(id, input) : { ok: false, message: "Notification delivery is unavailable; nothing was queued" };
         return { content: [{ type: "text", text: JSON.stringify(result) }], details: {} }; } });
-    const created = await createCoreNativeSession({ services,
+    const { session } = await createAgentSessionFromServices({ services,
       sessionManager: (() => {
         if (!existsSync(spec.sessionFile)) writeFileSync(spec.sessionFile, JSON.stringify(SessionManager.inMemory(spec.config.cwd).getHeader()) + "\n", { mode: 0o600 });
         return SessionManager.open(spec.sessionFile, undefined, spec.config.cwd);
       })(), model,
       thinkingLevel: spec.config.thinkingLevel, tools: ROOT_TOOLS, customTools: [bash, consentTool, notificationTool, replyTool] });
-    if (!created.ok) throw new RootInitializationError("resources-unavailable");
-    const { session } = created.value;
     native = session;
     installMessageDelivery(session, spec.env);
     const resources = services.resourceLoader;

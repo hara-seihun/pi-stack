@@ -7,7 +7,9 @@ import { AppUpdater, startAppUpdateChecks } from "./app-update-state";
 const enabled = nativePlatform && !!remote.checkAppUpdate && !!remote.installAppUpdate;
 const attemptKey = "pi-auto-apk-install";
 let storage: Storage | null;
-try { storage = window.sessionStorage; } catch { storage = null; }
+// Android may destroy the WebView while its installer is in front; a session-scoped record would
+// then reopen the installer on every return. Persist the attempt so only a tap reopens it.
+try { storage = window.localStorage; } catch { storage = null; }
 const updater = new AppUpdater({
   check: async () => {
     await bootstrapUrl();

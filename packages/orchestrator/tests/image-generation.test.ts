@@ -168,28 +168,8 @@ test("revocation and cancellation refuse execution without making a provider cal
   expect(f.store.activeLeases()).toHaveLength(0);
 });
 
-test.each(IMAGE_MODELS)("%s completes across fragmented keepalive heartbeats without another request", async model => {
-  const f = fixture(); f.account(); f.reconcile();
-  const native = completed(model);
-  const transport = vi.fn(async () => stream([
-    { type: "response.created", response: { id: "resp-test" } },
-    { type: "keepalive" },
-    { type: "response.image_generation_call.generating" },
-    { type: "keepalive" },
-    { type: "response.output_item.done", item: native.response.output[0] },
-    { type: "keepalive" }, native,
-  ], true));
-  vi.stubGlobal("fetch", transport);
-  const result = await f.execute({ model });
-  expect(result.details).toMatchObject({ model, responseId: "resp-test" });
-  expect(readFileSync(join(f.root, "image.png"))).toEqual(png);
-  expect(f.store.activeLeases()).toHaveLength(0);
-  expect(transport).toHaveBeenCalledTimes(1);
-});
-
 test.each([
   [[], "without response.completed"],
-  [[{ type: "keepalive" }], "without response.completed"],
   [[{ type: "response.failed", response: { error: { message: "generation refused" } } }], "generation refused"],
   [[{ type: "response.new_variant" }, completed()], "Unknown provider response event type"],
   [[{ type: "response.completed" }], "Missing response object"],

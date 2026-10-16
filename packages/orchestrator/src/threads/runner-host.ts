@@ -2,31 +2,17 @@ import { createServer, type Socket } from "node:net";
 import { unlinkSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { basename, dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { getPackageDir } from "@earendil-works/pi-coding-agent";
-import { publishNativeStorageOwner, assertNativeStorageOwner } from "./runner-ownership.js";
 import { underMemoryPressure } from "./runner-memory.js";
 import { RuntimeOutput } from "./runner-output.js";
 import { shareFile } from "../shared-custody.js";
-import * as initialFactory from "./pi-session.js";
-import { RunnerFutureFactory, bindRunnerEnvironments, identifyRunnerFactory, RUNNER_FACTORY_PROTOCOL, type RunnerFactoryIdentity } from "./runner-factory.js";
+import { openPiSession, piEnvironmentScope } from "./pi-session.js";
 import type { PiEvent, PiSession, PiSessionOptions } from "./contracts.js";
 import { assertNever } from "./runtime-events.js";
 import { requireRunnerChannelRequest, requireRunnerControlRequest } from "./runner-protocol.js";
 
-type Resident = { close(): Promise<void>; id: string; factory: RunnerFactoryIdentity; key?: string; active: boolean; used: number; pending: number; priority: boolean; background: Set<string>; backgroundCount: number };
+type Resident = { close(): Promise<void>; id: string; key?: string; active: boolean; used: number; pending: number; priority: boolean };
 const [controlPath] = process.argv.slice(2);
 if (!controlPath) throw new Error("Thread runner requires a control socket");
-const nativeDataDir = process.env.PI_NATIVE_RUNNER_DATA_DIR;
-const nativeUid = process.env.PI_NATIVE_RUNNER_UID;
-if (!nativeDataDir || !/^\d+$/.test(nativeUid ?? "")) throw new Error("Native storage ownership configuration is required");
-const nativeOwner = publishNativeStorageOwner(nativeDataDir, Number(nativeUid), controlPath);
-const initialIdentity = identifyRunnerFactory(fileURLToPath(new URL("./pi-session.js", import.meta.url)));
-if (!initialIdentity.ok) throw new Error(initialIdentity.error.message);
-const futureFactory = new RunnerFutureFactory({ identity: initialIdentity.value, module: initialFactory }, () => assertNativeStorageOwner(nativeOwner));
-type WriterLease = { release(): { ok: boolean }; assertOwned(): { ok: boolean } };
-type WriterModule = { acquireSessionWriter(config: { directory: string | undefined; scope: string | undefined; identity: string }): { ok: true; value: WriterLease } | { ok: false; error: Error } };
-const writers: WriterModule = await import(pathToFileURL(join(getPackageDir(), "dist/core/session-writer.mjs")).href);
 const sessions = new Map<string, Resident>();
 let stopping = false, drainWhenEmpty = false;
 const shared = process.env.PI_THREAD_RUNNER_RESIDENT !== "0";
@@ -47,11 +33,11 @@ function availableSlots(priority = false) {
   return stopping || pressure() ? 0 : Math.max(0, limit - activeCount());
 }
 async function reclaim(reserve = 0, exclude?: Resident) {
-  const idle = [...sessions.values()].filter(session => !session.active && !session.pending && !session.background.size && !session.backgroundCount && session !== exclude).sort((a, b) => a.used - b.used);
+  const idle = [...sessions.values()].filter(session => !session.active && !session.pending && session !== exclude).sort((a, b) => a.used - b.used);
   for (const session of idle) {
     if (sessions.size + reserve <= maxResident && !pressure()) break;
     try { await session.close(); }
-    catch (error) { console.error(`Runner reclamation refused for ${session.id}:`, error); }
+    catch (error) { session.active = true; console.error(`Runner reclamation refused for ${session.id}:`, error); }
     globalThis.gc?.();
   }
 }
@@ -74,14 +60,10 @@ function lines(socket: Socket, receive: (value: any) => void) {
 }
 function reply(socket: Socket | null, value: unknown) { if (socket?.writable) socket.write(`${JSON.stringify(value)}\n`); }
 function remove(path: string) {
-  assertNativeStorageOwner(nativeOwner);
   try { unlinkSync(path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
 }
 async function open(options: PiSessionOptions & { socketPath: string; priority?: boolean }) {
-  assertNativeStorageOwner(nativeOwner);
   if (stopping) throw new Error("Runner is stopping");
-  const env = { ...options.env };
-  if (!env.PI_SESSION_WRITER_SCOPE?.trim() || !env.PI_SESSION_WRITER_DIRECTORY?.trim()) throw new Error("Native thread requires its registered SDK writer directory and scope");
   const existing = sessions.get(options.socketPath);
   if (existing) {
     if (options.env.PI_THREAD_RECOVERING === "1") return;
@@ -93,22 +75,15 @@ async function open(options: PiSessionOptions & { socketPath: string; priority?:
   const { socketPath } = options;
   const generation = basename(controlPath, ".sock");
   if (dirname(socketPath) !== join(dirname(controlPath), "..", "thread-sockets") || !basename(socketPath).startsWith(`${generation}.`)) throw new Error("Invalid thread socket");
-  const binding = futureFactory.snapshot();
-  const runEnvironment = <T>(action: () => T): T => bindRunnerEnvironments([initialFactory.piEnvironmentScope, binding.module.piEnvironmentScope], env, action);
+  const env = { ...options.env };
   const spoolPath = `${socketPath}.events`;
-  const claimed = writers.acquireSessionWriter({ directory: env.PI_SESSION_WRITER_DIRECTORY, scope: "pi-native-thread-owner-v1", identity: `thread:${options.threadId}` });
-  if (!claimed.ok) throw claimed.error;
-  const lease = claimed.value;
-  let output: RuntimeOutput;
-  try {
-    for (const path of [socketPath, spoolPath]) remove(path);
-    output = new RuntimeOutput(spoolPath);
-  } catch (error) { lease.release(); throw error; }
+  for (const path of [socketPath, spoolPath]) remove(path);
+  const output = new RuntimeOutput(spoolPath);
   let client: Socket | null = null;
   let closed = false;
   let adapter: PiSession;
   let ready: Promise<void>;
-  const resident: Resident = { close, id: options.threadId, factory: binding.identity, key: env.PI_THREAD_SESSION_KEY, active: true, used: Date.now(), pending: 0, priority: options.priority !== false, background: new Set(), backgroundCount: 0 };
+  const resident: Resident = { close, id: options.threadId, key: env.PI_THREAD_SESSION_KEY, active: true, used: Date.now(), pending: 0, priority: options.priority !== false };
   const channel = createServer(socket => {
     client?.destroy(); client = socket; socket.setNoDelay(true);
     lines(socket, input => {
@@ -121,7 +96,7 @@ async function open(options: PiSessionOptions & { socketPath: string; priority?:
         case "command": {
           resident.pending++;
           const observing = /^(?:get_|set_session_name$|set_speed$|set_thinking_level$)/.test(value.value.type);
-          void serial(async () => { if (!observing) await activate(resident); else resident.used = Date.now(); await ready; }).then(() => runEnvironment(() => adapter.command(value.value))).catch(error => publish({
+          void serial(async () => { if (!observing) await activate(resident); else resident.used = Date.now(); await ready; }).then(() => piEnvironmentScope.run(env, () => adapter.command(value.value))).catch(error => publish({
             id: value.value.id, type: "response", command: value.value.type, success: false, error: String(error),
           })).finally(() => { resident.pending--; });
           return;
@@ -132,15 +107,6 @@ async function open(options: PiSessionOptions & { socketPath: string; priority?:
     socket.on("close", () => { if (client === socket) client = null; });
   });
   function publish(value: PiEvent) {
-    if (value.type === "tool_execution_end") {
-      const details = (value.result as { details?: { operationId?: string; state?: string } } | undefined)?.details;
-      if (details?.operationId && (details.state === "running" || details.state === "accepted")) resident.background.add(details.operationId);
-    }
-    if (value.type === "tool_operation_result") {
-      resident.background.delete(String(value.operationId));
-      resident.backgroundCount = resident.background.size;
-    }
-    if (value.type === "response" && value.command === "get_state" && value.success) resident.backgroundCount = Number((value.data as { backgroundOperationCount?: number })?.backgroundOperationCount ?? 0);
     if (value.type === "response" && value.command === "get_state" && value.success) value = { ...value, data: { ...value.data as object, threadSessionKey: resident.key } };
     if (!closed) output.publish(value);
   }
@@ -149,21 +115,19 @@ async function open(options: PiSessionOptions & { socketPath: string; priority?:
     closed = true;
     reply(client, { type: "exit", code }); client?.end(); channel.close(); output.close();
     for (const path of [socketPath, spoolPath]) remove(path);
-    const released = lease.release();
-    if (!released.ok) throw new Error("Native thread ownership release failed");
     sessions.delete(socketPath);
     if (!sessions.size && (drainWhenEmpty || !shared) && !stopping) void serial(stop);
   }
   async function close() {
     await ready;
     if (resident.pending) throw new Error("Cannot close a session with unacknowledged commands");
-    await runEnvironment(() => adapter.close());
+    await piEnvironmentScope.run(env, () => adapter.close());
     finish();
   }
   sessions.set(socketPath, resident);
   try { await new Promise<void>((resolve, reject) => { channel.once("error", reject); channel.listen(socketPath, () => { shareFile(socketPath); resolve(); }); }); }
   catch (error) { finish(1); throw error; }
-  ready = runEnvironment(() => binding.module.openPiSession(options, publish, finish)).then(value => { adapter = value; }).catch(error => {
+  ready = piEnvironmentScope.run(env, () => openPiSession(options, publish, finish)).then(value => { adapter = value; }).catch(error => {
     publish({ type: "extension_error", error: String(error) });
     console.error(`Runner thread ${options.threadId}:`, error);
     finish(1);
@@ -177,16 +141,6 @@ const server = createServer(socket => {
     const value = requireRunnerControlRequest(input);
     const respond = (operation: Promise<unknown>) => void operation.then(() => reply(socket, { ok: true, pid: process.pid }), error => reply(socket, { error: String(error), ...((error as { nativeNotReady?: boolean }).nativeNotReady ? { nativeNotReady: true } : {}) }));
     switch (value.type) {
-      case "upgrade_factory":
-        void serial(async () => {
-          if (Object.keys(nativeOwner).some(key => nativeOwner[key as keyof typeof nativeOwner] !== value.owner[key as keyof typeof value.owner])) {
-            reply(socket, { ok: false, error: "Native process/storage identity changed", errorCode: "ownership-conflict" }); return;
-          }
-          if (stopping) { reply(socket, { ok: false, error: "Runner is stopping", errorCode: "factory-unavailable" }); return; }
-          const result = await futureFactory.upgrade(value.expected, value.candidate);
-          reply(socket, result.ok ? { ok: true, pid: process.pid, protocol: RUNNER_FACTORY_PROTOCOL, ...result.value, residentFactories: [...sessions.values()].map(session => ({ threadId: session.id, factory: session.factory })) }
-            : { ok: false, error: result.error.message, errorCode: result.error.code });
-        }).catch(error => reply(socket, { ok: false, error: String(error), errorCode: "factory-unavailable" })); return;
       case "open": respond(serial(() => open(value.options))); return;
       case "close": respond(serial(async () => { await sessions.get(value.socketPath)?.close(); })); return;
       case "activity":
@@ -199,8 +153,7 @@ const server = createServer(socket => {
       case "retain": drainWhenEmpty = false; reply(socket, { ok: true }); return;
       case "drain": drainWhenEmpty = true; reply(socket, { ok: true }); if (!sessions.size) void serial(stop); return;
       case "status":
-        reply(socket, { ok: true, historySource: "native-jsonl-v1", factoryProtocol: RUNNER_FACTORY_PROTOCOL, futureFactory: futureFactory.snapshot().identity,
-          nativeOwner, residentFactories: [...sessions.values()].map(session => ({ threadId: session.id, factory: session.factory })), pid: process.pid, unit: process.env.PI_THREAD_RUNNER_UNIT ?? null, sessions: sessions.size, activeSessions: activeCount(), availableSlots: availableSlots(true),
+        reply(socket, { ok: true, historySource: "native-jsonl-v1", pid: process.pid, unit: process.env.PI_THREAD_RUNNER_UNIT ?? null, sessions: sessions.size, activeSessions: activeCount(), availableSlots: availableSlots(true),
           backgroundSlots: availableSlots(false), threadIds: [...sessions.values()].map(session => session.id),
           activeThreadIds: [...sessions.values()].filter(session => session.active).map(session => session.id), maxSessions, maxResident, rss: process.memoryUsage().rss }); return;
     }

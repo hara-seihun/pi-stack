@@ -228,11 +228,12 @@ export async function nativeHistoryStartup({ configPath, environment = process.e
       cause: result.error.code, bootstrap: { ...source.value, uid, dataDir: configuration.dataDir } } }
       : { ...result, error: { ...result.error, legacyBootstrapError: source.error } };
   };
+  // Native owners reattach their retained output; only a schema migration needs drained old producers.
+  if (!migrationRequired) return { ok: true, value: { state: schema.value } };
   const output = await outputCensus(configuration, paths.value.socketDirs, !migrationRequired, procRoot);
   if (!output.ok) return bootstrapIfNeeded(output);
   const writers = writerCensus(configuration, paths.value.nativePaths, procRoot, output.value);
   if (!writers.ok) return bootstrapIfNeeded(writers);
-  if (!migrationRequired) return { ok: true, value: { state: schema.value } };
   if (!isAbsolute(migratorPath) || !Number.isSafeInteger(migrationTimeoutMs) || migrationTimeoutMs <= 0 || migrationTimeoutMs > MIGRATION_MS) return failure("arguments", "Absolute migrator path and positive timeout no greater than 45 seconds required", 78);
   const result = spawnSync(process.execPath, [migratorPath, "--supervisor-db", configuration.supervisorDb, "--thread-db", configuration.threadDb,
     "--output-dir", configuration.outputDir, "--writers-stopped"], { encoding: "utf8", timeout: migrationTimeoutMs, maxBuffer: 1024 * 1024 });

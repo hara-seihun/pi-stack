@@ -58,29 +58,6 @@ export class KenanKeys {
     return operation;
   }
 
-  async verify(user: string, key: string): Promise<CustodyResult> {
-    const person = this.people.find(person => person.user === user);
-    if (!person?.unlock) return { ok: false, status: 403, error: "Unknown encrypted person" };
-    if (!key || Buffer.byteLength(key) > 4096 || /[\r\n\0]/.test(key)) return { ok: false, status: 400, error: "Key required" };
-    if (!this.disk?.wrappers[user]) return { ok: false, status: 503, error: "Person has no enrolled custody credential" };
-    const wrapper = this.disk.wrappers[user];
-    const encoded = (value: unknown, size: number) => typeof value === "string" && Buffer.from(value, "base64").length === size && Buffer.from(value, "base64").toString("base64") === value;
-    if (!encoded(wrapper.salt, 32) || !encoded(wrapper.box?.iv, 12) || !encoded(wrapper.box?.tag, 16) || !encoded(wrapper.box?.data, 32)) return { ok: false, status: 503, error: "Custody credential is malformed" };
-    let wrapping: Buffer | undefined, master: Buffer | undefined, plaintext: Buffer | undefined;
-    try {
-      wrapping = await wrappingKey(key, wrapper.salt);
-      try { master = open(wrapping, wrapper.box, `one-kenan/master/${user}`); }
-      catch { return { ok: false, status: 403, error: "Wrong key" }; }
-      plaintext = open(master, this.disk.vault, "one-kenan/keys");
-      const enrolled: unknown = JSON.parse(plaintext.toString("utf8"));
-      if (!enrolled || typeof enrolled !== "object" || Array.isArray(enrolled)) return { ok: false, status: 503, error: "Custody store is malformed" };
-      const retained = (enrolled as Record<string, unknown>)[user];
-      if (typeof retained !== "string" || !equal(retained, key)) return { ok: false, status: 503, error: "Custody credential does not match its vault" };
-      return { ok: true };
-    } catch { return { ok: false, status: 503, error: "Custody credential could not be verified" }; }
-    finally { wrapping?.fill(0); master?.fill(0); plaintext?.fill(0); }
-  }
-
   async authenticate(user: string, key: string): Promise<CustodyResult> {
     return this.exclusive(async () => {
       const person = this.people.find(person => person.user === user);

@@ -4,8 +4,6 @@ import { resolve } from "node:path";
 import { TextDecoder } from "node:util";
 import { projectAnthropicNarrationMessage } from "./anthropic-narration.mjs";
 import { isSilentAssistant } from "./manager-turn.mjs";
-import { inputBatchPresentation } from "./input-batch-presentation.mjs";
-export { inputBatchPresentation } from "./input-batch-presentation.mjs";
 
 export const MAX_HISTORY_RECORD_BYTES = 8 * 1024 * 1024;
 export const MAX_HISTORY_INDEX_BYTES = 64 * 1024 * 1024;
@@ -87,13 +85,10 @@ function withSource(path, use) {
   return result;
 }
 
-function parseRecord(raw, path, line, offset, closed) {
-  let entry, text;
-  const evidence = () => ({ line, offset, length: raw.length, digest: createHash("sha256").update(raw).digest("hex"), ...(closed === undefined ? {} : { closed }) });
-  try { text = decoder.decode(raw); }
-  catch { return failure("invalid-record", path, `Invalid session UTF-8 at line ${line}`, { ...evidence(), syntax: "utf8" }); }
-  try { entry = JSON.parse(text); }
-  catch { return failure("invalid-record", path, `Invalid session JSONL at line ${line}: invalid JSON`, { ...evidence(), syntax: "json" }); }
+function parseRecord(raw, path, line, offset) {
+  let entry;
+  try { entry = JSON.parse(decoder.decode(raw)); }
+  catch (error) { return failure("invalid-record", path, `Invalid session JSONL at line ${line}: ${error.message}`, { line, offset }); }
   if (!entry || typeof entry !== "object" || Array.isArray(entry) || !nonempty(entry.type)) {
     return failure("invalid-record", path, `Invalid session entry at line ${line}`, { line, offset });
   }
@@ -132,8 +127,6 @@ function recordMetadata(entry, raw, path, line, offset) {
   if (typeof message.content !== "string" && !Array.isArray(message.content) && message.content != null) {
     return failure("invalid-record", path, `Invalid session message content at line ${line}`, { line, offset });
   }
-  const batch = inputBatchPresentation({ ...message, customType: entry.customType, details: entry.details });
-  if (!batch.ok) return failure("invalid-record", path, batch.error, { line, offset });
   const timestamp = message.timestamp ?? entry.timestamp;
   if (timestamp != null && ((typeof timestamp !== "string" && typeof timestamp !== "number") || timestampMs(timestamp) === undefined)) {
     return failure("invalid-record", path, `Invalid session timestamp at line ${line}`, { line, offset });
@@ -157,12 +150,10 @@ function recordMetadata(entry, raw, path, line, offset) {
       ...(block.namespace != null ? { namespace: block.namespace } : {}),
     }));
   }
-  const displayedItemCount = batch.value ? batch.value.length : message.role === "assistant" && Array.isArray(message.content)
+  const displayedItemCount = message.role === "assistant" && Array.isArray(message.content)
     ? blocks.filter(block => block.displayed).length + Number(blocks.length === 0 && Boolean(message.errorMessage))
     : message.role === "assistant" && typeof message.content === "string" && !message.content.trim() ? 0 : 1;
-  return ok(Object.freeze({ ...base, role: batch.value ? "user" : message.role, timestamp: timestampMs(timestamp) ?? null,
-    ...(batch.value?.some(input => input.inputOrigin === "human") ? { inputOrigin: "human" }
-      : batch.value?.every(input => input.inputOrigin === "machine") ? { inputOrigin: "machine" } : {}),
+  return ok(Object.freeze({ ...base, role: message.role, timestamp: timestampMs(timestamp) ?? null,
     blocks: Object.freeze(blocks), toolCallIds: Object.freeze(blocks.filter(block => block.type === "toolCall").map(block => block.toolCallId)),
     toolResultId: message.role === "toolResult" ? message.toolCallId ?? null : null, displayedItemCount,
     ...(typeof message.rootConsent === "boolean" ? { rootConsent: message.rootConsent } : {}),
@@ -209,10 +200,10 @@ function scanRecords(fd, path, size, start, firstLine, hash, hashFrom, initialMe
   const chunk = Buffer.allocUnsafe(SCAN_CHUNK_BYTES);
   const records = [];
   let parts = [], length = 0, recordStart = start, line = firstLine, position = start, estimatedBytes = initialMetadataBytes;
-  const consume = closed => {
+  const consume = () => {
     const raw = parts.length === 1 ? parts[0] : Buffer.concat(parts, length);
     if (raw.toString("utf8").trim()) {
-      const parsed = parseRecord(raw, path, line, recordStart, closed);
+      const parsed = parseRecord(raw, path, line, recordStart);
       if (!parsed.ok) return parsed;
       const metadata = recordMetadata(parsed.value, raw, path, line, recordStart);
       if (!metadata.ok) return metadata;
@@ -237,7 +228,7 @@ function scanRecords(fd, path, size, start, firstLine, hash, hashFrom, initialMe
       if (length > MAX_HISTORY_RECORD_BYTES) return failure("oversized-record", path, `Session record exceeds ${MAX_HISTORY_RECORD_BYTES} bytes`, { line, offset: recordStart, limit: MAX_HISTORY_RECORD_BYTES });
       if (part.length) parts.push(Buffer.from(part));
       if (end < bytes) {
-        const consumed = consume(true);
+        const consumed = consume();
         if (!consumed.ok) return consumed;
         line++; recordStart = position + end + 1;
       }
@@ -253,7 +244,7 @@ function scanRecords(fd, path, size, start, firstLine, hash, hashFrom, initialMe
     try { if (raw.toString("utf8").trim()) JSON.parse(decoder.decode(raw)); }
     catch { complete = false; }
     if (complete) {
-      const consumed = consume(false);
+      const consumed = consume();
       if (!consumed.ok) return consumed;
     }
   }
@@ -321,15 +312,16 @@ function branchRecords(cache, path, leafId, managerWakeVisibility, inputOrigins)
     entries: Object.freeze(entries.map(record => messageById.get(record.id) ?? record)) });
 }
 
-function readIndexedRecord(source, proof, descriptors, descriptor) {
+function readIndexedRecord(source, descriptors, descriptor) {
   if (!descriptors.has(descriptor)) return failure("invalid-descriptor", source.path, "Record descriptor does not belong to this history snapshot");
   if (descriptor.length > MAX_HISTORY_RECORD_BYTES) return failure("oversized-record", source.path, `Session record exceeds ${MAX_HISTORY_RECORD_BYTES} bytes`, { line: descriptor.line, offset: descriptor.offset, limit: MAX_HISTORY_RECORD_BYTES });
   return withSource(source.path, fd => {
-    const before = verifyPrefix(fd, source.path, proof);
-    if (!before.ok) return before;
+    if (stamp(fstatSync(fd, { bigint: true })) !== source.revision) return failure("stale-source", source.path, "Session revision changed; refresh the history index");
     const record = readRecordAt(fd, source, descriptor);
-    const after = verifyPrefix(fd, source.path, proof);
-    return after.ok ? record : after;
+    if (stamp(fstatSync(fd, { bigint: true })) !== source.revision || stamp(statSync(source.path, { bigint: true })) !== source.revision) {
+      return failure("stale-source", source.path, "Session record changed during reading");
+    }
+    return record;
   });
 }
 
@@ -469,184 +461,15 @@ export function indexedThreadHistory(path, leafId, options) {
     }
     const source = Object.freeze({ kind: "native-jsonl", path, generation: cache.generation, revision, size, leafId: branch.value.leafId });
     const descriptors = new Set(branch.value.entries);
-    const proof = { stat: cache.stat, revision: cache.revision, size: cache.size, digest: cache.digest };
     const presentationRevision = createHash("sha256").update(snapshotKey).digest("hex");
     const value = Object.freeze({ source, presentationRevision, entries: branch.value.entries, messages: branch.value.messages,
-      read: descriptor => readIndexedRecord(source, proof, descriptors, descriptor) });
+      read: descriptor => readIndexedRecord(source, descriptors, descriptor) });
     snapshotDescriptors.set(value, descriptors);
-    snapshotProofs.set(value, proof);
+    snapshotProofs.set(value, { stat: cache.stat, revision: cache.revision, size: cache.size, digest: cache.digest });
     cache.snapshots.set(snapshotKey, { value, bytes });
     cache.metadataBytes += bytes; indexedMetadataBytes += bytes;
     trimIndexCache();
     return ok(value);
-  });
-}
-
-// Watermarks observe bytes, not the entry graph. Historic bodies never enter memory.
-function validWatermark(value) {
-  const integer = n => Number.isSafeInteger(n) && n >= 0;
-  const sha = s => typeof s === "string" && /^[a-f0-9]{64}$/.test(s);
-  return value?.kind === "native-jsonl-watermark" && value.version === 1
-    && typeof value.revision === "string" && typeof value.device === "string" && /^\d+$/.test(value.device)
-    && typeof value.inode === "string" && /^\d+$/.test(value.inode)
-    && integer(value.size) && integer(value.closedOffset) && value.closedOffset <= value.size
-    && integer(value.nextLine) && value.nextLine >= 1 && sha(value.prefixDigest)
-    && (value.lastOffset === -1 && value.lastLength === 0 && value.lastLine === 0 && value.lastDigest === ""
-      || integer(value.lastOffset) && integer(value.lastLength) && value.lastLength > 0
-        && integer(value.lastLine) && value.lastLine >= 1 && value.lastLine < value.nextLine
-        && value.lastOffset + value.lastLength < value.closedOffset && sha(value.lastDigest));
-}
-
-function watermarkProof(value) {
-  return { stat: { dev: BigInt(value.device), ino: BigInt(value.inode) },
-    revision: value.closedOffset === value.size ? value.revision : "closed-prefix",
-    size: value.closedOffset, digest: value.prefixDigest };
-}
-
-/** Fixed captured prefix; even a valid JSON object without LF belongs to the next observation. */
-function* watermarkLines(fd, path, stat, start, firstLine, prefixHash, previous, bodies, outcome) {
-  const chunk = Buffer.allocUnsafe(SCAN_CHUNK_BYTES);
-  let position = start, recordStart = start, line = firstLine, length = 0, nonblank = false;
-  let parts = [], recordHash = createHash("sha256"), oversized = false;
-  let closedOffset = start, closedDigest = prefixHash.copy().digest("hex");
-  let lastOffset = previous?.lastOffset ?? -1, lastLength = previous?.lastLength ?? 0,
-    lastLine = previous?.lastLine ?? 0, lastDigest = previous?.lastDigest ?? "";
-  const size = Number(stat.size);
-  while (position < size) {
-    const bytes = readSync(fd, chunk, 0, Math.min(chunk.length, size - position), position);
-    if (!bytes) { outcome.error = failure("stale-source", path, "Session changed during watermark capture").error; return; }
-    let begin = 0;
-    while (begin < bytes) {
-      const found = chunk.subarray(0, bytes).indexOf(10, begin);
-      const end = found < 0 ? bytes : found;
-      const part = chunk.subarray(begin, end);
-      prefixHash.update(part); recordHash.update(part); length += part.length;
-      if (!nonblank) for (const byte of part) if (byte !== 32 && byte !== 13 && byte !== 9) { nonblank = true; break; }
-      if (bodies && !oversized) {
-        if (length > MAX_HISTORY_RECORD_BYTES) { oversized = true; parts = []; }
-        else if (part.length) parts.push(Buffer.from(part));
-      }
-      if (found < 0) break;
-      prefixHash.update(chunk.subarray(end, end + 1));
-      closedOffset = position + end + 1; closedDigest = prefixHash.copy().digest("hex");
-      const digest = recordHash.digest("hex");
-      const descriptor = Object.freeze({ offset: recordStart, length, line, digest });
-      if (nonblank) {
-        lastOffset = recordStart; lastLength = length; lastLine = line; lastDigest = digest;
-        if (bodies) {
-          if (oversized) yield { kind: "uncertain", descriptor, error: failure("oversized-record", path,
-            `New session record exceeds ${MAX_HISTORY_RECORD_BYTES} bytes; effects and image acceptance are uncertain`,
-            { line, offset: recordStart, limit: MAX_HISTORY_RECORD_BYTES }).error };
-          else {
-            const parsed = parseRecord(parts.length === 1 ? parts[0] : Buffer.concat(parts, length), path, line, recordStart, true);
-            yield parsed.ok ? { kind: "record", descriptor, entry: parsed.value } : { kind: "uncertain", descriptor, error: parsed.error };
-          }
-        }
-      }
-      recordStart = closedOffset; line++; length = 0; nonblank = false; parts = []; oversized = false;
-      recordHash = createHash("sha256"); begin = end + 1;
-    }
-    position += bytes;
-  }
-  outcome.watermark = Object.freeze({ kind: "native-jsonl-watermark", version: 1,
-    revision: stamp(stat), size, device: String(stat.dev), inode: String(stat.ino), prefixDigest: closedDigest,
-    lastOffset, lastLength, lastLine, lastDigest, closedOffset, nextLine: line });
-}
-
-/** Raw SHA256 and offsets only, bounded independently of historic record length. */
-export function captureNativeHistoryWatermark(path) {
-  path = resolve(path);
-  return withSource(path, fd => {
-    const stat = fstatSync(fd, { bigint: true });
-    if (!stat.isFile() || stat.size > BigInt(Number.MAX_SAFE_INTEGER)) return failure("io", path, "Session source must be a seekable, safely addressable file");
-    const outcome = {};
-    for (const _ of watermarkLines(fd, path, stat, 0, 1, createHash("sha256"), undefined, false, outcome)) { /* metadata only */ }
-    if (outcome.error) return { ok: false, error: outcome.error };
-    const verified = verifyPrefix(fd, path, watermarkProof(outcome.watermark));
-    return verified.ok ? ok(outcome.watermark) : verified;
-  });
-}
-
-/** Projection sees only complete NEW lines after a trusted prefix; no historic JSON parse. */
-export function withNativeHistorySuffix(path, watermark, project) {
-  path = resolve(path);
-  if (!validWatermark(watermark)) return failure("invalid-watermark", path, "Native suffix requires a complete trusted byte-prefix watermark");
-  return withSource(path, fd => {
-    const stat = fstatSync(fd, { bigint: true });
-    if (!stat.isFile() || stat.size > BigInt(Number.MAX_SAFE_INTEGER)) return failure("io", path, "Session source must be a seekable, safely addressable file");
-    const named = statSync(path, { bigint: true }), proof = watermarkProof(watermark);
-    if (!sameFile(proof.stat, stat) || !sameFile(stat, named) || stat.size < BigInt(watermark.closedOffset) || named.size < BigInt(watermark.closedOffset))
-      return failure("stale-source", path, "Native watermark source was replaced or truncated");
-    const prefixHash = createHash("sha256"), prefix = {};
-    for (const _ of watermarkLines(fd, path, { ...stat, size: BigInt(watermark.closedOffset) }, 0, 1, prefixHash, undefined, false, prefix)) { /* raw prefix proof */ }
-    if (prefix.error) return { ok: false, error: prefix.error };
-    for (const key of ["prefixDigest", "closedOffset", "nextLine", "lastOffset", "lastLength", "lastLine", "lastDigest"])
-      if (prefix.watermark[key] !== watermark[key]) return failure("stale-source", path, "Native watermark prefix or boundary record was rewritten");
-    const outcome = {};
-    const records = watermarkLines(fd, path, stat, watermark.closedOffset, watermark.nextLine, prefixHash, watermark, true, outcome);
-    let active = true;
-    const scoped = { *[Symbol.iterator]() {
-      if (!active) throw new Error("Native suffix iterable expired outside its synchronous projection");
-      while (active) { const next = records.next(); if (next.done) return; yield next.value; }
-    } };
-    let value;
-    try { value = project(scoped); }
-    finally { active = false; records.return(); }
-    if (outcome.error) return { ok: false, error: outcome.error };
-    if (!outcome.watermark) return failure("invalid-descriptor", path, "Native suffix projection must consume the complete captured suffix synchronously");
-    const after = verifyPrefix(fd, path, watermarkProof(outcome.watermark));
-    return after.ok ? ok({ value, watermark: outcome.watermark }) : after;
-  });
-}
-
-/** Observation only: preserve corrupt raw bytes at the source and expose every gap explicitly.
- * Stored order is not an active branch and must never be used to resume execution. */
-export function quarantinedThreadHistoryPage(path, request) {
-  path = resolve(path);
-  const { offset, limit, entryId } = request;
-  if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 100
-    || entryId !== undefined && !nonempty(entryId)) return failure("invalid-descriptor", path, "Invalid quarantined native page");
-  return withSource(path, fd => {
-    const stat = fstatSync(fd, { bigint: true });
-    if (!stat.isFile() || stat.size > BigInt(Number.MAX_SAFE_INTEGER)) return failure("io", path, "Session source must be a seekable, safely addressable file");
-    const outcome = {}, gaps = [], entries = [];
-    let ordinal = 0, found = false, selectedBytes = 0;
-    for (const record of watermarkLines(fd, path, stat, 0, 1, createHash("sha256"), undefined, true, outcome)) {
-      let entry;
-      if (record.kind === "record") {
-        const raw = record.entry;
-        const checked = recordMetadata(raw, Buffer.alloc(0), path, record.descriptor.line, record.descriptor.offset);
-        if (!checked.ok) { record.kind = "uncertain"; record.error = checked.error; }
-        else if (raw.type === "message" || raw.type === "custom_message") entry = raw;
-        else continue;
-      }
-      if (record.kind === "uncertain") {
-        const gap = Object.freeze({ ...record.descriptor, code: record.error.code, message: record.error.message });
-        gaps.push(gap);
-        if (gaps.length * 1024 > MAX_HISTORY_INDEX_BYTES) return failure("oversized-index", path, "Quarantined gap metadata exceeds bounded index", { limit: MAX_HISTORY_INDEX_BYTES });
-        entry = { type: "custom_message", id: `native-gap:${gap.offset}:${gap.digest}`, customType: "native_history_gap",
-          content: [{ type: "text", text: `Native history gap at line ${gap.line}: ${gap.length} original bytes remain in ${path} at offset ${gap.offset}; SHA256 ${gap.digest}. Missing native content is unknown; execution must not resume from this partial projection.` }],
-          display: true, details: gap };
-      }
-      const selected = entryId !== undefined ? entry.id === entryId : ordinal >= offset && ordinal < offset + limit;
-      if (selected) {
-        found = true;
-        selectedBytes += Buffer.byteLength(JSON.stringify(entry));
-        if (selectedBytes > MAX_HISTORY_RECORD_BYTES) return failure("oversized-record", path, "Quarantined page exceeds bounded body budget", { limit: MAX_HISTORY_RECORD_BYTES });
-        entries.push(entry);
-      }
-      ordinal++;
-    }
-    if (outcome.error) return { ok: false, error: outcome.error };
-    const verified = verifyPrefix(fd, path, watermarkProof(outcome.watermark));
-    if (!verified.ok) return verified;
-    if (entryId !== undefined && !found) return failure("invalid-descriptor", path, "Quarantined transcript entry not found", { entryId });
-    const watermark = outcome.watermark;
-    return ok({ entries, ...(entryId === undefined && offset + entries.length < ordinal ? { nextCursor: String(offset + entries.length) } : {}),
-      integrity: { kind: "partial", traversal: "stored-order", ancestry: "unproven", resumeAllowed: false,
-        source: { path, revision: watermark.revision, size: watermark.size, device: watermark.device, inode: watermark.inode,
-          prefixDigest: watermark.prefixDigest, closedOffset: watermark.closedOffset },
-        gaps, unclosedTailBytes: watermark.size - watermark.closedOffset } });
   });
 }
 
@@ -678,7 +501,7 @@ export function parseSession(text) {
       entries.push(JSON.parse(line));
     } catch (error) {
       if (index === lines.length - 1) break;
-      throw new Error(`Invalid session JSONL at line ${index + 1}: invalid JSON`);
+      throw new Error(`Invalid session JSONL at line ${index + 1}: ${error.message}`);
     }
   }
   return entries;

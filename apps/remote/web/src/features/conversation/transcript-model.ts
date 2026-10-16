@@ -174,9 +174,7 @@ export function buildStableTranscript(entries: ContextEntry[], mono = false): Tr
     replies = [];
   };
 
-  const ordered = [...entries].sort((left, right) => left.seq !== undefined && right.seq !== undefined ? left.seq - right.seq
-    : left.seq !== undefined ? -1 : right.seq !== undefined ? 1 : 0);
-  for (const entry of ordered) {
+  for (const entry of entries) {
     if (emptyAssistantEntry(entry) || mono && entry.kind === "assistant" && entry.text === SILENT_TURN_TEXT) continue;
     const kind = visibleKind(entry, mono);
     if (!mono) {

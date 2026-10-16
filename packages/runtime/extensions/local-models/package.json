@@ -1,0 +1,11 @@
+{
+  "name": "@hara-seihun/local-models",
+  "version": "1.0.0",
+  "description": "Register locally served OpenAI-compatible inference engines from a host manifest and start them on demand",
+  "license": "MIT",
+  "type": "module",
+  "keywords": ["pi-package", "pi-extension"],
+  "pi": { "extensions": ["./index.mjs"] },
+  "peerDependencies": { "@earendil-works/pi-coding-agent": ">=0.87.1 <0.88.0" },
+  "scripts": { "test": "node --test local-models.test.mjs" }
+}

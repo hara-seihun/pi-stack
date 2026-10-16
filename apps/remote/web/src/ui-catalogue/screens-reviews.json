@@ -1,0 +1,698 @@
+[
+  {
+    "caseId": "inbox-empty",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/inbox-empty.png",
+    "judgment": "Actual 390×844 screenshot read. Search and start-chat affordance remain visible; empty list is calm and unambiguous. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "inbox-empty",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/inbox-empty.png",
+    "judgment": "Actual 820×1180 screenshot read. Search and start-chat affordance remain visible; empty list is calm and unambiguous. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "inbox-empty",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/inbox-empty.png",
+    "judgment": "Actual 1440×1000 screenshot read. Search and start-chat affordance remain visible; empty list is calm and unambiguous. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "inbox-populated",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/inbox-populated.png",
+    "judgment": "Actual 390×844 screenshot read. Needs-you/active/quiet groups, synthetic room, unread badge and selected row remain readable. Search no-match was also clicked and inspected at phone size. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "inbox-populated",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/inbox-populated.png",
+    "judgment": "Actual 820×1180 screenshot read. Needs-you/active/quiet groups, synthetic room, unread badge and selected row remain readable. Search no-match was also clicked and inspected at phone size. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "inbox-populated",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/inbox-populated.png",
+    "judgment": "Actual 1440×1000 screenshot read. Needs-you/active/quiet groups, synthetic room, unread badge and selected row remain readable. Search no-match was also clicked and inspected at phone size. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "inbox-long",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/inbox-long.png",
+    "judgment": "Actual 390×844 screenshot read. Many Unicode and unbroken titles are deliberately ellipsized inside scrollable rows; start/search controls remain reachable. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "inbox-long",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/inbox-long.png",
+    "judgment": "Actual 820×1180 screenshot read. Many Unicode and unbroken titles are deliberately ellipsized inside scrollable rows; start/search controls remain reachable. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "inbox-long",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/inbox-long.png",
+    "judgment": "Actual 1440×1000 screenshot read. Many Unicode and unbroken titles are deliberately ellipsized inside scrollable rows; start/search controls remain reachable. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "inbox-compact",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/inbox-compact.png",
+    "judgment": "Actual 390×844 screenshot read. Selected title-only row remains identifiable without collapsing the other rows or status groups. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "inbox-compact",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/inbox-compact.png",
+    "judgment": "Actual 820×1180 screenshot read. Selected title-only row remains identifiable without collapsing the other rows or status groups. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "inbox-compact",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/inbox-compact.png",
+    "judgment": "Actual 1440×1000 screenshot read. Selected title-only row remains identifiable without collapsing the other rows or status groups. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "inbox-error",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/inbox-error.png",
+    "judgment": "Actual 390×844 screenshot read. Fixed flush-edge error layout: owned error is inset, wrapped and visually separated from retained rows. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "inbox-error",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/inbox-error.png",
+    "judgment": "Actual 820×1180 screenshot read. Fixed flush-edge error layout: owned error is inset, wrapped and visually separated from retained rows. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "inbox-error",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/inbox-error.png",
+    "judgment": "Actual 1440×1000 screenshot read. Fixed flush-edge error layout: owned error is inset, wrapped and visually separated from retained rows. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "agents-empty",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/agents-empty-v1.png",
+    "judgment": "Actual 390×844 screenshot read. Empty directory preserves refresh/search/filter navigation with a clear empty explanation. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "agents-empty",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/agents-empty.png",
+    "judgment": "Actual 820×1180 screenshot read. Empty directory preserves refresh/search/filter navigation with a clear empty explanation. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "agents-empty",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/agents-empty.png",
+    "judgment": "Actual 1440×1000 screenshot read. Empty directory preserves refresh/search/filter navigation with a clear empty explanation. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "agents-loading",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/agents-loading-v1.png",
+    "judgment": "Actual 390×844 screenshot read. Initial loading is explicit; directory navigation remains readable with no fabricated loaded rows. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "agents-loading",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/agents-loading.png",
+    "judgment": "Actual 820×1180 screenshot read. Initial loading is explicit; directory navigation remains readable with no fabricated loaded rows. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "agents-loading",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/agents-loading.png",
+    "judgment": "Actual 1440×1000 screenshot read. Initial loading is explicit; directory navigation remains readable with no fabricated loaded rows. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "agents-refreshing",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/agents-refreshing-v1.png",
+    "judgment": "Actual 390×844 screenshot read. Retained background tasks remain readable while refresh is pending. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "agents-refreshing",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/agents-refreshing.png",
+    "judgment": "Actual 820×1180 screenshot read. Retained background tasks remain readable while refresh is pending. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "agents-refreshing",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/agents-refreshing.png",
+    "judgment": "Actual 1440×1000 screenshot read. Retained background tasks remain readable while refresh is pending. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "agents-failed",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/agents-failed-v1.png",
+    "judgment": "Actual 390×844 screenshot read. Source failure wraps without obscuring retained tasks or refresh action. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "agents-failed",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/agents-failed.png",
+    "judgment": "Actual 820×1180 screenshot read. Source failure wraps without obscuring retained tasks or refresh action. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "agents-failed",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/agents-failed.png",
+    "judgment": "Actual 1440×1000 screenshot read. Source failure wraps without obscuring retained tasks or refresh action. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "agents-populated",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/agents-populated-v1.png",
+    "judgment": "Actual 390×844 screenshot read. Task grouping, activity/error/held/waiting states and filter counts are readable. Waiting filter and no-match search were actually exercised on phone. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "agents-populated",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/agents-populated.png",
+    "judgment": "Actual 820×1180 screenshot read. Task grouping, activity/error/held/waiting states and filter counts are readable. Waiting filter and no-match search were actually exercised on phone. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "agents-populated",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/agents-populated.png",
+    "judgment": "Actual 1440×1000 screenshot read. Task grouping, activity/error/held/waiting states and filter counts are readable. Waiting filter and no-match search were actually exercised on phone. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "agents-long",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/agents-long-v2.png",
+    "judgment": "Actual 390×844 screenshot read. Fixed unbroken group-title overflow and activity wrapping; many long Unicode task descriptions stay inside the scrollable directory. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "agents-long",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/agents-long.png",
+    "judgment": "Actual 820×1180 screenshot read. Fixed unbroken group-title overflow and activity wrapping; many long Unicode task descriptions stay inside the scrollable directory. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "agents-long",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/agents-long.png",
+    "judgment": "Actual 1440×1000 screenshot read. Fixed unbroken group-title overflow and activity wrapping; many long Unicode task descriptions stay inside the scrollable directory. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "attention-empty",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/attention-empty-v2.png",
+    "judgment": "Actual 390×844 screenshot read. Empty now/upcoming sections and calendar affordances clearly show that nothing currently needs action. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "attention-empty",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/attention-empty.png",
+    "judgment": "Actual 820×1180 screenshot read. Empty now/upcoming sections and calendar affordances clearly show that nothing currently needs action. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "attention-empty",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/attention-empty.png",
+    "judgment": "Actual 1440×1000 screenshot read. Empty now/upcoming sections and calendar affordances clearly show that nothing currently needs action. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "attention-populated",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/attention-populated-v2.png",
+    "judgment": "Actual 390×844 screenshot read. Question/commitment/decision cards, current and upcoming events and history are legible; longer content continues through the owned vertical scroll. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "attention-populated",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/attention-populated.png",
+    "judgment": "Actual 820×1180 screenshot read. Question/commitment/decision cards, current and upcoming events and history are legible; longer content continues through the owned vertical scroll. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "attention-populated",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/attention-populated.png",
+    "judgment": "Actual 1440×1000 screenshot read. Question/commitment/decision cards, current and upcoming events and history are legible; longer content continues through the owned vertical scroll. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "attention-failed",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/attention-failed-v2.png",
+    "judgment": "Actual 390×844 screenshot read. Explicit synthetic source errors remain readable alongside navigation; no successful empty result is substituted. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "attention-failed",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/attention-failed.png",
+    "judgment": "Actual 820×1180 screenshot read. Explicit synthetic source errors remain readable alongside navigation; no successful empty result is substituted. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "attention-failed",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/attention-failed.png",
+    "judgment": "Actual 1440×1000 screenshot read. Explicit synthetic source errors remain readable alongside navigation; no successful empty result is substituted. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "attention-loading",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/attention-loading-v2.png",
+    "judgment": "Actual 390×844 screenshot read. Pending source states are explicit and navigation remains available; no false completion is shown. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "attention-loading",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/attention-loading.png",
+    "judgment": "Actual 820×1180 screenshot read. Pending source states are explicit and navigation remains available; no false completion is shown. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "attention-loading",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/attention-loading.png",
+    "judgment": "Actual 1440×1000 screenshot read. Pending source states are explicit and navigation remains available; no false completion is shown. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "attention-partial",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/attention-partial-v2.png",
+    "judgment": "Actual 390×844 screenshot read. Retained needs/events coexist with source failures. Phone dismissal failure retained the card and explained no dismissal occurred; expanded coverage was separately inspected. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "attention-partial",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/attention-partial.png",
+    "judgment": "Actual 820×1180 screenshot read. Retained needs/events coexist with source failures. Phone dismissal failure retained the card and explained no dismissal occurred; expanded coverage was separately inspected. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "attention-partial",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/attention-partial.png",
+    "judgment": "Actual 1440×1000 screenshot read. Retained needs/events coexist with source failures. Phone dismissal failure retained the card and explained no dismissal occurred; expanded coverage was separately inspected. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-empty",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/calendar-empty.png",
+    "judgment": "Actual 390×844 screenshot read. Empty agenda retains zone/month navigation and full-sized new/settings actions. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-empty",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/calendar-empty.png",
+    "judgment": "Actual 820×1180 screenshot read. Empty agenda retains zone/month navigation and full-sized new/settings actions. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-empty",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/calendar-empty.png",
+    "judgment": "Actual 1440×1000 screenshot read. Empty agenda retains zone/month navigation and full-sized new/settings actions. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-populated",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/calendar-populated.png",
+    "judgment": "Actual 390×844 screenshot read. Fixed calendar controls/details touch sizing. Unicode titles and unbroken location wrap; timed/all-day/read-only/series events remain distinct. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-populated",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/calendar-populated-final.png",
+    "judgment": "Actual 820×1180 screenshot read. Fixed calendar controls/details touch sizing. Unicode titles and unbroken location wrap; timed/all-day/read-only/series events remain distinct. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-populated",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/calendar-populated.png",
+    "judgment": "Actual 1440×1000 screenshot read. Fixed calendar controls/details touch sizing. Unicode titles and unbroken location wrap; timed/all-day/read-only/series events remain distinct. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-failed",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/calendar-failed.png",
+    "judgment": "Actual 390×844 screenshot read. Source failure remains explicit and readable; calendar navigation retains 44px action targets. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-failed",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/calendar-failed.png",
+    "judgment": "Actual 820×1180 screenshot read. Source failure remains explicit and readable; calendar navigation retains 44px action targets. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-failed",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/calendar-failed.png",
+    "judgment": "Actual 1440×1000 screenshot read. Source failure remains explicit and readable; calendar navigation retains 44px action targets. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-loading",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/calendar-loading.png",
+    "judgment": "Actual 390×844 screenshot read. Pending agenda remains explicit without invented events; navigation and 44px actions stay usable. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-loading",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/calendar-loading.png",
+    "judgment": "Actual 820×1180 screenshot read. Pending agenda remains explicit without invented events; navigation and 44px actions stay usable. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-loading",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/calendar-loading.png",
+    "judgment": "Actual 1440×1000 screenshot read. Pending agenda remains explicit without invented events; navigation and 44px actions stay usable. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "needs-kinds",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/needs-kinds-v1.png",
+    "judgment": "Actual 390×844 screenshot read. All five need kinds, set/unset deadlines and original-source actions remain readable; source failure details are retained below the cards. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "needs-kinds",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/needs-kinds.png",
+    "judgment": "Actual 820×1180 screenshot read. All five need kinds, set/unset deadlines and original-source actions remain readable; source failure details are retained below the cards. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "needs-kinds",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/needs-kinds.png",
+    "judgment": "Actual 1440×1000 screenshot read. All five need kinds, set/unset deadlines and original-source actions remain readable; source failure details are retained below the cards. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "needs-busy",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/needs-busy-v1.png",
+    "judgment": "Actual 390×844 screenshot read. Dismissal pending disables the relevant actions without hiding the question, source or recommendation. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "needs-busy",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/needs-busy.png",
+    "judgment": "Actual 820×1180 screenshot read. Dismissal pending disables the relevant actions without hiding the question, source or recommendation. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "needs-busy",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "passed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/needs-busy.png",
+    "judgment": "Actual 1440×1000 screenshot read. Dismissal pending disables the relevant actions without hiding the question, source or recommendation. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-editor-new",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/calendar-editor-new-final.png",
+    "judgment": "Actual 390×844 screenshot read. Fixed native-gray undersized Repeat select and field targets. Empty required title, dark fields and Cancel/Save fit; phone spacing keeps the short form in view. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-editor-new",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/calendar-editor-new.png",
+    "judgment": "Actual 820×1180 screenshot read. Fixed native-gray undersized Repeat select and field targets. Empty required title, dark fields and Cancel/Save fit; phone spacing keeps the short form in view. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-editor-new",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/calendar-editor-new.png",
+    "judgment": "Actual 1440×1000 screenshot read. Fixed native-gray undersized Repeat select and field targets. Empty required title, dark fields and Cancel/Save fit; phone spacing keeps the short form in view. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-editor-timed",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/calendar-editor-timed-final.png",
+    "judgment": "Actual 390×844 screenshot read. Fixed select/field touch sizing; timed start/end, zone and required title are legible with reachable Cancel/Save. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-editor-timed",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/calendar-editor-timed.png",
+    "judgment": "Actual 820×1180 screenshot read. Fixed select/field touch sizing; timed start/end, zone and required title are legible with reachable Cancel/Save. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-editor-timed",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/calendar-editor-timed.png",
+    "judgment": "Actual 1440×1000 screenshot read. Fixed select/field touch sizing; timed start/end, zone and required title are legible with reachable Cancel/Save. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-editor-all-day",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/calendar-editor-all-day-final.png",
+    "judgment": "Actual 390×844 screenshot read. Date-only fields, long Unicode title and zone remain readable with full-sized actions; short form fits phone viewport. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-editor-all-day",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/calendar-editor-all-day.png",
+    "judgment": "Actual 820×1180 screenshot read. Date-only fields, long Unicode title and zone remain readable with full-sized actions; short form fits phone viewport. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-editor-all-day",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/calendar-editor-all-day.png",
+    "judgment": "Actual 1440×1000 screenshot read. Date-only fields, long Unicode title and zone remain readable with full-sized actions; short form fits phone viewport. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-editor-occurrence",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/calendar-editor-occurrence-final.png",
+    "judgment": "Actual 390×844 screenshot read. Occurrence scope explicitly says other repeats remain unchanged; unavailable series controls are not shown; Cancel/Save are reachable. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-editor-occurrence",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/calendar-editor-occurrence.png",
+    "judgment": "Actual 820×1180 screenshot read. Occurrence scope explicitly says other repeats remain unchanged; unavailable series controls are not shown; Cancel/Save are reachable. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-editor-occurrence",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/calendar-editor-occurrence.png",
+    "judgment": "Actual 1440×1000 screenshot read. Occurrence scope explicitly says other repeats remain unchanged; unavailable series controls are not shown; Cancel/Save are reachable. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-editor-series",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/calendar-editor-series-final.png",
+    "judgment": "Actual 390×844 screenshot read. Whole-series scope and weekly recurrence/end are explicit; long values stay within fields. Owned modal scroll reaches Cancel/Save, inspected separately at phone and desktop. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-editor-series",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/calendar-editor-series.png",
+    "judgment": "Actual 820×1180 screenshot read. Whole-series scope and weekly recurrence/end are explicit; long values stay within fields. Owned modal scroll reaches Cancel/Save, inspected separately at phone and desktop. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-editor-series",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/calendar-editor-series.png",
+    "judgment": "Actual 1440×1000 screenshot read. Whole-series scope and weekly recurrence/end are explicit; long values stay within fields. Owned modal scroll reaches Cancel/Save, inspected separately at phone and desktop. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-editor-save-pending",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/calendar-editor-save-pending-final.png",
+    "judgment": "Actual 390×844 screenshot read. Actually clicked Save. Fixed ambiguous disabled Save label to Saving… with aria-busy; entered draft remains visible while save is pending. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-editor-save-pending",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/calendar-editor-save-pending-final.png",
+    "judgment": "Actual 820×1180 screenshot read. Actually clicked Save. Fixed ambiguous disabled Save label to Saving… with aria-busy; entered draft remains visible while save is pending. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-editor-save-pending",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/calendar-editor-save-pending-final.png",
+    "judgment": "Actual 1440×1000 screenshot read. Actually clicked Save. Fixed ambiguous disabled Save label to Saving… with aria-busy; entered draft remains visible while save is pending. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-editor-save-failed",
+    "viewport": "phone",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/phone/calendar-editor-save-failed-final.png",
+    "judgment": "Actual 390×844 screenshot read. Actually clicked Save. Explicit error says event was not saved; all entered data remains and Save is enabled for retry. Phone modal scroll exposes error and both actions. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-editor-save-failed",
+    "viewport": "tablet",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/tablet/calendar-editor-save-failed-final.png",
+    "judgment": "Actual 820×1180 screenshot read. Actually clicked Save. Explicit error says event was not saved; all entered data remains and Save is enabled for retry. Phone modal scroll exposes error and both actions. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  },
+  {
+    "caseId": "calendar-editor-save-failed",
+    "viewport": "desktop",
+    "theme": "dark",
+    "status": "fixed",
+    "evidence": "/home/kenan/data/pi-ui-review-20261009/screens/desktop/calendar-editor-save-failed-final.png",
+    "judgment": "Actual 1440×1000 screenshot read. Actually clicked Save. Explicit error says event was not saved; all entered data remains and Save is enabled for retry. Phone modal scroll exposes error and both actions. Product dark palette; representative OS-light phone/tablet/desktop captures were also read and remained dark."
+  }
+]

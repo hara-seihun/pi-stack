@@ -40,7 +40,7 @@ export function pooledRetryAvailability(model:string,env:NodeJS.ProcessEnv=proce
   }finally{store.close();}
 }
 
-export function defaultLedgerPath(env:NodeJS.ProcessEnv=process.env):string{return env.PI_ORCHESTRATOR_LEDGER||join(env.HOME||homedir(),".local/share/pi-orchestrator/ledger.sqlite3");}
+export function defaultLedgerPath(env:NodeJS.ProcessEnv=process.env):string{return env.PI_ORCHESTRATOR_LEDGER||join(homedir(),".local/share/pi-orchestrator/ledger.sqlite3");}
 
 export async function resolveSessionModel(models:readonly Model<any>[],provider:string,modelId:string,env:NodeJS.ProcessEnv=process.env):
   Promise<{ok:true;model:Model<any>}|{ok:false;error:string}> {

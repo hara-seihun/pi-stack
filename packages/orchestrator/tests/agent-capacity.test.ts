@@ -36,7 +36,7 @@ async function listen(server: Server): Promise<string> {
   return `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 }
 
-it("admits parallel HTTP executions under the explicit unlimited policy while preserving custody", async () => {
+it("admits at most 100 parallel HTTP executions across two authenticated owners and explicitly queues the rest", async () => {
   const authority = memoryAuthority(true);
   const url = await listen(createAgentCapacityServer(authority, owners));
   let peak = 0;
@@ -46,14 +46,22 @@ it("admits parallel HTTP executions under the explicit unlimited policy while pr
     return response;
   };
   const clients = owners.map(owner => createAgentCapacityClient({ url, ownerId: owner.id, token: owner.token, transport }));
-  expect(GLOBAL_AGENT_LIMIT).toBeNull();
-  const executions = Array.from({ length: 125 }, (_, index) => ({ agentId: `agent-${index}`, executionId: `execution-${index}` }));
+  const executions = Array.from({ length: GLOBAL_AGENT_LIMIT + 25 }, (_, index) => ({ agentId: `agent-${index}`, executionId: `execution-${index}` }));
   const results = await Promise.all(executions.map((execution, index) => clients[index % clients.length]!.acquire(execution)));
-  expect(results.filter(result => result.ok)).toHaveLength(125);
-  expect(peak).toBe(125);
-  expect(authority.status()).toEqual({ authority: AGENT_CAPACITY_AUTHORITY, initialized: true, limit: null, active: 125, queued: 0 });
-  value(await value(results[0]!).release());
-  expect(authority.status()).toMatchObject({ active: 124, queued: 0 });
+  expect(results.filter(result => result.ok)).toHaveLength(100);
+  expect(peak).toBe(100);
+  expect(authority.status()).toEqual({ authority: AGENT_CAPACITY_AUTHORITY, initialized: true, limit: 100, active: 100, queued: 25 });
+  for (const result of results.filter(result => !result.ok)) expect(result).toMatchObject({ ok: false, error: {
+    code: "unavailable", retryAt: expect.any(Number), message: expect.stringContaining("Global agent limit 100/100"),
+  } });
+  const denied = results.findIndex(result => !result.ok);
+  expect(await clients[denied % clients.length]!.acquire(executions[denied]!)).toMatchObject({ ok: false, error: { code: "unavailable" } });
+  expect(authority.status().queued).toBe(25);
+  const granted = results.findIndex(result => result.ok);
+  value(await value(results[granted]!).release());
+  const promoted = value(await clients[denied % clients.length]!.acquire(executions[denied]!));
+  expect(promoted).toMatchObject(executions[denied]!);
+  expect(authority.status()).toMatchObject({ active: 100, queued: 24 });
 });
 
 it("fails closed before census cutover and for missing client configuration", async () => {
@@ -75,17 +83,26 @@ it("fails closed before census cutover and for missing client configuration", as
   expect(authority.status()).toMatchObject({ initialized: true, active: 1, queued: 0 });
 });
 
-it("adopts every census identity without inventing a capacity ceiling", () => {
+it("rejects an over-limit initial census without changing custody and holds cutover until at most 100 remain", () => {
   const authority = memoryAuthority(false);
   const census = Array.from({ length: 102 }, (_, index) => ({ ownerId: owners[index % owners.length]!.id,
     agentId: `existing-agent-${index}`, executionId: `existing-execution-${index}` }));
   const fresh = { agentId: "fresh-agent", executionId: "fresh-execution" };
   expect(authority.acquire(owners[0]!.id, fresh)).toMatchObject({ ok: false });
-  value(authority.initialize(census));
-  expect(authority.entries()).toHaveLength(102);
-  expect(authority.status()).toMatchObject({ initialized: true, limit: null, active: 102, queued: 1 });
+  const before = authority.status();
+  expect(authority.initialize(census)).toMatchObject({ ok: false, error: { message: expect.stringContaining("100") } });
+  expect(authority.status()).toEqual(before);
+  expect(authority.status()).toMatchObject({ initialized: false, active: 0, queued: 1 });
+  expect(authority.entries()).toEqual([]);
+  expect(census).toHaveLength(102);
+  expect(authority.acquire(owners[0]!.id, fresh)).toMatchObject({ ok: false, error: { code: "unavailable" } });
+  value(authority.initialize(census.slice(0, 100)));
+  expect(authority.status()).toMatchObject({ initialized: true, active: 100, queued: 1 });
+  expect(authority.acquire(owners[0]!.id, fresh)).toMatchObject({ ok: false, error: { code: "unavailable" } });
+  const settled = authority.entries()[0]!;
+  value(authority.release(settled.ownerId, settled));
   value(authority.acquire(owners[0]!.id, fresh));
-  expect(authority.status()).toMatchObject({ active: 103, queued: 0 });
+  expect(authority.status()).toMatchObject({ active: 100, queued: 0 });
 });
 
 it("uses one slot for an execution identity and prevents overlapping executions of the same agent", async () => {

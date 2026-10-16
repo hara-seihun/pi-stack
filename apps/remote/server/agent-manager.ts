@@ -2,7 +2,7 @@ import { combineManagerWork, validateManagerWorkSummary, type ManagerWorkSummary
 import type { Person } from "./persons";
 import type { EnvironmentEndpoint } from "./environments";
 
-const operations = new Set(["managerNotificationPolicy", "managerWorkSummary", "send", "questionOrigin", "managerQuestionCustody", "managerReplies"]);
+const operations = new Set(["managerNotificationPolicy", "managerWorkSummary", "send", "questionOrigin", "managerQuestionCustody"]);
 const summaryTimeoutMs = 5_000;
 const summaryFailure = (environment: string, reason: string): Result<never> => ({ ok: false,
   error: { code: "unavailable", message: `Environment ${environment} work summary unavailable: ${reason}` } });
@@ -67,9 +67,7 @@ async function boundedSummary(environment: string, signal: AbortSignal, request:
 export async function handleAgentManager(req: Request, peer: { uid: number } | undefined,
   people: ReadonlyMap<number, string>, person: (user: string) => Person | undefined,
   endpoints: (user: string) => readonly EnvironmentEndpoint[], localEnvironment: string,
-  proxy: (person: Person, origin: string, req: Request, target: URL, upstream: string | undefined, sourceEnvironment: string) => Promise<Response>,
-  canonicalPolicy?: (user: string, uid: number, sourceEnvironment: string, targetEnvironment: string, signal: AbortSignal) => Promise<Response | undefined>,
-  canonicalNotice?: (user: string, uid: number, sourceEnvironment: string, targetEnvironment: string, input: unknown, signal: AbortSignal) => Promise<Response | undefined>): Promise<Response> {
+  proxy: (person: Person, origin: string, req: Request, target: URL, upstream: string | undefined, sourceEnvironment: string) => Promise<Response>): Promise<Response> {
   const actor = peer && people.get(peer.uid);
   const owner = actor ? person(actor) : undefined;
   if (!owner) return Response.json({ ok: false, error: { code: "unavailable", message: "Manager relay requires your own registered Unix identity" } }, { status: 403 });
@@ -103,14 +101,6 @@ export async function handleAgentManager(req: Request, peer: { uid: number } | u
   const environment = body.environmentId === undefined
     ? owner.environment.PI_REMOTE_MANAGER_ENVIRONMENT === undefined ? localEnvironment : owner.environment.PI_REMOTE_MANAGER_ENVIRONMENT : body.environmentId;
   if (typeof environment !== "string" || !/^[a-z][a-z0-9-]{0,31}$/.test(environment)) return Response.json({ ok: false, error: { code: "invalid_request", message: "Canonical manager environment is invalid" } }, { status: 503 });
-  if (operation === "managerNotificationPolicy" && Object.keys(body.input).length === 0 && canonicalPolicy && peer) {
-    const projected = await canonicalPolicy(owner.user, peer.uid, localEnvironment, environment, req.signal);
-    if (projected !== undefined) return projected;
-  }
-  if (operation === "send" && canonicalNotice && peer) {
-    const projected = await canonicalNotice(owner.user, peer.uid, localEnvironment, environment, body.input, req.signal);
-    if (projected !== undefined) return projected;
-  }
   const endpoint = endpoints(owner.user).find(item => item.id === environment);
   const origin = environment === localEnvironment ? `http://127.0.0.1:${owner.port}` : endpoint?.upstreams?.[owner.user];
   if (!endpoint || !origin) return Response.json({ ok: false, error: { code: "unavailable", message: "Canonical manager environment is not granted to this account" } }, { status: 503 });

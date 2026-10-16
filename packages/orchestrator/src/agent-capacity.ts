@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import type { Result, ThreadError } from "./threads/contracts.js";
 
@@ -9,13 +9,7 @@ export interface AgentExecution { agentId: string; executionId: string }
 export interface CapacityCustody extends AgentExecution { leaseId: string }
 export interface CapacityLease extends CapacityCustody { release(): Promise<Result<void>> }
 export type CapacityObservation = { state: "absent" | "queued" | "released" } | { state: "active"; custody: CapacityCustody };
-export type CapacityReleaseClient = Pick<AgentCapacity, "inspect" | "release" | "withdraw">;
-export interface CapacityRecovery {
-  recordedOwner(execution: AgentExecution): Promise<Result<string | null>>;
-  originalOwner(ownerId: string, execution: AgentExecution): Result<CapacityReleaseClient>;
-}
 export interface AgentCapacity {
-  readonly ownerId?: string;
   acquire(execution: AgentExecution): Promise<Result<CapacityLease>>;
   release(custody: CapacityCustody): Promise<Result<void>>;
   inspect(execution: AgentExecution): Promise<Result<CapacityObservation>>;
@@ -40,10 +34,7 @@ function isThreadError(value: unknown): value is ThreadError {
 
 export type CapacityTransport = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 export interface AgentCapacityClientOptions { url: string; ownerId: string; token: string; transport?: CapacityTransport }
-export interface AgentCapacityStatusClient extends AgentCapacity {
-  status(): Promise<Result<AgentCapacityStatus>>;
-  recordedOwner(execution: AgentExecution): Promise<Result<string | null>>;
-}
+export interface AgentCapacityStatusClient extends AgentCapacity { status(): Promise<Result<AgentCapacityStatus>> }
 export function createAgentCapacityClient(options: AgentCapacityClientOptions): AgentCapacityStatusClient {
   const url = new URL(options.url);
   if (url.protocol !== "http:" || url.username || url.password || url.search || url.hash || url.pathname !== "/" || !url.port) throw new Error("Agent capacity URL must be an explicit http://HOST:PORT authority");
@@ -64,14 +55,6 @@ export function createAgentCapacityClient(options: AgentCapacityClientOptions): 
     }
   }
   const client: AgentCapacityStatusClient = {
-    ownerId: options.ownerId,
-    async recordedOwner(execution) {
-      const result = await request("/v1/recorded-owner", execution);
-      if (!result.ok) return result;
-      const value = result.value as { kind?: string; ownerId?: string } | null;
-      if (value?.kind === "absent") return { ok: true, value: null };
-      return value?.kind === "recorded" && text(value.ownerId) ? { ok: true, value: value.ownerId } : unavailable("Invalid original-owner receipt");
-    },
     async status() {
       const result = await request("/v1/status");
       if (!result.ok) return result;
@@ -114,15 +97,10 @@ export function createAgentCapacityClient(options: AgentCapacityClientOptions): 
 }
 
 export const AGENT_CAPACITY_CLIENT_CONFIG = "/etc/pi-stack/agent-capacity-client.json";
-export interface AgentCapacityClientManifest {
-  authorityUrl: string; owners: { uid: number; ownerId: string; tokenFile: string }[];
-  migration?: { ownerId: string; ownerIds: string[] };
-}
-export function configuredAgentCapacitySettings(env: NodeJS.ProcessEnv = process.env, identity?: { uid: number }): Result<{ capacity: AgentCapacityStatusClient; ownerId: string }> {
+export interface AgentCapacityClientManifest { authorityUrl: string; owners: { uid: number; ownerId: string; tokenFile: string }[] }
+export function configuredAgentCapacitySettings(env: NodeJS.ProcessEnv = process.env): Result<{ capacity: AgentCapacityStatusClient; ownerId: string }> {
   try {
     let url = env.PI_AGENT_CAPACITY_URL, ownerId = env.PI_AGENT_CAPACITY_OWNER, tokenFile = env.PI_AGENT_CAPACITY_TOKEN_FILE;
-    if (identity && (!Number.isSafeInteger(identity.uid) || identity.uid < 0)) return unavailable("Agent capacity requires a valid registered Unix identity");
-    if (identity && [url, ownerId, tokenFile].some(value => value !== undefined)) return unavailable("UID-bound capacity must select its owner from the host manifest, not environment credentials");
     const environmentConfigured = [url, ownerId, tokenFile].some(value => value !== undefined);
     if (!environmentConfigured) {
       const path = env.PI_AGENT_CAPACITY_CONFIG ?? AGENT_CAPACITY_CLIENT_CONFIG;
@@ -131,7 +109,7 @@ export function configuredAgentCapacitySettings(env: NodeJS.ProcessEnv = process
       if (!manifest || !text(manifest.authorityUrl) || !Array.isArray(manifest.owners)
         || manifest.owners.some(owner => !owner || !Number.isSafeInteger(owner.uid) || owner.uid < 0 || !text(owner.ownerId) || !text(owner.tokenFile) || !owner.tokenFile.startsWith("/"))
         || new Set(manifest.owners.map(owner => owner.uid)).size !== manifest.owners.length || new Set(manifest.owners.map(owner => owner.ownerId)).size !== manifest.owners.length) return unavailable("Invalid explicit host agent capacity client manifest");
-      const owner = manifest.owners.find(owner => owner.uid === (identity ? identity.uid : userInfo().uid));
+      const owner = manifest.owners.find(owner => owner.uid === userInfo().uid);
       if (!owner) return unavailable("This Unix identity has no registered global agent capacity owner");
       url = manifest.authorityUrl; ownerId = owner.ownerId; tokenFile = owner.tokenFile;
     }
@@ -140,74 +118,19 @@ export function configuredAgentCapacitySettings(env: NodeJS.ProcessEnv = process
   } catch (error) { return unavailable(error instanceof Error ? error.message : String(error)); }
 }
 
-export function configuredCapacityRecovery(env: NodeJS.ProcessEnv, ownsAgent: (agentId: string) => boolean): CapacityRecovery {
-  const clients = new Map<string, AgentCapacityStatusClient>();
-  function manifest(): AgentCapacityClientManifest {
-    if (userInfo().uid !== 0) throw Error("Original-owner recovery requires the privileged Core custodian");
-    const path = env.PI_AGENT_CAPACITY_CONFIG ?? AGENT_CAPACITY_CLIENT_CONFIG;
-    if (!path.startsWith("/")) throw Error("Original-owner manifest path must be absolute");
-    const metadata = statSync(path);
-    if (!metadata.isFile() || metadata.uid !== 0 || (metadata.mode & 0o022)) throw Error("Original-owner manifest requires protected root custody");
-    const value = JSON.parse(readFileSync(path, "utf8")) as AgentCapacityClientManifest;
-    if (!value || !Array.isArray(value.owners) || value.owners.some(owner => !owner || !Number.isSafeInteger(owner.uid) || owner.uid < 0
-      || !text(owner.ownerId) || !text(owner.tokenFile) || !owner.tokenFile.startsWith("/"))
-      || new Set(value.owners.map(owner => owner.uid)).size !== value.owners.length
-      || new Set(value.owners.map(owner => owner.ownerId)).size !== value.owners.length) throw Error("Invalid original-owner manifest registration");
-    return value;
-  }
-  function client(ownerId: string): Result<AgentCapacityStatusClient> {
-    try {
-      const registered = manifest();
-      const grant = registered.migration;
-      if (!grant || !text(grant.ownerId) || !Array.isArray(grant.ownerIds) || !grant.ownerIds.length
-        || new Set(grant.ownerIds).size !== grant.ownerIds.length || !registered.owners.some(owner => owner.uid === 0 && owner.ownerId === grant.ownerId)
-        || grant.ownerIds.some(id => !registered.owners.some(owner => owner.ownerId === id))) return unavailable("Original-owner recovery has no valid explicit host migration grant");
-      if (ownerId !== grant.ownerId && !grant.ownerIds.includes(ownerId)) return unavailable("Original owner is outside the host migration grant");
-      const registration = registered.owners.find(owner => owner.ownerId === ownerId);
-      if (!registration) return unavailable("Original capacity owner is not registered");
-      let value = clients.get(ownerId);
-      if (!value) { value = createAgentCapacityClient({ url: registered.authorityUrl, ownerId, token: readFileSync(registration.tokenFile, "utf8").trim() }); clients.set(ownerId, value); }
-      return { ok: true, value };
-    } catch (error) { return unavailable(error instanceof Error ? error.message : String(error)); }
-  }
-  const allowed = (execution: AgentExecution) => isAgentExecution(execution) && ownsAgent(execution.agentId);
-  return {
-    async recordedOwner(execution) {
-      if (!allowed(execution)) return unavailable("Execution is not owned by this adopted scope");
-      try {
-        const registered = manifest();
-        if (!registered.migration) return unavailable("Original-owner lookup has no explicit host migration grant");
-        const migration = client(registered.migration.ownerId);
-        return migration.ok ? migration.value.recordedOwner(execution) : migration;
-      } catch (error) { return unavailable(error instanceof Error ? error.message : String(error)); }
-    },
-    originalOwner(ownerId, execution) {
-      if (!allowed(execution)) return unavailable("Execution is not owned by this adopted scope");
-      const original = client(ownerId); if (!original.ok) return original;
-      const exact = (value: AgentExecution) => allowed(value) && value.agentId === execution.agentId && value.executionId === execution.executionId;
-      return { ok: true, value: {
-        inspect: value => exact(value) ? original.value.inspect(value) : Promise.resolve(unavailable("Recovery execution mismatch")),
-        release: value => exact(value) ? original.value.release(value) : Promise.resolve(unavailable("Recovery custody mismatch")),
-        withdraw: value => exact(value) ? original.value.withdraw(value) : Promise.resolve(unavailable("Recovery withdrawal mismatch")),
-      } };
-    },
-  };
-}
-
 export async function configuredAgentCapacityStatus(env: NodeJS.ProcessEnv = process.env): Promise<Result<AgentCapacityStatus>> {
   const configured = configuredAgentCapacitySettings(env);
   return configured.ok ? configured.value.capacity.status() : configured;
 }
 
 /** Missing configuration queues work. There is deliberately no local authority or fail-open path. */
-export function configuredAgentCapacity(env: NodeJS.ProcessEnv = process.env, identity?: { uid: number }): AgentCapacity {
+export function configuredAgentCapacity(env: NodeJS.ProcessEnv = process.env): AgentCapacity {
   let configured: ReturnType<typeof configuredAgentCapacitySettings> | undefined;
   const current = () => {
-    if (!configured?.ok) configured = configuredAgentCapacitySettings(env, identity);
+    if (!configured?.ok) configured = configuredAgentCapacitySettings(env);
     return configured;
   };
   return {
-    get ownerId() { const value = current(); return value.ok ? value.value.ownerId : undefined; },
     async acquire(execution) { const value = current(); return value.ok ? value.value.capacity.acquire(execution) : value; },
     async release(custody) { const value = current(); return value.ok ? value.value.capacity.release(custody) : value; },
     async inspect(execution) { const value = current(); return value.ok ? value.value.capacity.inspect(execution) : value; },

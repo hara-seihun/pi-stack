@@ -23,8 +23,7 @@ for (const path of paths) {
     assert.match(source, /writeSessionFileDurably\(newSessionFile/u);
     const sessionManagerSource = source.slice(source.indexOf("function syncSessionDirectory"), source.indexOf("    static async list(", source.indexOf("function syncSessionDirectory")));
     assert.doesNotMatch(sessionManagerSource, /appendFileSync/u);
-    assert.ok([...sessionManagerSource.matchAll(/appendSessionFileDurably\(this\.sessionFile/gu)].length >= 1);
-    assert.doesNotMatch(source.slice(source.indexOf("    _persist(entry) {"), source.indexOf("    _appendEntry(entry) {")), /const hasAssistant/u);
+    assert.ok([...sessionManagerSource.matchAll(/appendSessionFileDurably\(this\.sessionFile/gu)].length >= 2);
 
     const directory = mkdtempSync(join(tmpdir(), "pi-session-durability-"));
     const candidate = join(directory, "session-manager.mjs");

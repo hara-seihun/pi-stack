@@ -2,8 +2,6 @@
 
 Reusable extensions for [Pi](https://pi.dev). The [stack manifest](../../package.json) pins Pi and the browser packages every host runs.
 
-[Guarded write and exact append](file-write.md) owns destructive-overwrite refusal, deliberate full rewrites, exact append, retained local-tool adoption and synthetic installed acceptance.
-
 ## Packages
 
 - `bash-timeout-guard` requires explicit bounded bash calls and forbids detached work. Canonical managers have a hard five-second maximum, including Converge bash; workers retain 30 minutes with a UI, 55 seconds autonomously, or their host-configured ceiling.
@@ -11,6 +9,7 @@ Reusable extensions for [Pi](https://pi.dev). The [stack manifest](../../package
 - [Browser runtime](extensions/browser/README.md) loads the native browser tool with its executable from the same immutable dependency tree.
 - [Codex compaction](extensions/codex-compaction/README.md) stores OpenAI's server-side checkpoints in Pi sessions while keeping Pi's tools and account routing. Stored JSONL remains readable through the [shared session reader](../../tools/read-condensed-session/README.md).
 - [Web search](extensions/web-search/README.md) registers a native `web_search` tool over a host-selected search backend, so every session has web search in its tool list instead of reaching for a skill or a browser. The shipped Exa backend sends requests through the host's governed `exa-api` transport.
+- [Local models](extensions/local-models/README.md) registers the OpenAI-compatible inference engines a host lists in `~/.pi/agent/local-models.json`, starting one that is not running as a transient user unit, and mirrors them into Pi's model catalog.
 
 [Runtime wire dispatch](../../docs/runtime-wire.md) owns the closed SDK/runner/provider event domains and explicit diagnostics for unsupported values. A stored Codex compaction operation with an invalid state is a repair error, never automatically reinterpreted as failed/retryable. The invalid record remains intact; explicit compact may supersede it through its owning operation path.
 
@@ -21,8 +20,6 @@ PiStack's [unified thread service](../../docs/threads.md) owns every stack agent
 [`stack-pi.mjs`](stack-pi.mjs) is the account's `pi` launcher and IO attachment client. Foreground user-systemd scopes retain the caller's real TTY/pipes, UID/GID, mount and user namespaces, cwd and application confinement. They do not ask the manager to execute inside its host mount namespace. [`native-guardian.mjs`](native-guardian.mjs) watches a separate native/tools scope containing [`native-host.mjs`](native-host.mjs). The host runs the selected Pi SDK CLI, preserving its options, native UI, resource discovery, session switching and RPC protocol. Both watcher and host assert the original identity, namespaces and cwd before execution. The bus is always `/run/user/<kernel UID>/bus`; inherited bus addresses cannot choose another account. Missing own-account manager access fails explicitly, without an unmanaged fallback.
 
 [`patch-managed-cli.mjs`](patch-managed-cli.mjs) places the CLI's initial and replacement session factories under [`createManagedAgentSession`](../orchestrator/src/threads/native-session.ts). The CLI loads that owner at session creation, not SDK import: Pi's SDK barrel also exports the CLI, so eagerly importing the owner from the CLI would cycle back through the SDK. Help and application SDK imports do not acquire execution custody. Application SDK callers use that same exported `pi-orchestrator/api` factory and await its `close()`. Runtime preparation verifies this selected SDK/managed CLI closure, including actual Bash output and descendant-cleanup behavior; unused bundled CLI storage copies are not deployment dependencies. A missing required managed contract reports its name before any candidate selection. Native prompt, continuation, compaction, shell and tool execution become durable `ThreadService` operations. Nested calls share the active operation; direct tool calls receive their own operation. Admission happens before the native factory, and release waits for all native children to settle. Native `ModelRuntime.complete` requests with no executing agent remain direct inference.
-
-Native `prompt()` preserves the SDK's completion contract: it admits one durable input identity and resolves only after that input has landed in canonical history and Pi emits `agent_settled`. `steer()` and `followUp()` retain queue-acceptance semantics. Closing before settlement rejects the waiting prompt; admission failure preserves its accepted bytes and reports the error. This lets actual `--print --mode json` complete its assistant turn before runtime disposal rather than treating queue acceptance as completion.
 
 The immutable dependency identity includes [`deploy/runtime`](../../deploy/runtime), so changing the bundle recipe or staging layout cannot reuse a closure produced by an earlier recipe. [`deploy-runtime-closure.test.mjs`](../../scripts/deploy-runtime-closure.test.mjs) executes that recipe and its hash inputs, proves recipe changes invalidate the cache, and loads the bundled owner without a runtime-wide `pi-orchestrator` link.
 
@@ -91,26 +88,6 @@ checks registered agent tools, explicit zero-argument exceptions and affected
 operations; [`thread-wait-schema.test.ts`](../orchestrator/tests/thread-wait-schema.test.ts)
 requires dependency constraints on Anthropic and both OpenAI APIs.
 
-## Orphan tool-result projection
-
-[`patch-orphan-tool-results.mjs`](patch-orphan-tool-results.mjs) applies
-[`orphan-tool-results.mjs`](../orchestrator/src/threads/orphan-tool-results.mjs) at the common provider history
-transform in the SDK and both bundled copies. An errored/aborted assistant is not
-replayable, and a recovered or late tool receipt may no longer have an adjacent
-replayable call. Those receipts become attributed user evidence, preserving their
-text, images, timestamp and success/error status without inventing a tool call or
-replaying an effect. Valid adjacent result batches retain native tool pairing;
-unmatched receipts follow the batch so they cannot interrupt its valid pairs.
-Duplicate results also become evidence instead of duplicate protocol results.
-Native JSONL and genuine tool-operation details remain untouched. Deployment hashes
-both files into its immutable dependency identity.
-
-[`orphan-tool-results.test.mjs`](orphan-tool-results.test.mjs) checks actual SDK and
-bundled transforms against Anthropic's conversion, including aborted/error calls,
-late/duplicate results, mixed valid/orphan batches, system updates, images,
-cross-provider IDs and missing content. It checks adjacency, complete result-content
-preservation, idempotence and native-history immutability without network calls.
-
 ## Anthropic error tool-result content
 
 [`patch-anthropic-error-content.mjs`](patch-anthropic-error-content.mjs) normalizes
@@ -165,7 +142,7 @@ On September 15, 2026, thread `fbd03453-7fd1-486d-ab6e-86051acd9124` received th
 
 On September 18, 2026, native sessions `d916c1a9-0dad-4198-83d5-1142b8bf12a8` and `73d1735e-aa4c-4794-9491-6b5c060856d1` received the `access_programs` rejection on Astra accounts 8 and 11 at 02:42:30 and 02:59:19 UTC. Neither failure contained output, usage or a response ID. The installed provider builders, request hooks and configuration contain no `access_programs` option. Both sessions subsequently succeeded on the same account and model at 02:42:55 and 02:59:40 without a configuration change. There is no local parameter to remove. The recovery handles that provider rejection without changing `service_tier`, refreshing credentials or rerouting accounts. Tests cover both transports, preserved priority, cancellation, partial output, repeated rejection and real authentication failures. The incident sessions remain unchanged; repair tests use synthetic requests only.
 
-[`patch-compaction-errors.mjs`](patch-compaction-errors.mjs) lets native compaction return a concrete failure through both Pi runtime copies. If summary-only recovery also fails, failed between-turn compaction reaches the agent failure handler without aborting it. The context hook can return `{ error: string }` to reject a later request at its durable failure fence. Pi rejects that result outside extension exception logging, preserves the cause on the assistant and excludes both failures from ordinary chat retries. Actual cancellation retains its abort signal. The extension's [operation scope and durable attempt records](extensions/codex-compaction/operation.mjs) own progress deadlines and explicit recovery. The [incident and recovery contract](extensions/codex-compaction/README.md#september-12-timeout-incident) records the large-context replay.
+[`patch-compaction-errors.mjs`](patch-compaction-errors.mjs) lets native compaction return a concrete failure through both Pi runtime copies. Failed between-turn compaction reaches the agent failure handler without aborting it. The context hook can return `{ error: string }` to reject a later request at its durable failure fence. Pi rejects that result outside extension exception logging, preserves the cause on the assistant and excludes both failures from ordinary chat retries. Actual cancellation retains its abort signal. The extension's [operation scope and durable attempt records](extensions/codex-compaction/operation.mjs) own progress deadlines and explicit recovery. The [incident and recovery contract](extensions/codex-compaction/README.md#september-12-timeout-incident) records the large-context replay.
 
 Pi 0.87.1 owns the companion cut-selection repair. When trailing tool results alone exceed `keepRecentTokens`, Pi keeps their preceding assistant call instead of retaining the entire transcript and declining compaction. [`compaction-cut.test.mjs`](compaction-cut.test.mjs) guards that upstream contract; the extension's lifecycle test runs a complete parallel tool batch, native compaction and continuation inside one Pi run.
 
@@ -191,9 +168,8 @@ recovery stops after 32 requests. Every attempt's usage contributes to the retur
 summary usage. The same helper covers ordinary history and split-turn prefixes;
 Codex's server-side checkpoint handler remains unchanged.
 
-Automatic prose compaction that still fails after summary-only recovery writes a
-native custom entry excluded from model context. Both automatic compaction and
-provider preparation honor that active-branch
+Failed automatic prose compaction writes a native custom entry excluded from model
+context. Both automatic compaction and provider preparation honor that active-branch
 failure fence, including after reload or an account-alias change. A successful manual
 `/compact` or compact RPC appends the compaction boundary that clears it. Another model
 can proceed independently. Operator cancellation does not install a failure fence.
@@ -221,38 +197,6 @@ or credentials:
 
 ```sh
 node --test packages/runtime/summary-recovery.test.mjs packages/runtime/compaction-errors.test.mjs packages/runtime/compaction-cut.test.mjs
-```
-
-## Cross-model compaction recovery
-
-[`patch-compaction-fallback.mjs`](patch-compaction-fallback.mjs) installs
-[`compaction-fallback.js`](compaction-fallback.js) and its
-[`portable history helper`](compaction-fallback-history.js) after prose-summary
-recovery in [`deploy/runtime`](../../deploy/runtime). The policy covers every model, profile
-and agent role on both maintained hosts, including native Codex, automatic, manual
-and overflow compaction. Any non-cancelled failure of the original compaction gets
-one alternate summary-only attempt with `openai-codex/gpt-6.1-sol`. If the original
-model is already Sol, it selects the next available installed model with a different
-model identity; another account alias for Sol is not an alternative. Cancellation
-never triggers this recovery, and an alternate failure cannot recurse.
-
-The alternate produces portable prose, not a model-bound encrypted checkpoint.
-Only the summary producer changes: the session retains its selected conversation
-model, profile and role. Diagnostics retain the original error and identify the
-actual summary producer. If no eligible producer is available or its summary fails,
-the compaction remains a failure and its existing failure handling applies. Original
-history is retained throughout; a complete alternate summary commits the ordinary
-compaction boundary and clears the failure fence.
-
-Deployment hashes the patch and both helpers into the immutable dependency identity.
-[`compaction-fallback.test.mjs`](compaction-fallback.test.mjs) and
-[`compaction-fallback-history.test.mjs`](compaction-fallback-history.test.mjs) are
-discovered by the owning runtime check runner. The fallback integration fixture has
-declared generated-fixture coverage in [`check-plan.mjs`](../../scripts/check-plan.mjs);
-the history helper uses ordinary import-closure coverage. Run their focused checks with:
-
-```sh
-node --test packages/runtime/compaction-fallback.test.mjs packages/runtime/compaction-fallback-history.test.mjs
 ```
 
 ## Shell output custody
@@ -311,21 +255,11 @@ concurrent peer tools are untouched. Ordinary command completion also closes
 remaining descendants before returning the command's original exit status.
 
 Cleanup stops and kills only the subreaper's direct children through pidfds,
-reaps them, and repeats for newly adopted descendants. Parent validation and live
-pidfd identity checks prevent stale PID observations from signalling unrelated
-work. If an owned child elevated its UID and signalling returns EPERM, the
-subreaper invokes the same immutable helper through existing noninteractive sudo
-authority (`/usr/bin/python3 -I -B`, `--privileged-cleanup`). A private socket passes
-the actual owner and target pidfds with SCM_RIGHTS. The root helper matches the
-socket's kernel peer PID/UID to the pinned owner and sudo caller, validates the
-pinned target's direct parent, then sends only STOP/KILL through that descriptor.
-There is no numeric-PID signal route, new sudo grant, root shell executor or host
-service. Callers without this sudo authority receive an explicit cleanup error;
-timeout/abort remains the primary outcome with the cleanup failure attached,
-and a completed command retains its recorded original exit status in the error.
-Cleanup has a two-second budget; missing cleanup receipts are failures, never
-successful cancellation. The supervisor's receipt pipe is not inherited by shell
-descendants. Linux needs
+reaps them, and repeats for newly adopted descendants. Parent validation prevents
+stale PID observations from signalling unrelated work. Cleanup has a two-second
+budget and returns an explicit failure with residual PIDs if they cannot exit;
+missing cleanup receipts are failures, never successful cancellation. The
+supervisor's receipt pipe is not inherited by shell descendants. Linux needs
 `/usr/bin/python3` with pidfd support and readable `/proc`; capability failures
 prevent command launch. Other platforms retain their existing native executor.
 No shared runner cgroup, service or publication lifecycle is changed.
@@ -334,99 +268,17 @@ The patch and both helpers participate in the immutable dependency hash.
 [`bash-cancellation.test.mjs`](bash-cancellation.test.mjs) covers parallel GNU
 timeout children, signal-resistant session escapes, double forks, exact PID
 absence, concurrent sibling survival and runner-parent death. Its disposable
-fixtures never change installed runtime code. With `PI_TEST_ROOT_CUSTODY=1`, the
-same test also covers root-owned descendant abort/timeout and unchanged ordinary
-siblings using existing sudo. `PI_TEST_ROOT_CUSTODY=1 python3 -B
-packages/runtime/pi-shell-owner.test.py` checks privileged peer rejection, exited
-pidfd identity, root session escapes and the independent worker's original timeout
-receipt. No privileged cases run without that explicit test flag.
-SDK delivery prepares a new immutable dependency closure containing the helper
-and patch. A resident shell factory keeps its original module URL and helper
-path: switching the source checkout or runtime selector does not change that
-factory. New consumers of the selected SDK use the repair; resident Core/native
-shell-tool consumers need their owning routine release adoption. Never edit a
-selected dependency closure to activate this change.
-
-### Retained resident shell adoption
-
-The prepared SDK also carries [`resident-shell-adoption.mjs`](resident-shell-adoption.mjs).
-Its `adoptResidentLocalShells` API installs the candidate local shell executor into
-the retained operation object; it does not replace a tool, session or history.
-The finite native operator imports the sealed SDK's `core/tools/bash.js`
-`createLocalShellOperations` factory and calls the adopter with:
-
-```js
-{
-  protocol: "resident-local-shell-v1",
-  factory: candidate.createLocalShellOperations,
-  factorySha256: approvedCandidateFactoryHash,
-  entries: [{ kind: "local-shell", id: residentIdentity, operations: retainedLocal,
-    expectedExecSha256: approvedPredecessorExecHash,
-    shellName: originalShellName, resolveShellConfig: originalResolveShellConfig }]
-}
-```
-
-These are original object/function handles, not copies or regenerated callbacks.
-For the retained 9cb/891/e7 adapter's approved scoped-local route, the finite
-inspector census follows `customBash.execute`'s `definition` binding, then
-`definition.execute`'s `ops` binding, then `ops.exec`'s `local` binding. For a
-known direct-local route, `ops` itself is the local operation object. The local
-`exec` closure provides the original `shellName` and `resolveShellConfig`
-bindings. Every traversed function must match its approved source hash, and the
-operator must bind the complete actual resident/operation census to the same
-native PID/birth and candidate seal. A missing or unknown route is a failure,
-not permission to replace a tool with a default executor. Durable-worker
-operations cannot be described as local operations by this API.
-
-The adopter preflights all predecessors and descriptor identities before one
-synchronous CAS. It preserves local operation object identity and descriptor
-flags; scoped wrappers, budgets, environment hooks, PiExecution admission and
-history remain unchanged. Active calls retain their already-captured executor
-and original child/cancellation registry. Adoption neither cancels nor replays
-those calls and does not retroactively repair an already-running old Python
-owner. Coverage applies to subsequent calls through the adopted object.
-Resident runtime/session replacement can construct another old-module operation
-object; its owning factory-adoption route must cover that creation before claiming
-replacement coverage. The future-native-factory selector alone does not do so.
-
-`node --test packages/runtime/resident-shell-adoption.test.mjs` covers complete
-preflight refusal and unchanged in-flight ownership. The Bash cancellation suite
-also runs a real original-SDK command, adopts its operation while active, proves
-original abort/sibling ownership, then proves repaired root cleanup for a new call.
-
-`deploy/runtime` runs the same proof against copied installed source without
-patching it:
+fixtures never change installed runtime code. `deploy/runtime` runs the same
+proof against copied installed source without patching it:
 
 ```sh
 PI_TEST_RUNTIME_ENTRY=file:///srv/pi/runtime/node_modules/@earendil-works/pi-coding-agent/dist/index.js \
   PI_TEST_BASH_CANCELLATION_PATCH=0 node --test packages/runtime/bash-cancellation.test.mjs
 ```
 
-## Async tool operation custody
-
-Managed sessions use [`PiExecution`](../orchestrator/src/threads/pi-execution.ts) and [`PiInputBatch`](../orchestrator/src/threads/pi-input-batch.ts) around upstream Pi's tools and all-message steering. Input bytes are committed atomically before acceptance. The completed assistant message is the delivery boundary. An admitted input batch releases tool observations without cancelling their operations: each original call returns one final result or an inspectable operation handle. Terminal results for handles enter the ordinary inbox with deterministic completion IDs. Native custom-message content, not a side acknowledgement, proves landing. Admission and result hooks run under raw operation custody, so slow hook I/O can yield with the same operation handle while permission checks still precede effects. Shared RPC owns same-ID no-UI dialog cancellation before observer transport; interactive native UI retains its own decisions.
-
-Retained native generations advertise their capabilities through `get_state`. The current protocol is `batch-operations-v1`. A registered versionless predecessor is a finite draining state: its exact accepted/landed/completed receipts remain authoritative, running model and tool execution finishes untouched, and all new pending identities remain queued. Only a positive idle snapshot permits closing that host and reopening the same transcript with the current generation before the first batch or resume command. If an admitted predecessor tool has no terminal receipt, adoption records an uncertain result instead of replaying the effect. Missing exact receipts is an explicit custody error, not permission to guess or resend.
-
-[`pi-bash-worker.py`](pi-bash-worker.py) runs managed model Bash operations in independent systemd scopes. Scope launch preserves the caller's UID, mount namespace, cwd and environment. The worker records full output and an atomic terminal receipt beside the native session in `SESSION.jsonl.operations/OP-ID/`; the invocation is private and contains captured environment. Scopes have no runner lifecycle binding. Model settlement releases its lease while raw tool custody remains resident; restart observes a live scope or its terminal receipt. Missing admitted executors become `uncertain` and are never replayed. Explicit operation cancel or Stop owns cancellation; message delivery does not.
-
-The Bash patch copies the worker into the immutable SDK and agent-core trees. Native adapter tests cover streaming batch admission, late preparation arrivals, direct-final versus handle/completion selection, resource ordering after yielding, owner-loss replay fencing, and worker descendant cleanup.
-
 ## Session crash durability
 
-[`patch-session-durability.mjs`](patch-session-durability.mjs) repairs the SDK used by application sessions and the managed CLI. [`session-writer.mjs`](session-writer.mjs) holds an exclusive Linux flock for the entire persistent SessionManager lifetime. Custody is independent of execution-capacity leases: a settled model turn does not release its history writer. Keys include the explicit logical source scope and native header ID; a basename fence also covers opening and creating files before their header is available. Different encrypted FUSE views and different generations therefore contend on the same physical custody, rather than their unrelated session inodes. Appends handle short writes and EINTR, sync before returning, and poison custody after a failed write. Initial/fork/import writes are completed and synced as one file; owner-held migrations replace through a synced temporary file and atomic rename, never truncate an existing file. A host reset cannot leave an acknowledged unsynced gocryptfs final block.
-
-A fresh persistent manager creates and fsyncs its SDK-generated canonical header while holding both filename and header-ID custody, for explicit paths and generated sessions. Pre-assistant model/thinking/input-acceptance records append durably immediately; persistence never waits for a fabricated or real assistant message. Native checkpointing can therefore acknowledge the first accepted input against an existing canonical file. Existing history is opened strictly and kept intact.
-
-Persistent writers require `PI_SESSION_WRITER_DIRECTORY` and `PI_SESSION_WRITER_SCOPE`, or explicit `withSessionWriterConfiguration({ directory, scope }, callback)` around construction. Configuration is captured per manager through AsyncLocalStorage, including across SDK/helper module copies; callers never mutate a process-global environment to select an in-process source. The directory must be precreated on a common local physical filesystem outside FUSE, with access explicitly granted to the actual account UID. Host launch/configuration owns this grant and identical visibility across generation namespaces. Lock files stay in place: unlinking them while an owner exists breaks kernel custody. Missing configuration, nonphysical directories and contention are explicit `SESSION_WRITER_*` errors. Unpatched generations must settle and close positively before cutover; the new fence cannot retroactively govern their writes.
-
-Source dependency readiness in [`deploy/lib`](../../deploy/lib) applies session durability, shared custody and session-local RPC under the checkout-directory lock before fresh or cached dependencies reach a compiler. The runtime implementation and genuine `SessionManager.dispose()` declaration therefore arrive together; patch failure refuses readiness and borrowed dependency links are not mutated. Production dependency sealing repeats the same source-owned patches independently.
-
-`SessionManager.dispose()` releases custody; `AgentSession.dispose()` invokes it. Runtime session replacement awaits disposal, transfers branch/import custody, retains captured source configuration and cleans up candidates when construction or shutdown fails. Direct manager users also dispose explicitly. Strict resume and fork/import parsing reject incomplete or malformed records, duplicate IDs and missing/cyclic parents without rewriting or skipping history. Discovery/observational readers remain separate from model continuation. [`session-writer.test.mjs`](session-writer.test.mjs) exercises actual patched managers/runtime replacement, competing processes, crash release, FUSE-path aliases, partial writes, failed construction and exact raw-prefix preservation; [`session-durability.test.mjs`](session-durability.test.mjs) checks syntax and write boundaries.
-
-```sh
-node --test packages/runtime/session-writer.test.mjs packages/runtime/session-durability.test.mjs
-```
+Pi 0.87.1 closes JSONL files after writes without syncing them. A hard host reset can therefore persist a new gocryptfs file length without the complete authenticated final block, making every later read that reaches that block fail with `EIO`. [`patch-session-durability.mjs`](patch-session-durability.mjs) repairs the SDK used by application sessions and the managed CLI. Appends are synced before returning, initial and fork writes are completed and synced as one file, and rewrites use a synced temporary file followed by an atomic rename and parent-directory sync. [`session-durability.test.mjs`](session-durability.test.mjs) checks those writers and their syntax.
 
 ## Root worker filesystem custody
 
