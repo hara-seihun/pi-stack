@@ -42,6 +42,7 @@ cp -a --reflink=auto "$source_dependency" "$dependency"
 node "$root/packages/runtime/patch-subscription-only.mjs" "$dependency/node_modules"
 node "$root/packages/runtime/subscription-only-check.mjs" "$dependency/node_modules"
 mkdir -p "$(dirname "$runtime_release")" "$(dirname "$orchestrator_release")"
+chmod 0755 "$(dirname "$runtime_release")" "$(dirname "$orchestrator_release")"
 cp -a "$runtime" "$runtime_release"
 cp -a "$orchestrator" "$orchestrator_release"
 python3 - "$source_dependency" "$dependency" "$runtime_release" "$orchestrator_release" <<'PY'
