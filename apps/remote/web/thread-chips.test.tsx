@@ -18,7 +18,6 @@ test("known threads show their name and running threads are marked", () => {
   const asked: string[][] = [];
   const directory: ThreadDirectory = {
     name: id => id === first ? "Toy2 Optimality" : null,
-    agentName: () => null,
     busy: id => id === first,
     open: () => {},
     discover: ids => asked.push(ids),

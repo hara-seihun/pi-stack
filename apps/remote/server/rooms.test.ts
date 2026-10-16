@@ -188,7 +188,7 @@ test("a private thread is never converted into a room and a member cannot remove
 
 test("root's read-only audience attestation uses the current directory and never downgrades an unknown room token", async () => {
   const f = fixture(); await f.create();
-  const audience = roomAudienceResolver(f.path);
+  const audience = roomAudienceResolver(f.path, "pi-rooms");
   expect(audience("alice", f.id)).toBeUndefined();
   expect(audience("pi-rooms", f.id)).toEqual({ roomId: f.id, people: ["alice", "bob"] });
   expect(() => audience("pi-rooms", crypto.randomUUID())).toThrow("no current room directory attestation");

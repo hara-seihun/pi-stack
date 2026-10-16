@@ -57,60 +57,13 @@ read-thread --json --work --limit 10 self
 
 `--limit` defaults to 10 transcript entries with a maximum of 20, or 20 children with a maximum of 100. Search retains its separate default of 20 matches and maximum of 50. `--offset` counts characters with `--json --entry` and matching records with `--search`. Paged reads reject search, raw/full output, alternate branch selection, time/tail filters and output-file flags instead of silently ignoring them. `--entry` chunks use `nextOffset`; ordinary pages use `nextCursor`.
 
-## Model-assisted condensation
+## Native record corruption and recovery
 
-`read-condensed-session` is for a session whose local transcript remains too large after selecting a useful window. It avoids raw JSONL, signatures, and abandoned branches, but it makes model calls on cache misses and is not the default thread reader.
+A malformed LF-terminated record is corruption, not an unfinished append. The canonical indexed reader reports its exact line, byte offset, raw length, SHA-256, `closed` state and syntax category without exporting the body or a parser snippet. Reading never skips that record. An unclosed final line remains a resume point while its writer finishes.
 
-```bash
-read-condensed-session /path/to/session.jsonl
-read-condensed-session --output /tmp/condensed.md /path/to/large-session.jsonl
-read-condensed-session --since 2026-08-28T15:20:00.000Z /path/to/session.jsonl
-read-condensed-session --threshold 32000 --concurrency 8 /path/to/session.jsonl
-```
+[`history-recovery.mjs`](../../packages/orchestrator/src/threads/history-recovery.mjs) owns `stageNativeHistoryRecordRecovery`. Recovery requires the current full byte-prefix watermark and complete raw native records recovered from their authenticated resident owner. It accepts only missing-prefix insertion: every original fragment byte must remain an exact suffix of the recovered record. Guessed headers, content edits, replacement of valid records, changed source evidence and unresolved tails are errors.
 
-For a large session, use `--output FILE` and inspect the result in slices.
-
-`--since TIMESTAMP` filters the active path before condensation. The output
-prints both the requested lower bound and the latest included timestamp. A
-caller can use that upper bound as the next read's lower bound. Team
-supervision always supplies `--since`, so each read contains only the worker's
-new activity.
-
-## Transcript shape
-
-The command follows the active parent chain and flattens it into user text, assistant prose and thinking, tool calls, tool results, images, and compaction entries.
-
-It retains these durable conversational anchors:
-
-- every user message;
-- the final assistant prose before each user message;
-- images and compaction markers;
-- recent activity beginning at the tenth-most-recent tool call.
-
-Large thinking and tool-result bodies in the recent tail are capped at 2,000 characters, and tool-call arguments at 500, so a short session cannot become mostly one raw result.
-
-Everything else is condensed in two passes:
-
-1. Blocks of at least 16,000 source characters receive a focused pre-summary.
-2. Each substantial anchor-to-anchor work episode is represented by its small original blocks plus those pre-summaries, packed into chunks of at most about 300,000 characters, and rewritten as a chronological episode account. Pre-summaries inform the account rather than remaining as separate visible units.
-
-This topology follows conversational work episodes rather than the accidental boundaries between thinking and tool blocks. Small episodes below the threshold remain readable as-is.
-
-## Model requests and cache
-
-Each cache miss is a direct `ModelRuntime.complete` request with exactly one user message. It does not call `session.prompt` and sends no Pi coding prompt, tools, skills, `AGENTS.md`, extensions, or conversation history. `createAgentSessionServices` loads extension-registered provider aliases and credentials without constructing an agent. Tool-free inference does not acquire agent execution capacity. The default model is `gpt-6-astra`; when several authenticated providers serve it, a failed provider falls through to the next alias.
-
-Defaults and overrides:
-
-| Setting | Default |
-|---|---|
-| `--model` / `SESSION_CONDENSER_MODEL` | `gpt-6-astra` |
-| `SESSION_CONDENSER_PROVIDER` | any authenticated provider serving the model |
-| `--thinking` | `low` |
-| `--concurrency` / `SESSION_CONDENSER_CONCURRENCY` | 16 |
-| `--db` / `SESSION_CONDENSER_DB` | `~/.local/share/session-condenser/summaries.sqlite3` |
-
-The cache key is the SHA-256 of the exact model prompt. Source changes, episode-boundary changes, and prompt edits therefore invalidate only the summaries they affect. Stable completed episodes keep their cache entries as a live session grows.
+The helper writes two explicitly selected new private files: an exact byte-for-byte quarantine copy and a restored native JSONL. It fsyncs them and their directories, leaves the source untouched and returns a metadata-only `staged-not-adopted` receipt. Quarantine is evidence owned by this recovery operation, not a second history authority. The thread controller must fence every native writer before explicitly selecting a restored session. If the original owner no longer retains the missing prefix, recovery remains unresolved; a readable invented history is not a repair.
 
 ## Operations
 
@@ -119,6 +72,4 @@ npm test --workspace=@hara-seihun/read-condensed-session
 ../../deploy/tools local
 ```
 
-CI tests every shared command. `deploy/tools local` links both commands into the interactive and fleet users' `~/.local/bin` and publishes the reviewed source under `/srv/pi/tools/read-condensed-session`. The release shares Pi Runtime's production dependencies. The deployed Pi coding-agent runtime remains the provider and credential source for optional condensation; neither command registers a Pi extension.
-
-The 2026-08-25 full-session trial condensed the `User Message Extraction` session from 3,840,059 on-disk characters to 174,849 characters, down from 404,334 with the former per-block design. It generated 17 large-block pre-summaries and 16 episode summaries with no failures. Manual inspection recovered decisions, exact paths and commits, failed approaches, benchmark values, current state, and the recent tail; all user messages and answered assistant replies remained exact.
+The tools deployment links `read-thread` into the interactive and fleet users' `~/.local/bin` and publishes its source under `/srv/pi/tools/read-condensed-session`.

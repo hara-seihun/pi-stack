@@ -25,7 +25,7 @@ export const PHONE_COMMANDS: readonly PhoneCommand[] = [
   c("screen.capture", "Capture unprotected screen content; rate limited by Android", false, {}, "screenshots", "{mime:'image/png',base64,width,height}"),
   c("overlay.show", "Show Kenan's overlay dot (persists on the phone)", true, {}, "accessibility", "{visible}"),
   c("overlay.hide", "Hide Kenan's overlay dot (persists on the phone)", true, {}, "accessibility", "{visible}"),
-  c("overlay.say", "Speech bubble beside Kenan's dot; x/y or nodeId moves the dot there first. durationMs 0 keeps it until the next say/clear", true, { text: str(), x: num(false), y: num(false), nodeId: str(false), durationMs: num(false, 0, 120_000) }, "accessibility"),
+  c("overlay.say", "Speech bubble beside Kenan's dot; x/y or nodeId moves the dot there first. durationMs 0 keeps it until the next say/clear", true, { text: str(), receiptId: str(false, "Immutable canonical reply receipt; Android acknowledges only after display"), x: num(false), y: num(false), nodeId: str(false), durationMs: num(false, 0, 120_000) }, "accessibility"),
   c("overlay.point", "Fly Kenan's dot to a point, rectangle or tree node and highlight it without acting; optional bubble text", true, { x: num(false), y: num(false), nodeId: str(false), left: num(false), top: num(false), right: num(false), bottom: num(false), text: str(false) }, "accessibility"),
   c("overlay.move", "Fly Kenan's dot to screen pixels", true, { x: num(), y: num() }, "accessibility"),
   c("overlay.state", "Set the dot's animation", true, { state: choice(["idle", "thinking", "working"]) }, "accessibility"),
@@ -92,6 +92,7 @@ export function validatePhoneCommand(input: unknown): { ok: true; command: strin
     if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data) || data.length > 4 * Math.ceil(PHONE_MAX_FILE_BYTES / 3) || Buffer.from(data, "base64").byteLength > PHONE_MAX_FILE_BYTES) return invalid("base64 must encode at most 1 MiB");
   }
   if (command.command === "overlay.say" && ((fields.text as string).length < 1 || (fields.text as string).length > OVERLAY_MAX_SAY)) return invalid(`text must be 1..${OVERLAY_MAX_SAY} characters`);
+  if (command.command === "overlay.say" && fields.receiptId !== undefined && (!(fields.receiptId as string).trim() || (fields.receiptId as string).length > 256 || /\s/.test(fields.receiptId as string))) return invalid("receiptId must be 1..256 nonwhitespace characters");
   if (command.command === "overlay.point") {
     const rect = ["left", "top", "right", "bottom"].filter(key => fields[key] !== undefined).length;
     const point = ["x", "y"].filter(key => fields[key] !== undefined).length;

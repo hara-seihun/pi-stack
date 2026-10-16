@@ -1,0 +1,185 @@
+#!/usr/bin/python3 -B
+"""Preconnect an exact old Meet cohort through retained listener dentries, then idle-release."""
+import array
+import ctypes
+import fcntl
+import hashlib
+import http.client
+import json
+import os
+from pathlib import Path
+import re
+import socket
+import struct
+import subprocess
+import sys
+import time
+sys.dont_write_bytecode = True
+from core_namespace import absolute, publish, trusted
+
+
+def birth(pid):
+    return Path('/proc', str(pid), 'stat').read_text().rsplit(')', 1)[1].split()[19]
+
+
+def normal_exit(text):
+    return re.search(r'^exit_group\(0\)\s*=\s*\?\s*$', text, re.M) is not None and '+++ exited with 0 +++' in text
+
+
+def response(connection, method, route, body=None):
+    # A held channel is the capability: never reopen a pathname after a sibling unlinks it.
+    connection.connect = lambda: (_ for _ in ()).throw(ValueError('original retained channel closed; no pathname reconnect'))
+    connection.request(method, route, body=None if body is None else json.dumps(body), headers={'content-type':'application/json'})
+    received = connection.getresponse()
+    value = json.loads(received.read())
+    if received.status != 200 or value.get('ok') is not True:
+        raise ValueError('original Meet runtime refused its owning request')
+    return value['value']
+
+
+def owner_channels(fd, owner, libc):
+    parent, child = socket.socketpair()
+    pid = os.fork()
+    if pid == 0:
+        parent.close()
+        try:
+            os.setgroups([]); os.setgid(owner['gid']); os.setuid(owner['uid'])
+            if libc.prctl(4, 1, 0, 0, 0) != 0:
+                raise OSError('cannot expose the owning child proc descriptors')
+            channels = []
+            for _ in range(2):
+                channel = socket.socket(socket.AF_UNIX)
+                channel.settimeout(5)
+                channel.connect('/proc/self/fd/' + str(fd))
+                channels.append(channel)
+            st = os.fstat(fd)
+            child.sendmsg([json.dumps({'ok':True,'dev':str(st.st_dev),'ino':str(st.st_ino)}).encode()], [(socket.SOL_SOCKET,socket.SCM_RIGHTS,array.array('i',[channel.fileno() for channel in channels]))])
+            os._exit(0)
+        except BaseException as error:
+            child.send(json.dumps({'ok':False,'error':str(error)}).encode())
+            os._exit(1)
+    child.close(); parent.settimeout(7)
+    try:
+        raw, ancillary, _, _ = parent.recvmsg(4096, socket.CMSG_SPACE(8))
+        info = json.loads(raw)
+        _, status = os.waitpid(pid, 0)
+        if not info['ok'] or status != 0:
+            raise ValueError('owning UID could not connect original dentry: ' + info.get('error','child exit'))
+        descriptors = array.array('i')
+        for level, kind, data in ancillary:
+            if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                descriptors.frombytes(data[:len(data)//4*4])
+        if len(descriptors) != 2:
+            raise ValueError('exact status and release channel pair required')
+        channels = []
+        for descriptor in descriptors:
+            channel = socket.socket(fileno=descriptor); channel.settimeout(5)
+            peer = struct.unpack('3i', channel.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))
+            if peer[:2] != (owner['pid'], owner['uid']):
+                channel.close(); raise ValueError('original listener peer identity changed')
+            connection = http.client.HTTPConnection('localhost', timeout=5); connection.sock = channel
+            channels.append(connection)
+        return channels, {'dev':info['dev'],'ino':info['ino'],'peerPid':owner['pid'],'peerUid':owner['uid']}
+    finally:
+        parent.close()
+
+
+def drain(path):
+    plan = trusted(path)
+    if plan.get('version') != 1 or not isinstance(plan.get('owners'),list) or not plan['owners']:
+        raise ValueError('explicit finite Meet cohort required')
+    output = absolute(plan['outputPath'])
+    if output.exists():
+        raise ValueError('cohort already has accountable evidence; inspect it rather than replay')
+    module = absolute(plan['modulePath'])
+    if hashlib.sha256(module.read_bytes()).hexdigest() != plan['moduleSha256'] or os.uname().release != plan['kernel']:
+        raise ValueError('exact running-kernel recovery artifact required')
+    owners = []
+    for reference in plan['owners']:
+        owner = trusted(absolute(reference['planPath']))
+        if birth(owner['pid']) != owner['startTicks'] or Path('/proc',str(owner['pid'])).stat().st_uid != owner['uid']:
+            raise ValueError('original Meet process birth or UID changed')
+        source = absolute(owner['sourceProof']['path']); raw = source.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != owner['sourceProof']['sha256'] or str(source).encode() not in Path('/proc',str(owner['pid']),'cmdline').read_bytes():
+            raise ValueError('original loaded Meet source differs')
+        for token in (b'if (meet.liveRooms().length)',b'if (inFlight)',b'phase = "releasing"',b'await meet.close();',b'db.close();',b'process.exit(0);'):
+            if token not in raw: raise ValueError('owning source idle/drain acknowledgement absent')
+        if any(Path(owner[key]).exists() for key in ('statePath','proofPath','tracePath')):
+            raise ValueError('existing owner evidence requires reconciliation, not new release')
+        if os.readlink(Path('/proc',str(owner['pid']),'fd',str(reference['listenerFd']))) != 'socket:['+reference['listenerInode']+']':
+            raise ValueError('original listening descriptor identity changed')
+        owners.append((owner, reference))
+    if len({owner['pid'] for owner,_ in owners}) != len(owners): raise ValueError('duplicate cohort owner')
+    libc = ctypes.CDLL(None,use_errno=True); libc.syscall.restype = ctypes.c_long
+    held = []; channels = []; observers = []; loaded = False; device = None
+    receipt = {'version':1,'protocol':'pi-core-meet-dentry-cohort-v1','state':'preparing','planSha256':hashlib.sha256(path.read_bytes()).hexdigest(),'owners':[]}
+    publish(output, receipt)
+    try:
+        subprocess.run(['/usr/sbin/insmod',str(module)],check=True); loaded=True
+        device = os.open('/dev/pi-stack-unix-dentry',os.O_RDONLY)
+        for owner, reference in owners:
+            pfd = os.pidfd_open(owner['pid']); held.append(pfd)
+            duplicate = libc.syscall(438,pfd,reference['listenerFd'],0)
+            if duplicate < 0: raise OSError(ctypes.get_errno(),os.strerror(ctypes.get_errno()))
+            held.append(duplicate)
+            check = socket.socket(fileno=os.dup(duplicate))
+            try:
+                if check.family != socket.AF_UNIX or check.type != socket.SOCK_STREAM or check.getsockopt(socket.SOL_SOCKET,socket.SO_ACCEPTCONN) != 1:
+                    raise ValueError('original descriptor is not a Unix stream listener')
+            finally: check.close()
+            fd = fcntl.ioctl(device,0x5071,duplicate); held.append(fd)
+            pair, evidence = owner_channels(fd,owner,libc); channels.append(pair)
+            receipt['owners'].append({'pid':owner['pid'],'startTicks':owner['startTicks'],'uid':owner['uid'],'dentry':evidence,'listener':reference,'state':'connected'})
+        os.close(device); device=None
+        subprocess.run(['/usr/sbin/rmmod','pi_stack_unix_dentry'],check=True); loaded=False
+        receipt.update({'state':'connected','moduleUnloadedBeforeRequests':True,'kernel':plan['kernel'],'moduleSha256':plan['moduleSha256']}); publish(output,receipt)
+        for i, (owner, _) in enumerate(owners):
+            status = response(channels[i][0],'GET','/runtime/status')
+            if status.get('protocol') != 'meet-runtime-v1' or status.get('pid') != owner['pid'] or status.get('phase') != 'serving': raise ValueError('own runtime status identity changed')
+            receipt['owners'][i]['idleStatus'] = status
+            if status.get('rooms') != [] or status.get('requestsInFlight') != 0:
+                receipt['state']='pending-accepted-work'; publish(output,receipt); return {'state':receipt['state'],'pid':owner['pid']}
+        for i, (owner, _) in enumerate(owners):
+            trace = absolute(owner['tracePath']); fd=os.open(trace,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600);os.close(fd)
+            observer=subprocess.Popen(['/usr/bin/strace','-e','trace=exit_group','-p',str(owner['pid']),'-o',str(trace)],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+            observers.append(observer); deadline=time.monotonic()+3
+            while time.monotonic()<deadline:
+                status=Path('/proc',str(owner['pid']),'status').read_text()
+                if re.search(r'^TracerPid:\s*'+str(observer.pid)+r'\s*$',status,re.M):break
+                if observer.poll() is not None:raise ValueError('kernel observer refused attachment')
+                time.sleep(.01)
+            else:raise ValueError('kernel observer did not acknowledge attachment')
+            state={'version':1,'planSha256':hashlib.sha256(json.dumps(owner,sort_keys=True,separators=(',',':')).encode()).hexdigest(),'state':'attached','instance':receipt['owners'][i]['idleStatus']['instance'],'observerPid':observer.pid,'idleStatus':receipt['owners'][i]['idleStatus']}
+            publish(absolute(owner['statePath']),state)
+        receipt['state']='observed-before-release';publish(output,receipt)
+        for i, (owner, _) in enumerate(owners):
+            state=trusted(absolute(owner['statePath']))
+            released=response(channels[i][1],'POST','/runtime/release',{'instance':state['instance']})
+            state.update({'releaseAcknowledgement':released,'state':'release-acknowledged' if released.get('released') is True else 'pending'});publish(absolute(owner['statePath']),state)
+            receipt['owners'][i]['releaseAcknowledgement']=released;publish(output,receipt)
+        for i, (owner, _) in enumerate(owners):
+            try:observers[i].wait(timeout=8)
+            except subprocess.TimeoutExpired:receipt['owners'][i]['state']='exit-unconfirmed';continue
+            state=trusted(absolute(owner['statePath']));trace=absolute(owner['tracePath'])
+            if state['releaseAcknowledgement'].get('released') is not True or not normal_exit(trace.read_text()):receipt['owners'][i]['state']='exit-unconfirmed';continue
+            proof={'version':1,'protocol':'pi-core-meet-resource-drain-v1','state':'closed','pid':owner['pid'],'startTicks':owner['startTicks'],'instance':state['instance'],'idleStatus':state['idleStatus'],'releaseAcknowledgement':state['releaseAcknowledgement'],'planSha256':state['planSha256'],'sourceProof':owner['sourceProof'],'namespace':owner['namespace'],'databasePath':owner['databasePath'],'exit':{'kind':'normal','code':0},'trace':{'path':str(trace),'sha256':hashlib.sha256(trace.read_bytes()).hexdigest()},'dentryRecovery':{'cohortReceiptPath':str(output),'moduleSha256':plan['moduleSha256'],'kernel':plan['kernel'],**receipt['owners'][i]['dentry']}}
+            publish(absolute(owner['proofPath']),proof);receipt['owners'][i].update({'state':'closed','proofPath':owner['proofPath']})
+        receipt['state']='closed' if all(owner['state']=='closed' for owner in receipt['owners']) else 'exit-unconfirmed';publish(output,receipt)
+        return {'state':receipt['state'],'closedCount':sum(owner['state']=='closed' for owner in receipt['owners']),'outputPath':str(output)}
+    except BaseException as error:
+        receipt['state']='unconfirmed';receipt['error']={'type':type(error).__name__,'message':str(error)};publish(output,receipt);raise
+    finally:
+        for pair in channels:
+            for channel in pair:channel.close()
+        for observer in observers:
+            if observer.poll() is None:observer.terminate();observer.wait(timeout=3)
+        if device is not None:os.close(device)
+        if loaded:subprocess.run(['/usr/sbin/rmmod','pi_stack_unix_dentry'],check=True)
+        for fd in reversed(held):os.close(fd)
+
+if __name__=='__main__':
+    try:
+        if os.geteuid()!=0 or len(sys.argv)!=2:raise ValueError('usage: root core-meet-dentry-drain ROOT_PLAN')
+        print(json.dumps({'ok':True,'value':drain(absolute(sys.argv[1]))}))
+    except (OSError,ValueError,KeyError,TypeError,subprocess.SubprocessError) as error:
+        print(json.dumps({'ok':False,'error':{'code':'meet-dentry-cohort-unconfirmed','message':str(error)}}));sys.exit(75)

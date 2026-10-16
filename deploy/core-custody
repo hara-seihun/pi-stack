@@ -1,0 +1,251 @@
+#!/usr/bin/python3 -B
+"""Resource-only keeper; trusted additions preserve every existing mount generation."""
+import ctypes
+import hashlib
+import json
+import os
+from pathlib import Path
+import signal
+import socket
+import subprocess
+import sys
+import time
+sys.dont_write_bytecode = True
+from core_namespace import absolute, namespace_path, publish, trusted
+from importlib.machinery import SourceFileLoader
+adoption = SourceFileLoader('core_adoption', str(Path(__file__).with_name('core-adopt'))).load_module()
+
+
+def command(args):
+    subprocess.run(args, check=True, capture_output=True, timeout=5)
+
+
+def process_namespace():
+    fields = Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()
+    return {'kind': 'process', 'pid': os.getpid(), 'startTicks': fields[19],
+            'mountNamespaceInode': str(Path('/proc/self/ns/mnt').stat().st_ino)}
+
+
+def pin_self(identifier):
+    return adoption.pin({'version': 1, 'namespaces': [{'id': identifier, 'namespace': process_namespace()}]})['namespaces'][0]
+
+
+def resource_handle(entry, read=False, clone_mount=False):
+    logical = absolute(entry['path'])
+    left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+    nsfd = os.open(namespace_path(entry['namespace']), os.O_RDONLY)
+    code = "import os,socket,array,sys,ctypes;s=socket.socket(fileno=int(sys.argv[1]));c=ctypes.CDLL(None,use_errno=True);fd=c.open_tree(-100,os.fsencode(sys.argv[2]),1|os.O_CLOEXEC) if sys.argv[4]=='clone' else os.open(sys.argv[2],int(sys.argv[3]));\nif fd<0:raise OSError(ctypes.get_errno(),'clone registered resource mount')\ns.sendmsg([b'fd'],[(socket.SOL_SOCKET,socket.SCM_RIGHTS,array.array('i',[fd]))])"
+    child = None
+    try:
+        child = subprocess.Popen(['/usr/bin/nsenter', f'--mount=/proc/self/fd/{nsfd}', '--',
+                                  '/usr/bin/python3', '-c', code, str(right.fileno()), str(logical), str(os.O_RDONLY if read else os.O_PATH), 'clone' if clone_mount else 'open'],
+                                 pass_fds=(nsfd, right.fileno()), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        left.settimeout(5)
+        _, ancillary, _, _ = left.recvmsg(16, socket.CMSG_SPACE(4))
+        status = child.wait(timeout=5)
+        if status != 0 or len(ancillary) != 1 or ancillary[0][:2] != (socket.SOL_SOCKET, socket.SCM_RIGHTS):
+            raise ValueError('registered resource handle unavailable')
+        import array
+        descriptors = array.array('i'); descriptors.frombytes(ancillary[0][2][:4])
+        fd = descriptors[0]
+        metadata = os.fstat(fd)
+        import stat
+        if entry['kind'] not in ('file', 'directory') or (entry['kind'] == 'file' and not stat.S_ISREG(metadata.st_mode)) or (entry['kind'] == 'directory' and not stat.S_ISDIR(metadata.st_mode)):
+            os.close(fd)
+            raise ValueError('registered resource kind mismatch')
+        return fd, metadata.st_dev, metadata.st_ino
+    finally:
+        if child is not None and child.poll() is None:
+            child.kill(); child.wait(timeout=5)
+        left.close(); right.close(); os.close(nsfd)
+
+
+def additions(previous, candidate):
+    if candidate.get('version') != 1 or not isinstance(candidate.get('resources'), list) or not isinstance(candidate.get('generations'), list) or not isinstance(candidate.get('namespaceId'), str):
+        raise ValueError('explicit resources, generations and namespace ID required')
+    if previous is not None and candidate['namespaceId'] != previous['namespaceId']:
+        raise ValueError('live namespace identity is immutable')
+    result = {}
+    for key, identity in [('resources', 'path'), ('generations', 'mountpoint')]:
+        current = {entry[identity]: entry for entry in candidate[key]}
+        if len(current) != len(candidate[key]):
+            raise ValueError('resource identities must be unique')
+        original = {} if previous is None else {entry[identity]: entry for entry in previous[key]}
+        if any(current.get(path) != entry for path, entry in original.items()):
+            raise ValueError('live resources cannot be removed or changed')
+        result[key] = [entry for path, entry in current.items() if path not in original]
+    old_paths = [] if previous is None else [entry['path'] for entry in previous['resources']] + [entry['mountpoint'] for entry in previous['generations']]
+    new_paths = [entry['path'] for entry in result['resources']] + [entry['mountpoint'] for entry in result['generations']]
+    for index, path in enumerate(new_paths):
+        absolute(path)
+        if any(path == other or path.startswith(other + '/') or other.startswith(path + '/') for other in old_paths + new_paths[:index]):
+            raise ValueError('added resource must not cover or replace an existing view')
+    return result
+
+
+def validate_generation(generation):
+    registry = trusted(absolute(generation['registryPath']))
+    if registry['user'] != generation['user'] or registry.get('unlock') != {'cipherDir': generation['cipherDir'], 'mountpoint': generation['mountpoint']}:
+        raise ValueError('target generation differs from owning folder registry')
+    if generation['sourceNamespace'].get('kind') != 'pinned' or adoption.mount_identity(generation['sourceNamespace'], generation['mountpoint'])['source'] != generation['cipherDir']:
+        raise ValueError('target generation requires an already-active registered source mount')
+    if type(generation['uid']) is not int or type(generation['gid']) is not int or min(generation['uid'], generation['gid']) < 0:
+        raise ValueError('explicit folder owner UID/GID required')
+    descriptor = key_handle(generation)
+    os.close(descriptor)
+
+
+def key_handle(generation):
+    source = generation.get('keySource')
+    if source is None:
+        key = absolute(generation['keyFile'])
+        descriptor = os.open(key, os.O_RDONLY | os.O_NOFOLLOW)
+        expected_uid = 0
+    else:
+        expected_path = f"/run/credentials/pi-remote@{generation['user']}.service/key"
+        if source.get('kind') != 'systemd-credential' or source.get('path') != expected_path or source.get('namespace') != generation['sourceNamespace']:
+            raise ValueError('credential must bind the exact original owning unit namespace')
+        descriptor, _, _ = resource_handle({'path': source['path'], 'kind': 'file', 'namespace': source['namespace']}, read=True)
+        expected_uid = None
+    import stat
+    metadata = os.fstat(descriptor)
+    mode = stat.S_IMODE(metadata.st_mode)
+    protected = (metadata.st_uid == 0 and metadata.st_gid == 0 and mode in (0o400, 0o440)
+                 or metadata.st_uid == generation['uid'] and mode == 0o400) if source is not None else metadata.st_uid == expected_uid and mode & 0o077 == 0
+    if not stat.S_ISREG(metadata.st_mode) or not protected:
+        os.close(descriptor)
+        raise ValueError('existing protected credential custodian required')
+    return descriptor
+
+
+def apply(addition, namespace):
+    handles, children, mounted = [], [], []
+    try:
+        for entry in sorted(addition['resources'], key=lambda item: len(item['path'])):
+            descriptor, device, inode = resource_handle(entry, clone_mount=True)
+            handles.append((entry, descriptor, device, inode))
+        for generation in addition['generations']:
+            validate_generation(generation)
+        for entry, descriptor, device, inode in handles:
+            logical = absolute(entry['path'])
+            if not logical.exists():
+                raise ValueError('registered mount target does not exist in common view')
+            current = logical.stat()
+            if (current.st_dev, current.st_ino) != (device, inode):
+                libc = ctypes.CDLL(None, use_errno=True)
+                if libc.move_mount(descriptor, b'', -100, os.fsencode(logical), 4) != 0:
+                    raise OSError(ctypes.get_errno(), 'attach exact registered resource mount clone')
+                mounted.append(logical)
+            actual = logical.stat()
+            if (actual.st_dev, actual.st_ino) != (device, inode) or not os.access(logical, os.R_OK):
+                raise ValueError('borrowed common resource differs or is not core-readable')
+        for generation in addition['generations']:
+            mountpoint = absolute(generation['mountpoint'])
+            if not mountpoint.is_dir():
+                raise ValueError('registered folder mount target must already exist')
+            if subprocess.run(['/usr/bin/mountpoint', '-q', '--', str(mountpoint)], timeout=5).returncode == 0:
+                if namespace is not None:
+                    raise ValueError('new generation would replace an existing live mount')
+                command(['/usr/bin/umount', '--lazy', '--', str(mountpoint)])
+            with os.fdopen(key_handle(generation), 'rb') as key:
+                child = subprocess.Popen(['/usr/bin/setpriv', f"--reuid={generation['uid']}", f"--regid={generation['gid']}", '--clear-groups', '--',
+                    '/usr/bin/gocryptfs', '-fg', '-q', '-nosyslog', '-acl', '-allow_other', '-sharedstorage', '-nonempty', '--', generation['cipherDir'], str(mountpoint)],
+                    stdin=key, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            children.append(child)
+            deadline = time.monotonic() + 10
+            while subprocess.run(['/usr/bin/mountpoint', '-q', '--', str(mountpoint)], timeout=1).returncode != 0:
+                if child.poll() is not None:
+                    raise ValueError(f'target encrypted generation mount failed for {generation["user"]}: {child.stderr.read(4096).decode().strip()}')
+                if time.monotonic() >= deadline:
+                    raise ValueError('target encrypted generation mount timed out')
+                time.sleep(0.02)
+            mounted.append(mountpoint)
+        return children, mounted
+    except BaseException:
+        for child in children:
+            if child.poll() is None:
+                child.terminate(); child.wait(timeout=5)
+        for mount in reversed(mounted):
+            state = subprocess.run(['/usr/bin/mountpoint', '-q', '--', str(mount)], timeout=5).returncode
+            if state == 0:
+                command(['/usr/bin/umount', '--lazy', '--', str(mount)])
+            elif state != 32:
+                raise ValueError('rollback mount state could not be observed')
+        raise
+    finally:
+        for _, descriptor, _, _ in handles:
+            os.close(descriptor)
+
+
+def receipts(generations, namespace):
+    for generation in generations:
+        identity = adoption.mount_identity(namespace, generation['mountpoint'])
+        if identity['source'] != generation['cipherDir'] or 'allow_other' not in identity['options'] or not os.access(generation['mountpoint'], os.R_OK | os.X_OK):
+            raise ValueError('prepared generation is not core-readable registered ciphertext')
+        publish(absolute(generation['mountReceiptPath']), {'version': 1, 'cipherDir': generation['cipherDir'], 'mountpoint': generation['mountpoint'], 'namespace': namespace,
+            'sharedstorage': True, 'owner': {'uid': generation['uid'], 'gid': generation['gid']}})
+
+
+def main():
+    if os.geteuid() != 0 or len(sys.argv) != 3:
+        raise ValueError('usage: root core-custody ABSOLUTE_RESOURCE_MANIFEST ABSOLUTE_RUNTIME_PLAN')
+    source, target = (absolute(path) for path in sys.argv[1:])
+    manifest = trusted(source)
+    initial = additions(None, manifest)
+    children = []
+    signals = {signal.SIGTERM, signal.SIGINT, signal.SIGHUP}
+    signal.pthread_sigmask(signal.SIG_BLOCK, signals)
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.unshare(0x00020000) != 0:
+            raise OSError(ctypes.get_errno(), 'create private common mount namespace')
+        command(['/usr/bin/mount', '--make-rprivate', '/'])
+        initial_children, _ = apply(initial, None)
+        children.extend(initial_children)
+        namespace = pin_self(manifest['namespaceId'])
+        receipts(initial['generations'], namespace)
+        publish(target, {'version': 1, 'uid': 0, 'gid': 0, 'namespace': namespace})
+        notify = os.environ['NOTIFY_SOCKET']
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as transport:
+            transport.connect('\0' + notify[1:] if notify.startswith('@') else notify)
+            transport.sendall(b'READY=1')
+        while True:
+            if any(child.poll() is not None for child in children):
+                raise ValueError('owned encrypted generation daemon exited')
+            pending = signal.sigtimedwait(signals, 2)
+            if pending is None:
+                continue
+            if pending.si_signo != signal.SIGHUP:
+                break
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            try:
+                candidate = trusted(source)
+                addition = additions(manifest, candidate)
+                added_children, added_mounts = apply(addition, namespace)
+                try:
+                    receipts(addition['generations'], namespace)
+                except BaseException:
+                    for child in added_children:
+                        if child.poll() is None:
+                            child.terminate(); child.wait(timeout=5)
+                    for mount in reversed(added_mounts):
+                        command(['/usr/bin/umount', '--lazy', '--', str(mount)])
+                    raise
+                children.extend(added_children)
+                manifest = candidate
+                outcome = {'ok': True, 'value': {'namespace': namespace}}
+            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+                outcome = {'ok': False, 'error': {'code': 'core-resource-addition-unavailable', 'message': str(error)}}
+            publish(Path(str(target) + '.reconcile.json'), {'version': 1, 'manifestSha256': digest, **outcome})
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.terminate()
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        print(json.dumps({'ok': False, 'error': {'code': 'core-resource-view-unavailable', 'message': str(error)}}), file=sys.stderr)
+        sys.exit(75)

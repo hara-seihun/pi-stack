@@ -26,7 +26,7 @@ export function newRunnerUnit(id: string) {
 export function runnerUnit(env: NodeJS.ProcessEnv): string {
   const id = env.PI_THREAD_RESOURCE_BOUNDARY, unit = env.PI_THREAD_RUNNER_UNIT;
   if (!id || !/^[a-f0-9]{16}$/.test(id)) throw new Error("Invalid runner resource boundary");
-  if (!unit || !new RegExp(`^pi-thread-runner-${id}-[a-f0-9]{12}\\.service$`).test(unit))
+  if (!unit || !new RegExp(`^pi-thread-runner-${id}-[a-f0-9]{12}\\.(?:service|scope)$`).test(unit))
     throw new Error(`Runner unit ${unit ?? "(unset)"} does not belong to resource boundary ${id}`);
   return unit;
 }

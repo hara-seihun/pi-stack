@@ -19,7 +19,7 @@
       ],
       "put": {
         "operationId": "submitCompletion",
-        "description": "Atomically stores caller input and one tool-free Orchestrator run. Same ID and identical input replay the existing record; changed input conflicts. Network disconnect does not cancel work. Luna accepts native strict JSON schema; maxOutputTokens is rejected before admission on the Codex route.",
+        "description": "Atomically stores principal-scoped caller input and one tool-free provider run. New requests require an exact Pi Codex model or established alias, explicit thinkingLevel and speed. Same ID and identical input replay existing custody, including adopted inputs with unset historical settings; changed input conflicts. Network disconnect does not cancel work. Native strict JSON schema is supported; maxOutputTokens is rejected before admission. Record.settings distinguishes explicit new inputs from historical unset settings.",
         "requestBody": {
           "required": true,
           "content": {
@@ -61,6 +61,16 @@
               }
             }
           },
+          "403": {
+            "description": "Model not granted or disabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Request not found",
             "content": {
@@ -92,7 +102,17 @@
             }
           },
           "500": {
-            "description": "Orchestrator failure",
+            "description": "Provider custody failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Model policy unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -126,6 +146,16 @@
               }
             }
           },
+          "403": {
+            "description": "Model not granted or disabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Request not found",
             "content": {
@@ -157,7 +187,17 @@
             }
           },
           "500": {
-            "description": "Orchestrator failure",
+            "description": "Provider custody failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Model policy unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -205,6 +245,16 @@
               }
             }
           },
+          "403": {
+            "description": "Model not granted or disabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Request not found",
             "content": {
@@ -236,7 +286,17 @@
             }
           },
           "500": {
-            "description": "Orchestrator failure",
+            "description": "Provider custody failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Model policy unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -283,6 +343,16 @@
               }
             }
           },
+          "403": {
+            "description": "Model not granted or disabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Request not found",
             "content": {
@@ -314,7 +384,17 @@
             }
           },
           "500": {
-            "description": "Orchestrator failure",
+            "description": "Provider custody failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Model policy unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -362,6 +442,16 @@
               }
             }
           },
+          "403": {
+            "description": "Model not granted or disabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Request not found",
             "content": {
@@ -393,7 +483,17 @@
             }
           },
           "500": {
-            "description": "Orchestrator failure",
+            "description": "Provider custody failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Model policy unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -863,7 +963,8 @@
         "properties": {
           "model": {
             "type": "string",
-            "const": "luna"
+            "pattern": "^(astra|sol|luna|openai-codex/[^/\\s]+)$",
+            "description": "Exact Pi Codex model ID or an established catalogue alias."
           },
           "prompt": {
             "type": "string",
@@ -913,13 +1014,17 @@
               {
                 "type": "string",
                 "const": "priority"
+              },
+              {
+                "type": "string",
+                "const": "ultrafast"
               }
             ]
           },
           "maxOutputTokens": {
             "type": "integer",
             "minimum": 1,
-            "description": "Reserved provider-native output cap. Codex Luna rejects this option with HTTP 422 unsupported-option; it is never silently ignored."
+            "description": "Codex rejects this option with HTTP 422 unsupported-option; it is never silently ignored."
           },
           "responseFormat": {
             "type": "object",
@@ -981,13 +1086,72 @@
               },
               "model": {
                 "type": "string",
-                "const": "luna"
+                "pattern": "^(astra|sol|luna|openai-codex/[^/\\s]+)$",
+                "description": "Exact Pi Codex model ID or an established catalogue alias."
               },
               "metadata": {
                 "type": "object",
                 "patternProperties": {
                   "^.*$": {}
                 }
+              },
+              "settings": {
+                "type": "object",
+                "required": [
+                  "thinkingLevel",
+                  "speed"
+                ],
+                "properties": {
+                  "thinkingLevel": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "const": "off"
+                      },
+                      {
+                        "type": "string",
+                        "const": "minimal"
+                      },
+                      {
+                        "type": "string",
+                        "const": "low"
+                      },
+                      {
+                        "type": "string",
+                        "const": "medium"
+                      },
+                      {
+                        "type": "string",
+                        "const": "high"
+                      },
+                      {
+                        "type": "string",
+                        "const": "xhigh"
+                      },
+                      {
+                        "type": "string",
+                        "const": "max"
+                      }
+                    ]
+                  },
+                  "speed": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "const": "standard"
+                      },
+                      {
+                        "type": "string",
+                        "const": "priority"
+                      },
+                      {
+                        "type": "string",
+                        "const": "ultrafast"
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
               },
               "createdAt": {
                 "type": "integer",
@@ -1032,13 +1196,72 @@
               },
               "model": {
                 "type": "string",
-                "const": "luna"
+                "pattern": "^(astra|sol|luna|openai-codex/[^/\\s]+)$",
+                "description": "Exact Pi Codex model ID or an established catalogue alias."
               },
               "metadata": {
                 "type": "object",
                 "patternProperties": {
                   "^.*$": {}
                 }
+              },
+              "settings": {
+                "type": "object",
+                "required": [
+                  "thinkingLevel",
+                  "speed"
+                ],
+                "properties": {
+                  "thinkingLevel": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "const": "off"
+                      },
+                      {
+                        "type": "string",
+                        "const": "minimal"
+                      },
+                      {
+                        "type": "string",
+                        "const": "low"
+                      },
+                      {
+                        "type": "string",
+                        "const": "medium"
+                      },
+                      {
+                        "type": "string",
+                        "const": "high"
+                      },
+                      {
+                        "type": "string",
+                        "const": "xhigh"
+                      },
+                      {
+                        "type": "string",
+                        "const": "max"
+                      }
+                    ]
+                  },
+                  "speed": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "const": "standard"
+                      },
+                      {
+                        "type": "string",
+                        "const": "priority"
+                      },
+                      {
+                        "type": "string",
+                        "const": "ultrafast"
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
               },
               "createdAt": {
                 "type": "integer",
@@ -1084,13 +1307,72 @@
               },
               "model": {
                 "type": "string",
-                "const": "luna"
+                "pattern": "^(astra|sol|luna|openai-codex/[^/\\s]+)$",
+                "description": "Exact Pi Codex model ID or an established catalogue alias."
               },
               "metadata": {
                 "type": "object",
                 "patternProperties": {
                   "^.*$": {}
                 }
+              },
+              "settings": {
+                "type": "object",
+                "required": [
+                  "thinkingLevel",
+                  "speed"
+                ],
+                "properties": {
+                  "thinkingLevel": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "const": "off"
+                      },
+                      {
+                        "type": "string",
+                        "const": "minimal"
+                      },
+                      {
+                        "type": "string",
+                        "const": "low"
+                      },
+                      {
+                        "type": "string",
+                        "const": "medium"
+                      },
+                      {
+                        "type": "string",
+                        "const": "high"
+                      },
+                      {
+                        "type": "string",
+                        "const": "xhigh"
+                      },
+                      {
+                        "type": "string",
+                        "const": "max"
+                      }
+                    ]
+                  },
+                  "speed": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "const": "standard"
+                      },
+                      {
+                        "type": "string",
+                        "const": "priority"
+                      },
+                      {
+                        "type": "string",
+                        "const": "ultrafast"
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
               },
               "createdAt": {
                 "type": "integer",
@@ -1216,13 +1498,72 @@
               },
               "model": {
                 "type": "string",
-                "const": "luna"
+                "pattern": "^(astra|sol|luna|openai-codex/[^/\\s]+)$",
+                "description": "Exact Pi Codex model ID or an established catalogue alias."
               },
               "metadata": {
                 "type": "object",
                 "patternProperties": {
                   "^.*$": {}
                 }
+              },
+              "settings": {
+                "type": "object",
+                "required": [
+                  "thinkingLevel",
+                  "speed"
+                ],
+                "properties": {
+                  "thinkingLevel": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "const": "off"
+                      },
+                      {
+                        "type": "string",
+                        "const": "minimal"
+                      },
+                      {
+                        "type": "string",
+                        "const": "low"
+                      },
+                      {
+                        "type": "string",
+                        "const": "medium"
+                      },
+                      {
+                        "type": "string",
+                        "const": "high"
+                      },
+                      {
+                        "type": "string",
+                        "const": "xhigh"
+                      },
+                      {
+                        "type": "string",
+                        "const": "max"
+                      }
+                    ]
+                  },
+                  "speed": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "const": "standard"
+                      },
+                      {
+                        "type": "string",
+                        "const": "priority"
+                      },
+                      {
+                        "type": "string",
+                        "const": "ultrafast"
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
               },
               "createdAt": {
                 "type": "integer",
@@ -1354,13 +1695,72 @@
               },
               "model": {
                 "type": "string",
-                "const": "luna"
+                "pattern": "^(astra|sol|luna|openai-codex/[^/\\s]+)$",
+                "description": "Exact Pi Codex model ID or an established catalogue alias."
               },
               "metadata": {
                 "type": "object",
                 "patternProperties": {
                   "^.*$": {}
                 }
+              },
+              "settings": {
+                "type": "object",
+                "required": [
+                  "thinkingLevel",
+                  "speed"
+                ],
+                "properties": {
+                  "thinkingLevel": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "const": "off"
+                      },
+                      {
+                        "type": "string",
+                        "const": "minimal"
+                      },
+                      {
+                        "type": "string",
+                        "const": "low"
+                      },
+                      {
+                        "type": "string",
+                        "const": "medium"
+                      },
+                      {
+                        "type": "string",
+                        "const": "high"
+                      },
+                      {
+                        "type": "string",
+                        "const": "xhigh"
+                      },
+                      {
+                        "type": "string",
+                        "const": "max"
+                      }
+                    ]
+                  },
+                  "speed": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "const": "standard"
+                      },
+                      {
+                        "type": "string",
+                        "const": "priority"
+                      },
+                      {
+                        "type": "string",
+                        "const": "ultrafast"
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
               },
               "createdAt": {
                 "type": "integer",
@@ -1492,13 +1892,72 @@
               },
               "model": {
                 "type": "string",
-                "const": "luna"
+                "pattern": "^(astra|sol|luna|openai-codex/[^/\\s]+)$",
+                "description": "Exact Pi Codex model ID or an established catalogue alias."
               },
               "metadata": {
                 "type": "object",
                 "patternProperties": {
                   "^.*$": {}
                 }
+              },
+              "settings": {
+                "type": "object",
+                "required": [
+                  "thinkingLevel",
+                  "speed"
+                ],
+                "properties": {
+                  "thinkingLevel": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "const": "off"
+                      },
+                      {
+                        "type": "string",
+                        "const": "minimal"
+                      },
+                      {
+                        "type": "string",
+                        "const": "low"
+                      },
+                      {
+                        "type": "string",
+                        "const": "medium"
+                      },
+                      {
+                        "type": "string",
+                        "const": "high"
+                      },
+                      {
+                        "type": "string",
+                        "const": "xhigh"
+                      },
+                      {
+                        "type": "string",
+                        "const": "max"
+                      }
+                    ]
+                  },
+                  "speed": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "const": "standard"
+                      },
+                      {
+                        "type": "string",
+                        "const": "priority"
+                      },
+                      {
+                        "type": "string",
+                        "const": "ultrafast"
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
               },
               "createdAt": {
                 "type": "integer",

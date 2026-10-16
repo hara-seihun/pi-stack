@@ -8,7 +8,6 @@ import { CompletionService } from "../src/completion.js";
 import { CompletionExecutionPool as CompletionPool } from "../src/host/completion-execution.js";
 import { assignCompletion } from "../src/policy.js";
 import { noModelPolicy } from "./fixtures/model-availability.js";
-import { reservationKey } from "../src/admission-reservation.js";
 import type { CompletionExecution, CompletionOutcome } from "../src/completion-contract.js";
 
 function value<T>(outcome: CompletionOutcome<T>): T { if (!outcome.ok) throw new Error(outcome.error.message); return outcome.value; }
@@ -19,9 +18,8 @@ function fixture() {
   const config = { ...loadConfig("/missing"), agentDir: root, maxConcurrentSessions: 1 };
   const service = new CompletionService(store, root), accountId = "openai-codex-12";
   store.upsertAccount({ id: accountId, provider: "openai-codex", concurrency: 1 });
-  store.setControl(reservationKey(accountId), JSON.stringify({ metadata, reason: "Atlas" }));
   for (const meter of ["codex-5h", "codex-7d"]) store.recordMeter(accountId, meter, 83, Date.now() + 86400000, Date.now());
-  const submit = (id: string, meta = metadata) => value(service.submit(id, { model: "luna", prompt: id, metadata: meta }));
+  const submit = (id: string, meta = metadata) => value(service.submit(id, { model: "luna", thinkingLevel: "low", speed: "standard", prompt: id, metadata: meta }));
   const admit = (id: string) => {
     const record = submit(id), choice = assignCompletion(store, record.runId, "luna", config, noModelPolicy);
     expect(choice.assignment).toBeDefined();
@@ -49,11 +47,9 @@ it("runs 315 independent requests concurrently despite agent ceilings, preservin
   } finally { release(); await pool.close(); f.close(); }
 }, 20_000);
 
-it("keeps reservation, pause, exhaustion, freshness and cooldown as real admission boundaries", () => {
+it("keeps pause, exhaustion, freshness and cooldown as real admission boundaries", () => {
   const f = fixture();
   try {
-    const wrong = f.submit("wrong", { caller: "other", purpose: metadata.purpose });
-    expect(assignCompletion(f.store, wrong.runId, "luna", f.config, noModelPolicy).assignment).toBeUndefined();
     const right = f.submit("right");
     f.store.setControl("launches", "paused");
     expect(assignCompletion(f.store, right.runId, "luna", f.config, noModelPolicy).assignment).toBeUndefined();

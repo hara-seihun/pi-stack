@@ -5,7 +5,7 @@ import { defineConfig } from "vite";
 export default defineConfig({
   publicDir: false,
   define: {
-    __MEET_AVATAR__: JSON.stringify(`data:image/png;base64,${readFileSync(resolve(import.meta.dirname, "web/public/kenan.png")).toString("base64")}`),
+    __MEET_LOGO__: JSON.stringify(`data:image/svg+xml;base64,${readFileSync(resolve(import.meta.dirname, "web/public/liminal-logo.svg")).toString("base64")}`),
   },
   build: {
     outDir: resolve(import.meta.dirname, "web/dist"),

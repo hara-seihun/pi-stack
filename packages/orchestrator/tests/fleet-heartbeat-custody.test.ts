@@ -1,5 +1,4 @@
 import { expect, it, vi } from "vitest";
-import { Daemon } from "../src/daemon.js";
 import { Fleet } from "../src/fleet.js";
 import { loadConfig } from "../src/config.js";
 import { Store } from "../src/store.js";
@@ -40,13 +39,4 @@ it.each([false, true])("detaches timers without releasing accepted execution cus
   } finally {
     fleet.detach(); if (!closed) store.close(); vi.restoreAllMocks(); vi.useRealTimers();
   }
-});
-
-it.each([false, true])("daemon lifetime stops lease timers before caller closes its ledger (failed: %s)", async failed => {
-  const detach = vi.fn();
-  const owner = { fleet: { detach }, startOwned: async () => { if (failed) throw new Error("native custody retained"); } };
-  const result = Daemon.prototype.start.call(owner as unknown as Daemon);
-  if (failed) await expect(result).rejects.toThrow("native custody retained");
-  else await expect(result).resolves.toBeUndefined();
-  expect(detach).toHaveBeenCalledTimes(1);
 });

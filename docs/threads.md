@@ -42,9 +42,17 @@ including after their bounded retry budget settles an assignment as failed: losi
 native startup is not proof that external resources have been released. Automatic
 archive sweeps preserve that owner across restarts. Successful startup clears the
 failure; explicit Stop/close still takes effect and never resumes failed work.
-A native turn without nonempty final assistant text or a retained dependency/question
-returns a failed settlement with `Native turn ended without a final result or a durable
-dependency wait`. The failed result is delivered to its assignment requester and result
+An assignment turn without nonempty final assistant text or a retained dependency/question
+requests `state your final result in one short message` once in the same native
+conversation before failing. Recovery owns its exact original work IDs through
+settlement. New steering input is accepted durably but dispatched in the next
+execution, so it cannot overwrite or inherit the recovered result.
+The original work, execution, settings and capacity custody remain owned; the original input and completed tools are not replayed. An accepted
+background operation retains continuation ownership until its terminal transition lands.
+A second empty final returns a failed settlement with `Native turn ended without a final
+result or a durable dependency wait`. A durable native recovery receipt fences the one
+attempt across lost acknowledgements and owner restart; an interrupted accepted attempt
+fails explicitly rather than restarting the assignment. The failed result is delivered to its assignment requester and result
 subscribers, and a background thread archives just like any other settled assignment.
 `metadata.incompleteResult` records the failure; it is not ongoing work. Startup reconciles
 previously retained incomplete background results the same way. Foreground human conversations
@@ -134,6 +142,12 @@ result notifications retain their execution identity; only a matching current
 assignment result clears an agent wait. Cross-owner delivery obtains bounded
 owner evidence, and an unavailable owner leaves the result subscription pending with a typed
 error. Historical notifications are still delivered, without releasing the wait.
+A completed, silent execution containing only notification inputs records
+`notificationOnly:true`: its turn and input receipts settle, but it is not an
+assignment result. It neither requests a final answer nor replies to old assignment
+senders, discharges result subscribers, satisfies an assignment await, or produces
+a manager completion notice. Outstanding waits remain owned by their registration.
+Mixed executions containing explicit input still require a result or durable wait.
 Bounded
 `thread_await` still reads historical results according to its explicit cursors.
 
@@ -401,8 +415,8 @@ compaction/branch messages receive their own delivery records.
 
 The trusted owner launcher declares `PI_PERSON_TIMEZONE_FILE` as
 `/var/lib/pi-timezones/USER/timezone.json`. The owning Remote publishes this
-narrow projection from its canonical `settings.json` after CalendarStore migration,
-then fences every timezone setting write with `state: "updating"` before publishing
+narrow projection from its canonical `settings.json`,
+and fences every timezone setting write with `state: "updating"` before publishing
 `state: "ready"`. Projection files are own-UID, reader-group mode0640 even under
 UMask0077; directories inherit the host-owned `pi-timezones-readers` group. Host
 provisioning creates directories, never timezone values. Fleet/terminal sessions

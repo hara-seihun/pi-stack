@@ -12,7 +12,7 @@ import { pathToFileURL } from "node:url";
 // Paths inside each copied resource are relative to its release destination.
 /** @type {RemoteResource[]} */
 export const remoteResources = [
-  ...["lib", "release-checkout", "meeting-census", "smoke", "one-kenan-activate", "editor"].map(name => ({
+  ...["lib", "release-checkout", "meeting-census", "smoke", "editor"].map(name => ({
     source: `deploy/${name}`, destination: `deploy/${name}`, kind: "file",
   })),
   { source: "deploy/systemd/pi-editor@.service", destination: "deploy/systemd/pi-editor@.service", kind: "file" },
@@ -27,19 +27,15 @@ export const remoteResources = [
     source: "apps/remote/server", destination: "server", kind: "tree",
     required: ["manager-prompt.md", "voice/delegation-policy.md", "meet/transcriber.ts", "pi-editor-launch", "phone/dist/retell-sdk.js", "native-history-startup.mjs", "native-history-startup-legacy.mjs"],
     entrypoints: ["main.ts", "router.ts", "person-cli.ts", "voice/service.ts", "rooms-main.ts", "meet/runtime-main.ts"],
-    executables: ["pi-remote", "pi-phone", "pi-room", "pi-signal", "pi-calendar", "pi-remote-launch", "pi-remote-supervise", "pi-editor-launch", "pi-timezone-provision"],
+    executables: ["pi-remote", "pi-phone", "pi-room", "pi-signal", "pi-remote-launch", "pi-remote-supervise", "pi-editor-launch", "pi-timezone-provision"],
   },
   { source: "apps/remote/shared", destination: "shared", kind: "tree" },
   { source: "apps/remote/skills", destination: "skills", kind: "tree", dereference: true, required: ["livedev/SKILL.md"] },
   {
     source: "apps/remote/web/dist", destination: "web/dist", kind: "tree", generated: true,
-    required: ["index.html", "meet-adapter.js", "voice.html", "kenan.png"],
+    required: ["index.html", "meet-adapter.js", "kenan.png"],
   },
-  { source: "packages/kenan-root/src", destination: "kenan-root/src", kind: "tree", entrypoints: ["main.ts"] },
-  { source: "packages/kenan-root/dist", destination: "kenan-root/dist", kind: "tree", generated: true },
-  ...["instructions.md", "package.json"].map(name => ({
-    source: `packages/kenan-root/${name}`, destination: `kenan-root/${name}`, kind: "file",
-  })),
+  { source: "packages/kenan-root/instructions.md", destination: "kenan-root/instructions.md", kind: "file" },
 ];
 
 export const remoteEntrypoints = remoteResources.flatMap(resource => resource.kind === "file" ? [] :

@@ -1,16 +1,22 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, mkdtempSync, mkdirSync, copyFileSync, rmSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, copyFileSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { patchCompactionErrors, patchContextErrors, patchCompactionErrorCopies } from "./patch-compaction-errors.mjs";
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai";
+import { patchSummaryFailureFence } from "./patch-summary-recovery.mjs";
+import { patchCompactionFallback } from "./patch-compaction-fallback.mjs";
+import { runCompactionWithFallback } from "./compaction-fallback.js";
 
 const base = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
 const paths = [join(base, "core/agent-session.js")];
-for (const path of paths) test("native failures reach Pi lifecycle and stop continuation in SDK", async () => {
-  const source = patchCompactionErrors(readFileSync(path, "utf8"));
+for (const path of paths) for (const [name, source] of (() => {
+  const original = patchCompactionErrors(readFileSync(path, "utf8"));
+  const alternate = patchCompactionFallback(patchSummaryFailureFence(original));
+  return original === alternate ? [["installed", original]] : [["installed", original], ["fallback-patched", alternate]];
+})()) test(`native failures reach Pi lifecycle and stop continuation in SDK (${name})`, async () => {
   assert.equal(patchCompactionErrors(source), source);
   const start = source.indexOf("async _runAutoCompaction(");
   const end = source.indexOf("setAutoCompactionEnabled(", start);
@@ -21,10 +27,21 @@ for (const path of paths) test("native failures reach Pi lifecycle and stop cont
   const session = {
     model: {}, settingsManager: { getCompactionSettings: () => ({}) },
     _getSummarizationRequestAuth: async () => ({}), sessionManager: { getBranch: () => [], appendCustomEntry() {} },
+    _modelRuntime: { getAvailableSnapshot: () => [{ provider: "openai-codex", api: "openai-codex-responses", id: "gpt-6.1-sol" }], streamSimple() {} },
     _emit: event => events.push(event), _emitSessionCompactFailed: async event => failures.push(event),
     _extensionRunner: { hasHandlers: () => true, emit: async () => ({ cancel: true, error: "native idle-timeout" }) },
     agent: { abort() { aborted++; }, async processEvents() {}, async runWithLifecycle(executor) { try { await executor(); } catch (error) { assistantFailures.push({ error, cancelled: false }); } } }, _resolveIdleWaitIfIdle() {}, _assertSummaryRecovery() {},
   };
+  if (source.includes("/* Pi Stack single alternate compaction */")) {
+    const helperStart = source.indexOf("/* Pi Stack single alternate compaction */");
+    const helperEnd = source.indexOf("async _runDefaultCompaction(", helperStart);
+    const helpers = new Function("runCompactionWithFallback", "portableCompactionPreparation", "buildSessionProjection", "compact",
+      `return class { ${source.slice(helperStart, helperEnd)} };`)(runCompactionWithFallback, preparation => ({ ok: true, value: preparation }), () => ({}),
+      async () => { throw new Error("alternate summary failed"); }).prototype;
+    session._runCompactionWithFallback = helpers._runCompactionWithFallback;
+    session.settingsManager.getRetrySettings = () => ({});
+    session._summarizationRetryCallbacks = () => ({});
+  }
   assert.equal(await method.call(session, "threshold", false), false);
   assert.equal(aborted, 0, "provider failures must not cancel the agent");
   assert.match(assistantFailures[0].error.message, /native idle-timeout/);
@@ -39,6 +56,21 @@ for (const path of paths) test("native failures reach Pi lifecycle and stop cont
   session._extensionRunner.emit = async () => ({ cancel: true });
   assert.equal(await method.call(session, "threshold", false, true), false);
   assert.equal(events.at(-1).aborted, true, "operator cancellation stays cancellation");
+  const manualStart = source.indexOf("async compact(customInstructions)");
+  const manualEnd = source.indexOf("async _checkCompaction(", manualStart);
+  const manual = new Function("prepareCompaction", "prepareCompaction2", `return class { ${source.slice(manualStart, manualEnd)} };`)(prepare, prepare).prototype.compact;
+  session.abort = async () => {};
+  session._clearManualCompactionState = () => { session._compactionAbortController = undefined; };
+  session._extensionRunner.emit = async () => ({ cancel: true, error: "native idle-timeout" });
+  await assert.rejects(manual.call(session, "preserve release custody"), /native idle-timeout/);
+  assert.equal(events.at(-1).aborted, false, "manual provider failure stays a failure");
+  assert.match(events.at(-1).errorMessage, /native idle-timeout/);
+  assert.equal(failures.at(-1).fromExtension, true);
+  assert.equal(session._compactionAbortController, undefined);
+  session._extensionRunner.emit = async () => ({ cancel: true });
+  await assert.rejects(manual.call(session), /Compaction cancelled/);
+  assert.equal(events.at(-1).aborted, true);
+  assert.equal(events.at(-1).errorMessage, undefined);
 });
 
 const runnerPaths = [join(base, "core/extensions/runner.js")];
@@ -50,6 +82,7 @@ test("deployment patches both consumers and declares context rejection without m
       const destination = join(target, relative(base, path));
       mkdirSync(dirname(destination), { recursive: true });
       copyFileSync(path, destination);
+      chmodSync(destination, 0o600);
     }
     patchCompactionErrorCopies(root);
     patchCompactionErrorCopies(root);

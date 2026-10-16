@@ -14,7 +14,6 @@
     {
       "id": "read-condensed-session",
       "commands": [
-        { "name": "read-condensed-session", "entry": "main" },
         { "name": "read-thread", "entry": "read-thread" }
       ]
     }

@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { nativePlatform, nativeSessionReady, remote, type PhoneSetupStep, type PhoneStatus } from "./native";
-import { phoneGrants, requestPhoneGrant } from "./phone-access";
+import { nativePlatform, nativeSessionReady, remote, type PhoneStatus } from "./native";
 import { auth } from "./person";
 
 type PhoneState = { state: "loading" } | { state: "ready"; value: PhoneStatus } | { state: "error"; message: string };
@@ -75,25 +74,14 @@ export function PermissionsSetup() {
     if (!active()) return;
     await remote.phoneConfigure({ enabled, user: auth.user, environment: environment.id });
   });
-  const grant = (step: PhoneSetupStep, instruction: string) => run(step, async active => {
-    if (!remote.phoneSetup || !remote.phoneStatus) throw new Error("Permission setup is unavailable in this Android shell.");
-    const result = await requestPhoneGrant({ active, status: () => remote.phoneStatus!(), request: step => remote.phoneSetup!({ step, instruction }) }, step);
-    if (!active()) return;
-    switch (result.state) {
-      case "granted": setPhone({ state: "ready", value: result.status }); break;
-      case "denied": setPhone({ state: "ready", value: result.status }); setError("Android has not granted this permission. Other grants are unchanged."); break;
-      case "error": setError(result.message); break;
-      case "cancelled": break;
-    }
-  });
   const status = phone.state === "ready" ? phone.value : null;
   const disabled = busy !== null || !auth.session;
   return <div className="settings-phone">
     {phone.state === "loading" && <p role="status">Checking this phone…</p>}
     {phone.state === "error" && <><p role="alert">{phone.message}</p><button type="button" disabled={busy !== null} onClick={() => void refreshPhone.current?.()}>Retry phone status</button></>}
     {status && <>
-      <label className="settings-switch-row"><span><strong>Enable phone control</strong><span className="settings-switch-detail">Connect this device to Kenan. Only the permissions granted below are available.</span></span>
-        <input type="checkbox" aria-label="Enable phone control" checked={status.enabled} disabled={disabled || !remote.phoneConfigure} onChange={event => void configure(event.target.checked)} />
+      <label className="settings-switch-row"><span><strong>Enable phone control</strong><span className="settings-switch-detail">Connect this fully configured device to Kenan.</span></span>
+        <input type="checkbox" aria-label="Enable phone control" checked={status.enabled} disabled={disabled || !remote.phoneConfigure || status.setup.state !== "complete"} onChange={event => void configure(event.target.checked)} />
       </label>
       <p role="status">{status.name} · {status.enabled ? status.connected ? "Connected" : "Reconnecting" : "Phone control is off"}</p>
       {typeof status.overlay === "boolean" && remote.phoneOverlay ? <label className="settings-switch-row"><span><strong>Show Kenan over other apps</strong><span className="settings-switch-detail">Independent of phone-control permissions.</span></span>
@@ -102,17 +90,7 @@ export function PermissionsSetup() {
           void run("overlay-visible", async () => { await remote.phoneOverlay!({ visible }); });
         }} />
       </label> : <p>Overlay preferences are unavailable in this Android shell.</p>}
-      <details className="settings-phone-grants"><summary>Device permissions</summary>
-        <p>Each grant is separate. Enabling phone control does not grant access or perform an action.</p>
-        <ul>{phoneGrants.map(({ step, label, help }) => {
-          const capability = status.capabilities[step];
-          const known = typeof capability === "boolean";
-          return <li key={step}><div><strong>{label}</strong><p>{help}</p></div><div className="settings-grant-action">
-            <span>{known ? capability ? "Granted" : "Not granted" : "Unavailable"}</span>
-            {known && !capability && <button type="button" disabled={disabled || !remote.phoneSetup || (step === "backgroundLocation" && status.capabilities.location !== true)} onClick={() => void grant(step, help)}>{busy === step ? "Waiting for Android…" : "Grant"}</button>}
-          </div></li>;
-        })}</ul>
-      </details>
+      <p role="status">{status.setup.state === "complete" ? "Device setup complete" : `Android setup required: ${status.setup.missing.join(", ")}`}</p>
       {status.error && <p role="alert">{typeof status.error === "string" ? status.error : status.error.message}</p>}
     </>}
     {error && <p role="alert">{error}</p>}

@@ -5,12 +5,13 @@ import { join } from "node:path";
 import { credential } from "../src/config.js";
 import { prepareMemoryEnvironment } from "../src/session.js";
 import { memoryService } from "../src/service.js";
+import { fixtureAuthorization } from "./authorization.js";
 import { MemoryStore } from "../src/store.js";
 
 test("existing folder credential without new memory credential still mints a verified UID session", async () => {
   const root = mkdtempSync(join(tmpdir(), "credential-cutover-"));
   const store = new MemoryStore(":memory:");
-  const server = memoryService({ store, auth: { supervisors: [], uidPersons: { "64000": "alice" } }, enabled: () => true, peerUid: () => 64000 });
+  const server = memoryService({ authorize: fixtureAuthorization, store, auth: { supervisors: [], uidPersons: { "64000": "alice" } }, enabled: () => true, peerUid: () => 64000 });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   try {
     const host = join(root, "host.json"); writeFileSync(host, '{"oneKenan":true}');

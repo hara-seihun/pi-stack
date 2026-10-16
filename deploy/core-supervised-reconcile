@@ -1,0 +1,62 @@
+#!/usr/bin/python3 -B
+"""Consume actual Bun close acknowledgement when its non-DB runuser forwarder died by TERM."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import runpy
+import sys
+from datetime import datetime, timezone
+sys.dont_write_bytecode = True
+from core_namespace import absolute, publish, trusted
+
+
+def valid_forwarder_exit(current, previous):
+    return current.get('InvocationID') == previous['InvocationID'] and current.get('MainPID') == '0' and current.get('ExecMainPID') == previous['MainPID'] and current.get('ActiveState') == 'inactive' and current.get('ExecMainCode') == '2' and current.get('ExecMainStatus') == '15' and current.get('Result') == 'success'
+
+
+def reconcile(path):
+    evidence=trusted(path)
+    if evidence.get('version')!=1 or evidence.get('protocol')!='pi-core-runuser-owner-reconciliation-v1':raise ValueError('exact closed supervising-owner reconciliation required')
+    owner_path=absolute(evidence['ownerPlanPath']);plan=trusted(owner_path)
+    if hashlib.sha256(owner_path.read_bytes()).hexdigest()!=evidence['ownerPlanSha256'] or plan['kind']!='remote' or plan['unit']!='pi-remote@kenan.service' or plan['nativeExit']['kind']!='supervised':raise ValueError('original accepted Remote drain plan changed')
+    drain=runpy.run_path(str(Path(__file__).with_name('core-drain')))
+    state_path=absolute(plan['statePath']);state=trusted(state_path)
+    digest=hashlib.sha256(json.dumps(plan,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    if state['planSha256']!=digest or state['state'] not in ('stopping','detached'):raise ValueError('original accountable stop purpose is not current')
+    observed=evidence['observedUnitOwner']
+    if observed!={'pid':plan['pid'],'startTicks':plan['startTicks'],'executable':'/usr/sbin/runuser'}:raise ValueError('original observed owner is not the exact runuser forwarder')
+    tokens={'entry':b'exec /usr/bin/nsenter --mount=', 'child':b'exec /srv/pi/pi-remote/server/pi-remote-supervise /usr/local/bin/bun /srv/pi/pi-remote/server/main.ts'}
+    if set(evidence['forwardingSources']) != set(tokens):raise ValueError('exact entry and owning child source pair required')
+    for role,token in tokens.items():
+        proof=evidence['forwardingSources'][role];source=absolute(proof['path']);st=source.lstat();raw=source.read_bytes()
+        if str(source) != '/usr/local/libexec/pi-remote-'+('enter-custody' if role=='entry' else 'custody-start'):raise ValueError('source does not name the exact registered forwarding entry')
+        if not source.is_file() or source.is_symlink() or st.st_uid!=0 or st.st_mode&0o022 or hashlib.sha256(raw).hexdigest()!=proof['sha256'] or token not in raw:raise ValueError('exact protected forwarding source changed')
+        if role=='entry' and b'-- /usr/sbin/runuser -u kenan -- /usr/local/libexec/pi-remote-custody-start' not in raw:raise ValueError('entry must only forward to the declared owning child launcher')
+    current=drain['properties'](plan['unit'])
+    if not valid_forwarder_exit(current,state['previous']):raise ValueError('exact runuser forwarding process has not acknowledged successful service termination')
+    native=drain['native_exit_custody'](plan,state['previous']['InvocationID'],after=True)
+    if native is None:raise ValueError('actual native database owner has no positive normal-exit witness yet')
+    witness=trusted(absolute(plan['nativeExit']['witnessPlanPath']))
+    if witness.get('unitOwner')!={'pid':plan['pid'],'startTicks':plan['startTicks']} or witness['wrapper']['pid']==plan['pid']:raise ValueError('positive native proof must belong to the nested original source wrapper')
+    image=drain['image_drain_proofs'](plan)
+    identities=drain['storage_identities'](plan['scopes'])
+    if identities!=state['storageIdentities']:raise ValueError('original store changed during supervising-owner handoff')
+    timestamp=datetime.now(timezone.utc).isoformat();reference={'protocol':evidence['protocol'],'path':str(path),'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'unitOwnerExit':{'kind':'signal','signal':15,'serviceResult':'success'},'nativeDatabaseOwnerExit':{'kind':'normal','code':0},'forwardingSources':evidence['forwardingSources']}
+    for scope in plan['scopes']:
+        target=absolute(scope['receiptPath'])
+        if target.exists():
+            prior=trusted(target)
+            if prior.get('detachmentEvidence',{}).get('planSha256')!=digest or prior.get('detachmentEvidence',{}).get('supervisingOwnerReconciliation')!=reference:raise ValueError('another owner already holds this receipt')
+            continue
+        receipt={'version':1,**scope.get('receiptExtras',{}),'state':'detached','scopeId':scope['scopeId'],'databasePath':scope['databasePath'],'sessionsDir':scope['sessionsDir'],'databaseIdentity':identities[scope['scopeId']],'previousOwner':{'identity':f"{plan['unit']}:{plan['pid']}:{plan['startTicks']}:{state['previous']['InvocationID']}",'detachedAt':timestamp},'detachmentEvidence':{'protocol':'pi-core-owner-drain-v1','planSha256':digest,'exitCode':None,'fleetExitEvidence':None,'sourceProof':plan['sourceProof'],'imageDrainProofs':image,'nativeExitCustody':native,'supervisingOwnerReconciliation':reference}}
+        publish(target,receipt)
+    publish(state_path,{**state,'state':'detached','detachedAt':state.get('detachedAt',timestamp),'supervisingOwnerReconciliation':reference})
+    return {'state':'detached','unit':plan['unit'],'receiptCount':len(plan['scopes']),'nativeDatabaseOwnerExit':{'kind':'normal','code':0},'unitOwnerExit':{'kind':'signal','signal':15},'signalsSent':False}
+
+if __name__=='__main__':
+    try:
+        if os.geteuid()!=0 or len(sys.argv)!=2:raise ValueError('usage: root core-supervised-reconcile ROOT_PLAN')
+        print(json.dumps({'ok':True,'value':reconcile(absolute(sys.argv[1]))}))
+    except (OSError,ValueError,KeyError,TypeError) as error:
+        print(json.dumps({'ok':False,'error':{'code':'supervising-owner-detachment-unconfirmed','message':str(error)}}));sys.exit(75)

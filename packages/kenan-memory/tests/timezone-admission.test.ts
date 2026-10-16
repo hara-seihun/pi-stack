@@ -1,13 +1,14 @@
 import { expect, test } from "bun:test";
 import { MemoryStore } from "../src/store.js";
 import { memoryService } from "../src/service.js";
+import { fixtureAuthorization } from "./authorization.js";
 
 test("root timezone follows only the token-verified asking person and refreshes on queued resume", async () => {
   const store = new MemoryStore(":memory:"), alice = store.session("alice", "thread-a");
   const zone = { zone: "Europe/London", source: "configured" as const, observedAt: "2026-10-08T00:00:00Z" };
   const resolved: string[] = [];
   let unavailable = false;
-  const server = memoryService({ store, auth: { supervisors: [{ person: "alice", token: "alice-supervisor" }], rootToken: "root-service" }, enabled: () => true, peerUid: () => undefined,
+  const server = memoryService({ authorize: fixtureAuthorization, store, auth: { supervisors: [{ person: "alice", token: "alice-supervisor" }], rootToken: "root-service" }, enabled: () => true, peerUid: () => undefined,
     timezone: person => { resolved.push(person); return unavailable ? { ok: false, error: { code: "unavailable", message: "projection missing" } } : { ok: true, value: zone }; } });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;

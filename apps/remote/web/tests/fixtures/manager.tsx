@@ -9,7 +9,7 @@ import type { ChatDrawing } from "../../src/chat-drawing";
 const drawing = { isOpen: false, editors: null } as ChatDrawing;
 const noAction = () => {};
 const peers = Array.from({ length: 7 }, (_, n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`);
-const directory: ThreadDirectory = { name: id => `Child ${peers.indexOf(id) + 1}`, agentName: id => id === "manager" ? "Kenan" : "Worker", busy: () => false, discover: noAction, lookupError: () => null, open: noAction };
+const directory: ThreadDirectory = { name: id => `Child ${peers.indexOf(id) + 1}`, busy: () => false, discover: noAction, lookupError: () => null, open: noAction };
 const entry = (key: string, kind: ContextEntry["kind"], fields: Partial<ContextEntry>): ContextEntry => ({ key, kind, signature: key, ...fields });
 const initial = Array.from({ length: 100 }, (_, n) => [
   entry(`human-${n}`, "user", { text: `Human request ${n}`, seq: n * 8 }),

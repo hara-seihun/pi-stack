@@ -12,9 +12,9 @@ const thread: Thread = { id: "cached-thread", parentId: "parent", title: "work",
 function fixture() {
   const store = Store.open(":memory:");
   for (const id of ["anthropic-1", "anthropic-2"]) store.upsertAccount({ id, provider: opus.provider, concurrency: 1 });
-  const config = { ...loadConfig("/missing"), profiles: { thread: [opus] } };
+  const config = loadConfig("/missing");
   return { store, config, choose: (id = thread.id, model: string = opus.model, pin?: string, exclude = new Set<string>()) =>
-    assign(store, "thread", "force", { ...config, profiles: { thread: [{ ...opus, model }] } }, Date.now(), pin, id, "user", exclude).assignment?.accountId };
+    assign(store, { ...opus, model }, "force", config, Date.now(), pin, id, "user", exclude).assignment?.accountId };
 }
 
 it.each(["background", "force", "live"] as const)("retains eligible %s thread affinity across idle execution and scheduler restart despite changed load", async admission => {
@@ -54,7 +54,7 @@ it.each(["cooldown", "quota", "disabled", "excluded", "pin"] as const)("does not
   } finally { store.close(); }
 });
 
-it("scopes affinity to thread, provider and model, without changing ordinary profile routing", () => {
+it("scopes affinity to thread, provider and model, without changing fresh account routing", () => {
   const { store, config, choose } = fixture();
   try {
     expect(choose()).toBe("anthropic-1");
@@ -62,11 +62,10 @@ it("scopes affinity to thread, provider and model, without changing ordinary pro
     expect(choose("another-thread")).toBe("anthropic-2");
     expect(choose(thread.id, "claude-opus-5")).toBe("anthropic-2");
     store.upsertAccount({ id: "codex-1", provider: "openai-codex", concurrency: 1 });
-    const codex = { ...config, profiles: { thread: [{ provider: "openai-codex" as const, model: "gpt-6.1-sol", thinking: "high" }] } };
-    expect(assign(store, "thread", "force", codex, Date.now(), undefined, thread.id).assignment?.accountId).toBe("codex-1");
+    const codex = { provider: "openai-codex" as const, model: "gpt-6.1-sol", thinking: "high" as const };
+    expect(assign(store, codex, "force", config, Date.now(), undefined, thread.id).assignment?.accountId).toBe("codex-1");
     expect(choose()).toBe("anthropic-1");
-    const ordinary = { ...config, profiles: { ordinary: [opus] } };
-    expect(assign(store, "ordinary", "force", ordinary, Date.now(), undefined, thread.id).assignment?.accountId).toBe("anthropic-2");
+    expect(assign(store, opus, "force", config).assignment?.accountId).toBe("anthropic-2");
     store.setControl("launches", "paused");
     expect(choose()).toBeUndefined();
   } finally { store.close(); }
@@ -77,6 +76,6 @@ it("retains background account affinity despite changed load, independently of g
   try {
     expect(choose()).toBe("anthropic-1");
     store.createLease("busy-preferred", "anthropic-1", "interactive");
-    expect(assign(store, "thread", "background", config, Date.now(), undefined, thread.id).assignment?.accountId).toBe("anthropic-1");
+    expect(assign(store, opus, "background", config, Date.now(), undefined, thread.id).assignment?.accountId).toBe("anthropic-1");
   } finally { store.close(); }
 });

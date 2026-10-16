@@ -36,7 +36,7 @@ it("recovers refused connection and lost acceptance across owner restart without
     openSession: async () => { throw new Error("No model execution is needed for transport acceptance"); } };
   let service = new ThreadService({ ...options, capacity: { mode: "unmanaged" } });
   cleanups.push(async () => { expect(await service.close()).toMatchObject({ ok: true }); });
-  expect((await service.spawn({ requestId: "create", id: "recipient", cwd: root })).ok).toBe(true);
+  expect((await service.spawn({ requestId: "create", id: "recipient", title: "Recipient", cwd: root })).ok).toBe(true);
   const bodies: string[] = [];
   let lostAcceptance = false;
   let restart: Promise<void> = Promise.resolve();
@@ -74,13 +74,13 @@ it("recovers refused connection and lost acceptance across owner restart without
   };
   const api = createThreadClient(`http://127.0.0.1:${port}/v1/threads`, fetcher, { timeoutMs: 3_000 });
   const result = await api.send(send);
-  expect(result).toMatchObject({ ok: true, value: { id: send.requestId, text: "GO", delivery: "steer" } });
+  expect(result).toMatchObject({ ok: true, value: { id: send.requestId, text: "GO", delivery: "pending" } });
   expect(refusals).toBe(1);
   expect(bodies).toEqual([JSON.stringify(send), JSON.stringify(send)]);
-  expect(service.pending("recipient")).toHaveLength(0);
+  expect(service.pending("recipient")).toMatchObject([{ id: send.requestId, state: "queued" }]);
   expect(service.get("recipient")).toMatchObject({ state: "idle", held: false, metadata: { archived: true } });
   expect(await api.send({ ...send, text: "different instruction" })).toMatchObject({ ok: false, error: { code: "conflict" } });
-  expect(service.pending("recipient")).toHaveLength(0);
+  expect(service.pending("recipient")).toMatchObject([{ id: send.requestId, state: "queued" }]);
   expect(service.get("recipient")).toMatchObject({ state: "idle", held: false, metadata: { archived: true } });
 });
 
@@ -91,7 +91,7 @@ it("waits through a suspended controller, then returns its durable acceptance", 
     openSession: async () => { throw new Error("No model execution"); } };
   let owner = new ThreadService({ ...options, capacity: { mode: "unmanaged" } });
   cleanups.push(async () => { expect(await owner.close()).toMatchObject({ ok: true }); });
-  await owner.spawn({ requestId: "create", id: "recipient", cwd: root });
+  await owner.spawn({ requestId: "create", id: "recipient", title: "Recipient", cwd: root });
   owner.suspend();
   const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
     const response = await threadHttp(owner, new Request(url, init));
@@ -116,7 +116,7 @@ it("deduplicates overlapping spawn retries after asynchronous parent discovery",
   const parentOwner = new ThreadService({ capacity: { mode: "unmanaged" }, databasePath: join(root, "parent.sqlite3"), sessionsDir: join(root, "parent"),
     openSession: async () => { throw new Error("No model execution"); } });
   cleanups.push(async () => { expect(await parentOwner.close()).toMatchObject({ ok: true }); });
-  expect(await parentOwner.spawn({ requestId: "create-parent", id: "parent", cwd: root })).toMatchObject({ ok: true });
+  expect(await parentOwner.spawn({ requestId: "create-parent", id: "parent", title: "Parent task", cwd: root })).toMatchObject({ ok: true });
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
   const list = parentOwner.list.bind(parentOwner);

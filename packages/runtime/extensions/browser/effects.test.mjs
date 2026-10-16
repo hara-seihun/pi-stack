@@ -217,7 +217,7 @@ test("actual native browser declared click produces one synthetic HTTP effect an
     const extension = join(directory, "extensions/browser");
     mkdirSync(extension, { recursive: true });
     mkdirSync(join(directory, "node_modules"));
-    for (const file of ["index.mjs", "effects.mjs", "package.json"]) copyFileSync(new URL(file, import.meta.url), join(extension, file));
+    for (const file of ["index.mjs", "effects.mjs", "private-credential.mjs", "package.json"]) copyFileSync(new URL(file, import.meta.url), join(extension, file));
     for (const pkg of ["agent-browser", "pi-agent-browser-native"]) symlinkSync(dirname(require.resolve(`${pkg}/package.json`)), join(directory, "node_modules", pkg));
     const memoryPackage = join(directory, "node_modules/kenan-memory");
     mkdirSync(join(memoryPackage, "dist"), { recursive: true });

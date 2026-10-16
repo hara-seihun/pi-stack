@@ -43,6 +43,9 @@ export class PiInputStatus {
   query(commandId: string, workId: string): InputStatus {
     const status = this.statuses.get(commandId);
     if (status && status.workId !== workId) throw new Error("Native input status identity mismatch");
+    const batch = this.manager.getEntries().some(entry => entry.type === "custom" && entry.customType === "thread_input_batch_accepted"
+      && (entry.data as { command?: { id: string } }).command?.id === commandId);
+    if (batch && (!status || status.state === "in_flight")) return { state: "accepted", commandId, workId };
     if (status) return status;
     // Older adapters recorded admission before their first await. An ordered native query is the ingress barrier.
     const receipt = [...this.manager.getEntries()].reverse().find(entry => entry.type === "custom"

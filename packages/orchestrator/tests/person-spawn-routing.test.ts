@@ -5,7 +5,6 @@ import { afterEach, expect, it, vi } from "vitest";
 import { ThreadService } from "../src/threads/service.js";
 import { resolveSpawnSettings } from "../src/threads/settings.js";
 import { configuredPersonSpawnModel } from "../src/threads/person-spawn-model.js";
-import { ScheduleService } from "../src/schedule.js";
 import type { Thread } from "../src/threads/contracts.js";
 const SOL = "openai-codex/gpt-6.1-sol", ASTRA = "openai-codex/gpt-6-astra", LUNA = "openai-codex/gpt-6-luna";
 const roots: string[] = [], owners: ThreadService[] = [];
@@ -58,20 +57,4 @@ it("accepted receipts and running work retain settings/custody after the owner d
   const broken = owner(root(), () => { throw Error("registry unavailable"); });
   expect(await broken.spawn({ requestId: "explicit", cwd: path, settings: { model: "luna" } })).toMatchObject({ ok: true, value: { settings: { model: LUNA } } });
   expect(await broken.spawn({ requestId: "implicit", cwd: path })).toMatchObject({ ok: false });
-});
-it("new implicit schedules resolve before storing; existing occurrences and explicit choices stay fixed, with other-person isolation", async () => {
-  const path = root(); let model = SOL;
-  const service = owner(path, () => model);
-  const schedules = new ScheduleService({ databasePath: join(path, "schedule.sqlite"), threads: service, now: () => 10_000, spawnDefaultModel: () => model });
-  const other = new ScheduleService({ databasePath: join(root(), "schedule.sqlite"), threads: owner(root()), now: () => 10_000 });
-  try {
-    expect(await schedules.create({ id: "implicit", prompt: "scheduled work", cwd: path, intervalMs: 1000, startAt: 10_000 })).toMatchObject({ ok: true, value: { settings: { model: SOL } } });
-    expect(await schedules.create({ id: "explicit", prompt: "scheduled explicit work", cwd: path, intervalMs: 1000, startAt: 10_000, settings: { model: "luna" } })).toMatchObject({ ok: true, value: { settings: { model: LUNA } } });
-    expect(await other.create({ id: "other", prompt: "other work", cwd: path, intervalMs: 1000, startAt: 10_000 })).toMatchObject({ ok: true, value: { settings: { model: ASTRA } } });
-    model = "luna"; await schedules.reconcile();
-    expect(service.get("schedule:implicit:10000")?.settings.model).toBe(SOL);
-    expect(service.get("schedule:explicit:10000")?.settings.model).toBe(LUNA);
-    const before = service.pending("schedule:implicit:10000"); await schedules.reconcile();
-    expect(service.pending("schedule:implicit:10000")).toEqual(before);
-  } finally { await schedules.close(); await other.close(); }
 });

@@ -10,7 +10,7 @@ import { projectThreadNotifications, projectQuestionNotifications, projectAttent
 
 type NotificationApi = Pick<ThreadApi, "settlements" | "questionEvents" | "attentionEvents" | "questions" | "list">;
 function thread(id: string, overrides: Partial<Thread> = {}): Thread {
-  return { id, title: id, parentId: null, role: "agent", cwd: "/tmp", sessionFile: `/tmp/${id}.jsonl`, settings: { model: "test", thinkingLevel: "off", speed: "standard" }, admission: "background", lifecycle: { kind: "idle" }, state: "idle", held: false, revision: 1, createdAt: 1, updatedAt: 1000, pendingMessages: 0, metadata: { foreground: true }, ...overrides };
+  return { id, title: id, parentId: null, role: "kena", cwd: "/tmp", sessionFile: `/tmp/${id}.jsonl`, settings: { model: "test", thinkingLevel: "off", speed: "standard" }, admission: "background", lifecycle: { kind: "idle" }, state: "idle", held: false, revision: 1, createdAt: 1, updatedAt: 1000, pendingMessages: 0, metadata: { foreground: true }, ...overrides };
 }
 function settlement(id: string, seq = 1, overrides: Partial<ThreadSettlement> = {}): ThreadSettlement {
   return { seq, executionId: `execution-${id}-${seq}`, threadId: id, workId: `work-${id}-${seq}`, outcome: "complete", time: seq * 1000, finalMessage: { role: "assistant", content: [{ type: "text", text: `Reply ${seq}` }] }, ...overrides };
@@ -27,6 +27,16 @@ function apiFor(threads: Thread[], receipts: ThreadSettlement[] = [], pending: T
 function database(): Database { const db = new Database(":memory:"); ensureSupervisorSchema(db); return db; }
 function count(db: Database): number { return (db.query("SELECT count(*) n FROM idle_notifications").get() as { n: number }).n; }
 function changes(db: Database): number { return (db.query("SELECT total_changes() n").get() as { n: number }).n; }
+
+test("Remote only projects receipts; core owns every manager notice send", async () => {
+  const db = database(), agent = thread("agent");
+  const api = apiFor([agent], [settlement(agent.id)]);
+  let sends = 0;
+  await projectThreadNotifications(db, "person", api, { list: api.list, send: async () => { sends++; throw new Error("Remote must not dispatch notices"); } }, undefined, { view: "mono", managerThreadId: "manager" });
+  expect(sends).toBe(0);
+  expect(count(db)).toBe(0);
+  db.close();
+});
 
 test("exact manager silent completion never creates notifications or unread, but classic ordinary and literal inline replies do", async () => {
   for (const [manager, text, expected] of [[true, "<silent/>", 0], [true, "Use <silent/> inline", 1], [false, "<silent/>", 1]] as const) {

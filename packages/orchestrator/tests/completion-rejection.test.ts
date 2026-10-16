@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
-import { createServer } from "node:http";
-import { Daemon } from "../src/daemon.js";
+import { createModelBroker } from "../src/model-broker.js";
+import { ModelAvailabilityStore } from "../src/threads/model-availability.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,7 +11,7 @@ import { assignCompletion } from "../src/policy.js";
 import { noModelPolicy } from "./fixtures/model-availability.js";
 import { recordCompletionRejection, recordCompletionSuccess, completionFeedbackRefusal } from "../src/completion-feedback.js";
 import type { CompletionExecution, CompletionOutcome } from "../src/completion-contract.js";
-const input={model:"luna" as const,prompt:"exact original",systemPrompt:"distinct instructions",metadata:{caller:"omniscience",purpose:"regulatory-atlas-tagging"}};
+const input={model:"luna" as const,thinkingLevel:"low" as const,speed:"standard" as const,prompt:"exact original",systemPrompt:"distinct instructions",metadata:{caller:"omniscience",purpose:"regulatory-atlas-tagging"}};
 const rejected:CompletionExecution={state:"failed",error:{code:"rate-limited",httpStatus:429,message:'{"detail":"Rate limit exceeded"}',retryAfterMs:2000}};
 const completed:CompletionExecution={state:"completed",result:{text:"ok",provider:"openai-codex",model:"gpt-6-luna",usage:{input:2,output:1,cacheRead:0,cacheWrite:0,totalTokens:3},stopReason:"stop"}};
 function value<T>(outcome:CompletionOutcome<T>):T{if(!outcome.ok)throw new Error(outcome.error.message);return outcome.value;}
@@ -57,22 +57,19 @@ it("recovers the exact deployed Codex rejection envelope without editing origina
 });
 
 it("serves retry and immutable attempt history without weakening the indeterminate fence",async()=>{
-  const store=Store.open(":memory:"),service=new CompletionService(store,"/tmp"),daemon=new Daemon(store,loadConfig("/missing"),"/release") as any;
-  daemon.reconcile=async()=>{};
-  expect(store.path).toBe(":memory:");
-  expect(daemon.threads.db.prepare("PRAGMA database_list").all()).toMatchObject([{ name: "main", file: "" }]);
-  const server=createServer((req,res)=>void daemon.request(req,res));
+  const store=Store.open(":memory:"),service=new CompletionService(store,"/tmp");
+  const root=mkdtempSync(join(tmpdir(),"broker-rejection-"));
+  const broker=createModelBroker({ledgerPath:":memory:",authPath:join(root,"auth.json"),listeners:[{principal:"kenan",port:0,accounts:["account"],models:["openai-codex/gpt-6-luna"],maxInFlight:2}]},new ModelAvailabilityStore(join(root,"policy.json")),fetch,{store});
   try{
     const first=value(service.submit("api-rejection",input));assign(store,first.runId);value(service.claim(first.runId,"first"));
     const old:CompletionExecution={state:"failed",error:{code:"provider",message:'{"detail":"Rate limit exceeded"}'}};value(service.settle(first.runId,"first",old));
-    await new Promise<void>(resolve=>server.listen(0,"127.0.0.1",resolve));
-    const base=`http://127.0.0.1:${(server.address() as {port:number}).port}/v1/completions/api-rejection`;
+    expect(broker.adoptCompletion("kenan","api-rejection","api-rejection").ok).toBe(true);
+    const [port]=await broker.listen();
+    const base=`http://127.0.0.1:${port}/v1/completions/api-rejection`;
     const retry=await fetch(base+'/retry',{method:'POST'});expect(retry.status).toBe(200);expect(await retry.json()).toMatchObject({state:'queued',runId:first.runId});
     const attempts=await(await fetch(base+'/attempts')).json();expect(attempts.attempts[0].outcome).toEqual(old);
-    const plans=await(await fetch(base.replace('/completions/api-rejection','/plans'))).json();
-    expect(Object.keys(plans.controls).some(key=>key.startsWith('completion-attempt:')||key.startsWith('completion-receipt:'))).toBe(false);
     await fetch(base+'/cancel',{method:'POST'});expect((await fetch(base+'/retry',{method:'POST'})).status).toBe(409);
-  }finally{await new Promise<void>(resolve=>server.close(()=>resolve()));await daemon.threads.close();store.close();}
+  }finally{await broker.close();store.close();rmSync(root,{recursive:true,force:true});}
 });
 
 it("uses observed rejection concurrency once per wave, honors cooldown, and expands after success",()=>{

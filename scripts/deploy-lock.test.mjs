@@ -69,6 +69,35 @@ test("one host deployment installs its shared dependency tree once", () => {
   }
 });
 
+test("source SDK custody is prepared before readiness on fresh and cached dependencies", () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-stack-source-sdk-"));
+  try {
+    writeFileSync(join(directory, "package.json"), "{}\n");
+    writeFileSync(join(directory, "package-lock.json"), "{}\n");
+    const runtime = join(directory, "packages/runtime"); mkdirSync(runtime, { recursive: true });
+    writeFileSync(join(runtime, "patch-session-durability.mjs"), `import { writeFileSync } from 'node:fs'; writeFileSync(process.argv[2]+'/dispose-ready','actual owner');`);
+    writeFileSync(join(runtime, "patch-shared-custody.mjs"), `import { readFileSync } from 'node:fs'; if(readFileSync(process.argv[2]+'/dispose-ready','utf8')!=='actual owner') process.exit(66);`);
+    writeFileSync(join(runtime, "patch-shared-rpc.mjs"), `import { readFileSync } from 'node:fs'; readFileSync(process.argv[2]+'/dispose-ready');`);
+    const result = spawnSync("bash", ["-c", `set -euo pipefail
+      source "$1"; root=$2
+      npm() { mkdir -p "$root/node_modules"; printf '{}' > "$root/node_modules/.package-lock.json"; }
+      pi_stack_prepare_dependencies "$root"
+      test -f "$root/node_modules/dispose-ready"
+      rm "$root/node_modules/dispose-ready"
+      pi_stack_prepare_dependencies "$root"
+      test -f "$root/node_modules/dispose-ready"
+      printf 'process.exit(37)' > "$root/packages/runtime/patch-session-durability.mjs"
+      if pi_stack_prepare_dependencies "$root"; then exit 99; else test "$?" = 37; fi
+    `, "source-sdk-readiness", helper, directory], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    const borrowed = join(directory, "borrower"); mkdirSync(borrowed);
+    mkdirSync(join(borrowed, "packages/runtime"), { recursive: true });
+    symlinkSync(join(directory, "node_modules"), join(borrowed, "node_modules"));
+    const refusal = spawnSync("bash", ["-c", 'source "$1"; pi_stack_prepare_source_sdk "$2"', "borrowed-source-sdk", helper, borrowed], { encoding: "utf8" });
+    assert.equal(refusal.status, 65); assert.match(refusal.stderr, /isolated owning dependency/);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("concurrent dependency consumers serialize npm ci and share its completed receipt", async () => {
   const directory = mkdtempSync(join(tmpdir(), "pi-stack-dependencies-concurrent-"));
   try {

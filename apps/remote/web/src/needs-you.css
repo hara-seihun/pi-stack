@@ -1,9 +1,0 @@
-.needs-you-kind, .needs-you-status, .needs-you-muted { color: var(--muted); font-size: 12px; }
-.needs-you-muted { line-height: 1.5; }
-.needs-you-status { margin-left: 10px; }
-.needs-you-coverage, .needs-you-policy { padding-top: 18px; margin-top: 24px; }
-.needs-you-coverage ul { list-style: none; padding: 0; }
-.needs-you-coverage li { margin-bottom: 18px; }
-.needs-you-coverage li p { margin: 5px 0; font-size: 13px; }
-.needs-you-error { color: var(--danger); overflow-wrap: anywhere; }
-.needs-you-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }

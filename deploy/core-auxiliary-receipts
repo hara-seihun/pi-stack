@@ -1,0 +1,94 @@
+#!/usr/bin/python3 -B
+"""Project immutable table claims from detached auxiliary custody; no store mutation."""
+import copy
+import hashlib
+import json
+import os
+from pathlib import Path
+import sqlite3
+import stat
+import sys
+sys.dont_write_bytecode = True
+IMAGE_TABLES = ['inline_images', 'inline_image_versions', 'inline_image_messages', 'core_image_acceptance', 'core_image_sources', 'core_image_ingress_errors', 'core_image_threads']
+WATCH_TABLES = ['watch_item', 'watch_request', 'watch_wake', 'watch_delivery', 'watch_schedule', 'watch_markdown_adoption']
+
+def trusted(path):
+    p = Path(path)
+    if not p.is_absolute() or p.resolve() != p: raise ValueError('canonical protected metadata path required')
+    s = p.stat()
+    if not stat.S_ISREG(s.st_mode) or s.st_uid != 0 or s.st_mode & 0o022: raise ValueError('root-owned protected metadata required')
+    return json.loads(p.read_bytes())
+
+def digest(path): return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+def publish(path, value):
+    b = (json.dumps(value, indent=2)+'\n').encode()
+    if path.exists():
+        if path.read_bytes() != b: raise ValueError('published receipt changed; preserve original')
+        return
+    tmp = Path(str(path)+'.'+str(os.getpid())+'.tmp')
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'wb') as f: f.write(b); f.flush(); os.fsync(f.fileno())
+    os.chown(tmp, 0, 0); os.replace(tmp, path)
+
+def schema(path, expected):
+    db = sqlite3.connect('file:'+path+'?mode=ro', uri=True)
+    try:
+        db.execute('PRAGMA query_only=ON')
+        names = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if not set(expected).issubset(names): raise ValueError('original auxiliary source schema is incomplete')
+        return sorted(set(expected))
+    finally: db.close()
+
+def detached(path, scope_id, database):
+    r = trusted(path); s = Path(database).stat()
+    if r.get('version') != 1 or r.get('state') != 'detached' or r.get('scopeId') != scope_id or r.get('databasePath') != database or r.get('databaseIdentity') != {'dev':str(s.st_dev),'ino':str(s.st_ino)} or not r.get('previousOwner',{}).get('identity') or not r.get('previousOwner',{}).get('detachedAt'): raise ValueError('exact detached database custody required')
+    return r
+
+def project(config_path, directory, output_path):
+    config = trusted(config_path); directory = Path(directory); output_path = Path(output_path)
+    if not directory.is_absolute() or directory.resolve() != directory or not output_path.is_absolute() or output_path.parent.resolve() != output_path.parent: raise ValueError('canonical output paths required')
+    directory.mkdir(mode=0o700, exist_ok=True)
+    s = directory.stat()
+    if s.st_uid != 0 or s.st_mode & 0o077: raise ValueError('root-only receipt directory required')
+    scopes = {s['id']:s for s in config['scopes']}; records = []
+    def add_resource(scope, path):
+        if not any(r['kind']=='file' and r['path']==str(path) for r in scope['resources']): scope['resources'].append({'kind':'file','path':str(path)})
+    for item in config['images'].get('registries', []):
+        scope = scopes[item['scopeId']]
+        if scope['availability']['kind'] != 'adopt': continue
+        prior_path = item['adoptionReceiptPath']; r = detached(prior_path, scope['id']+':images', item['databasePath'])
+        ref = r['imageAuxiliary']
+        if digest(ref['path']) != ref['sha256']: raise ValueError('original detached auxiliary hash changed')
+        aux = trusted(ref['path'])
+        if aux['phase'] != 'detached': raise ValueError('positive detached auxiliary required')
+        evidence = next(e for e in aux['evidence'] if e['id']==scope['id'])
+        if evidence['state'] != 'detached' or evidence['imageTableNames'] != IMAGE_TABLES: raise ValueError('exact original seven-table image claim required')
+        parent = evidence['detached']
+        if digest(parent['path']) != parent['sha256']: raise ValueError('original controller detachment changed')
+        observed = schema(item['databasePath'], IMAGE_TABLES[:3])
+        result = copy.deepcopy(r); result['tableNames'] = list(IMAGE_TABLES)
+        result['tableClaimProjection'] = {'version':1,'priorReceiptPath':prior_path,'priorReceiptSha256':digest(prior_path),'auxiliary':{'path':ref['path'],'sha256':ref['sha256']},'observedSourceTables':observed,'newOwnerMetadataTables':IMAGE_TABLES[3:]}
+        path = directory/(scope['id']+'.images.json'); publish(path,result); item['adoptionReceiptPath']=str(path);add_resource(scope,path)
+        records.append({'kind':'images','scopeId':scope['id'],'path':str(path),'sha256':digest(path)})
+    for item in config['duties'].get('entries', []):
+        scope = scopes[item['scopeId']]; watch = item['watch']
+        if scope['availability']['kind'] != 'adopt' or watch['kind'] != 'existing': continue
+        prior_path = watch['adoptionReceiptPath']; r=detached(prior_path,scope['id']+':watch',watch['databasePath'])
+        parent_path=scope['storage']['adoptionReceiptPath']; parent=detached(parent_path,scope['id'],watch['databasePath'])
+        expected={'version':1,'ownerScopeId':scope['id'],'ownerAdoptionReceiptPath':parent_path,'ownerAdoptionReceiptSha256':digest(parent_path)}
+        if r.get('tableSubdivision') != expected: raise ValueError('exact original parent table subdivision required')
+        observed=schema(watch['databasePath'],WATCH_TABLES[:5])
+        result=copy.deepcopy(r);result['tableNames']=list(WATCH_TABLES)
+        result['tableClaimProjection']={'version':1,'priorReceiptPath':prior_path,'priorReceiptSha256':digest(prior_path),'observedSourceTables':observed,'newOwnerMetadataTables':WATCH_TABLES[5:]}
+        path=directory/(scope['id']+'.watch.json');publish(path,result);watch['adoptionReceiptPath']=str(path);add_resource(scope,path)
+        records.append({'kind':'watch','scopeId':scope['id'],'path':str(path),'sha256':digest(path)})
+    publish(directory/'projection.json',{'version':1,'sourceConfigPath':str(config_path),'sourceConfigSha256':digest(config_path),'records':records,'storesMutated':False})
+    publish(output_path,config)
+    return {'receipts':len(records),'configPath':str(output_path),'configSha256':digest(output_path),'storesMutated':False}
+
+if __name__ == '__main__':
+    try:
+        if os.geteuid()!=0 or len(sys.argv)!=4: raise ValueError('usage: root core-auxiliary-receipts CONFIG RECEIPT_DIRECTORY OUTPUT_CONFIG')
+        print(json.dumps({'ok':True,'value':project(*sys.argv[1:])}))
+    except (OSError,ValueError,KeyError,TypeError,StopIteration,sqlite3.Error) as e:
+        print(json.dumps({'ok':False,'error':{'code':'auxiliary-table-claim-invalid','message':str(e)}}));sys.exit(75)

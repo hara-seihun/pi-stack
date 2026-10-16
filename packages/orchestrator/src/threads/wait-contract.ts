@@ -6,12 +6,13 @@ const after = Type.Optional(Type.Record(Type.String(), Type.Integer({ minimum: 0
 const jobId = Type.String({ minLength: 1 });
 const publicationId = Type.String({ minLength: 1 });
 const fromThreadId = Type.String({ minLength: 1 });
+const requestId = Type.Optional(Type.String({ minLength: 1, description: "Recovery only: reuse this caller's exact requestId from an unconfirmed wait with the unchanged original payload. Never issue a new identity to retry uncertain registration." }));
 const choices = Type.Union([
-  Type.Object({ action: Type.Literal("set"), kind: Type.Literal("agents"), threadIds, after }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("set"), kind: Type.Literal("job"), jobId }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("set"), kind: Type.Literal("deployment"), publicationId }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("set"), kind: Type.Literal("message"), fromThreadId }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("clear") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("set"), kind: Type.Literal("agents"), threadIds, after, requestId }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("set"), kind: Type.Literal("job"), jobId, requestId }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("set"), kind: Type.Literal("deployment"), publicationId, requestId }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("set"), kind: Type.Literal("message"), fromThreadId, requestId }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("clear"), requestId }, { additionalProperties: false }),
 ]);
 
 // Anthropic's non-strict projection keeps only root properties/required, not a root union.
@@ -20,7 +21,7 @@ export const threadWaitParameters = Type.Unsafe<Static<typeof choices>>({
   ...Type.Object({
     action: Type.Union([Type.Literal("set"), Type.Literal("clear")]),
     kind: Type.Optional(Type.Union(WAIT_KINDS.map(kind => Type.Literal(kind)), { description: "Required for set. agents needs nonempty accessible peer threadIds; job needs jobId; deployment needs publicationId; message needs accessible collaborator fromThreadId. Omit for clear. Finishing work is ordinary idle settlement, not a wait." })),
-    threadIds: Type.Optional(threadIds), after,
+    threadIds: Type.Optional(threadIds), after, requestId,
     jobId: Type.Optional(jobId), publicationId: Type.Optional(publicationId), fromThreadId: Type.Optional(fromThreadId),
   }, { additionalProperties: false }),
   anyOf: choices.anyOf,

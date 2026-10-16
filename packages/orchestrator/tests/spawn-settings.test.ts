@@ -18,7 +18,7 @@ function value<T>(result: Result<T>): T {
 
 function parent(model: string): Thread {
   return {
-    id: "parent", parentId: null, role: "agent", title: "Parent", cwd: "/work",
+    id: "parent", parentId: null, role: "kena", title: "Parent", cwd: "/work",
     sessionFile: "/work/parent.jsonl", settings: { model, thinkingLevel: "high", speed: "standard" },
     admission: "force", lifecycle: { kind: "idle" }, state: "idle", held: false, revision: 1, createdAt: 1, updatedAt: 1, pendingMessages: 0,
   };
@@ -121,14 +121,14 @@ describe("Astra and Sol ultrafast settings", () => {
 
   it("persists the selected speed, rejects unsupported combinations and resets it on model change", async () => {
     const { root, service } = fixture();
-    const thread = value(await service.spawn({ requestId: "ultrafast", cwd: root, settings: { model: "astra", speed: "ultrafast" } }));
+    const thread = value(await service.spawn({ requestId: "ultrafast", title: "Ultrafast settings", cwd: root, settings: { model: "astra", speed: "ultrafast" } }));
     expect(service.get(thread.id)?.settings.speed).toBe("ultrafast");
     for (const model of ["luna", "opus", "alternate/gpt-6-astra", "alternate/gpt-6.1-sol"]) {
       expect(await service.control({ action: "settings", threadId: thread.id, settings: { model, speed: "ultrafast" } })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
       expect(service.get(thread.id)?.settings).toEqual(thread.settings);
     }
     expect(value(await service.control({ action: "settings", threadId: thread.id, settings: { model: "sol", speed: "ultrafast" } })).settings).toMatchObject({ model: "openai-codex/gpt-6.1-sol", speed: "ultrafast" });
-    expect(await service.spawn({ requestId: "child", cwd: root, parentId: thread.id, settings: { model: "sol", speed: "ultrafast" } })).toMatchObject({ ok: true, value: { settings: { model: "openai-codex/gpt-6.1-sol", speed: "ultrafast" } } });
+    expect(await service.spawn({ requestId: "child", title: "Child settings", cwd: root, parentId: thread.id, settings: { model: "sol", speed: "ultrafast" } })).toMatchObject({ ok: true, value: { settings: { model: "openai-codex/gpt-6.1-sol", speed: "ultrafast" } } });
     expect(value(await service.control({ action: "settings", threadId: thread.id, settings: { model: "luna" } })).settings.speed).toBe("standard");
   });
 });
@@ -136,18 +136,18 @@ describe("Astra and Sol ultrafast settings", () => {
 describe("ThreadService child spawn policy", () => {
   it("keeps explicit Anthropic on conversations, children and direct runs", async () => {
     const { root, service } = fixture();
-    const conversation = value(await service.spawn({ requestId: "root", cwd: root, settings: { model: "opus" } }));
-    const child = value(await service.spawn({ requestId: "child", cwd: root, parentId: conversation.id }));
+    const conversation = value(await service.spawn({ requestId: "root", title: "Conversation settings", cwd: root, settings: { model: "opus" } }));
+    const child = value(await service.spawn({ requestId: "child", title: "Child settings", cwd: root, parentId: conversation.id }));
     expect(child.settings.model).toBe("openai-codex/gpt-6.1-sol");
     expect(await service.control({ action: "settings", threadId: child.id, settings: { model: "opus" } })).toMatchObject({ ok: true });
     expect(await service.control({ action: "settings", threadId: child.id, settings: { model: "fable" } })).toMatchObject({ ok: true });
-    expect(value(await service.spawn({ requestId: "direct", cwd: root, settings: { model: "opus" }, metadata: { source: "direct" } })).settings.model).toMatch(/^anthropic\//);
+    expect(value(await service.spawn({ requestId: "direct", title: "Direct settings", cwd: root, settings: { model: "opus" }, metadata: { source: "direct" } })).settings.model).toMatch(/^anthropic\//);
     expect(await service.control({ action: "settings", threadId: conversation.id, settings: { model: "fable" } })).toMatchObject({ ok: true });
   });
 
   it("rejects nonexistent installed model settings before forwarding to a peer owner", async () => {
     const { root, service } = fixture();
-    const rootThread = value(await service.spawn({ requestId: "root", cwd: root }));
+    const rootThread = value(await service.spawn({ requestId: "root", title: "Model validation", cwd: root }));
     const forward = vi.fn(async (_input: SpawnThread) => ({ ok: true as const, value: rootThread }));
     service.setDirectory(service, () => ({ spawn: forward } as unknown as ThreadApi));
 
@@ -159,7 +159,7 @@ describe("ThreadService child spawn policy", () => {
 
   it("replays a persisted pre-policy child receipt without revalidating it", async () => {
     const { root, service } = fixture();
-    const rootThread = value(await service.spawn({ requestId: "root", cwd: root }));
+    const rootThread = value(await service.spawn({ requestId: "root", title: "Retained receipt", cwd: root }));
     const input: SpawnThread = { requestId: "old-child", parentId: rootThread.id, cwd: root, settings: { model: "astra" } };
     const child = value(service.importThread({
       id: "old-child-thread", parentId: rootThread.id, title: "Old child", cwd: root,
@@ -179,15 +179,15 @@ describe("ThreadService child spawn policy", () => {
 describe("live mode", () => {
   it("declares the conversation, gives workers the cheap priority profile and live admission, and keeps the mode", async () => {
     const { root, service } = fixture();
-    const conversation = value(await service.spawn({ requestId: "meeting", cwd: root, metadata: { mode: "live" } }));
+    const conversation = value(await service.spawn({ requestId: "meeting", title: "Live conversation", cwd: root, metadata: { mode: "live" } }));
     expect(conversation).toMatchObject({ admission: "live", settings: { model: "openai-codex/gpt-6.1-sol", thinkingLevel: "low", speed: "priority" } });
-    const worker = value(await service.spawn({ requestId: "worker", cwd: root, parentId: conversation.id }));
+    const worker = value(await service.spawn({ requestId: "worker", title: "Live worker", cwd: root, parentId: conversation.id }));
     expect(worker).toMatchObject({ admission: "live", metadata: { mode: "live" }, settings: { model: "openai-codex/gpt-6-luna", thinkingLevel: "medium", speed: "priority" } });
-    const sol = value(await service.spawn({ requestId: "synthesis", cwd: root, parentId: conversation.id, settings: { model: "sol" } }));
+    const sol = value(await service.spawn({ requestId: "synthesis", title: "Live synthesis", cwd: root, parentId: conversation.id, settings: { model: "sol" } }));
     expect(sol.settings).toEqual({ model: "openai-codex/gpt-6.1-sol", thinkingLevel: "medium", speed: "priority" });
     expect(await service.spawn({ requestId: "escape", cwd: root, parentId: conversation.id, metadata: { mode: "other" } })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
-    const ordinary = value(await service.spawn({ requestId: "ordinary", cwd: root }));
+    const ordinary = value(await service.spawn({ requestId: "ordinary", title: "Ordinary settings", cwd: root }));
     expect(ordinary).toMatchObject({ admission: "force", settings: { speed: "standard" } });
-    expect(value(await service.spawn({ requestId: "ordinary-child", cwd: root, parentId: ordinary.id })).settings.speed).toBe("standard");
+    expect(value(await service.spawn({ requestId: "ordinary-child", title: "Ordinary child", cwd: root, parentId: ordinary.id })).settings.speed).toBe("standard");
   });
 });

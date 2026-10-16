@@ -72,6 +72,19 @@ describe("inline image presentation", () => {
     } finally { globalThis.window = original; }
   });
 
+  test("existing-path and generated images share the custody-backed presentation", () => {
+    const original = globalThis.window;
+    globalThis.window = { PiRemotePerson: { href: (path: string) => path }, KenanRemote: { resolveApiUrl: (path: string) => path } } as any;
+    try {
+      const complete = image({ prompt: null, sourcePath: "/existing.png", state: "complete", path: "/owned/image.png" });
+      const html = render('<pi-remote-image id="scene" path="/existing.png" />', { assistant: true, images: new Map([["scene", complete]]) });
+      expect(html).toContain('data-inline-image="true"');
+      expect(html).toContain('path=%2Fowned%2Fimage.png');
+      expect(html).not.toContain('/existing.png');
+      expect(html).not.toContain('Generating image');
+    } finally { globalThis.window = original; }
+  });
+
   test("shows escaped generation errors and missing display-only IDs", () => {
     const failed = image({ state: "error", error: { code: "provider_error", message: '<script>failed</script>' } });
     const html = render(tag, { assistant: true, images: new Map([["scene", failed]]) });

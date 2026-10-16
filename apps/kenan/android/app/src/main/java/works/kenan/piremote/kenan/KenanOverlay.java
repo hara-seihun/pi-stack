@@ -11,12 +11,10 @@ import android.graphics.Path;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.graphics.RectF;
-import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
-import android.text.InputFilter;
 import android.text.Layout;
 import android.text.StaticLayout;
 import android.text.TextPaint;
@@ -33,7 +31,6 @@ import android.view.WindowMetrics;
 import android.view.accessibility.AccessibilityWindowInfo;
 import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
-import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -49,8 +46,8 @@ import org.json.JSONObject;
 
 /** A chat scope or a finite phone-action scope owns every window and callback. */
 final class KenanOverlay {
-    private static final int CARD = 0xff242b40;
-    private static final int ACCENT = 0xffb8c8ff;
+    private static final int CARD = NativeShells.CARD;
+    private static final int ACCENT = NativeShells.ACCENT;
     private final AccessibilityService service;
     private final WindowManager windows;
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -78,6 +75,9 @@ final class KenanOverlay {
     private final Runnable home = this::goHome;
     private final Runnable clearBubble;
     private final Runnable clearHighlight;
+    private ReplyPresentation replyPresentation;
+    private record ReplyPresentation(String text, long duration, long deadline, java.util.function.BooleanSupplier authorized,
+                                     Runnable drawn, java.util.function.Consumer<PhoneResult> failed, Runnable timeout) {}
 
     KenanOverlay(AccessibilityService service) { this(service, false); }
     KenanOverlay(AccessibilityService service, boolean actionOnly) {
@@ -150,10 +150,11 @@ final class KenanOverlay {
         String visual = pressed + ":" + state;
         if (!visual.equals(renderedDot)) { renderedDot = visual; dot.invalidate(); }
     }
-    void haptic() { if (!closed) dot.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK); }
+    void haptic() { if (!closed) NativeHaptics.play(dot, NativeState.Haptic.SELECT.wire()); }
 
     PhoneResult command(String command, JSONObject args, Function<String, Rect> resolve) throws Exception {
         if (closed) return PhoneResult.error("unavailable", "Kenan overlay is not running");
+        if (args.has("receiptId")) return PhoneResult.error("invalid_args", "Receipt presentation requires the authenticated phone-service receipt owner");
         var parsed = NativeState.parse(NativeState.OverlayCommand.class, command);
         if (parsed.isEmpty()) return PhoneResult.error("unsupported", "Unknown overlay command");
         return switch (parsed.get()) {
@@ -162,6 +163,7 @@ final class KenanOverlay {
                 yield PhoneResult.success(new JSONObject().put("visible", isVisible(service)));
             }
             case CLEAR -> {
+                cancelReply("superseded", "Reply was cleared before drawing");
                 main.removeCallbacks(clearBubble); main.removeCallbacks(clearHighlight); main.removeCallbacks(home);
                 scene.words = null; scene.highlight = null; scene.tip = false; goHome(); scene.invalidate();
                 yield PhoneResult.success(new JSONObject());
@@ -316,21 +318,57 @@ final class KenanOverlay {
         };
         reconcile.run();
     }
-    void say(String text, long duration) {
-        if (closed || actionOnly) return;
+    private void bubble(String text) {
         main.removeCallbacks(clearBubble);
-        if (text.isEmpty()) { scene.words = null; scene.invalidate(); return; }
-        scene.words = StaticLayout.Builder.obtain(text, 0, text.length(), scene.textPaint, Math.max(dp(100), Math.round(width() * .75f) - dp(28)))
+        scene.words = text.isEmpty() ? null : StaticLayout.Builder.obtain(text, 0, text.length(), scene.textPaint, Math.max(dp(100), Math.round(width() * .75f) - dp(28)))
             .setAlignment(Layout.Alignment.ALIGN_NORMAL).setIncludePad(false).setMaxLines(6)
             .setEllipsize(TextUtils.TruncateAt.END).setLineSpacing(dp(3), 1).build();
-        addLine("Kenan", text); scene.invalidate(); activity();
+        scene.invalidate(); activity();
+    }
+    void say(String text, long duration) {
+        if (closed || actionOnly) return;
+        cancelReply("superseded", "Reply was replaced before drawing");
+        bubble(text);
+        if (!text.isEmpty()) addLine("Kenan", text);
         if (duration > 0) main.postDelayed(clearBubble, duration);
+    }
+    private boolean canPresentReply() {
+        return !closed && !actionOnly && kenanVisible() && captures == 0 && scene.isAttachedToWindow()
+            && scene.isShown() && scene.getWindowVisibility() == View.VISIBLE
+            && ((android.os.PowerManager) service.getSystemService(Context.POWER_SERVICE)).isInteractive()
+            && !((android.app.KeyguardManager) service.getSystemService(Context.KEYGUARD_SERVICE)).isKeyguardLocked();
+    }
+    void presentReply(String text, long duration, long deadline, java.util.function.BooleanSupplier authorized,
+                      Runnable drawn, java.util.function.Consumer<PhoneResult> failed) {
+        if (!canPresentReply()) {
+            failed.accept(PhoneResult.error("not_displayed", "Overlay is not visible on an unlocked active display")); return;
+        }
+        if (replyPresentation != null) { failed.accept(PhoneResult.error("busy", "Another reply is waiting to draw")); return; }
+        if (!authorized.getAsBoolean() || System.currentTimeMillis() >= deadline) {
+            failed.accept(PhoneResult.error("expired", "Reply authorization or deadline expired before drawing")); return;
+        }
+        Runnable timeout = () -> cancelReply("not_displayed", "Reply did not draw before the command deadline");
+        replyPresentation = new ReplyPresentation(text, duration, deadline, authorized, drawn, failed, timeout);
+        bubble(text);
+        main.postDelayed(timeout, Math.max(1, deadline - System.currentTimeMillis()));
+    }
+    private void cancelReply(String code, String message) {
+        ReplyPresentation previous = replyPresentation;
+        if (previous == null) return;
+        replyPresentation = null;
+        main.removeCallbacks(previous.timeout());
+        scene.words = null;
+        scene.invalidate();
+        previous.failed().accept(PhoneResult.error(code, message));
     }
     private void error(String message) { state("idle"); say(message, 5000); }
     private void addLine(String who, String text) {
         transcript.addLast(who + ": " + text);
         while (transcript.size() > 20) transcript.removeFirst();
-        if (history != null) history.setText(TextUtils.join("\n\n", transcript));
+        if (history != null) {
+            history.setText(TextUtils.join("\n\n", transcript));
+            ((View) history.getParent()).setVisibility(View.VISIBLE);
+        }
     }
     void ack(JSONObject frame) {
         Runnable timeout = pending.remove(frame.optString("id"));
@@ -352,6 +390,7 @@ final class KenanOverlay {
     }
     void resetSession() {
         if (closed || actionOnly) return;
+        cancelReply("session_expired", "Session changed before reply drawing");
         closePanel(); main.removeCallbacksAndMessages(null); pending.clear(); transcript.clear(); threadId = null; draft = "";
         scene.words = null; scene.highlight = null; scene.tip = false; scene.gestureUntil = 0; state("idle"); goHome();
     }
@@ -374,16 +413,6 @@ final class KenanOverlay {
             Runnable timeout = () -> { pending.remove(id); error("No receipt yet. Your message may have reached Kenan; it was not sent again."); };
             pending.put(id, timeout); main.postDelayed(timeout, 15000);
         } catch (org.json.JSONException defect) { error("Could not prepare your message"); }
-    }
-    private GradientDrawable card(int color) {
-        GradientDrawable shape = new GradientDrawable(); shape.setColor(color); shape.setCornerRadius(dp(20));
-        shape.setStroke(dp(1), 0xff46516f); return shape;
-    }
-    private Button button(String title, Runnable action) {
-        Button button = new Button(service); button.setText(title); button.setTextColor(Color.WHITE);
-        button.setBackground(card(0xff354261)); button.setMinHeight(dp(48));
-        button.setPadding(dp(12), dp(8), dp(12), dp(8));
-        button.setAllCaps(false); button.setOnClickListener(view -> action.run()); return button;
     }
     private static final class BackControl {
         private final android.window.OnBackInvokedDispatcher dispatcher;
@@ -408,38 +437,17 @@ final class KenanOverlay {
     private void openPanel() {
         if (closed || !kenanVisible() || gestures > 0 || captures > 0) return;
         if (panel != null) { closePanel(); return; }
-        panel = new Panel(); panel.setOrientation(LinearLayout.VERTICAL); panel.setPadding(dp(16), dp(12), dp(16), dp(12));
-        panel.setBackground(card(CARD)); panel.setElevation(dp(12));
-        LinearLayout controls = new LinearLayout(service);
-        controls.addView(button("Open in Kenan", () -> {
+        panel = new Panel();
+        NativeShells.Conversation conversation = NativeShells.conversation(service, panel, TextUtils.join("\n\n", transcript), draft, () -> {
             Intent intent = new Intent(service, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
             RemoteSession.Identity identity = NotificationIdentity.get(service).current();
             if (threadId != null && identity != null) intent.putExtra("sessionId", threadId).putExtra("user", identity.user)
                 .putExtra("environment", PhoneControlService.settings(service).getString("environment", ""));
             closePanel(); service.startActivity(intent);
-        }), new LinearLayout.LayoutParams(0, dp(48), 1));
-        controls.addView(button("Close", this::closePanel)); panel.addView(controls);
-        ScrollView scroll = new ScrollView(service);
-        history = new TextView(service); history.setTextColor(Color.WHITE); history.setTextSize(15);
-        history.setText(TextUtils.join("\n\n", transcript)); history.setPadding(0, dp(8), 0, dp(12));
-        scroll.addView(history); panel.addView(scroll, new LinearLayout.LayoutParams(-1, dp(160)));
-        input = new EditText(service); input.setTextColor(Color.WHITE); input.setHintTextColor(0xffb5bdd1);
-        input.setHint("Talk to Kenan…"); input.setTextSize(16); input.setMinLines(2); input.setMaxLines(4);
-        input.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE | android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
-        input.setBackgroundTintList(android.content.res.ColorStateList.valueOf(ACCENT));
-        input.setFilters(new InputFilter[] { new InputFilter.LengthFilter(8000) }); input.setText(draft); panel.addView(input);
-        Button send = button("Send", this::send);
-        EditText composer = input;
-        Runnable readiness = () -> {
-            boolean ready = !composer.getText().toString().trim().isEmpty();
-            send.setEnabled(ready); send.setAlpha(ready ? 1f : .45f);
-        };
-        input.addTextChangedListener(new android.text.TextWatcher() {
-            @Override public void beforeTextChanged(CharSequence text, int start, int count, int after) {}
-            @Override public void onTextChanged(CharSequence text, int start, int before, int count) { readiness.run(); }
-            @Override public void afterTextChanged(android.text.Editable text) {}
-        });
-        readiness.run(); panel.addView(send);
+        }, this::closePanel, this::send);
+        history = conversation.history();
+        input = conversation.input();
+        ScrollView scroll = conversation.scroll();
         panelAt = new WindowManager.LayoutParams(-1, -2, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL, PixelFormat.TRANSLUCENT);
         panelAt.gravity = Gravity.BOTTOM;
@@ -462,7 +470,7 @@ final class KenanOverlay {
         ((InputMethodManager) service.getSystemService(Context.INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(panel.getWindowToken(), 0);
         remove(panel); panel = null; panelAt = null; input = null; history = null;
     }
-    void suspendCapture() { if (!closed) { captures++; restoreVisibility(); } }
+    void suspendCapture() { if (!closed) { cancelReply("not_displayed", "Capture hid the reply before drawing"); captures++; restoreVisibility(); } }
     void restoreCapture() { if (!closed) { if (captures > 0) captures--; restoreVisibility(); } }
     private void restoreVisibility() {
         if (closed) return;
@@ -472,6 +480,7 @@ final class KenanOverlay {
     }
     void close() {
         if (closed) return;
+        cancelReply("not_displayed", "Overlay closed before reply drawing");
         closePanel(); closed = true; main.removeCallbacksAndMessages(null); pending.clear();
         touch.cancel(); dot.setOnTouchListener(null); dot.removeCallbacks(dot.frame);
         if (flight != null) { flight.cancel(); flight.removeAllUpdateListeners(); flight = null; }
@@ -590,6 +599,10 @@ final class KenanOverlay {
         Scene() { super(service); textPaint.setColor(Color.WHITE); textPaint.setTextSize(dp(15)); setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS); }
         @Override protected void onDraw(Canvas canvas) {
             if (closed || !isShown() || getWindowVisibility() != View.VISIBLE) return;
+            if (replyPresentation != null && !canPresentReply()) cancelReply("not_displayed", "Reply display became unavailable before drawing");
+            if (replyPresentation != null && (!replyPresentation.authorized().getAsBoolean()
+                || System.currentTimeMillis() >= replyPresentation.deadline()))
+                cancelReply("expired", "Reply authorization or deadline expired before drawing");
             long now = SystemClock.uptimeMillis();
             paint.setStyle(Paint.Style.STROKE); paint.setStrokeWidth(dp(2)); paint.setColor(ACCENT); paint.setAlpha(255);
             if (highlight != null) {
@@ -626,6 +639,14 @@ final class KenanOverlay {
                 paint.setStyle(Paint.Style.STROKE); paint.setStrokeWidth(dp(1)); paint.setColor(0xff46516f);
                 canvas.drawRoundRect(bubble, dp(16), dp(16), paint);
                 canvas.save(); canvas.translate(left + dp(14), top + dp(12)); words.draw(canvas); canvas.restore();
+                ReplyPresentation rendered = replyPresentation;
+                if (rendered != null) {
+                    replyPresentation = null;
+                    main.removeCallbacks(rendered.timeout());
+                    addLine("Kenaznia", rendered.text());
+                    if (rendered.duration() > 0) main.postDelayed(clearBubble, rendered.duration());
+                    OverlayReplyReceipts.afterDraw(rendered.drawn());
+                }
             }
             if (dragging) {
                     float cx = dismissX(), cy = dismissY();

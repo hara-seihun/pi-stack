@@ -35,7 +35,7 @@ Per-call `ImageGenerationOptions` is `{ signal?: AbortSignal; cwd?: string; acco
 
 `"spread"` selects the eligible account with the fewest active image leases, including images started by callers using the default selection. Equal loads rotate by account ID after the previous spread selection, wrapping at the end. The cursor lives in the shared ledger's `control` table under `image-account-spread-cursor`, so separate service instances and processes share rotation. Selection, lease creation and cursor advancement commit in one immediate transaction. An admitted attempt advances rotation even if authentication or generation later fails.
 
-Eligibility is unchanged: an enabled shared OpenAI Codex account with shared OAuth credentials, no active cooldown and no reservation. Spread does not rank by quota spent or non-image workload. It counts only `interactive:image:` interactive leases that are unended and heartbeated within the existing two-minute lease window. It does not add a concurrency cap or combine pools from different host ledgers.
+Eligibility is unchanged: an enabled shared OpenAI Codex account with shared OAuth credentials, no active cooldown and an eligible shared account-use assignment. Spread does not rank by quota spent or non-image workload. It counts only `interactive:image:` interactive leases that are unended and heartbeated within the existing two-minute lease window. It does not add a concurrency cap or combine pools from different host ledgers.
 
 ## Input and result
 

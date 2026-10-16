@@ -4,13 +4,13 @@ import WebSocket, { WebSocketServer, type RawData } from "ws";
 
 /** A broker listener is UID-gated by the host. Only its person's supervisor
  * can reach this route; no caller chooses an upstream URL or another owner. */
-export function attachMeetRecognitionBroker(server: Server, shutdown: AbortSignal, reserve: () => boolean, release: () => void) {
+export function attachMeetRecognitionBroker(server: Server, shutdown: AbortSignal, reserve: () => boolean, release: () => void, admit?: (request: IncomingMessage) => Promise<boolean>) {
   const sockets = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: 1024 * 1024 });
   const active = new Set<WebSocket>();
   const close = () => { for (const socket of active) socket.close(1012, "Broker stopping"); sockets.close(); };
   shutdown.addEventListener("abort", close, { once: true });
-  server.on("upgrade", (request: IncomingMessage, socket: Socket, head: Buffer) => {
-    if (request.url !== "/v1/meet/recognition" || !reserve() || shutdown.aborted) { socket.destroy(); return; }
+  server.on("upgrade", (request: IncomingMessage, socket: Socket, head: Buffer) => { void (async () => {
+    if (request.url !== "/v1/meet/recognition" || shutdown.aborted || admit && !await admit(request) || shutdown.aborted || !reserve()) { socket.destroy(); return; }
     try {
       sockets.handleUpgrade(request, socket, head, client => {
         active.add(client);
@@ -42,5 +42,5 @@ export function attachMeetRecognitionBroker(server: Server, shutdown: AbortSigna
         engine.on("close", finish); client.on("close", finish);
       });
     } catch { release(); socket.destroy(); }
-  });
+  })().catch(() => socket.destroy()); });
 }

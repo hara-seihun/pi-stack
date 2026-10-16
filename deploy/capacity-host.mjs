@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 
 const need = (condition, message) => { if (!condition) throw new Error(message); };
 const sourceKinds = ["threadDatabase", "threadDatabaseDirectory", "inactivePersonal"];
+const sourceNamespaceKey = source => source.namespaceProcess ? JSON.stringify(source.namespaceProcess) : source.namespacePinned ? JSON.stringify(source.namespacePinned) : source.namespaceUnit;
 export function inactivePersonalProof(procRoot, source) {
   need(isAbsolute(source.dataDir ?? "") && Number.isSafeInteger(source.uid) && source.uid >= 0, "Inactive-person lifecycle needs actual UID and configured data directory");
   const absolute = resolve(source.dataDir);
@@ -31,10 +32,12 @@ export function validateHostPlan(plan) {
   need(Array.isArray(plan.owners) && plan.owners.length && new Set(plan.owners.map(owner => owner.ownerId)).size === plan.owners.length, "Every distinct configured host owner required");
   for (const owner of plan.owners) {
     need(typeof owner.ownerId === "string" && owner.ownerId && Array.isArray(owner.controllers) && Array.isArray(owner.sources), "Owner controller/source inventory required");
-    for (const controller of owner.controllers) need(/^[a-zA-Z0-9@_.-]+\.service$/.test(controller.unit) && ["daemon", "remote", "root"].includes(controller.kind)
-      && /^http:\/\/127\.0\.0\.1:\d+\/v1\/health$/.test(controller.healthUrl), "Exact loopback controller health/unit/kind required");
+    for (const controller of owner.controllers) need(/^[a-zA-Z0-9@_.-]+\.service$/.test(controller.unit) && ["remote", "core"].includes(controller.kind)
+      && /^http:\/\/(?:127\.0\.0\.1|\[::1\]):\d+\/v1\/health$/.test(controller.healthUrl), "Exact loopback controller health/unit/kind required");
     for (const source of owner.sources) need(sourceKinds.includes(source.kind) && isAbsolute(source.path ?? "")
       && (source.namespaceUnit === null || /^[a-zA-Z0-9@_.-]+\.service$/.test(source.namespaceUnit))
+      && (source.namespaceProcess === undefined || source.namespaceUnit === null && Number.isSafeInteger(source.namespaceProcess.pid) && source.namespaceProcess.pid > 0 && /^\d+$/.test(source.namespaceProcess.startTicks) && /^\d+$/.test(source.namespaceProcess.mountNamespaceInode))
+      && (source.namespacePinned === undefined || source.namespaceUnit === null && source.namespaceProcess === undefined && /^\/run\/pi-stack\/namespaces\/[a-zA-Z0-9_.-]+$/.test(source.namespacePinned.path) && /^\d+$/.test(source.namespacePinned.mountNamespaceInode))
       && (source.kind !== "inactivePersonal" || source.namespaceUnit !== null && isAbsolute(source.dataDir ?? "") && Number.isSafeInteger(source.uid) && source.uid >= 0), "Explicit source path and namespace unit/null required");
     for (const controller of owner.controllers.filter(controller => controller.kind === "remote")) need(owner.sources.some(source => source.namespaceUnit === controller.unit && ["threadDatabase", "threadDatabaseDirectory", "inactivePersonal"].includes(source.kind)), `${owner.ownerId}: person source/lifecycle inventory missing for ${controller.unit}`);
   }
@@ -68,6 +71,24 @@ export function hostOperations(plan, system) {
   };
   const inNamespace = (ownerId, source, executable, args, input) => {
     const user = ownerUser(ownerId), own = ["/usr/sbin/runuser", "-u", user, "--", executable, ...args];
+    if (source.namespacePinned !== undefined) {
+      const expected = source.namespacePinned;
+      const path = '/proc/1/root' + expected.path;
+      const metadata = statSync('/proc/1/root/run/pi-stack/namespaces');
+      need(metadata.uid === 0 && !(metadata.mode & 0o022), 'Untrusted pinned resource directory');
+      const inode = command('/usr/bin/stat', ['-Lc', '%i', path]).trim();
+      const filesystem = command('/usr/bin/stat', ['-f', '-c', '%t', path]).trim();
+      need(inode === expected.mountNamespaceInode && filesystem === '6e736673', `${source.path}: pinned namespace identity changed`);
+      return command('/usr/bin/nsenter', [`--mount=${path}`, '--', ...own], undefined, input);
+    }
+    if (source.namespaceProcess !== undefined) {
+      const expected = source.namespaceProcess;
+      const stat = command('/usr/bin/cat', [`/proc/${expected.pid}/stat`]);
+      const ticks = stat.slice(stat.lastIndexOf(')') + 2).split(/\s+/)[19];
+      const inode = command('/usr/bin/stat', ['-Lc', '%i', `/proc/${expected.pid}/ns/mnt`]).trim();
+      need(ticks === expected.startTicks && inode === expected.mountNamespaceInode, `${source.path}: core custody namespace identity changed`);
+      return command('/usr/bin/nsenter', ['--target', String(expected.pid), '--mount', '--', ...own], undefined, input);
+    }
     if (source.namespaceUnit === null) return command(own[0], own.slice(1), undefined, input);
     const pid = unit(source.namespaceUnit, "MainPID");
     need(/^[1-9][0-9]*$/.test(pid), `${source.path}: owner namespace ${source.namespaceUnit} unavailable (locked or inactive)`);
@@ -101,7 +122,6 @@ export function hostOperations(plan, system) {
       need(typeof fleet === "string" && fleet, "Configured fleet user required for authority reachability");
       command("/usr/sbin/runuser", ["-u", fleet, "--", "/usr/local/bin/node", join(plan.checkout, "deploy/capacity-ready.mjs"), "uninitialized", join(plan.orchestrator, "dist/agent-capacity.js")]);
       release(join(plan.checkout, "deploy/host"), [plan.hostFile], "activation");
-      command("/usr/bin/python3", [join(plan.checkout, "deploy/one-kenan-activate"), "activate", "--host", plan.hostFile, "--expected", plan.releaseCommit]);
       return { gate: "applied", host: plan.host, barrierId: plan.barrierId };
     },
     async verify() {
@@ -115,7 +135,7 @@ export function hostOperations(plan, system) {
           if (state !== "active") continue;
           active++;
           const receipt = await health(controller.healthUrl);
-          if (receipt?.ok !== true || receipt.releaseCommit !== plan.releaseCommit || controller.kind === "daemon" && receipt.agentCapacityRequired !== true) oldControllers.push(controller.unit);
+          if (receipt?.ok !== true || receipt.releaseCommit !== plan.releaseCommit) oldControllers.push(controller.unit);
         }
         need(owner.sources.length > 0 || active === 0, `${owner.ownerId}: active controller has no execution sources`);
         const unavailableSources = [], groups = new Map();
@@ -126,7 +146,7 @@ export function hostOperations(plan, system) {
               need(clientManifest().owners.find(entry => entry.ownerId === owner.ownerId)?.uid === source.uid, "Inactive-person proof UID does not match configured owner");
               inactivePersonalSources.push({ ownerId: owner.ownerId, ...inactivePersonal(source) });
             } catch { unavailableSources.push(source.path); }
-          } else { const group = groups.get(source.namespaceUnit) ?? []; group.push(source); groups.set(source.namespaceUnit, group); }
+          } else { const key = sourceNamespaceKey(source); const group = groups.get(key) ?? []; group.push(source); groups.set(key, group); }
         }
         for (const sources of groups.values()) {
           try {
@@ -147,7 +167,7 @@ export function hostOperations(plan, system) {
       const entries = [];
       for (const owner of plan.owners) {
           const groups = new Map();
-          for (const source of owner.sources.filter(source => source.kind !== "inactivePersonal")) { const group = groups.get(source.namespaceUnit) ?? []; group.push(source); groups.set(source.namespaceUnit, group); }
+          for (const source of owner.sources.filter(source => source.kind !== "inactivePersonal")) { const key = sourceNamespaceKey(source); const group = groups.get(key) ?? []; group.push(source); groups.set(key, group); }
           for (const sources of groups.values()) {
             const censusPlan = { host: plan.host, barrierId: plan.barrierId, owners: [{ ownerId: owner.ownerId,
               threadDatabases: sources.filter(source => source.kind === "threadDatabase").map(source => source.path),

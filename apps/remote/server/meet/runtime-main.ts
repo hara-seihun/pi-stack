@@ -1,9 +1,10 @@
 import { Database } from "bun:sqlite";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { chmodSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { applyLocalConfig } from "../config";
-import { initializeRuntimeMirror, MEET_RUNTIME_PROTOCOL, meetData, meetSocket, runtimeRevision } from "./runtime";
+import { initializeRuntimeMirror, MEET_RUNTIME_PROTOCOL, meetData, retainedRuntimeEndpoint, runtimeRevision } from "./runtime";
+import { MeetSocketOwner, proveSocketAbsent } from "./runtime-socket";
 import type { RuntimeContext, RuntimeRequest, RuntimeResponse, RuntimeStatus } from "./runtime";
 import type { MeetResult } from "./protocol";
 
@@ -17,24 +18,33 @@ const validContext = (value: unknown): value is RuntimeContext => {
 };
 
 async function runMeetRuntime(): Promise<MeetResult<void>> {
+  const startupCleanup: Array<() => void | Promise<void>> = [];
   try {
     applyLocalConfig();
     const { MeetServer } = await import("./server");
     process.umask(0o077);
     const data = meetData();
-    const socket = meetSocket(data);
     mkdirSync(data, { recursive: true, mode: 0o700 });
-    // The parent invokes this entrypoint under its socket's lifetime flock. Only that owner may unlink a stale socket.
-    if (existsSync(socket)) unlinkSync(socket);
+    const locked = MeetSocketOwner.acquire(join(data, "meet-runtime.sock"), process.env.PI_CORE_CALLBACK_SOCKET, process.getuid!());
+    if (!locked.ok) { console.error(locked.error); process.exit(locked.kind === "occupied" ? 1 : 2); }
+    const retained = retainedRuntimeEndpoint(data);
+    if (!retained.ok || retained.value) {
+      locked.value.close();
+      console.error(retained.ok ? `Meet runtime PID ${retained.value!.pid} still owns accepted rooms; startup did not touch it` : retained.error);
+      process.exit(1);
+    }
+    const endpoint = locked.value;
+    const instance = endpoint.instance;
+    startupCleanup.push(() => endpoint.close());
+    const absent = await proveSocketAbsent(endpoint.socket);
+    if (!absent.ok) throw new Error(absent.error);
+    const socket = endpoint.endpoint;
     const db = new Database(join(data, "supervisor.sqlite3"), { create: true, strict: true });
+    startupCleanup.push(() => db.close());
     db.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
     initializeRuntimeMirror(db);
-    const instance = crypto.randomUUID();
+    startupCleanup.push(() => { db.query("DELETE FROM meet_runtime_owner WHERE instance=?").run(instance); });
     const revision = runtimeRevision();
-    db.transaction(() => {
-      db.query("DELETE FROM meet_live_rooms").run();
-      db.query("INSERT INTO meet_runtime_owner(singleton,pid,instance) VALUES(1,?,?) ON CONFLICT(singleton) DO UPDATE SET pid=excluded.pid,instance=excluded.instance").run(process.pid, instance);
-    })();
     const context = new AsyncLocalStorage<RuntimeContext>();
     const meet = new MeetServer(id => context.getStore()?.sessions.includes(id) === true, undefined, db,
       (meetingId, sessionId) => {
@@ -46,15 +56,16 @@ async function runMeetRuntime(): Promise<MeetResult<void>> {
         if (event.kind === "created") db.query("INSERT INTO meet_live_rooms(id,session_id,instance) VALUES(?,?,?)").run(event.id, event.sessionId, instance);
         else db.query("DELETE FROM meet_live_rooms WHERE id=? AND instance=?").run(event.id, instance);
       });
+    startupCleanup.push(() => meet.close());
     let phase: RuntimeStatus["phase"] = "serving";
     let inFlight = 0;
     let shutdown: Promise<void> | null = null;
     const stopIdle = async () => {
       await meet.close();
       await server.stop(true);
+      endpoint.close();
       db.query("DELETE FROM meet_runtime_owner WHERE instance=?").run(instance);
       db.close();
-      if (existsSync(socket)) unlinkSync(socket);
       process.exit(0);
     };
     const scheduleStop = () => {
@@ -68,7 +79,7 @@ async function runMeetRuntime(): Promise<MeetResult<void>> {
         server.timeout(req, 120);
         const path = new URL(req.url).pathname;
         if (path === "/runtime/status" && req.method === "GET") return success({ protocol: MEET_RUNTIME_PROTOCOL, revision, pid: process.pid,
-          instance, phase, requestsInFlight: inFlight, rooms: meet.liveRooms() } satisfies RuntimeStatus);
+          instance, socketPath: endpoint.endpoint, phase, requestsInFlight: inFlight, rooms: meet.liveRooms() } satisfies RuntimeStatus);
         if (path === "/runtime/release" && req.method === "POST") {
           let body: unknown;
           try { body = await req.json(); } catch { return failure("Invalid runtime release request"); }
@@ -117,14 +128,25 @@ async function runMeetRuntime(): Promise<MeetResult<void>> {
         finally { inFlight--; }
       },
     });
-    chmodSync(socket, 0o600);
+    startupCleanup.push(async () => { await server.stop(true); });
+    endpoint.captureBoundEndpoint();
+    db.transaction(() => {
+      db.query("DELETE FROM meet_live_rooms").run();
+      db.query("INSERT INTO meet_runtime_owner(singleton,pid,instance,socket_path) VALUES(1,?,?,?) ON CONFLICT(singleton) DO UPDATE SET pid=excluded.pid,instance=excluded.instance,socket_path=excluded.socket_path").run(process.pid, instance, endpoint.endpoint);
+    })();
+    const published = await endpoint.publish();
+    if (!published.ok) throw new Error(published.error);
     for (const signal of ["SIGUSR2", "SIGHUP"] as const) process.on(signal, () => {});
     for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => {
       // Release activation never signals this owner. TERM/INT are explicit service shutdown.
       if (phase === "serving") { phase = "releasing"; scheduleStop(); }
     });
     return { ok: true, value: undefined };
-  } catch (cause) { return { ok: false, error: `Meet runtime startup failed: ${String(cause)}` }; }
+  } catch (cause) {
+    const failures: string[] = [];
+    for (const close of startupCleanup.reverse()) try { await close(); } catch (failure) { failures.push(String(failure)); }
+    return { ok: false, error: `Meet runtime startup failed: ${String(cause)}${failures.length ? `; cleanup: ${failures.join("; ")}` : ""}` };
+  }
 }
 
 const started = await runMeetRuntime();

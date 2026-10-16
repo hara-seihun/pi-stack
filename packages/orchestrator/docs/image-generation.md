@@ -38,6 +38,8 @@ Writes share Pi's per-file mutation queue. An existing primary output is refused
 
 The router can make sequential image calls even with `parallel_tool_calls: false`. Multiple completed calls are valid output, not a reason to repeat generation. Requests use `store: false`; a response ID alone cannot recover bytes discarded by an earlier tool version.
 
+The shared Responses parser classifies the provider’s `keepalive` heartbeat as progress, so it does not terminate image generation or native completions. Unknown event types still produce an explicit protocol error; a heartbeat alone cannot establish completion. Retained runners may adopt this exact registry through `adoptRetainedResponseHeartbeats` (`retained-response-heartbeat-v1`): all parser/registry values and descriptors are validated before adding only the heartbeat entry. Installation is idempotent, proves the captured parser sees the change, rejects unknown registries and restores every addition on a binding mismatch. Factory selection alone does not update retained module closures.
+
 A request has a five-minute deadline and follows Pi cancellation. Provider refusal, a truncated stream, invalid image data or an explicitly reported wrong model is an error. Generation is never automatically retried or moved to another account after failure, because an interrupted request may already have consumed allowance.
 
 ## Checks

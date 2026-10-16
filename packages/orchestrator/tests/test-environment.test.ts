@@ -29,13 +29,13 @@ it("isolates synthetic admissions without bypassing explicit credential rejectio
   try {
     store.upsertAccount({ id: "anthropic", provider: "anthropic" });
     const config = loadConfig("/missing");
-    expect(assign(store, "opus", "force", config).assignment?.accountId).toBe("anthropic");
+    expect(assign(store, { provider: "anthropic", model: "claude-opus-5-5" }, "force", config).assignment?.accountId).toBe("anthropic");
     const authPath = join(process.env.HOME!, "rejected-auth.json");
     writeFileSync(authPath, JSON.stringify({ anthropic: {
       type: "oauth", access: "fixture", refresh: "fixture", expires: Date.now() + 60_000,
       piCredentialState: { state: "login-required", rejectedAt: Date.now() },
     } }));
-    const refused = assign(store, "opus", "force", { ...config, authPath });
+    const refused = assign(store, { provider: "anthropic", model: "claude-opus-5-5" }, "force", { ...config, authPath });
     expect(refused.assignment).toBeUndefined();
     expect(refused.refusals).toEqual([{ accountId: "anthropic", reason: "shared OAuth credential requires login" }]);
   } finally { store.close(); }

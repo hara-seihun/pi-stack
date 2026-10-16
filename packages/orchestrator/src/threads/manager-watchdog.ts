@@ -1,6 +1,7 @@
 import type { Thread } from "./contracts.js";
 
-export const MANAGER_INACTIVITY_MS = 5 * 60_000;
+export const MANAGER_DIGEST_MS = 20 * 60_000;
+export const MANAGER_INACTIVITY_MS = MANAGER_DIGEST_MS;
 export const MANAGER_WATCHDOG_PREFIX = "thread-wake:manager-inactivity:";
 export type ManagerWorkSummary = { activeWork: boolean; lastHumanMessageAt: number | null };
 export type ManagerWatchObservation = ManagerWorkSummary & { managerThreadId: string | null };
@@ -16,7 +17,8 @@ export function hasManagedWork(thread: Pick<Thread, "lifecycle" | "metadata">): 
   switch (thread.lifecycle.kind) {
     case "working": case "waiting": case "cancelling": return true;
     case "failed": return thread.lifecycle.control !== "none";
-    case "idle": case "archived": return false;
+    case "idle": return true;
+    case "archived": return false;
   }
 }
 

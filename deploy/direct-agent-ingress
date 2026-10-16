@@ -22,22 +22,7 @@ while IFS= read -r user; do
   [[ -n $home && -d $home ]] || { echo "Configured account home is unavailable: $user" >&2; exit 75; }
   [[ $(readlink -f "$home/.local/bin/pi") == "$selected" ]] || { echo "Account $user has no managed Pi launcher" >&2; exit 75; }
 done <<<"$users"
-load=$(systemctl show pi-kenan-root.service -p LoadState --value)
-case $load in
-  not-found) ;;
-  loaded|masked)
-    state=$(systemctl show pi-kenan-root.service -p ActiveState --value)
-    case $state in
-      active)
-        config=${PI_KENAN_CONFIG:-/etc/pi-stack/one-kenan.json}
-        port=$(pi_stack_as_root jq -er '.rootPort | select(type=="number" and .>0 and .<65536)' "$config")
-        health=$(pi_stack_as_root curl -fsS --max-time 5 "http://127.0.0.1:$port/v1/health")
-        jq -e --arg expected "$expected" '.releaseCommit==$expected and .releaseProtocol==1' <<<"$health" >/dev/null || { echo 'Root is not the selected managed release' >&2; exit 75; }
-        ;;
-      inactive|failed) ;;
-      *) echo "Root controller transition is unsettled: $state" >&2; exit 75;;
-    esac
-    ;;
-  *) echo "Unknown root controller state: $load" >&2; exit 75;;
-esac
-jq -nc --arg commit "$expected" '{cli:"managed",sdk:"managed",root:"idle-managed",evidence:{releaseCommit:$commit}}'
+core=${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}
+proof=$(pi_stack_as_root "$core/host/core-runtime" proof "$core" /etc/pi-stack/core.json)
+jq -e --arg expected "$expected" '.ok == true and .value.releaseCommit == $expected and .value.protocol == "pi-core-adoption-proof-v1"' <<<"$proof" >/dev/null || { echo 'Scoped core ingress does not own the selected adopted release' >&2; exit 75; }
+jq -nc --arg commit "$expected" '{cli:"managed",sdk:"managed",core:"adopted",evidence:{releaseCommit:$commit}}'

@@ -1,12 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, mkdtempSync, mkdirSync, copyFileSync, rmSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, copyFileSync, chmodSync, rmSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { patchSummaryRecovery, patchSummaryFailureFence, patchSummaryRecoveryCopies } from "./patch-summary-recovery.mjs";
 import { patchCompactionErrors } from "./patch-compaction-errors.mjs";
+import { patchCompactionFallback } from "./patch-compaction-fallback.mjs";
+import { runCompactionWithFallback } from "./compaction-fallback.js";
 
 const base = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
 const summaries = [join(base, "core/compaction/compaction.js")];
@@ -164,8 +166,11 @@ for (const path of summaries) {
   });
 }
 
-for (const path of sessions) test("SDK: failed automatic prose compaction fences requests across reload/aliases until its retry time", async () => {
-  const source = patchSummaryFailureFence(patchCompactionErrors(readFileSync(path, "utf8")));
+for (const path of sessions) for (const [name, source] of (() => {
+  const original = patchSummaryFailureFence(patchCompactionErrors(readFileSync(path, "utf8")));
+  const alternate = patchCompactionFallback(original);
+  return original === alternate ? [["installed", original]] : [["installed", original], ["fallback-patched", alternate]];
+})()) test(`SDK: failed automatic prose compaction fences requests across reload/aliases until its retry time (${name})`, async () => {
   assert.equal(patchSummaryFailureFence(source), source);
   const start = source.indexOf("/* Pi Stack durable summary failure fence */");
   const end = source.indexOf("async _dispatchTurnEndBoundary(", start);
@@ -175,21 +180,33 @@ for (const path of sessions) test("SDK: failed automatic prose compaction fences
   let compactRequests = 0;
   const session = {
     model, settingsManager: { getCompactionSettings: () => ({}) }, _getSummarizationRequestAuth: async () => ({}),
+    _modelRuntime: { getAvailableSnapshot: () => [{ provider: "openai-codex", api: "openai-codex-responses", id: "gpt-6.1-sol" }], streamSimple() {} },
     sessionManager: { getBranch: () => branch, appendCustomEntry: (customType, data) => branch.push({ type: "custom", customType, data }), buildSessionProjection: () => ({ messages: [] }) },
     _emit: event => events.push(event), _emitSessionCompactFailed: async () => {},
     _extensionRunner: { hasHandlers: () => true, emit: async () => { compactRequests++; return { error: "generation hit the token cap" }; } },
     agent: { state: { tools: [] }, async runWithLifecycle(executor) { try { await executor(); } catch {} }, async processEvents() {} },
     _resolveIdleWaitIfIdle() {}, _assertSummaryRecovery: methods._assertSummaryRecovery,
   };
+  if (source.includes("/* Pi Stack single alternate compaction */")) {
+    const helperStart = source.indexOf("/* Pi Stack single alternate compaction */");
+    const helperEnd = source.indexOf("async _runDefaultCompaction(", helperStart);
+    const helpers = new Function("runCompactionWithFallback", "portableCompactionPreparation", "buildSessionProjection", "compact",
+      `return class { ${source.slice(helperStart, helperEnd)} };`)(runCompactionWithFallback, preparation => ({ ok: true, value: preparation }), () => ({}),
+      async () => { throw new Error("alternate summary failed"); }).prototype;
+    session._runCompactionWithFallback = helpers._runCompactionWithFallback;
+    session.settingsManager.getRetrySettings = () => ({});
+    session._summarizationRetryCallbacks = () => ({});
+  }
+  const failureRecords = () => branch.filter(entry => entry.type === "custom" && entry.customType === "pi-stack-auto-compaction-failure");
   const autoStart = source.indexOf("async _runAutoCompaction(");
   const autoEnd = source.indexOf("setAutoCompactionEnabled(", autoStart);
   const prepare = () => ({});
   const auto = new Function("prepareCompaction", "prepareCompaction2", `return class { ${source.slice(autoStart, autoEnd)} };`)(prepare, prepare).prototype._runAutoCompaction;
   assert.equal(await auto.call(session, "overflow", true), false);
-  assert.equal(branch.length, 1);
+  assert.equal(failureRecords().length, 1);
   assert.equal(await auto.call(session, "threshold", false), false);
   assert.equal(compactRequests, 1, "automatic compaction must not resubmit the failed summary");
-  assert.equal(branch.length, 1, "rejections do not multiply durable failure records");
+  assert.equal(failureRecords().length, 1, "rejections do not multiply durable failure records");
   methods._installAgentRequestProjection.call(session);
   let inference = 0;
   const request = async () => { await session.agent.prepareRequest({ context: {} }); inference++; };
@@ -198,7 +215,7 @@ for (const path of sessions) test("SDK: failed automatic prose compaction fences
   const reloaded = { ...session, model: { ...model, provider: "anthropic-99" } };
   assert.throws(() => methods._assertSummaryRecovery.call(reloaded), /Automatic compaction retries after/);
   const now = Date.now;
-  Date.now = () => branch[0].data.failedAt + 60_000;
+  Date.now = () => failureRecords()[0].data.failedAt + 60_000;
   try { assert.doesNotThrow(() => methods._assertSummaryRecovery.call(reloaded), "the fence expires instead of waiting for a manual retry"); }
   finally { Date.now = now; }
   reloaded.model = { ...model, id: "another-model" };
@@ -208,7 +225,7 @@ for (const path of sessions) test("SDK: failed automatic prose compaction fences
   assert.equal(inference, 1);
   session._extensionRunner.emit = async () => ({ cancel: true });
   await auto.call(session, "threshold", false);
-  assert.equal(branch.length, 2, "operator cancellation creates no failure fence");
+  assert.equal(failureRecords().length, 1, "operator cancellation creates no failure fence");
 });
 
 test("actual SDK default summarizer retries a capped thinking response instead of committing an incomplete summary", async () => {
@@ -257,6 +274,7 @@ test("deployment patches managed SDK sources idempotently and preserves valid sy
       const destination = join(target, relative(base, path));
       mkdirSync(dirname(destination), { recursive: true });
       copyFileSync(path, destination);
+      chmodSync(destination, 0o600);
     }
     patchSummaryRecoveryCopies(root);
     patchSummaryRecoveryCopies(root);

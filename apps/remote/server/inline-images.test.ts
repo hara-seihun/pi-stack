@@ -4,7 +4,7 @@ import { mkdtemp, readFile, readdir, rm, truncate, writeFile } from "node:fs/pro
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseInlineImageTags } from "./inline-image-contract";
-import { InlineImages, type InlineImageGenerator } from "./inline-images";
+import { InlineImages, type InlineImageGenerator } from "../../../packages/orchestrator/src/core/image-registry";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0)) await close(); });
@@ -18,7 +18,7 @@ function deferred() {
 async function fixture(generate: InlineImageGenerator, concurrency = 2, acceptsThread = (_id: string) => true) {
   const root = await mkdtemp(join(tmpdir(), "pi-inline-images-"));
   const db = new Database(join(root, "state.sqlite3"));
-  db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; CREATE TABLE thread_views(id TEXT PRIMARY KEY); INSERT INTO thread_views VALUES('thread'),('other');");
+  db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; CREATE TABLE core_image_threads(id TEXT PRIMARY KEY); INSERT INTO core_image_threads VALUES('thread'),('other');");
   const listeners = new Set<() => void>();
   const changed = () => { for (const listener of listeners) listener(); };
   const service = new InlineImages(db, join(root, "images"), generate, changed, concurrency, () => true, acceptsThread);
@@ -32,8 +32,8 @@ async function fixture(generate: InlineImageGenerator, concurrency = 2, acceptsT
   return { root, db, service, until, changed };
 }
 
-test("sandbox replies cannot submit image generation through inline tags or context replay", async () => {
-  const f = await fixture(async () => { throw new Error("sandbox must not invoke an image provider"); }, 2, id => id !== "thread");
+test("resource grants gate inline image acceptance and context replay", async () => {
+  const f = await fixture(async () => { throw new Error("unauthorized thread must not invoke an image provider"); }, 2, id => id !== "thread");
   await f.service.start();
   const tag = '<pi-remote-image id="escape" prompt="draw" />';
   f.service.accept("thread", "message", tag);
@@ -52,6 +52,40 @@ test("shared parser excludes examples, escaped tags and raw code; decodes multil
   expect(tags[1].definition).toBeNull();
   expect(parseInlineImageTags('<pi-remote-image id="x" prompt="partial')).toEqual([]);
   expect(parseInlineImageTags('<pi-remote-image id="x" prompt="a" prompt="b" />')[0].error).toContain("Duplicate");
+});
+
+test("one image tag selects a path or a prompt without ambiguous definitions", () => {
+  const tag = parseInlineImageTags('<pi-remote-image id="file" path="/owned/a&amp;b.jpg" />')[0];
+  expect(tag.path).toBe("/owned/a&b.jpg");
+  expect(tag.definition).toEqual({ id: "file", prompt: null, refs: [], sourcePath: "/owned/a&b.jpg" });
+  expect(tag.error).toBeNull();
+  for (const attributes of ['path="relative.png"', 'path="/a.png" prompt="draw"', 'path="/a.png" refs="other"']) {
+    expect(parseInlineImageTags(`<pi-remote-image id="bad" ${attributes} />`)[0].error).not.toBeNull();
+  }
+});
+
+test("existing images enter the same immutable artifact custody without provider generation", async () => {
+  const f = await fixture(async () => { throw new Error("path display must not call the provider"); });
+  const source = join(f.root, "source.png");
+  await writeFile(source, png);
+  f.service.accept("thread", "file", `<pi-remote-image id="file" path="${source}" />`);
+  await f.service.start();
+  await f.until(() => f.service.snapshot("thread").images[0]?.state === "complete");
+  const completed = f.service.snapshot("thread").images[0];
+  expect(completed).toMatchObject({ prompt: null, sourcePath: source, model: null, responseId: null });
+  expect(completed.path).not.toBe(source);
+  await writeFile(source, "changed");
+  expect(await readFile(completed.path!)).toEqual(png);
+  f.service.accept("thread", "file-replay", `<pi-remote-image id="file" path="${source}" />`);
+  expect(f.service.snapshot("thread").images[0].conflict).toBeNull();
+  f.service.accept("thread", "file-conflict", '<pi-remote-image id="file" prompt="Replace" />');
+  expect(f.service.snapshot("thread").images[0].conflict).not.toBeNull();
+  f.service.stop();
+  f.db.query("UPDATE inline_images SET value=?").run(JSON.stringify({ ...completed, state: "generating", path: null, paths: [] }));
+  const replacement = new InlineImages(f.db, join(f.root, "images"), async () => { throw new Error("recovery must not generate"); }, f.changed);
+  await replacement.start();
+  expect(replacement.snapshot("thread").images[0]).toMatchObject({ state: "complete", path: completed.path });
+  await replacement.close();
 });
 
 test("multiline prompt contents cannot change Markdown state or submit embedded tags", () => {
@@ -187,7 +221,7 @@ test.each([true, false])("session deletion during provider completion cannot res
   f.service.accept("other", "retained", '<pi-remote-image id="retained" prompt="Keep me" />');
   await f.service.start();
   await claimed;
-  f.db.query("DELETE FROM thread_views WHERE id='thread'").run();
+  f.db.query("DELETE FROM core_image_threads WHERE id='thread'").run();
   release();
   await f.until(() => f.service.snapshot("other").images[0]?.state === "complete");
   expect(f.service.snapshot("thread")).toEqual({ version: 0, images: [] });

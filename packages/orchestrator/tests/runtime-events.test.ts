@@ -44,6 +44,7 @@ it("cannot turn unknown or nonterminal assistant/completion states into success"
 });
 
 it("accepts named provider progress but rejects unknown SSE and malformed native evidence", () => {
+  expect(parseResponseEvent({ type: "keepalive" })).toMatchObject({ ok: true, value: { kind: "progress" } });
   expect(parseResponseEvent({ type: "response.image_generation_call.generating" })).toMatchObject({ ok: true, value: { kind: "progress" } });
   expect(parseResponseEvent({ type: "response.new_event" })).toMatchObject({ ok: false, error: expect.stringContaining("Unknown provider response event type") });
   expect(parseResponseEvent({ type: "response.completed" })).toMatchObject({ ok: false, error: expect.stringContaining("Missing response object") });

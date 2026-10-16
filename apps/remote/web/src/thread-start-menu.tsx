@@ -5,7 +5,6 @@ import { CONTROLLER_REPLACEMENT_TIMEOUT_MS } from "./controller-replacement";
 import { validateSession, stateArray } from "../../shared/state-validation";
 import { ChatIcon } from "./chat-row";
 import { aiChat, roomChat, type Chat } from "./chats";
-import { agentName } from "./agent-name";
 import { StatusIcon } from "./features/status/StatusIcon";
 import { threadStatus } from "./features/status/thread-status";
 import type { Room, RoomMember } from "../../shared/rooms";
@@ -60,7 +59,7 @@ export const ChatPicker = forwardRef<ChatPickerHandle, ChatPickerProps>(function
   const request = state.kind === "creating" ? state.request : null;
   const busy = opening || state.kind === "creating";
   const models = pickerOptions(chosen?.models ?? [], query, item => `${item.label} ${item.id}`);
-  const agentOptions = pickerOptions((agents ?? []).filter(item => placement === "all" || (item.foreground ? "foreground" : "background") === placement), query, item => `${item.agentName ?? ""} ${item.name} ${item.id}`);
+  const agentOptions = pickerOptions((agents ?? []).filter(item => placement === "all" || (item.foreground ? "foreground" : "background") === placement), query, item => `${item.name} ${item.id}`);
   const searchable = category.kind === "agents" || category.kind === "archived" || (category.kind === "models" && models.searchable);
   const title = category.kind === "agents" ? "Open agent" : category.kind === "room" ? "Room" : category.kind === "archived" ? "Archived" : chosen?.label || "New chat";
   const close = useCallback((restoreFocus = false) => {
@@ -201,7 +200,7 @@ export const ChatPicker = forwardRef<ChatPickerHandle, ChatPickerProps>(function
         {category.kind === "agents" && <label>Placement <select aria-label="Agent placement" value={placement} onChange={event => setPlacement(event.target.value as typeof placement)}><option value="background">Background</option><option value="foreground">Foreground</option><option value="all">All</option></select></label>}
         <div className="chat-picker-list">
           {category.kind === "agents" && agents === null && !archiveError && <p role="status">Loading agents…</p>}
-          {category.kind === "agents" && agentOptions.items.map(item => <button type="button" key={item.id} disabled={busy} onClick={() => void select(aiChat(item, starts))}><StatusIcon status={threadStatus(item)} /><span>{agentName(item) ?? item.name}<small>{[agentName(item) && item.name, item.foreground ? "Foreground" : "Background"].filter(Boolean).join(" · ")}</small></span></button>)}
+          {category.kind === "agents" && agentOptions.items.map(item => <button type="button" key={item.id} disabled={busy} onClick={() => void select(aiChat(item, starts))}><StatusIcon status={threadStatus(item)} /><span>{item.name || item.id}<small>{item.foreground ? "Foreground" : "Background"}</small></span></button>)}
           {category.kind === "models" && modelGroups.map(group => <section className="chat-picker-model-group" key={group.id} aria-label={[group.title, group.description].filter(Boolean).join(" · ")}>
             <h3>{group.title}{group.description && <small>{group.description}</small>}</h3>
             <div className="chat-picker-identities chat-picker-model-identities">{group.models.map(choice => {
@@ -209,7 +208,7 @@ export const ChatPicker = forwardRef<ChatPickerHandle, ChatPickerProps>(function
               return <button className="chat-picker-identity" type="button" key={choice.id} aria-label={choice.label} title={choice.label} disabled={busy || state.kind === "failed"} onClick={() => choose(choice.id)}>{showModelIcon(icon) ? <ChatIcon icon={icon} /> : <span className="chat-picker-identity-label">{choice.label}</span>}</button>;
             })}</div>
           </section>)}
-          {category.kind === "archived" && archiveReady && archivePage.sessions.map(item => <button type="button" key={item.id} disabled={busy} onClick={() => void select(aiChat(item, starts))}><ChatIcon icon={aiChat(item, starts).icon} /><span>{agentName(item) ?? (item.name || "Agent")}{agentName(item) && item.name && <small>{item.name}</small>}</span></button>)}
+          {category.kind === "archived" && archiveReady && archivePage.sessions.map(item => <button type="button" key={item.id} disabled={busy} onClick={() => void select(aiChat(item, starts))}><ChatIcon icon={aiChat(item, starts).icon} /><span>{item.name || item.id}</span></button>)}
         </div>
         {category.kind === "archived" && !archiveReady && !archiveError ? <p role="status">Loading chats…</p> : !archiveError && <p className="chat-picker-count" role="status">{total === 0 ? (query ? "No matches" : "No options yet") : total > PICKER_RESULT_LIMIT ? `Showing ${PICKER_RESULT_LIMIT} of ${total}. Search to narrow the list.` : ""}</p>}
       </>}
