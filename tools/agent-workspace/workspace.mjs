@@ -1517,7 +1517,7 @@ function registerCommand(database, args) {
     cachePaths: cachePathsForRepository(selectedPath, args),
     replaceCachePaths: bool(args, "replace-cache"),
   });
-  print(record, bool(args, "json"));
+  print(creationRecord(database, record.id), bool(args, "json"));
 }
 
 /** @typedef {'workspace-not-registered' | 'path-mismatch' | 'state-not-reassignable' | 'state-mismatch' | 'mode-not-writer' | 'owner-mismatch' | 'source-mismatch' | 'assignment-unchanged' | 'assignment-history-mismatch' | 'checkout-type-mismatch' | 'repository-mismatch' | 'writer-branch-unknown' | 'head-mismatch' | 'checkout-inspection-failed' | 'resource-busy' | 'reassignment-failed'} ReassignmentErrorCode */
@@ -2829,9 +2829,13 @@ function assertPendingClean(destination) {
   if (changes) fail(`pending checkout contains changes: ${changes.split("\n").slice(0, 8).join(" | ")}; preserve and repair them before resuming creation`);
 }
 
+function recordedCapacity(database, id) {
+  const row = database.prepare("SELECT plan_json FROM workspace_capacity WHERE workspace_id=?").get(id);
+  return row === undefined ? null : JSON.parse(row.plan_json);
+}
+
 function creationRecord(database, id) {
-  const plan = database.prepare("SELECT plan_json FROM workspace_capacity WHERE workspace_id=?").get(id);
-  return { ...recordBy(database, { id }), ...(plan === undefined ? {} : { capacity: JSON.parse(plan.plan_json) }) };
+  return { ...recordBy(database, { id }), capacity: recordedCapacity(database, id) };
 }
 
 function completeCreation(database, id, repository, leaseSeconds, detail, args) {
@@ -3343,7 +3347,7 @@ function statusCommand(database, args) {
   const records = rows.slice(0, limit).map(row => {
     const { cachePaths, ...record } = rowToRecord({ ...row, cache_paths: "[]", creation_request: "null" });
     delete record.creation;
-    return { ...record, cacheDeclarationBytes: row.cache_bytes, creationRequestBytes: row.creation_bytes };
+    return { ...record, capacity: recordedCapacity(database, row.id), cacheDeclarationBytes: row.cache_bytes, creationRequestBytes: row.creation_bytes };
   });
   const last = rows[Math.min(rows.length, limit) - 1];
   const nextAfter = hasMore && last ? Buffer.from(JSON.stringify([last.root, last.path, last.id])).toString("base64url") : null;
