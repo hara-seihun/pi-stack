@@ -3,29 +3,55 @@ set -euo pipefail
 # Scoped immutable broker update. No Core/Remote/campaign activation.
 [[ $# == 3 ]] || { echo 'usage: deploy/subscription-only-broker BASE DEST SERVICE|none' >&2; exit 64; }
 base=$(realpath "$1"); dest=$2; service=$3
+[[ $service == none || $service == pi-model-broker.service ]] || { echo 'unsupported active broker owner' >&2; exit 65; }
 root=$(cd "$(dirname "$0")/.." && pwd)
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$root" GIT_OPTIONAL_LOCKS=0
 commit=$(git -C "$root" rev-parse HEAD)
 [[ -z $(git -C "$root" status --porcelain) ]] || { echo 'uncommitted source' >&2; exit 65; }
 [[ ! -e $dest ]] || { echo 'immutable destination exists' >&2; exit 65; }
 [[ $EUID == 0 ]] || { echo 'root required' >&2; exit 77; }
+# Build/publication modes must not inherit an operator's private umask.
+umask 022
+runtime_user=root
+runtime_group=root
+if [[ $service != none ]]; then
+  runtime_user=$(systemctl show "$service" --property=User --value)
+  runtime_group=$(systemctl show "$service" --property=Group --value)
+  [[ -n $runtime_user ]] || runtime_user=root
+  [[ -n $runtime_group ]] || runtime_group=$(id -gn "$runtime_user")
+  id -u "$runtime_user" > /dev/null
+  getent group "$runtime_group" > /dev/null
+fi
 stage=$(mktemp -d "${dest}.stage.XXXX")
 trap 'rm -rf "$stage"' EXIT
 cp -a "$base/." "$stage/"
 for name in subscription-only shared-oauth pooled-only anthropic-files-provider; do
   /srv/pi/runtime/node_modules/esbuild/bin/esbuild "$root/packages/orchestrator/src/auth/$name.ts" --outfile="$stage/dist/auth/$name.js" --format=esm --platform=node --target=node24
-  cp "$root/packages/orchestrator/src/auth/$name.ts" "$stage/src/auth/"
+  install -m 0644 "$root/packages/orchestrator/src/auth/$name.ts" "$stage/src/auth/"
 done
 /srv/pi/runtime/node_modules/esbuild/bin/esbuild "$root/packages/orchestrator/src/model-broker.ts" --outfile="$stage/dist/model-broker.js" --format=esm --platform=node --target=node24
-cp "$root/packages/orchestrator/src/model-broker.ts" "$stage/src/"
+install -m 0644 "$root/packages/orchestrator/src/model-broker.ts" "$stage/src/"
 /srv/pi/runtime/node_modules/esbuild/bin/esbuild "$root/packages/orchestrator/src/experiment-custody.ts" --outfile="$stage/dist/experiment-custody.js" --format=esm --platform=node --target=node24
-cp "$root/packages/orchestrator/src/experiment-custody.ts" "$stage/src/"
-cp "$root/deploy/subscription-only-check.mjs" "$stage/subscription-only-check.mjs"
+install -m 0644 "$root/packages/orchestrator/src/experiment-custody.ts" "$stage/src/"
+install -m 0644 "$root/deploy/subscription-only-check.mjs" "$stage/subscription-only-check.mjs"
 printf '{"source":"%s","base":"%s"}\n' "$commit" "$base" > "$stage/subscription-only-binding.json"
-node "$stage/subscription-only-check.mjs" "$stage"
+# Only public code produced here gets public read access. Do not recursively
+# widen permissions on the base release, dependencies or credential files.
+chmod 0755 "$stage" "$stage/dist" "$stage/dist/auth" "$stage/src" "$stage/src/auth"
+chmod 0644 "$stage/dist/model-broker.js" "$stage/dist/experiment-custody.js" "$stage/subscription-only-binding.json"
+for name in subscription-only shared-oauth pooled-only anthropic-files-provider; do
+  chmod 0644 "$stage/dist/auth/$name.js"
+done
+check_args=("$stage")
+if [[ $service != none ]]; then
+  # Keep the existing config bytes private and readable by the actual service.
+  chown root:"$runtime_group" /etc/pi-model-broker.json
+  chmod 0640 /etc/pi-model-broker.json
+  check_args+=(/etc/pi-model-broker.json)
+fi
+/usr/sbin/runuser -u "$runtime_user" -g "$runtime_group" -- /usr/local/bin/node "$stage/subscription-only-check.mjs" "${check_args[@]}"
 mv "$stage" "$dest"
 if [[ $service != none ]]; then
-  [[ $service == pi-model-broker.service ]] || { echo 'unsupported active broker owner' >&2; exit 65; }
   mkdir -p "/etc/systemd/system/$service.d"
   printf '[Service]\nExecStart=\nExecStart=/usr/local/bin/node %s/dist/cli.js model-broker /etc/pi-model-broker.json\nTimeoutStopSec=30min\n' "$dest" > "/etc/systemd/system/$service.d/zzzzzzz-subscription-only.conf"
   systemctl daemon-reload

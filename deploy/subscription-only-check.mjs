@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-export async function checkBroker(root) {
+export async function checkBroker(root, configPath) {
   const module = await import(pathToFileURL(join(root, 'dist/auth/shared-oauth.js')));
   const { subscriptionCredential } = await import(pathToFileURL(join(root, 'dist/auth/subscription-only.js')));
   const { pooledOnlyProvider } = await import(pathToFileURL(join(root, 'dist/auth/pooled-only.js')));
@@ -17,6 +17,14 @@ export async function checkBroker(root) {
   globalThis.fetch = async () => { fetches++; throw Error('network forbidden in offline proof'); };
   const cases = [];
   try {
+    // Import the real broker graph, including newly introduced modules. Importing
+    // does not start listeners; the global fetch sentinel forbids model calls.
+    await import(pathToFileURL(join(root, 'dist/model-broker.js')));
+    if (configPath) {
+      try { JSON.parse(readFileSync(configPath, 'utf8')); }
+      catch { throw Error('Broker config is unreadable or invalid for the runtime identity'); }
+    }
+    cases.push('broker graph and private config readable by runtime identity');
     for (const value of [{ type: 'api_key', key: 'offline-metered-sentinel' }, { type: 'token', token: 'offline-metered-sentinel' }, 'offline-metered-sentinel']) {
       writeFileSync(path, JSON.stringify({ 'openai-codex': value }));
       await assert.rejects(auth.resolve('openai-codex', AbortSignal.timeout(1000)), error => error.code === 'metered_inference_forbidden');
@@ -38,10 +46,10 @@ export async function checkBroker(root) {
     const brokerSource = readFileSync(join(root, 'src/model-broker.ts'), 'utf8');
     assert.match(brokerSource, /forwardVoiceRequest/);
     assert.match(brokerSource, /metered_inference_forbidden/);
-    return { ok: true, component: 'subscription-only-broker', root: resolve(root), cases, networkCalls: fetches };
+    return { ok: true, component: 'subscription-only-broker', root: resolve(root), cases, networkCalls: fetches, uid: process.getuid(), gid: process.getgid() };
   } finally { globalThis.fetch = originalFetch; rmSync(directory, { recursive: true, force: true }); }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  if (process.argv.length !== 3) { console.error('usage: node subscription-only-check.mjs BROKER_RELEASE'); process.exitCode = 64; }
-  else try { console.log(JSON.stringify(await checkBroker(process.argv[2]))); } catch (error) { console.error(JSON.stringify({ ok: false, code: error.code ?? 'offline_guard_failed', message: error.message })); process.exitCode = 1; }
+  if (process.argv.length < 3 || process.argv.length > 4) { console.error('usage: node subscription-only-check.mjs BROKER_RELEASE [CONFIG]'); process.exitCode = 64; }
+  else try { console.log(JSON.stringify(await checkBroker(process.argv[2], process.argv[3]))); } catch (error) { console.error(JSON.stringify({ ok: false, code: error.code ?? 'offline_guard_failed', message: error.message })); process.exitCode = 1; }
 }
