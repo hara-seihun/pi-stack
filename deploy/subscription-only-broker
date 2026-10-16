@@ -32,5 +32,16 @@ if [[ $service != none ]]; then
   # Existing requests drain under the broker's native close() before replacement.
   systemctl restart "$service"
   systemctl is-active --quiet "$service"
+  proof_dir=/var/lib/pi-model-broker/source-bindings
+  install -d -m755 "$proof_dir"
+  node --input-type=module - "$dest" "$commit" "$proof_dir/$commit.json" <<'NODE'
+import { readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { join } from 'node:path';
+const [root,source,path]=process.argv.slice(2);
+const names=['dist/model-broker.js','dist/experiment-custody.js',...['subscription-only','shared-oauth','pooled-only','anthropic-files-provider'].map(n=>`dist/auth/${n}.js`)];
+writeFileSync(path,JSON.stringify({source,root,files:names.map(name=>({path:name,sha256:createHash('sha256').update(readFileSync(join(root,name))).digest('hex')}))}),{mode:0o644});
+NODE
+  node "$root/deploy/subscription-only-adopt.mjs" "$dest" "$service" "$proof_dir/$commit.json"
 fi
 printf 'installed %s from %s\n' "$dest" "$commit"
