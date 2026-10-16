@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { MemoryStore } from "../src/store.js";
 import { memoryService } from "../src/service.js";
+import { fixtureAuthorization } from "./authorization.js";
 import type { RootAdmission, RootResumeConsent } from "../src/contract.js";
 
 test("consent continuation preserves original authenticated identity and audience across restart", () => {
@@ -38,7 +39,7 @@ test("consent continuation preserves original authenticated identity and audienc
 
 test("only root service resumes/logs, no claimed identity fields, room roster rechecked", async () => {
   const store = new MemoryStore(":memory:"); let roomPeople = ["alice", "bob"];
-  const server = memoryService({ store, auth: { supervisors: [{ person: "alice", token: "alice-supervisor" }, { person: "bob", token: "bob-supervisor" }], rootToken: "root-service" }, enabled: () => true, peerUid: () => undefined,
+  const server = memoryService({ authorize: fixtureAuthorization, store, auth: { supervisors: [{ person: "alice", token: "alice-supervisor" }, { person: "bob", token: "bob-supervisor" }], rootToken: "root-service" }, enabled: () => true, peerUid: () => undefined,
     roomAudience: (person, threadId) => person === "pi-rooms" && threadId === "room" ? { roomId: "room", people: roomPeople } : undefined });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;

@@ -5,7 +5,6 @@ import { api } from "../../client";
 import type { Session } from "../../types";
 import { StatusIcon } from "../status/StatusIcon";
 import { StatusQuiet } from "../status/StatusPill";
-import { agentName } from "../../agent-name";
 import { threadStatus } from "../status/thread-status";
 import { backgroundAgents, countAgents, groupAgents, mergeAgentDirectory, type AgentFilter, type AgentGroup } from "./agent-directory";
 import { agentActivity } from "./agent-task";
@@ -56,7 +55,7 @@ function AgentGroupView({ group, expanded, onToggle, onOpen }: { group: AgentGro
       <span className="agent-group-total" aria-label={`${counts.total} agents`}>{counts.total}</span>
     </summary>
     <ul className="agent-group-list">{group.agents.map(agent => {
-      const status = threadStatus(agent), activity = agentActivity(agent), name = agentName(agent);
+      const status = threadStatus(agent), activity = agentActivity(agent);
       return <li key={agent.id}>
         <button className="agent-open" type="button" onClick={() => onOpen(agent.id)} title="Open original task in Chats">
           <StatusIcon status={status} className="agent-row-status" />
@@ -64,7 +63,7 @@ function AgentGroupView({ group, expanded, onToggle, onOpen }: { group: AgentGro
           <span className="agent-row-activity">{activity.label}</span>
           {activity.detail && <span className="agent-row-detail">{activity.detail}</span>}
           {agent.attentionSummary && agent.attentionSummary !== activity.detail && <span className="agent-row-attention">{agent.attentionSummary}</span>}
-          <span className="agent-row-identity">{name && <span className="agent-row-name">{name}</span>}<span className="agent-row-id">#{agent.id.slice(0, 8)}</span></span>
+          <span className="agent-row-identity"><span className="agent-row-id">#{agent.id.slice(0, 8)}</span></span>
           {status.busy && status.lastActivityAt ? <StatusQuiet status={status} /> : null}
         </button>
       </li>;

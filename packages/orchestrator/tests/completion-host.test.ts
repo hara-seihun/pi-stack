@@ -31,7 +31,7 @@ function fixture() {
     finally { closeSync(log); }
   };
   const admit = (id: string) => {
-    const submitted = service.submit(id, { model: "luna", prompt: id, metadata: { caller: "fixture", purpose: "durable" } });
+    const submitted = service.submit(id, { model: "luna", thinkingLevel: "low", speed: "standard", prompt: id, metadata: { caller: "fixture", purpose: "durable" } });
     if (!submitted.ok) throw new Error(submitted.error.message);
     const runId = submitted.value.runId;
     const choice = assignCompletion(store, runId, "luna", config, noModelPolicy);

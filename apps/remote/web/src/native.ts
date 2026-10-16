@@ -25,6 +25,7 @@ export interface PhoneStatus {
   /** Kenan's dot is shown over other apps; absent on shells without the overlay. */
   overlay?: boolean;
   error?: string | { code: string; message: string } | null;
+  setup: { state: "complete" } | { state: "needs-permissions"; missing: PhoneSetupStep[] };
   capabilities: Record<string, boolean | string | number | null>;
 }
 interface RemoteBridge {
@@ -33,7 +34,6 @@ interface RemoteBridge {
   openEditor?(options: { url: string; ticket: string }): Promise<void>;
   phoneStatus?(): Promise<PhoneStatus>;
   phoneConfigure?(options: { enabled: boolean; user: string; environment: string; name?: string }): Promise<void>;
-  phoneSetup?(options: { step: PhoneSetupStep; instruction?: string }): Promise<PhoneStatus>;
   phoneOverlay?(options: { visible: boolean }): Promise<PhoneStatus>;
   haptic?(options: { kind: string }): Promise<void>;
   keepAwake?(options: { enabled: boolean }): Promise<void>;
@@ -100,7 +100,6 @@ export const remote: RemoteBridge = !nativePlatform
         openEditor: (options) => capacitor.nativePromise("KenanRemote", "openEditor", options),
         phoneStatus: () => capacitor.nativePromise("KenanRemote", "phoneStatus", {}),
         phoneConfigure: (options) => capacitor.nativePromise("KenanRemote", "phoneConfigure", options),
-        phoneSetup: (options) => capacitor.nativePromise("KenanRemote", "phoneSetup", options),
         phoneOverlay: (options) => capacitor.nativePromise("KenanRemote", "phoneOverlay", options),
         haptic: (options) => capacitor.nativePromise("KenanRemote", "haptic", options),
         keepAwake: (options) => capacitor.nativePromise("KenanRemote", "keepAwake", options),
@@ -431,7 +430,7 @@ window.KenanRemote = {
   enabled: true,
   getState,
   ...(nativePlatform ? { openEditor: async (options: { url: string; ticket: string }) => {
-    if (!remote.openEditor) throw new Error("This Android shell cannot open the isolated editor; update the app");
+    if (!remote.openEditor) throw new Error("This Android shell cannot open the editor; update the app");
     await nativeSessionReady();
     await remote.openEditor(options);
   } } : {}),

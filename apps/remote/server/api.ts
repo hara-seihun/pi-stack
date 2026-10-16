@@ -37,8 +37,6 @@ export const API = Object.freeze({
   settings: route("GET", "/v1/settings"), updateSetting: route("PUT", "/v1/settings/:id"),
   manager: route("GET", "/v1/manager"), updateManager: route("POST", "/v1/manager"),
   notifications: route("GET", "/v1/notifications"),
-  needsYou: route("GET", "/v1/needs-you"),
-  dismissNeed: route("POST", "/v1/needs-you/dismiss"),
   phones: route("GET", "/v1/phones"), phoneConnect: route("GET", "/v1/phones/connect"), phoneCommands: route("GET", "/v1/phones/commands"), phoneCommand: route("POST", "/v1/phones/:phoneId/commands"),
   messageReaction: route("POST", "/v1/messages/reactions"),
   sessionReaction: route("POST", "/v1/sessions/:sessionId/reactions"),
@@ -55,7 +53,6 @@ export const API = Object.freeze({
   fileInfo: route("GET", "/v1/files/info"),
   editor: route("POST", "/v1/editor"), editorInfo: route("GET", "/v1/editor"), editorClose: route("POST", "/v1/editor/close"),
   fileDownload: route("GET", "/v1/files/download"), fileDownloadHead: route("HEAD", "/v1/files/download"),
-  speech: route("GET", "/v1/speech"), speechVoices: route("GET", "/v1/speech/engines/:engineId/voices"), speechUtterances: route("POST", "/v1/speech/utterances"), speechUtterance: route("GET", "/v1/speech/utterances/:utteranceId"), speechAudio: route("GET", "/v1/speech/utterances/:utteranceId/audio"),
   voice: route("GET", "/v1/voice"), voiceOffer: route("POST", "/v1/voice/offer"), voiceSessionUpdate: route("PATCH", "/v1/sessions/:sessionId/voice/:voiceId"), voiceSessionClose: route("DELETE", "/v1/sessions/:sessionId/voice/:voiceId"),
   setModelAvailability: route("PUT", "/v1/models/:id/availability"),
   actions: route("GET", "/v1/actions"), actionToggle: route("POST", "/v1/actions/:id/toggle"), uploadInit: route("POST", "/v1/uploads/init"), upload: route("PUT", "/v1/uploads/:id"), uploadComplete: route("POST", "/v1/uploads/:id/complete"), uploads: route("POST", "/v1/uploads"), removeUploads: route("DELETE", "/v1/uploads"),
@@ -84,5 +81,5 @@ export const API = Object.freeze({
   sessionPrompt: route("POST", "/v1/sessions/:sessionId/prompt"), sessionFork: route("POST", "/v1/sessions/:sessionId/fork"), sessionAbort: route("POST", "/v1/sessions/:sessionId/abort"), sessionResume: route("POST", "/v1/sessions/:sessionId/resume"), sessionEvents: route("GET", "/v1/sessions/:sessionId/events"), sessionContext: route("GET", "/v1/sessions/:sessionId/context"),
   sessionAdmission: route("PUT", "/v1/sessions/:sessionId/admission"),
   sessionSettings: route("GET", "/v1/sessions/:sessionId/settings"), updateSessionSettings: route("PUT", "/v1/sessions/:sessionId/settings"), sessionCommands: route("GET", "/v1/sessions/:sessionId/commands"), sessionCommand: route("POST", "/v1/sessions/:sessionId/command"),
-  queueItem: route("DELETE", "/v1/sessions/:sessionId/queue/:workId"), queueSteer: route("POST", "/v1/sessions/:sessionId/queue/:workId/steer"), queueHardSteer: route("POST", "/v1/sessions/:sessionId/queue/:workId/hard-steer"),
+  queueItem: route("DELETE", "/v1/sessions/:sessionId/queue/:workId"),
 });

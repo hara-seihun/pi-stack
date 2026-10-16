@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { callBrief, backendInstructions, instructions, type CallBrief } from "./policy";
+import { callBrief, instructions, type CallBrief } from "./policy";
 const brief: CallBrief = { requestId: "4208e41f-cafe-4bc5-991f-02dcb8f0f723", to: "+15555550123", purpose: "Book Tuesday afternoon appointment", shareableFacts: ["Available Tuesday after 14:00"], opening: "Hello, I am Kenan, an AI assistant.", maxSeconds: 300 };
 test("only durable approved recipient-facing fields enter the call", () => {
   expect(callBrief(brief)).toEqual({ ok: true, value: brief });
@@ -24,9 +24,10 @@ test("follow-up acknowledgement preserves the authored brief and requires a call
     expect(callBrief({ ...authored, [key]: true }).ok).toBe(false);
   }
 });
-test("the approved briefing feeds both existing reasoning and live speech", () => {
+test("the complete upfront brief feeds tool-free live speech", () => {
   expect(instructions(brief)).toContain(brief.purpose);
-  expect(backendInstructions(brief)).toContain(brief.shareableFacts[0]);
+  expect(instructions(brief)).toContain(brief.shareableFacts[0]);
+  expect(instructions(brief)).toContain("no tools, delegation, lookup or background reasoning service");
   const privateValue = { ...brief, systemPrompt: "PRIVATE_INTERNAL_HISTORY" };
   expect(callBrief(privateValue).ok).toBe(false);
 });

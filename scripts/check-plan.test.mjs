@@ -80,7 +80,8 @@ test('build verdict reuse requires intact products, and a product repair does no
   put('packages/kenan-memory/src/client.ts', 'export const value = 1;');
   let calls = 0;
   const run = checkExecutor({ root, directory: join(root, 'receipts'), versions, execute: async ([name]) => {
-    calls++; put('packages/kenan-memory/dist/client.js', 'compiled');
+    calls++;
+    for (const owner of ['orchestrator', 'kenan-memory', 'kenan-root']) put(`packages/${owner}/dist/client.js`, 'compiled');
     return { name, outcome: 'passed', code: 0, elapsedMs: 1 };
   } });
   await run(build, () => {});

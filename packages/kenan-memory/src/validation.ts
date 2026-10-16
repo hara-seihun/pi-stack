@@ -1,6 +1,6 @@
 import type { DisclosureInput, MemoryError, MemoryInput, MemoryRequest, MemoryResult, MemorySetting, MemorySource, ReadContext } from "./contract.js";
 const object = (v: unknown): v is Record<string, any> => !!v && typeof v === "object" && !Array.isArray(v);
-const memoryErrors = { disabled: true, unauthenticated: true, "invalid-request": true, unavailable: true } satisfies Record<MemoryError, true>;
+const memoryErrors = { disabled: true, unauthenticated: true, "invalid-request": true, unavailable: true, "not-found": true, conflict: true } satisfies Record<MemoryError, true>;
 export function validateResult<T>(value: unknown): MemoryResult<T> | undefined {
   if (!object(value)) return undefined;
   if (value.ok === true && Object.hasOwn(value, "value") && !Object.hasOwn(value, "error")) return { ok: true, value: value.value };
@@ -11,7 +11,7 @@ export function validateResult<T>(value: unknown): MemoryResult<T> | undefined {
 /** A request either validates to a typed operation or names the first field that breaks the contract. */
 export type RequestValidation = { ok: true; request: MemoryRequest } | { ok: false; reason: string };
 type Field<T> = { ok: true; value: T } | { ok: false; reason: string };
-export const MEMORY_OPERATIONS = ["search", "read", "write", "forget", "disclosures", "log-disclosure", "finalize-turn"] as const satisfies readonly MemoryRequest["operation"][];
+export const MEMORY_OPERATIONS = ["search", "read", "write", "forget", "disclosures", "log-disclosure", "finalize-turn", "data"] as const satisfies readonly MemoryRequest["operation"][];
 const SOURCE_KEYS = ["saidBy", "actedFor", "action", "externalId"] as const;
 const TEXT = "a non-blank string of at most 100000 characters";
 const STRINGS = "a non-empty array of at most 100 non-blank strings";
@@ -80,6 +80,10 @@ export function validateRequest(v: unknown): RequestValidation {
   if (!MEMORY_OPERATIONS.includes(v.operation)) return reject(`operation must be one of ${MEMORY_OPERATIONS.join(", ")}`);
   const c = context(v.context);
   if (!c.ok) return c;
+  if (v.operation === "data") {
+    if (!text(v.dataset) || !text(v.requestId) || !Object.hasOwn(v, "command")) return reject("Structured memory data requires explicit dataset, requestId and command");
+    return accept({ operation: "data", dataset: v.dataset, requestId: v.requestId, command: v.command, context: c.value });
+  }
   if (v.operation === "finalize-turn") {
     if (typeof v.reply !== "string" || v.reply.length > 100_000) return reject("reply must be a string of at most 100000 characters");
     return accept({ operation: "finalize-turn", context: c.value, reply: v.reply });

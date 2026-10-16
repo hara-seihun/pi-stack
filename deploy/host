@@ -3,11 +3,8 @@
 #
 #   deploy/host [HOST_FILE]     defaults to /etc/pi-stack/host.json
 #
-# The host file names the account that runs the fleet daemon and any packages
-# and skills this machine adds for every person. Persons come from Pi Remote's
-# registry under /var/lib/pi-remote/persons. Everything else is the same on
-# every host: one runtime under /srv/pi, one orchestrator, one Pi Remote, the
-# tools, the skills, and each account's Pi settings and command links.
+# Host additions and person transports share one permission-scoped core.
+# Persons come from Pi Remote's registry under /var/lib/pi-remote/persons.
 set -euo pipefail
 
 control=$(cd "$(dirname "$0")/.." && pwd)
@@ -69,9 +66,9 @@ fleet=$(pi_stack_fleet_user)
 mapfile -t users < <(pi_stack_users)
 (( ${#users[@]} > 0 )) || { echo "no Pi accounts: set fleetUser in $PI_STACK_HOST_FILE or add a person with pi-remote person add" >&2; exit 64; }
 if (( services )); then
-  daemon_units=$(pi_stack_daemon_units "${users[@]}") || { echo 'could not discover Orchestrator daemon units' >&2; exit 1; }
-  daemons=()
-  if [[ -n $daemon_units ]]; then mapfile -t daemons <<< "$daemon_units"; fi
+  pi_stack_as_root test -f "${PI_STACK_CORE_CONFIG:-/etc/pi-stack/core.json}" || {
+    echo 'Shared core requires reconciled host grants and existing scope custody in /etc/pi-stack/core.json' >&2; exit 66;
+  }
 fi
 
 recognition_base=${PI_STACK_MEET_RECOGNITION_DEST:-/srv/pi/meet-recognition}
@@ -195,10 +192,7 @@ if [[ -z ${PI_STACK_HOST_PHASE:-} ]]; then
   "$root/deploy/prepare"
   export PI_STACK_RELEASES_ROOT=$(pi_stack_component_releases_root)
   if (( services )); then
-    if jq -e '.oneKenan == true' "$PI_STACK_HOST_FILE" >/dev/null; then
-      pi_stack_as_root python3 "$root/deploy/one-kenan-activate" check --host "$PI_STACK_HOST_FILE" --expected "$candidate" || exit $?
-    fi
-    "$root/deploy/native-history-boundary" "$PI_STACK_HOST_FILE" "$root" "$candidate"
+    pi_stack_as_root "$PI_STACK_RELEASES_ROOT/orchestrator/$candidate/host/core-runtime" preflight "$PI_STACK_RELEASES_ROOT/orchestrator/$candidate" "${PI_STACK_CORE_CONFIG:-/etc/pi-stack/core.json}"
   fi
   remote=${PI_STACK_REMOTE_DEST:-/srv/pi/pi-remote}
   export PI_STACK_PREVIOUS_REMOTE=''
@@ -262,8 +256,7 @@ JS
     # Supervisors own a 90-second start and 10-second stop budget. Activation
     # overlaps the doctors; the shared generation wait must include both plus
     # the front door's 20-second readiness budget.
-    # The measured cold fleet restart can consume 100 seconds after Remote starts.
-    # Each independently bounded owner must fit within this outer cleanup budget.
+    # Each independently bounded owner must fit within this cleanup budget.
     phase activation 300 env PI_STACK_HOST_PHASE=activation "$0" "$@" || activation_status=$?
     if [[ -n ${doctor_pid:-} ]]; then wait "$doctor_pid" || doctor_failed=1; fi
     if (( doctor_failed )); then
@@ -308,6 +301,12 @@ for component in orchestrator remote tools; do
   pi_stack_select_release "$PI_STACK_RELEASES_ROOT/$component/$expected" "$destination" "$expected"
 done
 "$root/deploy/orchestrator" --links-only
+if (( services )); then
+  "$root/deploy/orchestrator" --install-core
+  for user in "${users[@]}"; do
+    pi_stack_as_root bun "$orchestrator/host/core-host.mjs" bind-person "$orchestrator" "${PI_STACK_CORE_CONFIG:-/etc/pi-stack/core.json}" "/etc/pi-stack/users/$user/core-binding.json"
+  done
+fi
 if (( services )) && [[ ${PI_STACK_DEPLOY_NO_SUDO:-0} != 1 ]]; then
   [[ $remote =~ ^/[a-zA-Z0-9_./-]+$ ]] || { echo 'invalid selected Remote path for router web assets' >&2; exit 64; }
   pi_stack_as_root bash -s -- "$remote" <<'ROOT'
@@ -475,65 +474,33 @@ activate_remote() {
   printf 'supervisors did not activate Pi Remote %s within their start/stop budget: %s\n' "$target_commit" "${pending[*]}" >&2
   return 1
 }
-# Remote owns canonical settings and publishes its narrow timezone projection
-# before fleet admissions start. Locked owners retain explicit unavailable state.
-daemon_source_matches() {
-  local unit=$1 pid url running deadline=$((SECONDS + 100))
+activate_core() {
+  local config=${PI_STACK_CORE_CONFIG:-/etc/pi-stack/core.json} url running state
+  url=$(pi_stack_as_root jq -er '"http://" + (if .host == "::1" then "[::1]" else .host end) + ":" + (.port|tostring)' "$config") || return
+  state=$(pi_stack_as_root systemctl show pi-stack-core.service -p ActiveState --value) || return
+  case $state in
+    active)
+      if owner_changed core; then pi_stack_as_root systemctl restart pi-stack-core.service || return; fi ;;
+    inactive|failed) pi_stack_as_root systemctl start pi-stack-core.service || return ;;
+    *) echo "Shared core has unsettled lifecycle: $state" >&2; return 75;;
+  esac
+  pi_stack_as_root systemctl enable pi-stack-core.service || return
+  local deadline=$((SECONDS + 20))
   while (( SECONDS < deadline )); do
-    pid=$(pi_stack_as_root systemctl show "$unit" -p MainPID --value) || return 1
-    if [[ $pid =~ ^[1-9][0-9]*$ ]]; then
-      url=$(pi_stack_as_root node --input-type=module - "$orchestrator" "$pid" <<'JS'
-import { readFileSync, realpathSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
-const [orchestrator, pid] = process.argv.slice(2);
-const env = Object.fromEntries(readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').filter(Boolean).map(value => [value.slice(0, value.indexOf('=')), value.slice(value.indexOf('=') + 1)]));
-const { orchestratorUrl } = await import(pathToFileURL(`${realpathSync(orchestrator)}/dist/config.js`));
-const url = orchestratorUrl(env);
-if (!/^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):[0-9]+$/.test(url)) throw new Error('Daemon proof requires its own local configured listener');
-console.log(url);
-JS
-      ) || return 1
-      running=$(pi_stack_as_root curl -fsS --max-time 2 "$url/v1/health" 2>/dev/null | jq -r '.releaseCommit // empty') || running=''
-      if [[ -n $running ]]; then owner_matches daemons "$running"; return $?; fi
+    running=$(pi_stack_as_root curl -fsS --max-time 2 "$url/v1/health" 2>/dev/null | jq -r '.releaseCommit // empty') || running=''
+    if [[ -n $running ]]; then
+      owner_matches core "$running" && record_owner core pi-stack-core.service
+      return $?
     fi
     sleep 0.1
   done
-  echo "daemon $unit did not report a source-bound health proof" >&2
+  echo 'Shared core did not provide source-bound health; retain old callback endpoints and reconcile original scope custody' >&2
   return 1
-}
-activate_daemons() {
-  local failed=0 broker_units
-  local -a brokers=()
-  local daemon_change=0
-  owner_changed daemons && daemon_change=1
-  if (( daemon_change )) && { [[ -z ${PI_STACK_HOST_PLAN:-} ]] || jq -e '.owners.daemons.changed' "$PI_STACK_HOST_PLAN" >/dev/null; }; then
-    if (( ${#daemons[@]} )); then pi_stack_as_root systemctl restart "${daemons[@]}" || failed=1; fi
-  else
-    local unit state
-    for unit in "${daemons[@]}"; do
-      state=$(pi_stack_as_root systemctl show "$unit" -p ActiveState --value) || { failed=1; continue; }
-      case $state in
-        active) ;;
-        inactive|failed) pi_stack_as_root systemctl start "$unit" || failed=1 ;;
-        *) echo "daemon $unit has unsettled or unknown lifecycle: $state" >&2; failed=1 ;;
-      esac
-    done
-  fi
-  if (( failed == 0 )); then
-    for unit in "${daemons[@]}"; do daemon_source_matches "$unit" || failed=1; done
-    (( failed != 0 )) || record_owner daemons "${daemons[@]}" || failed=1
-  fi
-  broker_units=$(pi_stack_as_root systemctl list-units --type=service --state=running --no-legend 'pi-model-broker.service' 'pi-stack-model-broker@*.service') || failed=1
-  mapfile -t brokers < <(printf '%s\n' "$broker_units" | awk '$1 ~ /^(pi-model-broker\.service|pi-stack-model-broker@.*\.service)$/ {print $1}')
-  if owner_changed brokers && (( ${#brokers[@]} )); then
-    pi_stack_as_root systemctl restart "${brokers[@]}" || failed=1
-  fi
-  if (( failed == 0 )); then record_owner brokers "${brokers[@]}" || failed=1; fi
-  return "$failed"
 }
 activation_failed=0
 remote_activation_failed=0
 if [[ ${PI_STACK_FORCE_ROLLBACK:-0} != 1 ]]; then
+  activate_core || exit $?
   if (( recognition )); then
     recognition_started=1
     "$root/deploy/meet-recognition-service" --activate &
@@ -564,34 +531,10 @@ fi
 if (( activation_failed == 0 )) && [[ ${PI_STACK_DEPLOY_NO_SUDO:-0} != 1 ]]; then
   "$root/deploy/timezone-ready" "$router_base" || activation_failed=1
 fi
-if (( activation_failed == 0 )); then
-  activate_daemons &
-  daemon_activation_pid=$!
-fi
-
-# Refresh additive access and hand enabled consumers to their owning activator.
-# Root replacement pauses dispatch only; durable intake remains accepting.
-if ! "$root/deploy/one-kenan-access-release" "$PI_STACK_HOST_FILE"; then
-  activation_failed=1
-elif jq -e '.oneKenan == true' "$PI_STACK_HOST_FILE" >/dev/null && { owner_changed root || owner_changed memory || owner_changed rooms; }; then
+# Room membership/UI remains a transport; its native scopes belong to core.
+if jq -e '.oneKenan == true' "$PI_STACK_HOST_FILE" >/dev/null && owner_changed rooms; then
   if [[ ${PI_STACK_DEPLOY_NO_SUDO:-0} != 1 ]]; then
-    consumer_status=0
-    pi_stack_as_root python3 "$root/deploy/one-kenan-activate" activate --host "$PI_STACK_HOST_FILE" --expected "$expected" || consumer_status=$?
-    if (( consumer_status == 75 )); then
-      if (( recognition )); then wait "$recognition_pid" || exit 1; fi
-      if [[ -n ${daemon_activation_pid:-} ]]; then wait "$daemon_activation_pid" || exit 1; fi
-      echo 'executor replacement waiting: accepting Root remains busy or its graceful handoff is settling' >&2
-      exit 75
-    fi
-    if (( consumer_status == 0 )); then
-      consumer_proof=$(pi_stack_as_root python3 "$root/deploy/one-kenan-activate" proof --host "$PI_STACK_HOST_FILE" --expected "$expected") || activation_failed=1
-      if (( activation_failed == 0 )); then
-        for role in root memory rooms; do
-          unit=$(jq -er --arg role "$role" '.consumers[$role].unit' <<<"$consumer_proof") || { activation_failed=1; break; }
-          record_owner "$role" "$unit" || activation_failed=1
-        done
-      fi
-    else activation_failed=1; fi
+    pi_stack_as_root systemctl restart pi-rooms.service && record_owner rooms pi-rooms.service || activation_failed=1
   fi
 fi
 if (( recognition )); then
@@ -599,7 +542,6 @@ if (( recognition )); then
     if [[ $release_mode != qualified ]]; then recognition_journal accepted || activation_failed=1; fi
   else activation_failed=1; fi
 fi
-if [[ -n ${daemon_activation_pid:-} ]]; then wait "$daemon_activation_pid" || activation_failed=1; fi
 
 fi
 # Then walk the front door the way the clients do. A release that locks a

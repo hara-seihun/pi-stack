@@ -13,6 +13,7 @@
 
 import { agentMessagePresentation, agentSenderLabel } from "pi-orchestrator/message-format";
 import { AGENT_NAME } from "./agent-identity";
+import { inputBatchPresentation } from "pi-orchestrator/history";
 import { sha256 } from "./sync";
 import { isResponseMetrics } from "./response-metrics";
 import type { ToolCallResultHead, TranscriptItemBody, TranscriptItemHead } from "./protocol";
@@ -214,7 +215,12 @@ function visitTranscriptItems(context: any, accept: (item: DerivedItem) => void,
     flush();
   }
 
-  const messages: any[] = Array.isArray(context.messages) ? context.messages : [];
+  const messages: any[] = (Array.isArray(context.messages) ? context.messages : []).flatMap((message: any) => {
+    const batch = inputBatchPresentation(message);
+    if (!batch.ok) throw new Error(`invalid_record: ${batch.error}`);
+    return batch.value ? batch.value.map(input => ({ ...input,
+      ...(message.inputStates?.[input.inputId] ? { inputState: message.inputStates[input.inputId] } : {}) })) : [message];
+  });
   const results = new Map(messages.filter((message) => message?.role === "toolResult")
     .map((message) => [String(message.toolCallId || ""), message]));
   const paired = new Set<any>();

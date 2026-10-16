@@ -1,0 +1,19 @@
+[Unit]
+Description=Canonical manager policy-only Converge to LOCAL transport
+After=network-online.target pi-stack-manager-policy-forward.service
+Wants=network-online.target
+Requires=pi-stack-manager-policy-forward.service
+
+[Service]
+Type=simple
+User=kenan
+Group=kenan
+ExecStart=/usr/bin/ssh -NT -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=3 -R 127.0.0.1:18788:127.0.0.1:18788 converge
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

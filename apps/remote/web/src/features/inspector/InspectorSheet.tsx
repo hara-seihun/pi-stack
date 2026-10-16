@@ -8,7 +8,6 @@ import { navigate } from "../../app/routes";
 import { Sheet } from "../../app/Sheet";
 import { StatusPill } from "../status/StatusPill";
 import { StatusIcon } from "../status/StatusIcon";
-import { agentName } from "../../agent-name";
 import { threadStatus } from "../status/thread-status";
 import "./inspector.css";
 import { assertNever } from "../../../../shared/explicit-state";
@@ -83,7 +82,6 @@ export function InspectorSheet({ session, sessions, open, pending, onClose, onOp
     return () => { active = false; };
   }, [open, tab, session.id, session.revision, attempt]);
   const status = threadStatus(session);
-  const name = agentName(session);
   const parent = session.parentId ? sessions.find(item => item.id === session.parentId) ?? null : null;
   const tabs: { id: InspectorTab; label: string }[] = [{ id: "thread", label: "Thread" }, { id: "settings", label: "Settings" }, { id: "timeline", label: "Timeline" }];
   return <Sheet open={open} title={session.name || "Thread"} onClose={onClose} labelledBy="inspector-title" variant="sidebar">
@@ -117,18 +115,17 @@ export function InspectorSheet({ session, sessions, open, pending, onClose, onOp
         <Row label="Workspace">{session.workspaceName || "—"}</Row>
         <Row label="Directory"><code>{session.cwd}</code></Row>
         <Row label="Placement">{session.foreground ? "Foreground" : "Background"}</Row>
-        {name && <Row label="Agent">{name}</Row>}
         <Row label="Task">{session.name}</Row>
         <Row label="Created">{formatTime(session.createdAt)}</Row>
         <Row label="Updated">{formatTime(session.updatedAt)}</Row>
         {session.archivedAt && <Row label="Archived">{formatTime(session.archivedAt)}</Row>}
         <Row label="Thread ID"><code className="inspector-id">{session.id}</code></Row>
       </dl>
-      {parent && <section className="inspector-section"><h3>Launched by</h3><button type="button" className="inspector-link" onClick={() => onOpenThread(parent)}>{agentName(parent) && <strong>{agentName(parent)} </strong>}{parent.name || parent.id}</button></section>}
+      {parent && <section className="inspector-section"><h3>Launched by</h3><button type="button" className="inspector-link" onClick={() => onOpenThread(parent)}>{parent.name || parent.id}</button></section>}
       <section className="inspector-section">
         <h3>Agents launched {childrenLoading && <span className="muted">loading</span>}</h3>
         <DismissibleError message={childrenFailure} resetKey={attempt} />
-        {children.length ? <ul className="launched-agents">{children.map(child => <li key={child.id}><button type="button" className="inspector-link launched-agent" onClick={() => onOpenThread(child)}><StatusIcon status={threadStatus(child)} /><span className="launched-agent-text">{agentName(child) && <strong>{agentName(child)}</strong>} <span>{child.name}</span> <span className="muted">{child.foreground ? "Foreground" : "Background"}{child.archivedAt ? " · Archived" : ""}</span></span></button></li>)}</ul> : !childrenLoading && !childrenFailure && <p className="muted">No agents launched.</p>}
+        {children.length ? <ul className="launched-agents">{children.map(child => <li key={child.id}><button type="button" className="inspector-link launched-agent" onClick={() => onOpenThread(child)}><StatusIcon status={threadStatus(child)} /><span className="launched-agent-text"><span>{child.name}</span> <span className="muted">{child.foreground ? "Foreground" : "Background"}{child.archivedAt ? " · Archived" : ""}</span></span></button></li>)}</ul> : !childrenLoading && !childrenFailure && <p className="muted">No agents launched.</p>}
       </section>
       {debug && <section className="inspector-section"><h3>Debug</h3>{debug}</section>}
     </div>}

@@ -334,7 +334,7 @@ export class MeetServer {
     if (parts[3] === "browser" && req.method === "POST") {
       if (!member.participant.host) return fail("Only the host controls browser sharing", 403);
       const body = await this.body(req);
-      if (!body) return fail("A browser request is required");
+      if (!body || body.requested !== true) return fail("Screen sharing requires an explicit request");
       if (body.watch !== undefined && body.watch !== null && typeof body.watch !== "string") return fail("watch must be a directory path or null");
       if (!room.browser) {
         let error = "";

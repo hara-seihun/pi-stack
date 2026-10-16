@@ -30,7 +30,7 @@ requireCodexTier(
 
 `CodexTierResult` is `{ok:true,value:{accountId,model,tier}} | {ok:false,error:string}`. The pinned guard discovers only that account. Both functions leave Standard/default/Priority/no-tier policy unchanged. They gate only Ultrafast.
 
-The selection helper copies caller exclusions and adds every Codex account that cannot demonstrate current advertised support. It only refreshes enabled, credential-bearing, nonexcluded accounts; callers must first exclude accounts outside their grants and existing use/reservation policy. Capability discovery never authorizes a broader pool, changes quota/cooldown/reservation policy, or silently downgrades Ultrafast to another tier. Transport failures, unavailable credentials, malformed responses and stale observations are ineligible, not evidence of a negative capability.
+The selection helper copies caller exclusions and adds every Codex account that cannot demonstrate current advertised support. It only refreshes enabled, credential-bearing, nonexcluded accounts; callers must first exclude accounts outside their grants and existing account-use policy. Capability discovery never authorizes a broader pool or changes quota/cooldown policy, or silently downgrades Ultrafast to another tier. Transport failures, unavailable credentials, malformed responses and stale observations are ineligible, not evidence of a negative capability.
 
 ## Discovery lifecycle
 
@@ -67,7 +67,7 @@ pi-orchestrator account capabilities
 pi-orchestrator account capabilities openai-codex-8
 ```
 
-The CLI calls `POST /v1/accounts/capabilities` with `{}` or `{accountId:"openai-codex-8"}` on the owning daemon. Broker-client daemons reject local credential refresh and direct the operator to the account owner. Unknown/non-Codex aliases return 404. Disabled or credential-less accounts report `credential-unavailable` without a metadata request.
+The CLI calls authenticated `POST /v1/providers/accounts/capabilities` with `{}` or `{accountId:"openai-codex-8"}` on the owning core. Provider write authorization is separate from an inference grant. Unknown/non-Codex aliases return 404. Disabled or credential-less accounts report `credential-unavailable` without a metadata request.
 
 Programmatic diagnostic helpers are `readCodexCapabilities(store, accountId?)`, `readCodexTierObservation(store, accountId, model, tier)`, and `refreshCodexCapabilities(store, auth, accountId?, signal?, fetchFn?)`. The targeted read returns `{at,fresh,supported:boolean|undefined,error?}`; an absent observation returns `undefined`.
 

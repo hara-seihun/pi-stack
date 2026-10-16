@@ -14,7 +14,7 @@ const bounded = boundedArguments(args, 120, "thread_wait");
 const wait: ContextEntry = { kind: "toolCall", key: "wait", signature: "wait", argumentsTruncated: true,
   toolCall: { name: "functions.thread_wait", arguments: bounded.value },
   toolResult: { preview: '{"ok":true,"value":{"waitingOnAgents":{}}}', size: 500, isError: false } };
-const directory: ThreadDirectory = { name: id => `Child ${id}`, agentName: () => "Worker", busy: () => false, discover() {}, lookupError: () => null, open() {} };
+const directory: ThreadDirectory = { name: id => `Child ${id}`, busy: () => false, discover() {}, lookupError: () => null, open() {} };
 const noAction = () => {};
 const render = (entry: ContextEntry, mono: boolean) => renderToStaticMarkup(<ThreadDirectoryProvider value={directory}>
   <WorkEntry entry={entry} sessionId="manager" home="/work" mono={mono} autoCollapse={false} onEdit={noAction} onReply={noAction} />

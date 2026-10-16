@@ -3,7 +3,7 @@ import type { Dashboard, FileBrowserEntry, PeopleUsagePeriodData, PlanAccountRow
 import { FEATURES, type Feature, type FeatureUsageSummary, type UsageResult } from "../../../shared/feature-usage";
 import { API } from "../../../server/api";
 import { FilesScreen } from "../features/files/FilesScreen";
-import { FeatureUsagePanel } from "../features/machine/FeatureUsage";
+import { useFeatureUsageRows } from "../features/machine/FeatureUsage";
 import { MachineScreen, type MachineScreenProps } from "../features/machine/MachineScreen";
 import { configureFixtureTransport } from "./transport";
 import type { UiCase } from "./contract";
@@ -52,8 +52,13 @@ function usageRoutes(fixture: UsageFixture) {
 function machineCase(id: string, title: string, changes: Partial<MachineScreenProps>, usage: UsageFixture = { state: "ready", summary: emptySummary }): UiCase {
   return { id: `machine-${id}`, title, component: "MachineScreen / FeatureUsagePanel", contract: "Production machine dashboard: quota, spending, host, feature collection and connection state remain readable without live transports.", boundary: id.includes("many") || id.includes("long") ? "content-boundary" : "finite-variant", render() {
     usageRoutes(usage);
-    return <MachineScreen dashboard={dashboard} modelCounts={new Map([["model-0", 12]])} ownerErrors={[]} offline="" syncing={false} onDismissOwnerError={noop} onReconnect={noop} features={<FeatureUsagePanel />} clientRevision="catalogue-synthetic-revision" {...changes} />;
+    return <MachineFixture changes={changes} />;
   } };
+}
+
+function MachineFixture({ changes }: { changes: Partial<MachineScreenProps> }) {
+  const features = useFeatureUsageRows();
+  return <MachineScreen dashboard={dashboard} modelCounts={new Map([["model-0", 12]])} ownerErrors={[]} offline="" syncing={false} onDismissOwnerError={noop} onReconnect={noop} features={features} clientRevision="catalogue-synthetic-revision" {...changes} />;
 }
 
 type FileFixture = { state: "unset" } | { state: "loading"; path: string } | { state: "ready"; entry: FileBrowserEntry } | { state: "error"; path: string; message: string };

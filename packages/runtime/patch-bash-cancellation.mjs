@@ -16,11 +16,33 @@ function sdkShell(source) {
   return replace(source, "export function untrackDetachedChildPid(pid) {", "export function untrackDetachedChildPid(pid) {\n    releaseOwnedShell(pid);");
 }
 
+const sdkOwnership = `                if (!ownership.ok) {
+                    const message = signal?.aborted ? "aborted" : timedOut ? \`timeout:\${timeout}\` : ownership.error;
+                    onData(Buffer.from(\`\\nPi shell cleanup failed: \${ownership.error}\\n\`));
+                    throw Object.assign(new Error(message), {
+                        code: signal?.aborted ? "aborted" : timedOut ? "timeout" : "shell_cleanup_failed",
+                        cleanupError: ownership.error, commandExitCode: ownership.exitCode,
+                    });
+                }`;
+const harnessOwnership = `                if (!ownership.ok) {
+                    const code = callbackError ? callbackError.code : timedOut ? "timeout" : signal?.aborted ? "aborted" : "unknown";
+                    const message = callbackError ? callbackError.message : timedOut ? \`timeout:\${options?.timeout}\` : signal?.aborted ? "aborted" : ownership.error;
+                    settle(err(Object.assign(new ExecutionError(code, message + "\\nPi shell cleanup failed: " + ownership.error), {
+                        cleanupError: ownership.error, commandExitCode: ownership.exitCode,
+                    })));
+                    return;
+                }`;
+const previousSdkOwnership = '                if (!ownership.ok) throw Object.assign(new Error(ownership.error), { code: "shell_cleanup_failed" });';
+const previousHarnessOwnership = `                if (!ownership.ok) {
+                    settle(err(new ExecutionError("unknown", ownership.error)));
+                    return;
+                }`;
+
 function sdkTool(source) {
   source = replace(source, "const child = spawn(shellConfig.shell,", "const child = spawnOwnedShell(shellConfig.shell,");
   return replace(source, "const exitCode = await waitForChildProcess(child);", `const exitCode = await waitForChildProcess(child);
                 const ownership = await shellOwnershipResult(child);
-                if (!ownership.ok) throw Object.assign(new Error(ownership.error), { code: "shell_cleanup_failed" });`);
+${sdkOwnership}`);
 }
 
 function sdkExecutor(source) {
@@ -32,12 +54,14 @@ function harness(source) {
   source = replace(source, "child = spawn(shellConfig.value.shell,", "child = spawnOwnedShell(shellConfig.value.shell,");
   source = replace(source, "this.activeChildPids.delete(child.pid);", "this.activeChildPids.delete(child.pid);\n                if (child?.pid) releaseOwnedShell(child.pid);");
   return replace(source, "                if (callbackError) {\n                    settle(err(callbackError));", `                const ownership = await shellOwnershipResult(child);
-                if (!ownership.ok) {
-                    settle(err(new ExecutionError("unknown", ownership.error)));
-                    return;
-                }
+${harnessOwnership}
                 if (callbackError) {
                     settle(err(callbackError));`);
+}
+
+function shellOutput(source) {
+  return replace(source, 'result.error.code === "aborted" || context.abortSignal?.aborted',
+    'result.error.code === "aborted" && result.error.cleanupError === undefined');
 }
 
 export function patchBashCancellationCopies(nodeModules) {
@@ -46,16 +70,19 @@ export function patchBashCancellationCopies(nodeModules) {
   const pending = new Map();
   const apply = (path, patch, relative) => {
     const source = readFileSync(path, "utf8");
-    pending.set(path, source.startsWith(marker) ? source : marker + `import { ${exports} } from "${relative}/pi-shell-owner.mjs";\n` + patch(source));
+    let patched = source.startsWith(marker) ? source : marker + `import { ${exports} } from "${relative}/pi-shell-owner.mjs";\n` + patch(source);
+    if (patch === sdkTool && patched.includes(previousSdkOwnership)) patched = replace(patched, previousSdkOwnership, sdkOwnership);
+    if (patch === harness && patched.includes(previousHarnessOwnership)) patched = replace(patched, previousHarnessOwnership, harnessOwnership);
+    if (patch === shellOutput && !patched.includes('result.error.cleanupError === undefined')) patched = replace(patched,
+      'result.error.code === "aborted"', 'result.error.code === "aborted" && result.error.cleanupError === undefined');
+    pending.set(path, patched);
   };
   apply(join(coding, "utils/shell.js"), sdkShell, "..");
   apply(join(coding, "core/tools/bash.js"), sdkTool, "../..");
   apply(join(coding, "core/bash-executor.js"), sdkExecutor, "..");
   apply(join(core, "harness/env/nodejs.js"), harness, "../..");
-  apply(join(core, "harness/utils/shell-output.js"), source => replace(source,
-    'result.error.code === "aborted" || context.abortSignal?.aborted',
-    'result.error.code === "aborted"'), "../..");
-  for (const base of [coding, core]) for (const name of ["pi-shell-owner.mjs", "pi-shell-owner.py"]) {
+  apply(join(core, "harness/utils/shell-output.js"), shellOutput, "../..");
+  for (const base of [coding, core]) for (const name of ["pi-shell-owner.mjs", "pi-shell-owner.py", "pi-bash-worker.py", "resident-shell-adoption.mjs"]) {
     pending.set(join(base, name), readFileSync(join(here, name), "utf8"));
   }
   for (const [path, source] of pending) if (readExisting(path) !== source) writeFileSync(path, source);

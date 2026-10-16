@@ -240,6 +240,36 @@ export function personUsage(
   };
 }
 
+export interface PersonUsageLedger { store: Store; ownerPrincipal: string; accountPoolId: string }
+/** Host analytics over original ledgers. Historical owner rows are attributed
+ * explicitly; shared pool aliases count once without repricing frozen usage. */
+export function personUsageAcrossStores(ledgers: readonly PersonUsageLedger[], since: number, until = Date.now()): PersonUsageWindow {
+  if (!ledgers.length || new Set(ledgers.map(ledger => ledger.store.path)).size !== ledgers.length) throw new Error("People usage requires unique declared ledger owners");
+  const windows = ledgers.map(ledger => personUsage(ledger.store, since, until));
+  const rows = new Map<string, { principal: string; tokens: number; value: number; spend: number; unpricedTokens: number; sources: Record<UsageSource, Mutable>; providers: Record<string, Mutable> }>();
+  for (const [index, window] of windows.entries()) for (const row of window.rows) {
+    const principal = row.principal ?? ledgers[index]!.ownerPrincipal;
+    let combined = rows.get(principal);
+    if (!combined) { combined = { principal, tokens: 0, value: 0, spend: 0, unpricedTokens: 0, sources: { interactive: figures(), fleet: figures(), completion: figures() }, providers: {} }; rows.set(principal, combined); }
+    combined.tokens += row.tokens; combined.value += row.value; combined.spend += row.spend; combined.unpricedTokens += row.unpricedTokens;
+    for (const source of ["interactive", "fleet", "completion"] as const) for (const key of ["tokens", "value", "spend"] as const) combined.sources[source][key] += row.sources[source][key];
+    for (const [provider, value] of Object.entries(row.providers)) {
+      const target = combined.providers[provider] ??= figures();
+      target.tokens += value.tokens; target.value += value.value; target.spend += value.spend;
+    }
+  }
+  const subscriptions = ORCHESTRATOR_CATALOG.plans.map(plan => {
+    const aliases = new Set(ledgers.flatMap(ledger => ledger.store.accounts().filter(account => account.enabled && account.provider === plan.provider).map(account => JSON.stringify([ledger.accountPoolId, account.id]))));
+    const observations = windows.flatMap(window => window.subscriptions.filter(subscription => subscription.planId === plan.id));
+    const rates = new Set(observations.flatMap(observation => observation.rate === null ? [] : [observation.rate]));
+    return { planId: plan.id, label: plan.label, provider: plan.provider, accounts: aliases.size, monthlyUsd: plan.monthlyUsd,
+      spend: aliases.size * plan.monthlyUsd * Math.max(0, until - since) / SUBSCRIPTION_MONTH_MS,
+      used: observations.reduce((sum, observation) => sum + observation.used, 0), rate: rates.size === 1 ? [...rates][0]! : null };
+  });
+  return { since: new Date(since).toISOString(), until: new Date(until).toISOString(), subscriptions,
+    rows: [...rows.values()].sort((a, b) => b.spend - a.spend || b.value - a.value || b.tokens - a.tokens) };
+}
+
 export type PersonalUsagePeriod = "day" | "week";
 
 /** Local midnight today. */

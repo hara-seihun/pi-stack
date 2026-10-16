@@ -5,7 +5,7 @@ import { readFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID, randomBytes } from "node:crypto";
 import { callBrief, instructions, type CallBrief } from "./policy";
-import { sameToken, type CallFragment } from "./dispatcher";
+import { sameToken, type CallFragment } from "./protocol";
 import { providerSelection, loadProvider } from "./provider";
 import { silentReply, silentBegin } from "./retell-transport";
 import type { RetellFailure } from "./retell-error";
@@ -29,11 +29,11 @@ const provider = loaded.value;
 const owner = config.owner;
 const localPort = config.localPort, publicPort = config.publicPort;
 const voiceBase = config.voiceUrl, dispatcherBase = config.dispatcherUrl;
-if (typeof owner !== "string" || !owner || !Number.isInteger(localPort) || !Number.isInteger(publicPort) || typeof voiceBase !== "string" || typeof dispatcherBase !== "string") throw new Error("Explicit owner, listener ports, Voice and managed dispatcher URLs are required");
+if (typeof owner !== "string" || !owner || !Number.isInteger(localPort) || !Number.isInteger(publicPort) || typeof voiceBase !== "string" || typeof dispatcherBase !== "string") throw new Error("Explicit owner, listener ports, Live transport and canonical action-authority URLs are required");
 const actions = new ActionClient(dispatcherBase, adminToken);
 const db = new Database(join(state, "calls.sqlite3"));
 db.exec(`PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS calls(id TEXT PRIMARY KEY,provider_id TEXT,voice_id TEXT,status TEXT NOT NULL,brief TEXT NOT NULL,started_at INTEGER NOT NULL,ended_at INTEGER,error TEXT,cleanup INTEGER NOT NULL DEFAULT 0); CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,call_id TEXT NOT NULL,at INTEGER NOT NULL,type TEXT NOT NULL,payload TEXT NOT NULL);`);
-for (const [name, type] of [["provider_kind", "TEXT"], ["dial_state", "TEXT NOT NULL DEFAULT 'none'"], ["provider_snapshot", "TEXT"], ["provider_error", "TEXT"], ["accepted_at", "INTEGER"], ["action_id", "TEXT"], ["action_ticket", "TEXT"], ["request_id", "TEXT"], ["dispatcher_closed", "INTEGER NOT NULL DEFAULT 0"]]) {
+for (const [name, type] of [["provider_kind", "TEXT"], ["dial_state", "TEXT NOT NULL DEFAULT 'none'"], ["provider_snapshot", "TEXT"], ["provider_error", "TEXT"], ["accepted_at", "INTEGER"], ["action_id", "TEXT"], ["action_ticket", "TEXT"], ["request_id", "TEXT"]]) {
   if (!(db.query("PRAGMA table_info(calls)").all() as { name: string }[]).some(c => c.name === name)) db.exec(`ALTER TABLE calls ADD COLUMN ${name} ${type}`);
 }
 db.exec("CREATE UNIQUE INDEX IF NOT EXISTS call_approved_request ON calls(request_id) WHERE request_id IS NOT NULL");
@@ -43,7 +43,7 @@ const releaseFile = new URL("../../.pi-stack-commit", import.meta.url);
 const releaseCommit = existsSync(releaseFile) ? readFileSync(releaseFile, "utf8").trim() : null;
 const html = readFileSync(new URL("./media.html", import.meta.url), "utf8");
 let browser: Browser | undefined, launching: Promise<Browser> | undefined, stopping = false;
-type Row = { id: string; provider_id: string | null; voice_id: string | null; provider_kind: string | null; dial_state: string; dispatcher_closed: number };
+type Row = { id: string; provider_id: string | null; voice_id: string | null; provider_kind: string | null; dial_state: string };
 type SocketData = { side: "browser"; call?: Call } | { side: "silent"; providerId: string };
 type Socket = import("bun").ServerWebSocket<SocketData>;
 type Call = { id: string; brief: CallBrief; token: string; actionTicket?: ActionTicket; page?: Page; media?: Socket; voiceId?: string; providerId?: string;
@@ -51,7 +51,7 @@ type Call = { id: string; brief: CallBrief; token: string; actionTicket?: Action
   ready: Promise<void>; resolveReady: () => void; rejectReady: (e: Error) => void; audio: Promise<void>; resolveAudio: () => void;
   outputBytes: number; usageSeconds: number; offerPending: boolean; transportGranted: boolean; transportNotified: boolean; participantId?: string;
   progress?: CallProgress; progressTimer?: ReturnType<typeof setInterval>;
-  abort: AbortController; transcript: CallFragment[]; seen: Set<string>; delegations: Set<string>; queue: Promise<void>; finishing?: Promise<void> };
+  abort: AbortController; transcript: CallFragment[]; seen: Set<string>; finishing?: Promise<void> };
 const active = new Map<string, Call>();
 const log = (id: string, type: string, payload: unknown) => db.query("INSERT INTO events(call_id,at,type,payload) VALUES(?,?,?,?)").run(id, Date.now(), type, JSON.stringify(payload));
 function retainProviderError(id: string, operation: string, failure: RetellFailure) {
@@ -67,18 +67,15 @@ async function request(base: string, path: string, method: string, body: unknown
   } catch { return { ok: false as const, error: "Service acceptance/result unavailable; preserve request identity" }; }
 }
 const voice = (path: string, method: string, body: unknown) => request(voiceBase, path, method, body);
-const dispatch = (id: string, operation: string, body: unknown) => request(dispatcherBase, `/v1/telephone/${id}/${operation}`, "POST", body, true);
 const voiceIdentity = (id: string) => ({ owner, threadId: `phone:${id}` });
-function snapshot(call: Call): Row { return { id: call.id, provider_id: call.providerId ?? null, voice_id: call.voiceId ?? null, provider_kind: "retell-takeover", dial_state: call.dialState, dispatcher_closed: 0 }; }
+function snapshot(call: Call): Row { return { id: call.id, provider_id: call.providerId ?? null, voice_id: call.voiceId ?? null, provider_kind: "retell-takeover", dial_state: call.dialState }; }
 async function cleanup(row: Row) {
   const phone = row.provider_id
     ? ["retell", "retell-takeover"].includes(row.provider_kind ?? "") ? await provider.client.hangup(row.provider_id) : { ok: false as const, error: "Retired provider cleanup requires its account owner" }
     : ["dispatching", "uncertain"].includes(row.dial_state) ? { ok: false as const, error: "Dial acceptance unknown; provider duration cap applies; never redial" } : { ok: true as const };
   if (!phone.ok) retainProviderError(row.id, "hangup", phone);
   const spoken = row.voice_id ? await voice(`/sessions/${encodeURIComponent(row.voice_id)}`, "DELETE", voiceIdentity(row.id)) : { ok: true };
-  const managed = row.dispatcher_closed === 1 ? { ok: true } : await dispatch(row.id, "close", {});
-  if (managed.ok) db.query("UPDATE calls SET dispatcher_closed=1 WHERE id=?").run(row.id);
-  const failures = [phone, spoken, managed].filter(r => !r.ok).map(r => "error" in r ? r.error : "Cleanup failed");
+  const failures = [phone, spoken].filter(r => !r.ok).map(r => "error" in r ? r.error : "Cleanup failed");
   if (failures.length) db.query("UPDATE calls SET cleanup=0,error=? WHERE id=?").run(failures.join("; "), row.id);
   else db.query("UPDATE calls SET cleanup=1 WHERE id=?").run(row.id);
 }
@@ -137,17 +134,12 @@ function create(brief: CallBrief, actionTicket?: ActionTicket): Call {
   const ready = new Promise<void>((resolve, reject) => { resolveReady = resolve; rejectReady = reject; }); void ready.catch(() => {});
   const call: Call = { id: randomUUID(), brief, actionTicket, token: randomBytes(32).toString("base64url"), dialState: "none", ready, resolveReady, rejectReady,
     audio: new Promise<void>(resolve => { resolveAudio = resolve; }), resolveAudio, outputBytes: 0, usageSeconds: 0, offerPending: false, transportGranted: false, transportNotified: false,
-    abort: new AbortController(), transcript: [], seen: new Set(), delegations: new Set(), queue: Promise.resolve(), timer: setTimeout(() => void finish(call, "completed", "Maximum duration reached"), brief.maxSeconds * 1000) };
+    abort: new AbortController(), transcript: [], seen: new Set(), timer: setTimeout(() => void finish(call, "completed", "Maximum duration reached"), brief.maxSeconds * 1000) };
   db.query("INSERT INTO calls(id,status,brief,started_at,provider_kind,dial_state,request_id,action_id,action_ticket) VALUES(?,?,?,?,?,?,?,?,?)").run(call.id, "preparing", JSON.stringify(brief), Date.now(), "retell-takeover", "none", brief.requestId, actionTicket?.id ?? null, actionTicket ? JSON.stringify(actionTicket) : null);
   active.set(call.id, call); return call;
 }
 async function start(call: Call, shouldDial: boolean) {
   try {
-    if (shouldDial) {
-      const approved = await dispatch(call.id, "approved", { brief: call.brief });
-      if (!approved.ok) { await finish(call, "failed", "Managed call approval unavailable; no dial dispatched"); return; }
-      if (call.finishing) { await dispatch(call.id, "close", {}); return; }
-    }
     if (!browser) {
       launching ??= chromium.launch({ executablePath: config.chromium, headless: true, args: ["--no-sandbox", "--autoplay-policy=no-user-gesture-required", "--disable-dev-shm-usage"] }).then(b => { browser = b; b.on("disconnected", () => { browser = undefined; for (const c of active.values()) void finish(c, "failed", "Media browser disconnected"); }); return b; }).finally(() => { launching = undefined; });
       await launching;
@@ -186,23 +178,6 @@ async function start(call: Call, shouldDial: boolean) {
     if (call.finishing) { await cleanup(snapshot(call)); return; }
     // The monitor grant is available only after PSTN answers; the provider poll signals it.
   } catch { await finish(call, "failed", "Voice/PSTN startup failed"); }
-}
-async function delegate(call: Call, id: string) {
-  const body = { brief: call.brief, delegationId: id, transcript: [...call.transcript] };
-  log(call.id, "delegation-dispatch", { id });
-  const accepted = await dispatch(call.id, "delegate", body);
-  if (!accepted.ok) { send(call, { type: "session.commentary.append", event_id: randomUUID(), delegation_id: id, content: "The authorized reasoning service is unavailable. I cannot confirm that result." }); return; }
-  const workId = accepted.value.workId;
-  log(call.id, "delegation-accepted", { id, workId });
-  while (!call.finishing) {
-    const result = await dispatch(call.id, "result", { workId });
-    if (!result.ok) { send(call, { type: "session.commentary.append", event_id: randomUUID(), delegation_id: id, content: "The reasoning result is unavailable. No additional action is confirmed." }); return; }
-    if (result.value.state === "pending") continue;
-    if (result.value.state !== "completed" || typeof result.value.text !== "string") { await finish(call, "failed", "Invalid managed dispatcher result"); return; }
-    log(call.id, "delegation-result", { id, workId, text: result.value.text });
-    for (const part of result.value.text.match(/[\s\S]{1,500}/g) ?? []) send(call, { type: "session.commentary.append", event_id: randomUUID(), delegation_id: id, content: part });
-    return;
-  }
 }
 const websocket = {
   maxPayloadLength: 256 * 1024, idleTimeout: 60,
@@ -253,9 +228,8 @@ const websocket = {
       if (e.type === "session.input_transcript.delta") progressEffects(call, call.progress?.transcript(e.delta) ?? []);
       if (call.transcript.length > 2000 || Buffer.byteLength(JSON.stringify(call.transcript)) > 128_000) void finish(call, "completed", "Conversation length bound reached");
     } else if (e.type === "session.delegation.created") {
-      const id = e.delegation?.id;
-      if (typeof id !== "string" || !/^[A-Za-z0-9_-]{1,200}$/.test(id) || e.delegation.target !== "client" || call.delegations.has(id)) return;
-      call.delegations.add(id); call.queue = call.queue.then(() => call.finishing ? undefined : delegate(call, id));
+      log(call.id, "unexpected-delegation", { id: e.delegation?.id });
+      void finish(call, "failed", "Telephone runtime attempted a forbidden in-call delegation");
     } else if (["session.usage.updated", "session.closed"].includes(e.type)) {
       if (Number.isFinite(e.usage?.seconds)) call.usageSeconds = Math.max(call.usageSeconds, e.usage.seconds);
       if (e.type === "session.closed") void finish(call, "completed", "Voice session closed");
@@ -308,7 +282,7 @@ const local = Bun.serve<SocketData>({ hostname: "127.0.0.1", port: localPort, ma
       if (call.voiceId || call.offerPending) return error("Voice offer already accepted", 409);
       if (typeof body?.sdp !== "string") return error("SDP required");
       call.offerPending = true;
-      const result = await voice("/sessions", "POST", { ...voiceIdentity(call.id), sdp: body.sdp, instructions: instructions(call.brief) });
+      const result = await voice("/sessions", "POST", { ...voiceIdentity(call.id), sdp: body.sdp, instructions: instructions(call.brief), delegation: "none" });
       call.offerPending = false;
       if (!result.ok) return error(result.error, 502);
       call.voiceId = result.value.session.id;

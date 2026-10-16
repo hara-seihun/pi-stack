@@ -18,6 +18,7 @@ check_imports() {
 
 if [[ -f $dest/.pi-stack-commit && $(<"$dest/.pi-stack-commit") == "$commit" ]]; then
   check_imports "$dest"
+  pi_stack_as_root node "$root/deploy/custody-verifier.mjs" "$dest/server/one-kenan-verify.ts" "$root/apps/remote/server/one-kenan-verify.ts" verify
   printf 'Pi Remote from %s is already deployed\n' "$commit"
   exit 0
 fi
@@ -54,4 +55,5 @@ done < <(jq -r '((.dependencies // {}) + (.peerDependencies // {})) | keys[]' ap
 check_imports "$stage/release"
 printf '%s\n' "$commit" > "$stage/release/.pi-stack-commit"
 pi_stack_publish_release "$root" "$stage/release" "$dest" remote
+pi_stack_as_root node "$root/deploy/custody-verifier.mjs" "$dest/server/one-kenan-verify.ts" "$root/apps/remote/server/one-kenan-verify.ts" verify
 printf 'deployed Pi Remote from %s to %s\n' "$commit" "$dest"

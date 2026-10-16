@@ -3,88 +3,14 @@
   "scope": "native-android",
   "owningCommand": "apps/kenan/native-ui/render ABSOLUTE_OUTPUT_DIRECTORY EXISTING_CORDOVA_PLUGIN_DIRECTORY",
   "documentation": "apps/kenan/native-ui/README.md",
+  "fixture": "apps/kenan/android/app/src/test/java/works/kenan/piremote/kenan/NativeUiCatalogueTest.java",
   "generatingContracts": [
-    {
-      "source": "apps/kenan/android/app/src/test/java/works/kenan/piremote/kenan/NativeUiCatalogueTest.java",
-      "domain": "OverlayCase",
-      "representativeCases": 21,
-      "renderingOwner": "apps/kenan/android/app/src/main/java/works/kenan/piremote/kenan/KenanOverlay.java",
-      "views": ["Dot", "Scene", "Panel"],
-      "boundaries": {
-        "speechCharacters": 2000,
-        "speechLines": 6,
-        "draftCharacters": 8000,
-        "draftVisibleLines": [2, 4],
-        "retainedTranscriptEntries": 20,
-        "emptySpeech": "clears-bubble",
-        "emptyOrWhitespaceDraft": "send-disabled",
-        "capture": "all-owned-views-invisible",
-        "closed": "no-owned-windows",
-        "actionOnly": "no-chat-panel-or-chat-speech"
-      }
-    },
-    {
-      "source": "apps/kenan/android/app/src/main/java/works/kenan/piremote/kenan/NativeShells.java",
-      "domain": "SignInState",
-      "representativeCases": 3,
-      "consumer": "AccessSignIn.open",
-      "webView": "isolated-no-Capacitor-bridge",
-      "content": "native-instruction-and-retry-cancel-controls-only"
-    },
-    {
-      "source": "apps/kenan/android/app/src/main/java/works/kenan/piremote/kenan/NativeShells.java",
-      "domain": "EditorState",
-      "representativeCases": 8,
-      "consumer": "EditorActivity handoff and Activity/WebView callbacks",
-      "content": "native-opening-ready-failure-explanations-and-accessible-close",
-      "lifecycleDomain": "EditorCase",
-      "lifecycleCases": 13,
-      "replay": "consumed-ticket-cannot-reopen",
-      "closed": "no-editor-owned-window-and-destroyed-WebView",
-      "identity": "synthetic-loopback-fixture-only"
-    },
-    {
-      "source": "apps/kenan/android/app/src/test/java/works/kenan/piremote/kenan/NativeUiCatalogueTest.java",
-      "domain": "EditorProfile",
-      "representativeProfiles": 5,
-      "casesPerProfile": ["OPENING", "READY", "CONNECTION_FAILED", "SESSION_UNAVAILABLE"],
-      "representativeCaptures": 20,
-      "consumer": "actual EditorActivity lifecycle fixture",
-      "content": "native close-control, opaque opening layer, ready native shell, connection and longest-session-failure explanation"
-    }
+    {"source": "apps/kenan/android/app/src/main/java/works/kenan/piremote/kenan/KenanOverlay.java", "domain": "OverlayCase", "views": ["Dot", "Scene", "Panel"], "content": "synthetic text and finite phone-action geometry"},
+    {"source": "apps/kenan/android/app/src/main/java/works/kenan/piremote/kenan/NativeShells.java", "domain": "Conversation", "consumer": "KenanOverlay.Panel", "content": "shared native controls, local transcript and bounded draft"},
+    {"source": "apps/kenan/android/app/src/main/java/works/kenan/piremote/kenan/NativeShells.java", "domain": "SignInState", "consumer": "AccessSignIn.open", "content": "native instructions and retry/cancel only"},
+    {"source": "apps/kenan/android/app/src/main/java/works/kenan/piremote/kenan/NativeShells.java", "domain": "EditorState", "consumer": "EditorActivity", "content": "actual lifecycle and native shell; synthetic owner-bound handoff"}
   ],
-  "viewportProfiles": [
-    {"widthDp": 360, "heightDp": 800, "fontScale": 1, "coverage": "all-case-domains"},
-    {"widthDp": 360, "heightDp": 800, "fontScale": 1.6, "coverage": "overlay-panel-large-font-and-editor-representatives"},
-    {"widthDp": 320, "heightDp": 480, "fontScale": 1, "coverage": "overlay-panel-empty-and-editor-representatives"},
-    {"widthDp": 320, "heightDp": 480, "fontScale": 1.6, "coverage": "overlay-panel-large-font-and-editor-representatives"},
-    {"widthDp": 640, "heightDp": 360, "fontScale": 1, "coverage": "overlay-panel-transcript-long-bubble-and-editor-representatives"},
-    {"widthDp": 640, "heightDp": 360, "fontScale": 1.6, "coverage": "editor-representatives"}
-  ],
-  "renderedCaptures": 57,
-  "viewedCurrentCasesAcrossReceipts": 57,
-  "latestRun": {"renderedCaptures": 57, "actuallyViewedCaptures": 20, "renderedButNotViewedCaptures": 37, "unchangedHistoricalReviewedCases": 37},
   "renderer": {"engine": "Robolectric 4.16 native Android Skia", "androidApi": 28, "windowOwner": "synthetic WindowManager adapter"},
-  "reviewReceipts": {
-    "directory": "/home/kenan/data/pi-ui-review-20261009/native-editor-layout",
-    "renderManifest": "manifest.json",
-    "judgments": "review.json",
-    "gallery": "index.html",
-    "historicalReceipts": [
-      {"directory": "/home/kenan/data/pi-ui-review-20261009/native", "judgments": "review.json", "viewedCaptures": 29, "currentCases": 28, "scope": "25 overlay, 3 sign-in, 1 superseded editor shell"},
-      {"directory": "/home/kenan/data/pi-ui-review-20261009/native-editor", "judgments": "review.json", "viewedCaptures": 9, "scope": "360x800 font-1 real EditorActivity opening/ready/failure/replay"}
-    ]
-  },
-  "notYetViewed": [
-    {"scope": "editor-nonrepresentative-layouts", "states": ["HANDOFF_ENDED, ACCESS_ENDED, HTTP_ERROR, VIEW_STOPPED and REPLAY at the five added EditorProfile sizes; longest SESSION_UNAVAILABLE failure is the representative, not a screenshot of these variants"]},
-    {"scope": "native-sign-in-layouts", "states": ["compact, landscape and large-font native sign-in controls"]},
-    {"scope": "system-window-compositor", "states": ["Android 36 status-navigation-cutout insets", "keyboard visibility and resize", "accessibility token and elevation", "Dialog system insets"]},
-    {"scope": "remote-WebView-content", "states": ["actual Chromium editor POST redirect HTML and loaded documents", "FLAG_SECURE system compositor enforcement", "visual return into shared React Files", "third-party Access email and code pages"]},
-    {"scope": "Android-update", "states": ["package installer approval/cancellation", "allow-from-this-source settings"]},
-    {"scope": "notifications", "states": ["idle/question/attention collapsed-expanded-private", "phone-control Show/Hide/Disable", "monitoring/error ongoing notices", "heads-up and lockscreen"]},
-    {"scope": "Android-owned-controls", "states": ["native Toast compositor", "runtime permission prompts", "special-access setup", "launcher and launch splash"]}
-  ],
   "sharedWebCatalogueOwner": "apps/remote/web/src/ui-catalogue",
-  "nativeUpdateBoundary": "WEB/APK selection and transfer are native contracts; update banner/navigation belongs to the shared React UI; Android owns install consent",
-  "coverageClaim": "All declared representative actual-view cases and listed viewport probes; not the full protocol-state cross-product or Android system surfaces"
+  "boundaries": ["Android-owned dialogs, keyboard, notifications and system compositor", "real Chromium and third-party sign-in content", "SetupGate bitmap capture"]
 }

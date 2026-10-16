@@ -39,7 +39,6 @@ export default defineConfig({
     rollupOptions: {
       input: {
         index: resolve(import.meta.dirname, "web/index.html"),
-        voice: resolve(import.meta.dirname, "web/voice.html"),
       },
       output: {
         // Three HTML entries share React, so Rolldown hoists it into a shared

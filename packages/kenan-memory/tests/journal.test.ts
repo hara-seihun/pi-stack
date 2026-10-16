@@ -7,6 +7,7 @@ import { ActionJournal, actionObviouslyPrivate, actionJournalDirectory, journalD
 import type { MemoryClient, MemoryInput } from "../src/contract.ts";
 import { MemoryStore } from "../src/store.ts";
 import { memoryService } from "../src/service.ts";
+import { fixtureAuthorization } from "./authorization.js";
 const roots: string[] = [];
 function root() { const path = mkdtempSync(join(tmpdir(), "kenan-journal-")); roots.push(path); return path; }
 afterEach(() => { for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true }); });
@@ -124,7 +125,7 @@ test("Signal journal drain stays inside configured mounted own-person data", () 
 });
 test("missing publisher uses verified UID, never expired inherited session token", async () => {
   const previous = { ...process.env }, store = new MemoryStore(join(root(), "memory.sqlite3"));
-  const service = memoryService({ store, auth: { supervisors: [], uidPersons: { "1001": "alice" } }, enabled: () => true, peerUid: () => 1001 });
+  const service = memoryService({ authorize: fixtureAuthorization, store, auth: { supervisors: [], uidPersons: { "1001": "alice" } }, enabled: () => true, peerUid: () => 1001 });
   await new Promise<void>(resolve => service.listen(0, "127.0.0.1", resolve));
   const address = service.address() as { port: number };
   try {

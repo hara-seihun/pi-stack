@@ -10,29 +10,8 @@ export function fixedModelSystem(messages: AgentMessage[], instructions: string)
 
 /** Session argument that selects a raw Pi session: the model receives the conversation and nothing else. */
 export const RAW_ARGUMENT = "--raw";
-export const SANDBOX_ARGUMENT = "--sandbox";
-export const SANDBOX_POLICY_ARGUMENT = "--sandbox-policy";
-export type SandboxPolicy = { profile: "public" } | { profile: "benchmark"; gatewaySocket: string };
-
-export function sandboxPolicy(metadata: Record<string, unknown>): SandboxPolicy | undefined {
-  if (metadata.sandboxProfile === undefined && metadata.sandboxGateway === undefined) return { profile: "public" };
-  const gateway = metadata.sandboxGateway;
-  if (metadata.sandboxProfile !== "benchmark" || !gateway || typeof gateway !== "object" || Array.isArray(gateway)) return undefined;
-  const socketPath = (gateway as Record<string, unknown>).socketPath;
-  return typeof socketPath === "string" && socketPath.startsWith("/") && !socketPath.includes("\0")
-    ? { profile: "benchmark", gatewaySocket: socketPath } : undefined;
-}
-
 export function isRawSession(args: readonly string[]): boolean {
-  return args.includes(RAW_ARGUMENT) || args.includes(SANDBOX_ARGUMENT);
-}
-
-export function validSandboxBoundary(metadata: Record<string, unknown>): boolean {
-  return metadata.sandbox === undefined
-    ? metadata.sandboxProfile === undefined && metadata.sandboxGateway === undefined
-    : metadata.sandbox === true && metadata.raw === true && sandboxPolicy(metadata) !== undefined
-    && metadata.context === undefined && metadata.execution === undefined && metadata.mode === undefined
-    && metadata.meetingId == null && metadata.contextFiles === undefined;
+  return args.includes(RAW_ARGUMENT);
 }
 
 /**

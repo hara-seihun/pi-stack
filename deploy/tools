@@ -69,7 +69,6 @@ reconcile_links() {
     printf 'pi-phone\t%s/server/pi-phone\n' "$remote"
     printf 'pi-room\t%s/server/pi-room\n' "$remote"
     printf 'pi-signal\t%s/server/pi-signal\n' "$remote"
-    printf 'pi-calendar\t%s/server/pi-calendar\n' "$remote"
     printf 'pi-call\t%s/server/pi-call\n' "$remote"
   })
   pi_stack_as_root env PI_STACK_TOOL_LINKS="$expected" bash -s -- "$home" "$owner" "$group" "$dest" "$remote" <<'ROOT'

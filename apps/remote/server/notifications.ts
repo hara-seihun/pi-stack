@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import type { ManagerNotificationPolicy } from "pi-orchestrator/api";
+import type { ManagerNotificationPolicy, Thread } from "pi-orchestrator/api";
 import { CLASSIC_NOTIFICATION_POLICY, humanNotification } from "./notification-policy";
 
 import type { IdleNotification, IdleNotificationFeed, NotificationHistory, HistoryNotification, ThreadQuestion } from "./protocol";
@@ -8,7 +8,7 @@ export type { IdleNotification, IdleNotificationFeed } from "./protocol";
 export function idleNotifications(
   db: Database,
   after: number | null,
-  localThread: (id: string) => { parentId: string | null; role?: "agent" | "conversation" | "worker"; foreground?: boolean } | null,
+  localThread: (id: string) => { parentId: string | null; role?: Thread["role"] | "agent" | "conversation" | "worker"; foreground?: boolean } | null,
   policy: ManagerNotificationPolicy | null = CLASSIC_NOTIFICATION_POLICY,
 ): IdleNotificationFeed {
   const latest = Number((db.query("SELECT COALESCE(MAX(seq),0) AS seq FROM idle_notifications").get() as { seq: number }).seq);
@@ -18,7 +18,7 @@ export function idleNotifications(
   const notifications = page.filter(event => {
     if (!humanNotification(policy, event.sessionId, event.kind)) return false;
     const thread = localThread(event.sessionId);
-    return thread !== null && (event.kind === "question" || event.kind === "attention" || thread.foreground === true || thread.foreground === undefined && !thread.parentId && thread.role !== "worker");
+    return thread !== null && (event.kind === "question" || event.kind === "attention" || thread.foreground === true || thread.foreground === undefined && !thread.parentId && thread.role !== "worker" && thread.role !== "kenatia");
   });
   return { cursor: page.at(-1)?.seq ?? latest, notifications };
 }

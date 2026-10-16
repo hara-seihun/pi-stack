@@ -51,7 +51,7 @@ test("locked Kenan stays stopped while every unlocked supervisor is checked", (t
 
 test("an inactive unlocked supervisor or shared service fails", (t) => {
   const { run, router } = fixture(t);
-  for (const unit of ["pi-remote@sybil.service", "pi-orchestrator@kenan.service", "pi-remote-router.service", "pi-stack-voice.service"]) {
+  for (const unit of ["pi-remote@sybil.service", "pi-stack-core.service", "pi-remote-router.service", "pi-stack-voice.service"]) {
     const result = run({ INACTIVE: unit });
     assert.equal(result.status, 1);
     assert.ok(result.stderr.includes(`${unit} is not active`));
@@ -79,9 +79,8 @@ test("an all-locked host still requires shared services and valid router health"
 
 test("failed runtime units and failed unit enumeration remain errors", (t) => {
   const { run } = fixture(t);
-  for (const unit of ["pi-remote@kenan.service", "pi-orchestrator@sybil.service",
-    "pi-remote-router.service", "pi-stack-voice.service", "pi-stack-meet-recognition.service",
-    "pi-model-broker.service", "pi-stack-model-broker@sybil.service"]) {
+  for (const unit of ["pi-remote@kenan.service", "pi-stack-core.service",
+    "pi-remote-router.service", "pi-stack-voice.service", "pi-stack-meet-recognition.service"]) {
     const result = run({ FAILED: `${unit} loaded failed failed Runtime\npi-claude-reset-read.service loaded failed failed Collector` });
     assert.equal(result.status, 1);
     assert.ok(result.stderr.includes(`failed Pi runtime units after release:\n${unit}`));

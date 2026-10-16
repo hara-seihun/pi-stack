@@ -14,7 +14,7 @@ export class VoiceBroker {
     if (!this.#key.startsWith("sk-")) throw new Error("The Voice service requires an OpenAI API key in its dedicated credential file");
   }
 
-  async negotiate(sdp: string, instructions: string): Promise<VoiceResult<VoiceConnection>> {
+  async negotiate(sdp: string, instructions: string, delegation: "client" | "none"): Promise<VoiceResult<VoiceConnection>> {
     if (!boundedSdp(sdp)) return { ok: false, status: 400, error: "A bounded WebRTC SDP offer is required" };
     if (Buffer.byteLength(instructions, "utf8") > 32_000) return { ok: false, status: 400, error: "Voice instructions are too large" };
     try {
@@ -26,7 +26,7 @@ export class VoiceBroker {
             model: LIVE_MODEL,
             instructions,
             audio: { output: { voice: LIVE_VOICE } },
-            delegation: { type: "client" },
+            ...(delegation === "client" ? { delegation: { type: "client" } } : {}),
             store: false,
           },
           transport: { type: "webrtc", sdp },

@@ -1,0 +1,242 @@
+import { createServer, type Server, type RequestListener } from "node:http";
+import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
+import { loadCoreConfig, type CoreResult } from "./config.js";
+import type { CoreConfig } from "./contracts.js";
+import { CoreService } from "./service.js";
+import { CoreReloadOwner } from "./reload.js";
+import { createCoreCustodyFactory } from "./custody.js";
+import { CoreImages, type CoreImageScope } from "./images.js";
+import { authorizeRelatedImageScope } from "./image-scopes.js";
+import { createCoreMemory, type CoreMemoryAdapter } from "./memory.js";
+import { authorize } from "../permissions.js";
+import { CoreDuties } from "./duties-runtime.js";
+import { createCoreProvider, type CoreProvider } from "./provider.js";
+import { createCoreRootIntegration, type CoreRootPlugin } from "./root.js";
+import { webRequest, writeResponse } from "./http.js";
+import { startCallbackTransports, type CallbackTransports } from "./callback-transports.js";
+import { startGatewayTransports, type GatewayTransports } from "./gateway-transport.js";
+import { coreReadiness, observeCoreReconciliation, type CoreReconciliationHealth } from "./health.js";
+
+import { CoreStartupClock } from "./startup.js";
+
+export type RunningCore = { service: CoreService; close(): Promise<CoreResult<void>> };
+export async function serveCore(config: CoreConfig): Promise<CoreResult<RunningCore>> {
+  const startup = new CoreStartupClock(() => performance.now(), observation => console.info(JSON.stringify({ type: "core-startup", releaseCommit: config.releaseCommit, scopeCount: config.scopes.length, ...observation })));
+  const shutdown = new AbortController();
+  const core = new CoreService(config, createCoreCustodyFactory(config.root.kind === "configured" ? [config.root.consultationScopeId, ...config.root.consultationOwners.map(owner => owner.scopeId)] : null));
+  let provider: CoreProvider | undefined, root: CoreRootPlugin | null = null, images: CoreImages | undefined, memory: CoreMemoryAdapter | undefined;
+  const duties = new CoreDuties(config.duties, { scopes: config.scopes, principals: config.principals, policy: config.policy, owner: id => core.owner(id), enabled: () => !shutdown.signal.aborted });
+  let callbacks: CallbackTransports | undefined;
+  let gateways: GatewayTransports | undefined;
+  let server: Server | undefined, clock: ReturnType<typeof setInterval> | undefined;
+  let reconciliation: Promise<void> | undefined, rootReconciliation: Promise<void> | undefined, closing: Promise<CoreResult<void>> | undefined;
+  let readinessResults: readonly [PromiseSettledResult<void | undefined>, PromiseSettledResult<CoreResult<void>>] | undefined;
+  let rootResult: PromiseSettledResult<{ errors: number } | undefined> | { status: "pending" } = { status: "pending" };
+  let ready = false;
+  let reconciliationHealth: CoreReconciliationHealth = { state: "pending" };
+  const close = (): Promise<CoreResult<void>> => {
+    if (closing) return closing;
+    closing = (async (): Promise<CoreResult<void>> => {
+      if (!ready) startup.enter("failed");
+      shutdown.abort();
+      ready = false;
+      if (clock) clearInterval(clock);
+      try {
+        await root?.drain();
+        await Promise.all([reconciliation, rootReconciliation]);
+        const transportDrains = Promise.allSettled([
+          gateways?.close(), callbacks?.close(),
+          server?.listening ? new Promise<void>((resolve, reject) => server!.close(error => error ? reject(error) : resolve())) : undefined,
+        ]);
+        await root?.close();
+        await duties.close();
+        await images?.close();
+        const detached = await core.close();
+        if (!detached.ok) { closing = undefined; return detached; }
+        await memory?.close();
+        await provider?.close();
+        const transports = await transportDrains;
+        const failed = transports.find(result => result.status === "rejected");
+        if (failed?.status === "rejected") throw failed.reason;
+        return { ok: true, value: undefined };
+      } catch (cause) {
+        closing = undefined;
+        return { ok: false, error: { code: "unavailable", message: `Core drain incomplete: ${cause instanceof Error ? cause.message : String(cause)}` } };
+      }
+    })();
+    return closing;
+  };
+  try {
+    const adopted = await core.start();
+    if (!adopted.ok) { startup.enter("failed"); return adopted; }
+    startup.enter("provider-adoption");
+    if (config.broker.kind === "configured") {
+      const built = createCoreProvider(config.broker, config.policy, config.principals, scopeId => {
+        const owner = core.owner(scopeId);
+        return owner.ok ? { ok: true, value: { threads: owner.value.threads.snapshot(), running: owner.value.threads.runningSummary(), custody: owner.value.threads.laneCustody() } } : owner;
+      });
+      if (!built.ok) { await close(); return built; }
+      provider = built.value;
+    }
+    startup.enter("memory-adoption");
+    const memoryBuilt = await createCoreMemory({ config: config.memory, principals: config.principals, policy: config.policy, scopes: config.scopes, owner: id => core.owner(id), enabled: () => true, releaseCommit: config.releaseCommit });
+    if (!memoryBuilt.ok) { await close(); return memoryBuilt; }
+    const memoryOwner = memoryBuilt.value;
+    memory = { ...memoryOwner, request: (req, res) => {
+      const ingress = core.authorizeIngress(webRequest(req, core.url, new AbortController().signal, "unread"));
+      if (!ingress.ok) { res.writeHead(403, { "content-type": "application/json" }); res.end(JSON.stringify(ingress)); return; }
+      memoryOwner.request(req, res);
+    } };
+    startup.enter("image-adoption");
+    if (config.images.kind === "configured") {
+      if (!provider) { await close(); return { ok: false, error: { code: "invalid-config", message: "Image generation requires the configured shared provider owner" } }; }
+      const imageScope = (id: string): CoreResult<CoreImageScope | null> => {
+        const scope = config.scopes.find(scope => scope.id === id);
+        if (!scope) return { ok: false, error: { code: "invalid-config", message: "Unknown image scope" } };
+        if (scope.availability.kind === "unavailable") return { ok: true, value: null };
+        const owner = core.owner(id);
+        if (!owner.ok) return owner;
+        return { ok: true, value: { runtime: owner.value.runtime, uid: scope.custody.uid, gid: scope.custody.gid, threads: owner.value.threads, allowsThread: threadId => !!owner.value.threads.get(threadId) } };
+      };
+      images = new CoreImages(config.images, { accounts: provider.imageAccounts,
+        scope: imageScope,
+        relatedScope: (registryId, relatedId) => {
+          const allowed = authorizeRelatedImageScope(config, registryId, relatedId);
+          return allowed.ok ? imageScope(relatedId) : allowed;
+        },
+        authorize: (request, id, resource, actions) => core.authorizeScope(request, id, resource, actions),
+        authorizeNative: (id, resource, actions) => {
+          const scope = config.scopes.find(scope => scope.id === id), principal = config.principals.find(principal => principal.id === scope?.principalId);
+          if (!scope || !principal) return { ok: false, error: { code: "invalid-config", message: "Unknown native image principal" } };
+          for (const action of actions) {
+            const grant = authorize(config.policy, { principal, resource, action, now: Date.now() });
+            if (!grant.ok) return { ok: false, error: { code: "unavailable", message: grant.error.message } };
+          }
+          return { ok: true, value: undefined };
+        },
+      });
+      const started = await images.start();
+      if (!started.ok) { await close(); return started; }
+    }
+    startup.enter("duty-adoption");
+    const adoptedDuties = await duties.start();
+    if (!adoptedDuties.ok) { await close(); return adoptedDuties; }
+    startup.enter("root-adoption");
+    const integrated = await createCoreRootIntegration(config.root, config.scopes, id => core.owner(id), { releaseCommit: config.releaseCommit, shutdownSignal: shutdown.signal,
+      authorizeAdmin: (request, id, actions) => {
+        const scope = config.scopes.find(scope => scope.id === id);
+        return scope ? core.authorizeScope(request, id, scope.resource, actions) : { ok: false, error: { code: "invalid-config", message: "Unknown consultation scope" } };
+      },
+    });
+    if (!integrated.ok) { await close(); return integrated; }
+    const rootOwner = integrated.value;
+    root = rootOwner ? { ...rootOwner, fetch: async request => {
+      const ingress = core.authorizeIngress(request);
+      return ingress.ok ? rootOwner.fetch(request) : Response.json(ingress, { status: 403 });
+    } } : null;
+    startup.enter("callback-transports");
+    const retained = await startCallbackTransports(config.callbacks, { root, memory: config.memory.kind === "configured" ? memory ?? null : null });
+    if (!retained.ok) { await close(); return retained; }
+    callbacks = retained.value;
+    const handleRequest: RequestListener = (req, res) => {
+      const abort = new AbortController();
+      res.once("close", () => abort.abort());
+      void (async () => {
+        const path = new URL(req.url ?? "/", core.url).pathname;
+        const ingress = core.authorizeIngress(webRequest(req, core.url, abort.signal, "unread"));
+        if (!ingress.ok) { await writeResponse(Response.json(ingress, { status: 403 }), res); return; }
+        const brokerRoute = path.startsWith("/v1/model-broker/");
+        const memoryRoute = path === "/v1/memory" || path === "/v1/sessions" || path.startsWith("/v1/root/");
+        if (memoryRoute && memory) { memory.request(req, res); return; }
+        const request = webRequest(req, core.url, abort.signal, brokerRoute ? "unread" : "stream");
+        let response: Response | undefined;
+        if (path === "/health" || path === "/v1/health") {
+          const health = coreReadiness(ready, shutdown.signal.aborted, reconciliationHealth);
+          response = Response.json({ ok: health.ready, ...health, reconciliation: reconciliationHealth, startup: startup.snapshot(), service: "pi-stack-core", releaseCommit: config.releaseCommit, scopeCount: config.scopes.length }, { status: health.ready ? 200 : 503 });
+        } else if (brokerRoute || path.startsWith("/v1/providers")) {
+          const principal = core.authenticate(request);
+          if (!principal.ok) response = Response.json(principal, { status: 401 });
+          else if (!provider) response = Response.json({ error: { code: "unavailable", message: "Model provider is not configured" } }, { status: 503 });
+          else {
+            const result = await provider.request(principal.value, request, req, res);
+            if (result) response = result;
+            else if (brokerRoute) return;
+          }
+        } else if (root && (path === "/v1/ask" || path.startsWith("/v1/ask/") || path.startsWith("/v1/admin/"))) {
+          response = await root.fetch(request);
+        } else response = await images?.handle(request) ?? await core.request(request);
+        await writeResponse(response ?? Response.json({ error: { code: "not-found", message: "Unknown core operation" } }, { status: 404 }), res);
+      })().catch(cause => {
+        if (abort.signal.aborted) return;
+        console.error(`Core request failed: ${cause instanceof Error ? cause.message : String(cause)}`);
+        if (res.headersSent) res.destroy();
+        else { res.writeHead(500, { "content-type": "application/json" }); res.end(JSON.stringify({ error: { code: "unavailable", message: "Core request failed; inspect existing request identity before retry" } })); }
+      });
+    };
+    startup.enter("http-listen");
+    server = createServer(handleRequest);
+    await new Promise<void>((resolve, reject) => { server!.once("error", reject); server!.listen(config.port, config.host, () => { server!.off("error", reject); resolve(); }); });
+    startup.enter("scope-activation");
+    const activated = await core.activate();
+    if (!activated.ok) { await close(); return activated; }
+    startup.enter("provider-transports");
+    const transports = await provider?.startTransports();
+    if (transports && !transports.ok) { await close(); return transports; }
+    startup.enter("gateway-transports");
+    const admittedGateways = await startGatewayTransports(config.gatewayTransport, config.gatewayBindings, handleRequest);
+    if (!admittedGateways.ok) { await close(); return admittedGateways; }
+    gateways = admittedGateways.value;
+    ready = true;
+    startup.enter("initial-reconciliation");
+    const observeReconciliation = () => {
+      if (!readinessResults) return;
+      reconciliationHealth = observeCoreReconciliation(readinessResults[0], rootResult, readinessResults[1],
+        { provider: provider !== undefined, root: root !== null, dutyCustodyErrors: duties.errors() });
+      if (coreReadiness(ready, shutdown.signal.aborted, reconciliationHealth).ready) startup.enter("ready");
+    };
+    const reconcile = () => {
+      if (shutdown.signal.aborted) return;
+      provider?.tick();
+      if (root && !rootReconciliation) {
+        rootReconciliation = Promise.resolve().then(() => root!.reconcile()).then(value => {
+          rootResult = { status: "fulfilled", value }; observeReconciliation();
+        }, reason => {
+          rootResult = { status: "rejected", reason }; observeReconciliation();
+          console.error(`Root reconciliation failed: ${String(reason)}`);
+        }).finally(() => { rootReconciliation = undefined; });
+      }
+      if (reconciliation) return;
+      reconciliation = (async () => {
+        readinessResults = await Promise.allSettled([provider?.reconcile(), duties.tick()] as const);
+        observeReconciliation();
+        for (const result of readinessResults) if (result.status === "rejected") console.error(`Core reconciliation failed: ${String(result.reason)}`);
+      })().finally(() => { reconciliation = undefined; });
+    };
+    clock = setInterval(reconcile, 1_000); reconcile();
+    return { ok: true, value: { service: core, close } };
+  } catch (cause) {
+    const drained = await close();
+    return { ok: false, error: { code: "unavailable", message: `Core startup failed: ${cause instanceof Error ? cause.message : String(cause)}${drained.ok ? "" : `; ${drained.error.message}`}` } };
+  }
+}
+
+async function main(): Promise<void> {
+  const [command, path, ...extra] = process.argv.slice(2);
+  if (!path || extra.length || !["--check-config", "serve"].includes(command!)) { console.error("Usage: pi-stack-core --check-config|serve /absolute/core.json"); process.exitCode = 2; return; }
+  const config = loadCoreConfig(path);
+  if (!config.ok) { console.error(JSON.stringify(config)); process.exitCode = 1; return; }
+  if (command === "--check-config") { console.log(JSON.stringify({ ok: true, scopes: config.value.scopes.map(scope => scope.id), releaseCommit: config.value.releaseCommit })); return; }
+  const running = await serveCore(config.value);
+  if (!running.ok) { console.error(JSON.stringify(running)); process.exitCode = 1; return; }
+  const lifecycle = new CoreReloadOwner(config.value, running.value, () => loadCoreConfig(path), serveCore);
+  const report = (result: CoreResult<void>) => { if (!result.ok) console.error(JSON.stringify(result)); };
+  const reload = () => { void lifecycle.reload().then(result => { report(result); process.exitCode = result.ok ? 0 : 1; }); };
+  const stop = () => {
+    process.off("SIGHUP", reload);
+    void lifecycle.stop().then(result => { report(result); if (!result.ok) process.exitCode = 1; });
+  };
+  process.on("SIGHUP", reload);
+  process.once("SIGTERM", stop); process.once("SIGINT", stop);
+}
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) void main().catch(cause => { console.error(cause); process.exitCode = 1; });

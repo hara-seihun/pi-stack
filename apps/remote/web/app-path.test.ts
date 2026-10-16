@@ -6,11 +6,11 @@ import { RouterAuth } from "./src/router-auth";
 
 test("pages, artwork, and browser state belong to the document's mount", () => {
   for (const prefix of ["", "/pi-stack", "/tools/pi-stack"]) {
-    for (const page of ["", "index.html", "voice.html?session=thread-1"]) {
+    for (const page of ["", "index.html", "index.html?session=thread-1"]) {
       const href = `https://router.test${prefix}/${page}`;
       expect(appBase(href)).toBe(prefix);
       expect(appPath("/kenan.png", href)).toBe(`${prefix}/kenan.png`);
-      expect(appPath("voice.html", href)).toBe(`${prefix}/voice.html`);
+      expect(appPath("index.html", href)).toBe(`${prefix}/index.html`);
       expect(appPath("", href)).toBe(`${prefix}/`);
       expect(appStorageKey("pi-remote-person", href)).toBe(prefix ? `${prefix}:pi-remote-person` : "pi-remote-person");
     }
@@ -59,7 +59,7 @@ test("one built frontend serves root and prefix-stripped pages, assets, fonts an
         for (const match of css.matchAll(/url\(["']?([^\s"')]+)["']?\)/g)) await asset(match[1]!, url);
       }
     };
-    for (const page of ["", "index.html", "voice.html"]) {
+    for (const page of ["", "index.html"]) {
       const url = new URL(`https://router.test${prefix}/${page}`);
       const response = webResponse(output, url.pathname.slice(prefix.length), "GET");
       expect(response?.status).toBe(200);

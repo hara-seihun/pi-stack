@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MemoryStore } from "../../kenan-memory/src/store";
 import { memoryService } from "../../kenan-memory/src/service";
+import { fixtureAuthorization } from "../../kenan-memory/tests/authorization.js";
 import { ThreadService, threadHttp, createThreadClient } from "pi-orchestrator/api";
 import { rootConsentHandler } from "../../../apps/remote/server/root-consent";
 import { RootConsentManager, createConsentBridge, rootMemoryRpc } from "../src/consent";
@@ -19,7 +20,7 @@ async function fixture() {
   const router = rootConsentHandler({ capability: () => "c".repeat(64), persons: () => people, client: person => createThreadClient("http://fixture/v1/threads", async (input, init) => (await threadHttp(owners[person], new Request(input, init)))!) });
   const bridge = createConsentBridge("http://127.0.0.1:19880", "c".repeat(64), (async (input, init) => (await router(new Request(input, init)))!) as typeof fetch);
   const store = new MemoryStore(join(root, "memory.sqlite"));
-  const server = memoryService({ store, auth: { supervisors: people.map(person => ({ person: person.user, token: person.user + "-supervisor" })), rootToken: "root-service" }, enabled: () => true, peerUid: () => undefined });
+  const server = memoryService({ authorize: fixtureAuthorization, store, auth: { supervisors: people.map(person => ({ person: person.user, token: person.user + "-supervisor" })), rootToken: "root-service" }, enabled: () => true, peerUid: () => undefined });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const memory = rootMemoryRpc(`http://127.0.0.1:${(server.address() as { port: number }).port}`, "root-service");
   const admission = store.admitRoot("bob", "bob-thread", ["bob"], ["alice"]);

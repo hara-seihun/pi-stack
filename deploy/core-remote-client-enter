@@ -1,0 +1,41 @@
+#!/usr/bin/python3 -B
+"""Start an already-adopted thin Remote in the canonical shared data view."""
+import json
+import os
+from pathlib import Path
+import pwd
+import re
+import sys
+sys.dont_write_bytecode = True
+from core_namespace import absolute, namespace_path, trusted
+
+
+def enter_client(user):
+    if not re.fullmatch(r'[a-z_][a-z0-9_-]{0,31}', user):
+        raise ValueError('registered Unix custodian required')
+    binding_path = '/etc/pi-stack/rooms/core-binding.json' if user == 'pi-rooms' else f'/etc/pi-stack/users/{user}/core-binding.json'
+    binding = trusted(absolute(binding_path))
+    config = trusted(absolute('/etc/pi-stack/core.json'))
+    runtime = trusted(absolute('/etc/pi-stack/core-runtime.json'))
+    scope = next(s for s in config['scopes'] if s['id'] == binding['scopeId'])
+    unix = pwd.getpwnam(user)
+    if binding['user'] != user or scope['custody']['uid'] != unix.pw_uid or scope['custody']['gid'] != unix.pw_gid or scope['availability']['kind'] != 'adopt' or scope['custody']['namespace'] != runtime['namespace']:
+        raise ValueError('client must use its exact already-adopted canonical data view')
+    if scope['callbackGateway'] != {'kind':'remote-callback','peerUid':unix.pw_uid}:
+        raise ValueError('own Remote callback custodian required')
+    if user == 'pi-rooms' and scope['id'] != 'rooms' or user != 'pi-rooms' and scope['id'] != 'remote:'+user:
+        raise ValueError('client entrypoint belongs to another scope')
+    descriptor = os.open(namespace_path(scope['custody']['namespace']), os.O_RDONLY)
+    os.set_inheritable(descriptor, True)
+    main = 'rooms-main.ts' if user == 'pi-rooms' else 'main.ts'
+    os.execv('/usr/bin/nsenter', ['/usr/bin/nsenter', '--mount=/proc/self/fd/'+str(descriptor), '--', '/usr/sbin/runuser', '-u', user, '--', '/srv/pi/pi-remote/server/pi-remote-supervise', '/usr/local/bin/bun', '/srv/pi/pi-remote/server/'+main])
+
+
+if __name__ == '__main__':
+    try:
+        if os.geteuid() != 0 or len(sys.argv) != 2:
+            raise ValueError('usage: root core-remote-client-enter USER')
+        enter_client(sys.argv[1])
+    except (OSError,ValueError,KeyError,TypeError,StopIteration) as error:
+        print(json.dumps({'ok':False,'error':{'code':'thin-client-custody-unavailable','message':str(error)}}))
+        sys.exit(75)

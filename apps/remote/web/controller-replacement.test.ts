@@ -27,10 +27,10 @@ function fixture() {
 test.each(["spawn", "send"] as const)("web %s reconciles both precommit and lost-body replacement through the owner's durable receipt", async operation => {
   for (const committed of [false, true]) {
     const f = fixture();
-    if (operation === "send") expect(await f.owner.spawn({ requestId: "recipient-create", id: "recipient", cwd: f.root })).toMatchObject({ ok: true });
+    if (operation === "send") expect(await f.owner.spawn({ requestId: "recipient-create", id: "recipient", cwd: f.root, title: "Recipient" })).toMatchObject({ ok: true });
     const requestId = crypto.randomUUID();
     const input = operation === "spawn" ? { requestId, cwd: f.root, message: "one assignment" }
-      : { requestId, threadId: "recipient", text: "one message", delivery: "steer" };
+      : { requestId, threadId: "recipient", text: "one message" };
     const init = { method: "POST", body: JSON.stringify(input) };
     const transmitted: string[] = [];
     let original: unknown;
@@ -61,9 +61,9 @@ test.each(["spawn", "send"] as const)("web %s reconciles both precommit and lost
 test.each(["spawn", "send"] as const)("native %s survives committed/lost acceptance and uncommitted replacement exactly once", async operation => {
   for (const committed of [false, true]) {
     const f = fixture();
-    if (operation === "send") expect(await f.owner.spawn({ requestId: "recipient-create", id: "recipient", cwd: f.root })).toMatchObject({ ok: true });
+    if (operation === "send") expect(await f.owner.spawn({ requestId: "recipient-create", id: "recipient", cwd: f.root, title: "Recipient" })).toMatchObject({ ok: true });
     const input = operation === "spawn" ? { requestId: "native-spawn-call", cwd: f.root, message: "assignment" }
-      : { requestId: "native-send-call", threadId: "recipient", text: "message", delivery: "steer" as const };
+      : { requestId: "native-send-call", threadId: "recipient", text: "message" };
     const bodies: string[] = [];
     let original: unknown;
     const client = createThreadClient("http://owner/v1/thread-owner", async (_url, init) => {

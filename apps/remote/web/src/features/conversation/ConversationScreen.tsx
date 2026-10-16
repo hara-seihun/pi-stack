@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import { agentAvatar, ChatMessage } from "../../chat-message";
 import { managerLiveText } from "pi-orchestrator/manager-turn";
 import { CachedImage } from "../../cached-media";
@@ -12,10 +12,8 @@ import type { ChatDrawing } from "../../chat-drawing";
 import type { InlineImage } from "../../../../server/inline-image-contract";
 import type { ContextEntry, Session, SlashCommand } from "../../types";
 import { ConversationStatus, type ConversationConnection } from "../status/ConversationStatus";
-import { agentName } from "../../agent-name";
 import { monoThreadStatus, threadStatus } from "../status/thread-status";
 import { composerAction } from "../../thread-state";
-import { DELIVERY_LABELS } from "../queue/delivery";
 import { Transcript } from "./Transcript";
 import type { VisibleTranscriptRange } from "./transcript-store";
 import { ConversationModelMeta } from "./ContextTokens";
@@ -24,12 +22,9 @@ import type { ThreadQuestion, QuestionsResource } from "../../../../server/proto
 import "./conversation.css";
 import { useLongPress } from "../../app/long-press";
 
-import { resolveDelivery, type Delivery } from "../../../../../../packages/orchestrator/src/threads/contracts";
-export type { Delivery } from "../../../../../../packages/orchestrator/src/threads/contracts";
 
 export function BackIcon() { return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg>; }
 function InfoIcon() { return <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 11v5m0-8v.2" /></svg>; }
-function ChevronIcon() { return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>; }
 
 export function ConversationHeader({ title, subtitle, status, onBack, onOpenInspector, trailing, meta, avatar, showIdentity = true, compact = false, onLongPress }: { compact?: boolean; onLongPress?(): void; title: string; /** A second identity line, such as an agent's task under its name. */ subtitle?: string; /** Readable conversation state, beneath its identity. */ status?: ReactNode; onBack: (() => void) | null; onOpenInspector: (() => void) | null; trailing?: ReactNode; meta?: ReactNode; /** The contact's picture next to the title. */ avatar?: string; showIdentity?: boolean }) {
   const longPress = useLongPress(onLongPress);
@@ -95,7 +90,7 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
   onReply(target: ReplyTarget): void;
   onCancelReply(): void;
   onPrompt(text: string): void;
-  onSend(delivery: Delivery): void;
+  onSend(): void;
   onStop(): void;
   onResume(): void;
   onReconnect(): void;
@@ -108,31 +103,17 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
   const visibleLiveText = session.manager ? managerLiveText(liveText ?? "") : liveText;
   const status = mono ? monoThreadStatus(session) : threadStatus(session);
   const connection: ConversationConnection = offline ? { kind: "disconnected", reason: offline } : syncing ? { kind: "syncing" } : { kind: "connected" };
-  const running = session.state === "running";
   const hasText = prompt.trim().length > 0 || attachments.some(file => !file.uploading);
   const queued = session.queuedMessages.length;
   const action = session.manager ? "send" : composerAction(session, prompt);
   const cancelAction = composerAction(session, "");
-  const [delivery, setDelivery] = useState<Delivery>(resolveDelivery({}));
-  const [modeOpen, setModeOpen] = useState(false);
-  const modeRef = useRef<HTMLDivElement>(null);
-  const modeToggleRef = useRef<HTMLButtonElement>(null);
-  const modeMenuRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { setDelivery(resolveDelivery({})); setModeOpen(false); }, [running, session.id]);
-  useEffect(() => {
-    if (!modeOpen) return;
-    modeMenuRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
-    const outside = (event: PointerEvent) => { if (!modeRef.current?.contains(event.target as Node)) setModeOpen(false); };
-    document.addEventListener("pointerdown", outside);
-    return () => document.removeEventListener("pointerdown", outside);
-  }, [modeOpen]);
   const slashToken = prompt.startsWith("/") && !/\s/.test(prompt) ? prompt.slice(1).toLowerCase() : null;
   const visibleCommands = slashToken === null ? [] : slashCommands.filter(command => command.source === "skill" && !command.name.toLowerCase().includes("mcp") && command.name.toLowerCase().startsWith(slashToken));
   return <div className={`conversation-screen${mono ? " mono-conversation" : ""}${session.manager ? " manager-conversation" : ""}`}>
     <ConversationHeader title={mono || session.manager ? AGENT_NAME : session.name || "Agent"} compact={session.manager === true} avatar={session.manager ? agentAvatar() : undefined} onLongPress={mono?.onClassic} status={<ConversationStatus status={status} connection={connection} />} meta={session.manager || mono ? undefined : <ConversationModelMeta session={session} />} showIdentity={mono || session.manager ? true : showIdentity} onBack={!mono && showBack ? onBack : null} onOpenInspector={mono ? null : onOpenInspector}
       trailing={<>{!session.manager && questions.length > 0 && (cancelAction === "stop" || cancelAction === "cancel_wait") && <button type="button" className="header-action" disabled={pending} onClick={onStop}>{cancelAction === "stop" ? "Cancel work" : mono ? "Cancel request" : "Cancel wait"}</button>}{queued > 0 && <button type="button" className="header-chip" onClick={onOpenQueue} aria-label={`${queued} queued. Open the queue`}>{queued} queued</button>}{offline && <button type="button" className="header-action" onClick={onReconnect}>Reconnect</button>}</>} />
     {mono && !mono.hintSeen && <aside className="mono-hint" role="status"><span>Long-press this header to return to classic view. Long-press Chats to come back here.</span><button type="button" disabled={mono.saving} onClick={mono.onHintSeen} aria-label="Dismiss mono view hint">Got it</button></aside>}
-    {!mono && ancestors.length > 0 && <nav className="ancestry" aria-label="Launched by">{ancestors.map(ancestor => <button key={ancestor.id} type="button" title={ancestor.name || undefined} onClick={() => onOpenAncestor(ancestor)}>{agentName(ancestor) ?? (ancestor.name || ancestor.id)}</button>)}</nav>}
+    {!mono && ancestors.length > 0 && <nav className="ancestry" aria-label="Launched by">{ancestors.map(ancestor => <button key={ancestor.id} type="button" title={ancestor.name || undefined} onClick={() => onOpenAncestor(ancestor)}>{ancestor.name || ancestor.id}</button>)}</nav>}
     <DismissibleError className="conversation-error" dismissLabel="Dismiss thread error" message={controlError} resetKey={session.id} onDismiss={async () => { onDismissControlError(); return { ok: true as const }; }} />
     {outbox}
     <ConversationView key={session.id} active sentPromptId={sentPromptId} newerAvailable={newerAvailable} onJumpLatest={onJumpLatest} label={`Chat with ${mono ? AGENT_NAME : session.name || "Agent"}`} drawing={drawing} transcript={<InlineImagesContext.Provider value={images}>
@@ -144,21 +125,10 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
       <DismissibleError className="conversation-error" dismissLabel="Dismiss upload error" message={uploadError} resetKey={session.id} />
       {questionsResource?.state === "failed" && <div className="conversation-error" role="alert">Could not load questions: {questionsResource.error}. {questions.length > 0 ? "Showing previous questions; their status may have changed." : "Chat remains available."} <button type="button" onClick={onRetryQuestions}>Retry questions</button></div>}
       {questions.length > 0 && session.manager && <QuestionsComposer sessionId={session.id} questions={questions} onAccepted={onQuestionAccepted} />}
-      {questions.length > 0 && !session.manager ? <QuestionsComposer sessionId={session.id} questions={questions} onAccepted={onQuestionAccepted} /> : <Composer id="prompt" value={prompt} onChange={onPrompt} onSend={() => action === "stop" || action === "cancel_wait" ? onStop() : action === "resume" ? onResume() : onSend(session.manager ? "hardSteer" : delivery)} cancelWaitLabel={mono ? "Cancel request" : "Cancel wait"} placeholder={`Message ${mono ? AGENT_NAME : session.name || "Agent"}`} action={action} disabled={pending || (action === "send" && (attachments.some(file => file.uploading) || !hasText))} layoutKey={session.id}
+      {questions.length > 0 && !session.manager ? <QuestionsComposer sessionId={session.id} questions={questions} onAccepted={onQuestionAccepted} /> : <Composer id="prompt" value={prompt} onChange={onPrompt} onSend={() => action === "stop" || action === "cancel_wait" ? onStop() : action === "resume" ? onResume() : onSend()} cancelWaitLabel={mono ? "Cancel request" : "Cancel wait"} placeholder={`Message ${mono ? AGENT_NAME : session.name || "Agent"}`} action={action} disabled={pending || (action === "send" && (attachments.some(file => file.uploading) || !hasText))} layoutKey={session.id}
         attachments={attachments} onRemove={onRemoveAttachment} onUpload={onUpload} onPaste={onPaste} onDraw={onDraw}
         before={<>{reply && <ReplyComposer target={reply} onCancel={onCancelReply} />}{visibleCommands.length > 0 && <div className="slash-commands" role="listbox">{visibleCommands.map(command => <button key={command.name} type="button" className="slash-command" onClick={() => onPrompt(`/${command.name} `)}><strong className="slash-command-name">/{command.name}</strong>{command.description && <span className="slash-command-description">{command.description}</span>}</button>)}</div>}</>}
-        actions={<>{!session.manager && !mono && running && hasText && <div className="delivery-mode" ref={modeRef}>
-          <button ref={modeToggleRef} type="button" className="delivery-toggle" aria-haspopup="menu" aria-expanded={modeOpen} aria-label={`Change delivery. Current: ${DELIVERY_LABELS[delivery].label}`} onClick={() => setModeOpen(open => !open)} onKeyDown={event => { if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); setModeOpen(true); } }}><span>{DELIVERY_LABELS[delivery].label}</span><ChevronIcon /></button>
-          {modeOpen && <div ref={modeMenuRef} className="delivery-menu" role="menu" aria-label="Change delivery" onKeyDown={event => {
-            if (event.key === "Escape") { setModeOpen(false); modeToggleRef.current?.focus(); return; }
-            if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
-            event.preventDefault();
-            const choices = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("button")];
-            const current = choices.indexOf(document.activeElement as HTMLButtonElement);
-            const next = event.key === "Home" ? 0 : event.key === "End" ? choices.length - 1 : event.key === "ArrowDown" ? (current + 1) % choices.length : (current - 1 + choices.length) % choices.length;
-            choices[next]?.focus();
-          }}>{(["queue", "steer", "hardSteer"] as Delivery[]).filter(mode => mode !== delivery).map(mode => <button key={mode} type="button" role="menuitem" data-mode={mode} onClick={() => { setDelivery(mode); setModeOpen(false); modeToggleRef.current?.focus(); }}><strong>{DELIVERY_LABELS[mode].label}</strong><span>{DELIVERY_LABELS[mode].detail}</span></button>)}</div>}
-        </div>}</>} />}
+        />}
     </ConversationView>
   </div>;
 }

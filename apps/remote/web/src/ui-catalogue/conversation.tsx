@@ -13,8 +13,6 @@ import { useChatDrawing } from "../chat-drawing";
 import { DrawingCanvas } from "../DrawingCanvas";
 import { DrawingColourPicker } from "../DrawingColourPicker";
 import { PasteTextDialog } from "../PasteTextDialog";
-import { SpeechBarControls } from "../SpeechBar";
-import type { SpeechState } from "../speech";
 import { PromptOutboxStatus } from "../PromptOutboxStatus";
 import type { PromptOutboxEntry, PromptOutboxOutcome } from "../prompt-outbox";
 import type { PromptStorageState } from "../prompt-storage";
@@ -58,7 +56,7 @@ export function conversationSession(patch: Partial<Omit<Session, ObservationKeys
   const { observation = { kind: "idle" }, ...display } = patch;
   const value: Session = {
     id: "catalogue-session", parentId: null, hasChildren: false, origin: "person", foreground: true,
-    model: "openai/gpt-6.1-sol", name: "Visual review", agentName: "Kenan", cwd: "/home/catalogue/project",
+    model: "openai/gpt-6.1-sol", name: "Fixture conversation", cwd: "/home/catalogue/project",
     workspaceName: "Catalogue", environment: "Synthetic local", provider: "openai", createdAt: new Date(epoch).toISOString(), updatedAt: new Date(epoch).toISOString(),
     revision: 1, idleUnread: false, queuedMessages: [], ...display, ...observationFields(observation),
   };
@@ -70,7 +68,7 @@ function entry(kind: ContextEntry["kind"], text: string, key: string): ContextEn
   return { key, signature: key, kind, text, label: kind, time: epoch, messageTimestamp: epoch };
 }
 const messages = [entry("user", `Please review this. ${unicode}`, "user"), entry("assistant", markdown, "answer")];
-const receiptBase = { threadId: "catalogue-session", senderId: null, source: "explicit" as const, delivery: "steer" as const, priority: "human" as const, createdAt: epoch };
+const receiptBase = { threadId: "catalogue-session", senderId: null, source: "explicit" as const, delivery: "pending" as const, priority: "human" as const, createdAt: epoch };
 const receiptEntries: ContextEntry[] = [
   { state: "queued" as const },
   { state: "dispatched" as const, insertedAt: null, landedAt: null },
@@ -96,11 +94,11 @@ function ScreenFixture({ mode }: { mode: "empty" | "history" | "working" | "held
   const busy = mode === "working";
   const current = session({
     ...(busy || mode === "receipts" ? { observation: { kind: "running", phase: "thinking" } as const } : {}),
-    ...(mode === "receipts" || mode === "messenger" ? { manager: true, contextSelection: { mode: "all" as const, files: ["AGENTS.md", "machine/README.md", "notes.md"] }, queuedMessages: [queueMessage("input-0", "steer", "queued")] } : {}),
-    ...(mode === "held" ? { observation: { kind: "held" } as const, queuedMessages: [queueMessage("held", "queue", "queued")] } : {}),
+    ...(mode === "receipts" || mode === "messenger" ? { manager: true, contextSelection: { mode: "all" as const, files: ["AGENTS.md", "machine/README.md", "notes.md"] }, queuedMessages: [queueMessage("input-0", "queued")] } : {}),
+    ...(mode === "held" ? { observation: { kind: "held" } as const, queuedMessages: [queueMessage("held", "queued")] } : {}),
     ...(mode === "long-header" ? { name: `${unicode} ${longToken}`, model: `provider/${longToken}`, contextUsage: { tokens: 180000, contextWindow: 200000, percent: 90 } } : {}),
   });
-  return <div style={{ height: "100dvh" }}><ConversationScreen session={current} mono={mode === "receipts" || mode === "messenger" ? { hintSeen: true, onClassic: noop, onHintSeen: noop, saving: false } : undefined} ancestors={mode === "long-header" ? [session({ id: "parent", agentName: unicode })] : []}
+  return <div style={{ height: "100dvh" }}><ConversationScreen session={current} mono={mode === "receipts" || mode === "messenger" ? { hintSeen: true, onClassic: noop, onHintSeen: noop, saving: false } : undefined} ancestors={mode === "long-header" ? [session({ id: "parent", name: unicode })] : []}
     entries={mode === "messenger" ? [
       entry("user", "Can you show me the details?", "human-first"),
       { ...entry("user", "And keep the picture in the chat.", "human-next"), messageTimestamp: epoch + 15_000 },
@@ -123,12 +121,12 @@ function ComposerFixture({ mode }: { mode: "empty" | "long" | "uploading" | "man
   return <Frame><Composer value={value} onChange={setValue} onSend={noop} placeholder="Message Kenan" disabled={mode === "empty" || mode === "uploading" || mode === "readonly"} readOnly={mode === "readonly"}
     attachments={attachments} onRemove={id => setAttachments(items => items.filter(item => item.id !== id))} onUpload={noop} onPaste={noop} onDraw={noop} hideAttachments={mode === "hidden"} action={mode === "stop" ? "stop" : mode === "resume" ? "resume" : "send"} /></Frame>;
 }
-function queueMessage(id: string, delivery: QueuedMessage["delivery"], state: QueuedMessage["state"], acknowledgement?: QueuedMessage["acknowledgement"]): QueuedMessage {
-  return { id, text: `${id}: ${unicode}`, delivery, state, acknowledgement, canSteer: state === "queued" && delivery === "queue", canHardSteer: state === "queued" && delivery !== "hardSteer", canCancel: state === "queued", createdAt: new Date(epoch).toISOString() };
+function queueMessage(id: string, state: QueuedMessage["state"], acknowledgement?: QueuedMessage["acknowledgement"]): QueuedMessage {
+  return { id, text: `${id}: ${unicode}`, delivery: "pending", state, acknowledgement, canCancel: state === "queued", createdAt: new Date(epoch).toISOString() };
 }
 const queueVariants: QueuedMessage[] = [
-  queueMessage("queued", "queue", "queued"), queueMessage("steering", "steer", "queued"), queueMessage("interrupting", "hardSteer", "queued"),
-  queueMessage("sent", "queue", "dispatched"), queueMessage("pending", "steer", "dispatched", "pending"), queueMessage("unconfirmed", "hardSteer", "dispatched", "unconfirmed"),
+  queueMessage("queued", "queued"), queueMessage("sent", "dispatched"),
+  queueMessage("pending", "dispatched", "pending"), queueMessage("unconfirmed", "dispatched", "unconfirmed"),
 ];
 function QueueFixture({ mode }: { mode: "empty" | "variants" | "held" | "pending" | "long" }) {
   const [open, setOpen] = useState(true);
@@ -143,7 +141,7 @@ function InspectorFixture({ mode }: { mode: "idle" | "archived" | "agents" | "jo
     : mode === "deployment" ? { kind: "deployment", publicationId: longToken, since: epoch }
     : mode === "message" ? { kind: "message", fromThreadId: "peer", since: epoch } : undefined;
   const current = session({ observation: wait ? { kind: "dependency", wait } : mode === "archived" ? { kind: "archived" } : mode === "error" ? { kind: "error", message: prose } : { kind: "idle" }, cwd: `/home/catalogue/${longToken}` });
-  const children = mode === "children" ? Array.from({ length: 8 }, (_, i) => session({ id: `child-${i}`, parentId: current.id, agentName: `${unicode}-${i}`, name: prose })) : [];
+  const children = mode === "children" ? Array.from({ length: 8 }, (_, i) => session({ id: `child-${i}`, parentId: current.id, name: `${unicode}-${i}: ${prose}` })) : [];
   configureFixtureTransport([
     { method: "GET", match: url => url.pathname === `/v1/sessions/${current.id}/children`, reply: () => Response.json({ children }) },
     { method: "GET", match: url => url.pathname === `/v1/sessions/${current.id}/events`, reply: () => Response.json({ events: [{ seq: 1, time: new Date(epoch).toISOString(), type: "execution.started", phase: "thinking" }, { seq: 2, time: new Date(epoch).toISOString(), type: "tool.finished", detail: longToken, result: { ok: true } }] }) },
@@ -174,17 +172,13 @@ function ColourFixture() {
   const [color, setColor] = useState("#006d77");
   return <Frame><DrawingColourPicker color={color} onChange={setColor} /><DrawingColourPicker color="#fff" onChange={noop} disabled /></Frame>;
 }
-function SpeechFixture({ status }: { status: SpeechState["status"] }) {
-  const [state, setState] = useState<SpeechState>({ catalog: { engines: [{ id: "synthetic", name: "Synthetic speech", defaultVoice: "voice-1" }] }, status, error: status === "error" ? prose : "", title: prose, rate: 1.25, engine: "synthetic", voice: "voice-1", voices: [{ id: "voice-1", name: `${unicode} ${longToken}` }, { id: "voice-2", name: "Second voice" }], voicesError: "", position: 7384 });
-  return <Frame><SpeechBarControls state={state} onToggle={() => setState(current => ({ ...current, status: current.status === "playing" ? "paused" : "playing" }))} onVoice={voice => setState(current => ({ ...current, voice }))} onRate={() => setState(current => ({ ...current, rate: 1.5 }))} onStop={() => setState(current => ({ ...current, status: "idle" }))} /></Frame>;
-}
 function OutboxFixture({ mode }: { mode: "variants" | "storage-loading" | "storage-failed" }) {
   const outcomes: PromptOutboxOutcome[] = [
     { kind: "pending", reason: "saved", message: "Saved before sending." }, { kind: "pending", reason: "transport", message: "Connection lost; acceptance not confirmed." },
     { kind: "pending", reason: "authentication", message: "Sign in to check acceptance." }, { kind: "pending", reason: "unconfirmed", message: "Acknowledgement not received; not resent." },
     { kind: "rejected", message: prose }, { kind: "accepted", workId: "work-1" },
   ];
-  const entries: PromptOutboxEntry[] = outcomes.map((outcome, i) => ({ requestId: `request-${i}`, sessionId: "catalogue-session", bodyJson: JSON.stringify({ requestId: `request-${i}`, text: `${prose}\n${longToken}`, delivery: i % 2 ? "steer" : "queue" }), createdAt: epoch, outcome }));
+  const entries: PromptOutboxEntry[] = outcomes.map((outcome, i) => ({ requestId: `request-${i}`, sessionId: "catalogue-session", bodyJson: JSON.stringify({ requestId: `request-${i}`, text: `${prose}\n${longToken}` }), createdAt: epoch, outcome }));
   const storage: PromptStorageState<unknown> = mode === "storage-loading" ? { kind: "loading" } : mode === "storage-failed" ? { kind: "failed", error: { kind: "unavailable", message: prose } } : { kind: "ready", owner: {} };
   return <Frame><PromptOutboxStatus entries={mode === "variants" ? entries : []} busyRequestId="request-1" onRetry={noop} onDiscard={noop} storage={{ state: storage, retry: noop }} /></Frame>;
 }
@@ -224,7 +218,6 @@ export const conversationCases: UiCase[] = [
   ...(["empty", "long", "failure", "pending"] as const).map(mode => ui(`paste-${mode}`, "PasteTextDialog", "Empty/long document and submitted pending/failure states", () => <PasteFixture mode={mode} />)),
   ...(["blank", "image", "failure"] as const).map(mode => ui(`drawing-${mode}`, "DrawingCanvas", "Blank paper, decoded background and failed background; pointer/zoom/export controls", () => <DrawingFixture mode={mode} />)),
   ui("drawing-colour", "DrawingColourPicker", "Enabled/disabled and opened HSV picker interaction", () => <ColourFixture />),
-  ...(["idle", "loading", "playing", "paused", "error"] as const).map(status => ui(`speech-${status}`, "SpeechBarControls", "All speech statuses; long voice/title and multi-hour position", () => <SpeechFixture status={status} />)),
   ...(["variants", "storage-loading", "storage-failed"] as const).map(mode => ui(`outbox-${mode}`, "PromptOutboxStatus", "All pending reasons, rejection and accepted hiding; storage initialization variants", () => <OutboxFixture mode={mode} />)),
   ...(["literal", "markdown", "media", "reply"] as const).map(mode => ui(`message-${mode}`, "ChatMessage / Markdown", "Literal/markdown, media types, reply quote/reactions, failed delivery and response metrics", () => <MessageFixture mode={mode} />, "content-boundary")),
 ];

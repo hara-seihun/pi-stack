@@ -1,104 +1,39 @@
 #!/usr/bin/python3
-"""Observe Root executor idleness without changing request admission."""
+"""Read the shared core's exact scoped adoption proof; never change admission."""
 import argparse
-import importlib.machinery
-import importlib.util
 import json
 import os
 from pathlib import Path
-import pwd
 import re
 import subprocess
 import sys
-
-UNIT = 'pi-kenan-root.service'
-
-
-def activation_module():
-    loader = importlib.machinery.SourceFileLoader('root_activation', str(Path(__file__).with_name('one-kenan-activate')))
-    spec = importlib.util.spec_from_loader(loader.name, loader)
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
-
-
-def escaped_native_count(host):
-    user = host.command('systemctl', 'show', UNIT, '-p', 'User', '--value')
-    uid = pwd.getpwnam(user).pw_uid
-    count = 0
-    pattern = re.compile(r'(?:runner-host\.(?:js|ts)|native-(?:host|guardian)\.mjs|(?:shared-)?runtime-host\.(?:mjs|ts)|pi-coding-agent/dist/(?:bundle/)?cli\.js)$')
-    for directory in Path('/proc').iterdir():
-        if not directory.name.isdigit():
-            continue
-        try:
-            if directory.stat().st_uid != uid:
-                continue
-            args = (directory / 'cmdline').read_bytes().decode(errors='replace').split('\0')
-            if any(pattern.search(argument) for argument in args):
-                count += 1
-        except (FileNotFoundError, ProcessLookupError):
-            continue
-    return count
-
-
-def observe(host):
-    pid = host.command('systemctl', 'show', UNIT, '-p', 'MainPID', '--value')
-    active = host.command('systemctl', 'show', UNIT, '-p', 'ActiveState', '--value')
-    common = {'unit': UNIT, 'admissionGated': False}
-    if active in ('inactive', 'failed') and pid == '0':
-        native = escaped_native_count(host)
-        return {**common, 'ready': native == 0, 'state': 'inactive' if native == 0 else 'inactive-native-retained', 'escapedNativeProcesses': native}
-    if active != 'active' or not re.fullmatch(r'[1-9][0-9]*', pid):
-        return {**common, 'ready': False, 'state': 'lifecycle-unsettled'}
-    health = host.health('root')
-    source = health.get('releaseCommit')
-    if health.get('ok') is not True or not isinstance(source, str) or not re.fullmatch(r'[a-f0-9]{40}', source):
-        return {**common, 'ready': False, 'state': 'health-unavailable'}
-    evidence = dict(host.idle(pid), escapedNativeProcesses=escaped_native_count(host))
-    retained = any(evidence[field] for field in ('childProcesses', 'escapedNativeProcesses'))
-    counter_keys = set(health) & {'activeExecutions', 'consentActive'}
-    if counter_keys:
-        if counter_keys != {'activeExecutions', 'consentActive'} or type(health['activeExecutions']) is not int or health['activeExecutions'] < 0 or type(health['consentActive']) is not bool:
-            raise RuntimeError('Root readonly executor counters are invalid')
-        retained = retained or health['activeExecutions'] != 0 or health['consentActive']
-    if retained:
-        return {**common, 'ready': False, 'state': 'writers-retained', 'evidence': evidence}
-    if host.command('systemctl', 'show', UNIT, '-p', 'MainPID', '--value') != pid:
-        return {**common, 'ready': False, 'state': 'generation-changed'}
-    return {**common, 'ready': True, 'state': 'observed-idle', 'pid': pid, 'source': source, 'evidence': evidence,
-            'executorState': 'readonly-counters' if counter_keys else 'unobservable-readonly'}
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('host')
     parser.add_argument('candidate')
-    parser.add_argument('--probe', action='store_true', help='Observation is the only operation')
+    parser.add_argument('--probe', action='store_true')
     args = parser.parse_args()
     if os.geteuid() != 0 or not re.fullmatch(r'[a-f0-9]{40}', args.candidate):
-        raise RuntimeError('Root native history observation needs administrator and exact candidate SHA')
-    module = activation_module()
-    declaration = module.public_config(args.host)
-    if declaration.get('oneKenan') is False:
-        result = {'ready': True, 'state': 'not-enabled', 'admissionGated': False}
-    elif declaration.get('oneKenan') is True:
-        host = module.Host(module.public_config('/etc/pi-stack/one-kenan.json'), args.candidate)
-        try:
-            result = observe(host)
-        except module.Deferred:
-            result = {'ready': False, 'state': 'generation-unsettled', 'unit': UNIT, 'admissionGated': False}
-    else:
-        raise RuntimeError('Root product authority is not explicitly declared')
-    print(json.dumps(result))
-    if not result['ready']:
-        print('native history observation waiting: ' + result['state'], file=sys.stderr)
+        raise ValueError('administrator and exact candidate required')
+    artifact = Path('/srv/pi/pi-orchestrator')
+    result = subprocess.run([str(artifact / 'host/core-runtime'), 'proof', str(artifact), '/etc/pi-stack/core.json'],
+                            check=False, capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        print(json.dumps({'ready': False, 'state': 'core-adoption-unavailable', 'admissionGated': False}))
+        print('native history observation waiting: core adoption proof unavailable; original evidence remains owned', file=sys.stderr)
         return 75
+    proof = json.loads(result.stdout)
+    if proof.get('ok') is not True or proof['value'].get('protocol') != 'pi-core-adoption-proof-v1' or proof['value'].get('admissionGated') is not False:
+        raise ValueError('invalid scoped core adoption proof')
+    print(json.dumps({'ready': True, 'state': 'core-adopted', 'admissionGated': False, 'proof': proof['value']}))
     return 0
 
 
 if __name__ == '__main__':
     try:
         sys.exit(main())
-    except (RuntimeError, OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
-        print('Root native history observation failed: ' + str(error), file=sys.stderr)
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        print('Core native history observation failed: ' + str(error), file=sys.stderr)
         sys.exit(1)

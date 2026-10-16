@@ -26,7 +26,7 @@ readings should be collected and interpreted here.
   session that could refresh them. Sampling now refreshes idle credentials
   automatically, without a model request or an account reset.
 - Refresh failures preserve the credential and appear in `status.meterErrors`
-  and the daemon journal. Successful sampling clears the error. Attempts are
+  and the core journal. Successful sampling clears the error. Attempts are
   spaced by the provider's sampling interval even when credentials or requests
   fail, or an account does not report every declared bucket. Provider-rejected
   refresh credentials require a new provider-issued OAuth login.

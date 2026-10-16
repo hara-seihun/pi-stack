@@ -3,7 +3,7 @@ import { Check } from "typebox/value";
 import type { ThinkingLevel } from "./threads/contracts.js";
 
 export const CompletionRequestIdSchema = Type.String({ pattern: "^(?!openapi\\.json$)[A-Za-z0-9._:-]{1,256}$" });
-export const CompletionModelSchema = Type.Literal("luna");
+export const CompletionModelSchema = Type.String({ pattern: "^(astra|sol|luna|openai-codex/[^/\\s]+)$", description: "Exact Pi Codex model ID or an established catalogue alias." });
 export const CompletionThinkingLevelSchema = Type.Union([Type.Literal("off"), Type.Literal("minimal"), Type.Literal("low"), Type.Literal("medium"), Type.Literal("high"), Type.Literal("xhigh"), Type.Literal("max")]);
 // The wire schema stays explicit for generated clients; this fails to compile if it ever drifts from the thread levels.
 const thinkingLevelsMatch: Static<typeof CompletionThinkingLevelSchema> extends ThinkingLevel ? ThinkingLevel extends Static<typeof CompletionThinkingLevelSchema> ? true : never : never = true;
@@ -13,8 +13,8 @@ export const CompletionInputSchema = Type.Object({
   prompt: Type.String({ minLength: 1 }),
   systemPrompt: Type.Optional(Type.String()),
   thinkingLevel: Type.Optional(CompletionThinkingLevelSchema),
-  speed: Type.Optional(Type.Union([Type.Literal("standard"), Type.Literal("priority")])),
-  maxOutputTokens: Type.Optional(Type.Integer({ minimum: 1, description: "Reserved provider-native output cap. Codex Luna rejects this option with HTTP 422 unsupported-option; it is never silently ignored." })),
+  speed: Type.Optional(Type.Union([Type.Literal("standard"), Type.Literal("priority"), Type.Literal("ultrafast")])),
+  maxOutputTokens: Type.Optional(Type.Integer({ minimum: 1, description: "Codex rejects this option with HTTP 422 unsupported-option; it is never silently ignored." })),
   responseFormat: Type.Optional(Type.Object({
     type: Type.Literal("json_schema"),
     name: Type.String({ pattern: "^[A-Za-z0-9_-]{1,64}$" }),
@@ -65,6 +65,7 @@ export type CompletionAttempt = Static<typeof CompletionAttemptSchema>;
 const identity = {
   requestId: CompletionRequestIdSchema, runId: Type.String(), model: CompletionModelSchema,
   metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+  settings: Type.Optional(Type.Object({ thinkingLevel: CompletionThinkingLevelSchema, speed: Type.Union([Type.Literal("standard"), Type.Literal("priority"), Type.Literal("ultrafast")]) }, { additionalProperties: false })),
   createdAt: Type.Integer({ minimum: 0 }), updatedAt: Type.Integer({ minimum: 0 }),
   attemptCount: Type.Optional(Type.Integer({ minimum: 0 })), retryAt: Type.Optional(Type.Integer({ minimum: 0 })),
 };

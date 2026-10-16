@@ -1,4 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-here="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
-exec bun "$here/calendar-cli.ts" "$@"

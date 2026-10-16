@@ -72,8 +72,9 @@ it("retains scheduled wake identity in native notifications without rewriting th
   expect(agentMessagePresentation(native)).toEqual({ sender: { threadId: senderId, name: "Kelana" }, text: wake.text });
 });
 
-it("labels senders by first name, including threads named before single names", () => {
-  expect(agentSenderLabel({ threadId: senderId, name: "Tainetaimu Sizhukein" })).toBe("Tainetaimu");
+it("labels senders by complete task title and preserves historical names", () => {
+  expect(agentSenderLabel({ threadId: senderId, name: "Repair the shared core" })).toBe("Repair the shared core");
+  expect(agentSenderLabel({ threadId: senderId, name: "Tainetaimu Sizhukein" })).toBe("Tainetaimu Sizhukein");
   expect(agentSenderLabel({ threadId: senderId, name: "Kelana" })).toBe("Kelana");
   expect(agentSenderLabel({ threadId: senderId })).toBe("Agent · 7c925d87");
 });

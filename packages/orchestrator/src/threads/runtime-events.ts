@@ -20,7 +20,7 @@ export const RUNTIME_EVENT_TYPES = {
   auto_compaction_start: true, auto_compaction_end: true,
   owner_execution_phase: true, model_request_start: true,
   session_changed: true,
-  command_settled: true, runner_attached: true,
+  command_settled: true, runner_attached: true, tool_operation_result: true, thread_landed: true,
   thread_settled: true, thread_error: true, thread_message_inserted: true,
 } as const;
 export type RuntimeEventType = keyof typeof RUNTIME_EVENT_TYPES;

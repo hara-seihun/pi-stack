@@ -1,14 +1,16 @@
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { dispatch } from "../src/commands.js";
 
-vi.mock("../src/daemon.js",()=>({Daemon:vi.fn()}));
-afterEach(()=>{vi.restoreAllMocks();process.exitCode=0;});
+beforeEach(()=>{const path=join(process.env.HOME!,"core-control-token");writeFileSync(path,"fixture-token");vi.stubEnv("PI_CORE_URL","http://127.0.0.1:19181");vi.stubEnv("PI_CORE_TOKEN_FILE",path);vi.stubEnv("PI_THREAD_API_URL","http://127.0.0.1:19181/v1/threads");});
+afterEach(()=>{vi.restoreAllMocks();vi.unstubAllEnvs();process.exitCode=0;});
 
 it.each([
-  {argv:["pause","--ordinary"],path:"/v1/control",body:{key:"ordinary-launches",value:"paused"}},
-  {argv:["resume","--ordinary"],path:"/v1/control",body:{key:"ordinary-launches",value:"enabled"}},
-  {argv:["pause"],path:"/v1/control",body:{key:"launches",value:"paused"}},
-  {argv:["resume"],path:"/v1/control",body:{key:"launches",value:"enabled"}},
+  {argv:["pause","--ordinary"],path:"/v1/providers/control",body:{key:"ordinary-launches",value:"paused"}},
+  {argv:["resume","--ordinary"],path:"/v1/providers/control",body:{key:"ordinary-launches",value:"enabled"}},
+  {argv:["pause"],path:"/v1/providers/control",body:{key:"launches",value:"paused"}},
+  {argv:["resume"],path:"/v1/providers/control",body:{key:"launches",value:"enabled"}},
   {argv:["close","THREAD-123"],path:"/v1/threads/control",body:{threadId:"THREAD-123",action:"close"}},
   {argv:["stop","THREAD-123"],path:"/v1/threads/control",body:{threadId:"THREAD-123",action:"close"}},
   {argv:["reopen","THREAD-123"],path:"/v1/threads/control",body:{threadId:"THREAD-123",action:"reopen"}},

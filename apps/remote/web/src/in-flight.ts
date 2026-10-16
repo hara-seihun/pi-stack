@@ -23,7 +23,7 @@ let activation: Activation | null = null;
 
 const WRITES = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const TOP_LEVEL_READ = /^\/v1\/(?:sessions(?:\/archived)?|workspaces|files|environments|actions)$/;
-const BACKGROUND_WRITE = /^\/v1\/(?:reconcile|stream(?:\/[^/]+)?|speech\/utterances)$/;
+const BACKGROUND_WRITE = /^\/v1\/(?:reconcile|stream(?:\/[^/]+)?)$/;
 const NATIVE_ACTION = /^native:(?:installAppUpdate|checkAppUpdate|notifications)$/;
 
 /** Native bridge calls are not API reads; only explicit native actions can show progress. */

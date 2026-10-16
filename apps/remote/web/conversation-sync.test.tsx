@@ -154,10 +154,10 @@ test("chat header consumes context usage and replaces a count with recalculating
   expect(header(render())).toContain("Context —");
 });
 
-test("a running conversation defaults to steer rather than waiting for the turn to finish", () => {
+test("a running conversation has one send action and no delivery choices", () => {
   const html = render({ session: { ...session, state: "running", lifecycle: { kind: "working", phase: "thinking", since: 1 } }, prompt: "Adjust the work" });
-  expect(html).toContain('aria-label="Change delivery. Current: Steer"');
-  expect(html).not.toContain('aria-label="Change delivery. Current: Queued"');
+  expect(html).toContain('aria-label="Send message"');
+  expect(html).not.toContain('Change delivery');
 });
 
 test("questions replace messaging, expose only the next answer, and preserve stop", () => {

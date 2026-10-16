@@ -7,6 +7,7 @@ import sqlite3
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 watchdog = importlib.machinery.SourceFileLoader('prompt_availability', str(Path(__file__).resolve().parents[1] / 'deploy/prompt-availability')).load_module()
 CANDIDATE = 'a' * 40
@@ -114,6 +115,27 @@ class AdmissionProof(unittest.TestCase):
                     self.inspect()
                 self.receipt[key] = prior
                 self.save()
+
+
+class SupervisedOwner(unittest.TestCase):
+    def observe(self, text):
+        with patch.object(watchdog.subprocess, 'check_output', return_value=text):
+            return watchdog.supervised_owner('pi-remote@kenan.service')
+
+    def test_migration_fence_never_restores_even_with_a_running_supervisor(self):
+        self.assertEqual(self.observe('RefuseManualStart=yes\nMainPID=123\nActiveState=active\nSubState=running\n'),
+                         {'action': 'none', 'reason': 'migration-fenced'})
+
+    def test_only_the_existing_supervised_running_pid_may_be_inspected(self):
+        self.assertEqual(self.observe('RefuseManualStart=no\nMainPID=123\nActiveState=active\nSubState=running\n'),
+                         {'action': 'inspect', 'pid': '123'})
+        for pid, active, sub in [('0', 'inactive', 'dead'), ('123', 'deactivating', 'stop'), ('123', 'activating', 'start')]:
+            self.assertEqual(self.observe(f'RefuseManualStart=no\nMainPID={pid}\nActiveState={active}\nSubState={sub}\n')['action'], 'none')
+
+    def test_unknown_or_missing_observations_are_errors(self):
+        for text in ['MainPID=123\n', 'RefuseManualStart=maybe\nMainPID=123\nActiveState=active\nSubState=running\n']:
+            with self.assertRaises(ValueError):
+                self.observe(text)
 
 
 if __name__ == '__main__':

@@ -1,12 +1,15 @@
 import { custodyMkdirSync as mkdirSync, custodyOpenSync as openSync, custodyWriteFileSync as writeFileSync } from "../shared-custody.js";
 import {
   chmodSync,
+  chownSync,
+  statSync,
   closeSync,
   fsyncSync,
   existsSync,
   readFileSync,
   realpathSync,
   renameSync,
+  rmSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 import type { ModelAuth, OAuthAuth, OAuthCredential, Provider } from "@earendil-works/pi-ai";
@@ -92,13 +95,20 @@ function readAuth(path: string): Record<string, unknown> {
 function writeAuth(path: string, auth: Record<string, unknown>): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o770 });
   const temporary = join(dirname(path), `.auth.json.shared-${crypto.randomUUID()}`);
-  writeFileSync(temporary, JSON.stringify(auth, null, 2), { encoding: "utf8", mode: 0o660 });
-  chmodSync(temporary, 0o660);
-  const fd = openSync(temporary, "r");
-  try { fsyncSync(fd); } finally { closeSync(fd); }
-  renameSync(temporary, path);
-  const directory = openSync(dirname(path), "r");
-  try { fsyncSync(directory); } finally { closeSync(directory); }
+  // A root core may refresh an adopted user's store. Atomic replacement must
+  // not turn that user's credential inode into a root-owned unreadable file.
+  const retained = process.getuid?.() === 0 && existsSync(path) ? statSync(path) : undefined;
+  const mode = retained ? retained.mode & 0o777 : 0o660;
+  try {
+    writeFileSync(temporary, JSON.stringify(auth, null, 2), { encoding: "utf8", mode });
+    chmodSync(temporary, mode);
+    if (retained) chownSync(temporary, retained.uid, retained.gid);
+    const fd = openSync(temporary, "r");
+    try { fsyncSync(fd); } finally { closeSync(fd); }
+    renameSync(temporary, path);
+    const directory = openSync(dirname(path), "r");
+    try { fsyncSync(directory); } finally { closeSync(directory); }
+  } finally { rmSync(temporary, { force: true }); }
 }
 
 function ensureAuth(path: string): void {

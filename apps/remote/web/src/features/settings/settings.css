@@ -9,7 +9,7 @@
 .settings-section h3 { margin: 0 0 var(--space-2); font-size: var(--text-md); font-weight: 650; }
 .settings-section-body { display: grid; gap: var(--space-3); }
 .settings-section p { line-height: 1.5; margin: 0; font-size: var(--text-sm); }
-.settings-detail, .settings-owner, .settings-switch-detail, .settings-phone-grants p { color: var(--muted); font-size: var(--text-sm); }
+.settings-detail, .settings-owner, .settings-switch-detail { color: var(--muted); font-size: var(--text-sm); }
 .settings-section [role="alert"], .settings-load-error [role="alert"] { color: var(--danger, #f85149); overflow-wrap: anywhere; }
 .settings-section button, .settings-load-error button { min-height: var(--touch); padding: var(--space-2) var(--space-3); border: 0; border-radius: var(--radius-2); color: var(--text); background: var(--surface-2); font: inherit; font-size: var(--text-sm); cursor: pointer; }
 .settings-section button:hover:not(:disabled) { background: var(--surface-3); }
@@ -34,7 +34,7 @@
 .settings-switch-detail { display: block; margin-top: var(--space-1); line-height: 1.5; }
 label.settings-switch-row { cursor: pointer; }
 label.settings-switch-row:has(input:disabled) { cursor: default; }
-.settings-owner summary, .settings-phone-grants summary { min-height: var(--touch); align-content: center; cursor: pointer; }
+.settings-owner summary { min-height: var(--touch); align-content: center; cursor: pointer; }
 .settings-owner dl, .settings-account { display: grid; gap: var(--space-2); margin: var(--space-2) 0 0; }
 .settings-owner dl > div, .settings-account > div { display: grid; grid-template-columns: 85px minmax(0, 1fr); gap: var(--space-3); }
 .settings-owner dt, .settings-account dt { color: var(--muted); }
@@ -46,28 +46,11 @@ label.settings-switch-row:has(input:disabled) { cursor: default; }
 .settings-thread-editor .settings-open-thread { justify-self: start; color: var(--accent); }
 .settings-account { font-size: var(--text-sm); }
 .settings-phone { display: grid; gap: var(--space-3); }
-.settings-phone-grants ul { list-style: none; display: grid; gap: var(--space-3); padding: 0; margin: var(--space-3) 0 0; }
-.settings-phone-grants li { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); padding-bottom: var(--space-3); border-bottom: 1px solid var(--border); }
-.settings-phone-grants li:last-child { border-bottom: 0; }
-.settings-phone-grants strong { font-size: var(--text-sm); font-weight: 600; }
-.settings-grant-action { display: grid; flex: 0 0 auto; justify-items: end; gap: var(--space-2); font-size: 12px; color: var(--muted); }
 .settings-load-error { display: grid; gap: var(--space-3); padding: var(--space-4); }
 .settings-load-error button { justify-self: start; }
-.settings-speech { display: grid; gap: var(--space-3); }
-.settings-speech label { display: grid; gap: var(--space-2); font-size: var(--text-sm); color: var(--muted); }
-.settings-speech button { justify-self: start; }
-.settings-calendar, .settings-calendar-form, .settings-calendar-feed { display: grid; gap: var(--space-3); }
-.settings-calendar-form, .settings-calendar-feed { padding-top: var(--space-3); border-top: 1px solid var(--border); }
-.settings-calendar label { display: grid; gap: var(--space-2); font-size: var(--text-sm); color: var(--muted); }
-.settings-calendar button { justify-self: start; }
-.settings-subscriptions { list-style: none; display: grid; gap: var(--space-3); padding: 0; margin: 0; }
-.settings-subscriptions li { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); padding: var(--space-3); background: var(--surface-2); border-radius: var(--radius-2); }
-.settings-subscriptions li strong { font-size: var(--text-sm); font-weight: 650; }
-.settings-subscriptions li button { flex: 0 0 auto; }
 @media (max-width: 540px) {
   .settings-content { padding-left: var(--space-3); padding-right: var(--space-3); }
   .settings-section { padding: var(--space-3); }
   .settings-timezone { flex-direction: column; }
   .settings-timezone button { align-self: start; }
-  .settings-subscriptions li { flex-direction: column; }
 }

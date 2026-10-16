@@ -32,7 +32,7 @@ export class ThreadNotifications {
     });
   }
 
-  async show(key: string, title: string, onClick: () => void, body = "Session is idle") {
+  async show(key: string, title: string, onClick: () => void, body = "Session is idle", important = false) {
     await navigator.locks.request(key, { ifAvailable: true }, (lock) => {
       if (!lock || this.disposed) return;
       this.clear(key);
@@ -40,7 +40,7 @@ export class ThreadNotifications {
         this.foreground.show(key, title, () => { onClick(); this.clear(key); }, body);
         return;
       }
-      const notification = new Notification(title, { body, tag: key, icon: appPath("kenan.png") });
+      const notification = new Notification(title, { body, tag: key, icon: appPath("kenan.png"), requireInteraction: important });
       this.notifications.set(key, notification);
       notification.onclick = () => { onClick(); this.clear(key); };
       notification.onclose = () => {

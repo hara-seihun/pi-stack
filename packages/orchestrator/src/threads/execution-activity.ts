@@ -30,6 +30,9 @@ export function executionWaitActivity(metadata?: Record<string, any>): Execution
   const acknowledgement = metadata?.acknowledgementWait;
   if (acknowledgement) return { activity: "recovering", activitySince: acknowledgement.since, lastActivityAt: acknowledgement.since,
     activityDetail: acknowledgement.overdue ? "Input acknowledgement unconfirmed; checking native custody without replay" : "Input acknowledgement pending; native recovery may still be compacting" };
+  const preparation = metadata?.preparationWait;
+  if (preparation) return { activity: "waiting_to_retry", activitySince: preparation.since, lastActivityAt: preparation.lastActivityAt,
+    activityDetail: `Message preparation dependency unavailable: ${preparation.message}; next retry ${new Date(preparation.retryAt).toISOString()}` };
   const provider = metadata?.providerWait, admission = metadata?.admissionWait, startup = metadata?.startupFailure;
   const wait = provider ?? admission ?? startup;
   if (!wait) return undefined;
@@ -110,7 +113,8 @@ function activityObservation(state: ExecutionActivity, event: RuntimeEvent): Act
     case "entry_appended": case "session_info_changed": case "thinking_level_changed":
     case "response": case "extension_ui_request": case "extension_error": case "user_bash": case "bash_execution_update":
     case "session_changed":
-    case "command_settled": case "runner_attached": case "thread_message_inserted": return undefined;
+    case "command_settled": case "runner_attached": case "thread_message_inserted":
+    case "tool_operation_result": case "thread_landed": return undefined;
   }
   return assertNever(event);
 }

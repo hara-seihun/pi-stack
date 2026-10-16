@@ -55,7 +55,7 @@ public final class IdleNotificationService extends Service {
         notifications = getSystemService(NotificationManager.class);
         icon = android.graphics.BitmapFactory.decodeResource(getResources(), R.mipmap.ic_launcher_foreground);
         notifications.createNotificationChannel(new NotificationChannel(WATCHING, "Session monitoring", NotificationManager.IMPORTANCE_LOW));
-        notifications.createNotificationChannel(new NotificationChannel(NotificationDelivery.CHANNEL, "Agent updates and questions", NotificationManager.IMPORTANCE_HIGH));
+        NotificationDelivery.channel(this);
         startForeground(1, monitoringNotification());
         displayedDetail = detail;
     }

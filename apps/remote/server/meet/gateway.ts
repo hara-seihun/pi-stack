@@ -3,7 +3,7 @@ import type { ImageContent } from "@earendil-works/pi-ai";
 import { resolve, join } from "node:path";
 import { API_CORS_HEADERS } from "../cors";
 import { MeetTranscriptStore } from "./transcript";
-import { connectRuntime, initializeRuntimeMirror, meetData, meetSocket, runtimeCall } from "./runtime";
+import { connectRuntime, initializeRuntimeMirror, meetData, runtimeEndpoint, runtimeCall } from "./runtime";
 import type { RuntimeContext, RuntimeRequest, RuntimeResponse, RuntimeStatus } from "./runtime";
 import type { MeetJoined, MeetResult, MeetThreadState } from "./protocol";
 
@@ -26,7 +26,7 @@ export class MeetGateway {
       initializeRuntimeMirror(db);
       const runtime = await connectRuntime(data);
       if (!runtime.ok) return runtime;
-      return { ok: true, value: new MeetGateway(db, callbacks, meetSocket(data), runtime.value) };
+      return { ok: true, value: new MeetGateway(db, callbacks, runtimeEndpoint(data, runtime.value), runtime.value) };
     } catch (cause) { return { ok: false, error: `Meet gateway connection failed: ${String(cause)}` }; }
   }
 
