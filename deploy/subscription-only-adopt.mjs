@@ -16,6 +16,11 @@ try {
   for(const f of proof.files){if(!required.includes(f.path) || sha(join(root,f.path))!==f.sha256)throw Error('Frozen module hash mismatch');}
   const pid=Number(execFileSync('systemctl',['show',service,'--property=MainPID','--value'],{encoding:'utf8'}).trim());
   if(!(pid>0) || !readFileSync(`/proc/${pid}/cmdline`,'utf8').split('\0').includes(join(root,'dist/cli.js')))throw Error('Loaded broker command differs from frozen source');
+  const grants=JSON.parse(readFileSync('/etc/pi-model-broker.json','utf8'));
+  const serviceUser=execFileSync('systemctl',['show',service,'--property=User','--value'],{encoding:'utf8'}).trim();
+  if(!serviceUser)throw Error('Broker service Unix owner is unset');
+  execFileSync('runuser',['-u',serviceUser,'--',process.execPath,'--input-type=module','-e',"import{readFileSync}from'node:fs';for(const p of process.argv.slice(1))readFileSync(p);",'/etc/pi-model-broker.json',...required.map(p=>join(root,p))],{timeout:5000});
+  for(const listener of grants.listeners){const ready=await fetch(`http://127.0.0.1:${listener.port}/v1/dispatches`,{signal:AbortSignal.timeout(3000)});if(ready.status!==200)throw Error('Broker listener readiness failed');await ready.body?.cancel();}
   const causal=JSON.parse(execFileSync(process.execPath,[join(root,'subscription-only-check.mjs'),root],{encoding:'utf8',timeout:15000}));
   if(causal.ok!==true || causal.networkCalls!==0)throw Error('Installed subscription-only causal proof failed');
   const configPath='/usr/local/lib/pi-subscription-only/host.json',old=readFileSync(configPath),config=JSON.parse(old.toString('utf8'));

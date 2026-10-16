@@ -23,6 +23,20 @@ cp "$root/packages/orchestrator/src/experiment-custody.ts" "$stage/src/"
 cp "$root/deploy/subscription-only-check.mjs" "$stage/subscription-only-check.mjs"
 printf '{"source":"%s","base":"%s"}\n' "$commit" "$base" > "$stage/subscription-only-binding.json"
 node "$stage/subscription-only-check.mjs" "$stage"
+chmod 0755 "$stage"
+chmod 0644 "$stage/dist/experiment-custody.js" "$stage/src/experiment-custody.ts"
+if [[ $service != none ]]; then
+  service_user=$(systemctl show "$service" --property=User --value)
+  [[ -n $service_user ]] || { echo 'broker service must declare its Unix owner' >&2; exit 65; }
+  runuser -u "$service_user" -- node --input-type=module - "$stage" /etc/pi-model-broker.json <<'NODE'
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+const [root,config]=process.argv.slice(2);
+for(const name of ['dist/cli.js','dist/model-broker.js','dist/experiment-custody.js'])readFileSync(join(root,name));
+JSON.parse(readFileSync(config,'utf8'));
+console.log(JSON.stringify({ok:true,preflight:'service-user-code-and-grants-readable'}));
+NODE
+fi
 mv "$stage" "$dest"
 if [[ $service != none ]]; then
   [[ $service == pi-model-broker.service ]] || { echo 'unsupported active broker owner' >&2; exit 65; }
