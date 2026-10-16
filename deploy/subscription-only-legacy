@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $# == 0 ]] || { echo 'usage: deploy/subscription-only-legacy' >&2; exit 64; }
+[[ $EUID == 0 ]] || { echo 'root required' >&2; exit 77; }
+root=$(cd "$(dirname "$0")/.." && pwd)
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$root" GIT_OPTIONAL_LOCKS=0
+commit=$(git -C "$root" rev-parse HEAD)
+base=$(readlink -f /srv/pi/pi-orchestrator)
+dest="/srv/pi/.pi-stack-releases/orchestrator/subscription-only-$commit"
+"$root/deploy/subscription-only-broker" "$base" "$dest" none
+ln -s "$dest" /srv/pi/pi-orchestrator.subscription-next
+mv -Tf /srv/pi/pi-orchestrator.subscription-next /srv/pi/pi-orchestrator
+node "$dest/subscription-only-check.mjs" "$dest"
+printf 'selected Legacy CLI subscription source %s; no services restarted\n' "$commit"
