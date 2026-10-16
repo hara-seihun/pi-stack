@@ -73,6 +73,7 @@ export function readSourceJobRequest(directory) {
 
 export function writeSourceJobProgress(directory, value) {
   try {
+    if (readTerminal(directory)) return { ok: false, error: { code: "source-job-completed", message: "terminal source job cannot publish running progress" } };
     const attempt = readJson(path.join(directory, "attempt.json"));
     if (!attempt.present) return { ok: false, error: { code: "source-job-not-started", message: "source job attempt is absent" } };
     atomicJson(path.join(directory, "progress.json"), {
@@ -94,8 +95,32 @@ export function finishSourceJob(directory, result) {
         return { ok: false, error: { code: "source-job-result-conflict", message: "source job already has a different terminal result" } };
       }
     }
+    atomicJson(path.join(directory, "progress.json"), value);
     return { ok: true };
   } catch (error) { return { ok: false, error: ioError(error) }; }
+}
+
+export function observeSourceJob(directory) {
+  try {
+    const result = readTerminal(directory);
+    if (result) return result;
+    const request = readSourceJobRequest(directory);
+    if (!request.ok) return { state: "failed", error: request.error };
+    const attempt = readJson(path.join(directory, "attempt.json"));
+    if (!attempt.present || typeof attempt.value.unit !== "string") {
+      return failure("source-job-not-started", "source job attempt is absent or invalid");
+    }
+    const observed = unitState(attempt.value.unit);
+    // Completion may race with unit observation; its immutable result wins.
+    const completed = readTerminal(directory);
+    if (completed) return completed;
+    if (!observed.ok) return { state: "failed", error: observed.error };
+    if (observed.state !== "running" && observed.state !== "stopping") return {
+      state: "interrupted", error: { code: "source-job-interrupted", message: "source job stopped without a terminal result; repeat the original create request to resume" },
+    };
+    const progress = readJson(path.join(directory, "progress.json"));
+    return { state: "pending", phase: observed.state, progress: progress.present ? progress.value : null };
+  } catch (error) { return { state: "failed", error: ioError(error) }; }
 }
 
 export function userManagerEnvironment(environment = process.env) {
@@ -170,7 +195,7 @@ function unitState(unit) {
 }
 
 function pending(jobId, directory, phase) {
-  return { state: "pending", jobId, progressPath: path.join(directory, "progress.json"), phase };
+  return { state: "pending", jobId, progressPath: path.join(directory, "progress.json"), resultPath: path.join(directory, "result.json"), phase };
 }
 
 function readTerminal(directory) {

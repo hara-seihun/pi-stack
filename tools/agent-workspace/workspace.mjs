@@ -26,7 +26,7 @@ import { homedir, tmpdir, userInfo } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
-import { runSourceJob, readSourceJobRequest, writeSourceJobProgress, finishSourceJob, sourceJobId } from "./source-job.mjs";
+import { runSourceJob, readSourceJobRequest, writeSourceJobProgress, finishSourceJob, sourceJobId, observeSourceJob } from "./source-job.mjs";
 import { capacityRecovery } from "./capacity-recovery.mjs";
 import { GrowthLifecycleError, digest, growthError, retainedGrowth, validateRetirement } from "./growth-lifecycle.mjs";
 
@@ -1792,10 +1792,11 @@ function sourceCapacityPlan(repository, sourceCommit, intent, blockSize, mirror,
     repository = mirror;
   }
   const plan = sourceCheckoutCapacity(repository, sourceCommit, intent, blockSize, sparsePatterns);
-  const sourceImportBytes = sourceImportCapacity(repository, sourceCommit, mirror, sparsePatterns);
+  const imported = sourceImportCapacity(repository, sourceCommit, mirror, sparsePatterns);
+  const sourceImportBytes = imported.bytes;
   const constructionBytes = plan.constructionBytes + sourceImportBytes;
   if (!Number.isSafeInteger(constructionBytes)) fail("source capacity estimate exceeds supported byte range");
-  return { ...plan, constructionBytes, sourceImportBytes };
+  return { ...plan, constructionBytes, sourceImportBytes, sourceImportBaseCommits: imported.baseCommits };
 }
 
 function assertSourceCheckoutFilters(repository) {
@@ -1820,9 +1821,23 @@ function sourceCheckoutCapacity(repository, sourceCommit, intent, blockSize, spa
   return { ...intent, estimate: selected === null ? "whole-tree-upper-bound" : "git-sparse-upper-bound", constructionBytes, sourceImportBytes: 0, sourceCommit };
 }
 
+function importBaseCommits(repository, sourceCommit, mirror) {
+  const baseCommits = [];
+  if (mirror && existsSync(mirror) && !existsSync(path.join(mirror, "objects", "info", "alternates"))) {
+    const tips = [...new Set(git(mirror, ["for-each-ref", "--sort=-committerdate", "--format=%(objectname)"]).split("\n").filter(Boolean))];
+    // Bound qualification work; omitting older tips only overestimates import.
+    for (const tip of tips.slice(0, 16)) {
+      if (command("git", ["-C", repository, "merge-base", "--is-ancestor", tip, sourceCommit]).status === 0
+        && hasObjectClosure(mirror, tip)) baseCommits.push(tip);
+    }
+  }
+  return baseCommits;
+}
+
 function sourceImportCapacity(repository, sourceCommit, mirror, sparsePatterns) {
-  if (mirror && existsSync(mirror) && hasObjectClosure(mirror, sourceCommit, sparsePatterns)) return 0;
-  const objects = git(repository, ["rev-list", "--objects", "--no-object-names", sourceCommit]);
+  if (mirror && existsSync(mirror) && hasObjectClosure(mirror, sourceCommit, sparsePatterns)) return { bytes: 0, baseCommits: [sourceCommit] };
+  const baseCommits = importBaseCommits(repository, sourceCommit, mirror);
+  const objects = git(repository, ["rev-list", "--objects", "--no-object-names", sourceCommit, ...baseCommits.map(tip => `^${tip}`)]);
   const sizes = run("git", ["-C", repository, "cat-file", "--batch-check=%(objectsize)"], { input: `${objects}\n` });
   let bytes = 16 * 1024 ** 2;
   for (const size of sizes.split("\n")) {
@@ -1831,7 +1846,7 @@ function sourceImportCapacity(repository, sourceCommit, mirror, sparsePatterns) 
     bytes += 2 * (Number(size) + Math.ceil(Number(size) / 1000) + 128);
   }
   if (!Number.isSafeInteger(bytes)) fail("source history capacity exceeds supported byte range");
-  return bytes;
+  return { bytes, baseCommits };
 }
 
 function capacityRequirement(plan, reservations, sharedHeadroomBytes = 0) {
@@ -2288,8 +2303,10 @@ function fetchSource(mirror, repository, ref, sparsePatterns) {
     resolved = commit.stdout;
   }
   const sourceRef = sourceRefFor(repository, ref);
-  // Negotiation can report an existing commit as complete despite missing trees/blobs.
-  run("git", ["--git-dir", mirror, "fetch", "--refetch", "--no-tags", "--no-auto-maintenance", "workspace-source", `+${resolved}:${sourceRef}`], { timeout: sourcePreparationMode === "worker" ? 1_800_000 : 120_000 });
+  const bases = existsSync(repository) ? importBaseCommits(repository, resolved, mirror) : [];
+  // Negotiate only independently complete ancestry; damaged/unknown custody needs full refetch.
+  const negotiation = bases.length ? bases.map(tip => `--negotiation-tip=${tip}`) : ["--refetch"];
+  run("git", ["--git-dir", mirror, "fetch", ...negotiation, "--no-tags", "--no-auto-maintenance", "workspace-source", `+${resolved}:${sourceRef}`], { timeout: sourcePreparationMode === "worker" ? 1_800_000 : 120_000 });
   const commit = run("git", ["--git-dir", mirror, "rev-parse", "--verify", `${sourceRef}^{commit}`]);
   if (!hasObjectClosure(mirror, commit, sparsePatterns)) fail(`fetched source has incomplete object closure: ${commit}`);
   return commit;
@@ -2362,7 +2379,7 @@ function prepareSourceValue(database, args, request) {
   if (sourceJobDirectory !== null) writeSourceJobProgress(sourceJobDirectory, { phase: "forecasting", commit: sourceCommit });
   const blockSize = statfsSync(root).bsize;
   const forecastPath = `${request.receipt}.forecast.json`;
-  const inputs = { repository, sourceCommit, intent, sparsePatterns, blockSize, stamp: objectStoreStamp(mirror) };
+  const inputs = { version: 2, repository, sourceCommit, intent, sparsePatterns, blockSize, stamp: objectStoreStamp(mirror) };
   const cached = existsSync(forecastPath) ? JSON.parse(readFileSync(forecastPath, "utf8")) : null;
   const fingerprint = sourceJobId("source-forecast", inputs);
   let plan = cached !== null && cached.fingerprint === fingerprint ? cached.plan : intent === null
@@ -2579,7 +2596,9 @@ function createWorkspace(database, args, statePath) {
     const preparation = withResourceLock(statePath, `source-preparation:${destination}`, () =>
       prepareCreationSource(database, args, { statePath, root, destination, repository, ref, upstream, mirror, intent, sparsePatterns }));
     if (preparation.state !== "ready") {
-      print({ ok: true, state: "preparing", jobId: preparation.jobId, progressPath: preparation.progressPath, nextAction: "Repeat this exact create request after source preparation completes" }, true);
+      print({ ok: true, state: "preparing", jobId: preparation.jobId, progressPath: preparation.progressPath, resultPath: preparation.resultPath,
+        observeCommand: `agent-workspace source-status --job-id ${preparation.jobId} --json`,
+        nextAction: "Use source-status for authoritative terminal observation; repeat this exact create request to continue admission" }, true);
       process.exitCode = 75;
       return;
     }
@@ -3381,6 +3400,7 @@ function help() {
   process.stdout.write(`Usage:
   agent-workspace create --root PATH --name NAME --repo URL [--ref GIT_REF] [--mode writer|review] [--group ID] [--cache PATH,...] [--creation-timeout-seconds 300] [--sparse-pattern PATTERN ...]
                          [--intent source-only|budgeted --headroom-gib N --growth-mib N]
+  agent-workspace source-status --job-id SHA256 [--json]
   agent-workspace register --path PATH [--owner ID] [--source-commit SHA] [--group ID] [--cache PATH,...] [--cache-owned OUTPUT=TRACKED_SOURCE] [--replace-cache]
   agent-workspace reassign --id ID --path PATH --from-owner ID --from-source-commit SHA|unset --from-state STATE
                            --owner ID --source-commit HEAD_SHA --authorization RECEIPT [--json]
@@ -3439,6 +3459,16 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
   }
   const args = parseArgs(rest);
   if (args.positional.length > 0) fail(`unexpected argument: ${args.positional[0]}`);
+  if (commandName === "source-status") {
+    assertOnly(args, ["job-id", "json"]);
+    const jobId = required(args, "job-id");
+    if (!/^[0-9a-f]{64}$/u.test(jobId)) fail("--job-id must be a full source job SHA256");
+    const directory = path.join(path.dirname(statePath), "source-preparations", "jobs", jobId);
+    const result = observeSourceJob(directory);
+    print({ jobId, ...result }, true);
+    process.exitCode = result.state === "pending" ? 75 : result.state === "ready" ? 0 : 2;
+    return;
+  }
   if (commandName === "create") {
     const budgetMs = creationTimeout(args);
     const repository = repositoryLocation(required(args, "repo"), currentDirectory());

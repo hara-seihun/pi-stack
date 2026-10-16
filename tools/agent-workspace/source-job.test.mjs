@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, test } from "node:test";
-import { finishSourceJob, readSourceJobRequest, runSourceJob, writeSourceJobProgress } from "./source-job.mjs";
+import { finishSourceJob, readSourceJobRequest, runSourceJob, writeSourceJobProgress, observeSourceJob } from "./source-job.mjs";
 
 const roots = [];
 after(() => { for (const root of roots) rmSync(root, { recursive: true, force: true }); });
@@ -306,4 +306,43 @@ test("user-manager discovery fills absent connection variables without changing 
     assert.equal(invalid.ok, false);
     assert.equal(invalid.error.code, "source-job-user-environment");
   }
+});
+
+test("terminal observation defeats retained stale progress without mutation or resubmission", () => {
+  const f = fixture();
+  try {
+    runSourceJob(f.options);
+    const directory = f.jobDirectory();
+    const historical = JSON.stringify({ state: "running", value: { phase: "forecasting" } });
+    for (const result of [{ state: "ready", value: { source: "one" } }, { state: "failed", error: { code: "workspace-capacity-refused", message: "not enough" } }]) {
+      writeFileSync(path.join(directory, "result.json"), JSON.stringify(result));
+      writeFileSync(path.join(directory, "progress.json"), historical);
+      const before = readFileSync(path.join(directory, "result.json"));
+      assert.deepEqual(observeSourceJob(directory), result);
+      assert.equal(readFileSync(path.join(directory, "progress.json"), "utf8"), historical);
+      assert.deepEqual(readFileSync(path.join(directory, "result.json")), before);
+      assert.equal(writeSourceJobProgress(directory, { phase: "late" }).error.code, "source-job-completed");
+    }
+    assert.equal(f.state().submissions.length, 1);
+  } finally { f.restore(); }
+});
+
+test("new completions project terminal progress; stopped unfinished observer never claims pending forever", () => {
+  const f = fixture();
+  try {
+    const pending = runSourceJob(f.options);
+    const directory = f.jobDirectory();
+    assert.equal(observeSourceJob(directory).state, "pending");
+    const state = f.state();
+    for (const unit of Object.keys(state.units)) state.units[unit] = "inactive";
+    f.update(state);
+    assert.equal(observeSourceJob(directory).state, "interrupted");
+    const resumed = runSourceJob({ ...f.options, restartInterrupted: true });
+    assert.equal(resumed.jobId, pending.jobId);
+    const result = { state: "ready", value: { resumed: true } };
+    assert.equal(finishSourceJob(directory, result).ok, true);
+    assert.deepEqual(JSON.parse(readFileSync(path.join(directory, "progress.json"))), result);
+    assert.deepEqual(observeSourceJob(directory), result);
+    assert.equal(f.state().submissions.length, 2);
+  } finally { f.restore(); }
 });

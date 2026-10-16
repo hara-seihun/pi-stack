@@ -3827,3 +3827,40 @@ test("capacity projection explicitly reports unset for new and refreshed registr
     assert.equal(JSON.parse(run(["status", "--path", f.source, "--json"], f.env)).records[0].capacity, null);
   } finally { f.close(); }
 });
+
+test("qualified ancestral custody prices and fetches only receiver delta", () => {
+  const f = fixture();
+  try {
+    writeFileSync(path.join(f.source, "large-base.bin"), Buffer.alloc(2 * 1024 ** 2, 91));
+    git(f.source, "add", "."); git(f.source, "commit", "-m", "large base");
+    const base = git(f.source, "rev-parse", "HEAD");
+    const intent = { intent: "source-only", headroomBytes: 1024 ** 3, growthBytes: 8 * 1024 ** 2 };
+    const seed = JSON.parse(run(["create", "--root", f.workspaces, "--name", "delta-seed", "--repo", f.source, "--ref", base,
+      "--intent", "source-only", "--headroom-gib", "1", "--growth-mib", "8", "--json"], f.env));
+    const mirror = path.dirname(readFileSync(path.join(seed.path, ".git/objects/info/alternates"), "utf8").trim());
+    writeFileSync(path.join(f.source, "receiver.txt"), "receiver delta\n");
+    git(f.source, "add", "."); git(f.source, "commit", "-m", "receiver delta");
+    const receiver = git(f.source, "rev-parse", "HEAD");
+    const priced = workspaceTesting.sourceCapacityPlan(f.source, receiver, intent, 4096, mirror);
+    const full = workspaceTesting.sourceCapacityPlan(f.source, receiver, intent, 4096, path.join(f.root, "absent-mirror"));
+    assert.ok(priced.sourceImportBaseCommits.includes(base));
+    assert.ok(full.sourceImportBytes - priced.sourceImportBytes > 4 * 1024 ** 2);
+    const guarded = forbidGitOperations(f, ["--refetch"]);
+    const received = JSON.parse(run(["create", "--root", f.workspaces, "--name", "delta-receiver", "--repo", f.source,
+      "--ref", receiver, "--intent", "source-only", "--headroom-gib", "1", "--growth-mib", "8", "--json"], guarded));
+    assert.equal(received.sourceCommit, receiver);
+    assert.equal(git(received.path, "status", "--porcelain"), "");
+    assert.equal(readFileSync(path.join(received.path, "receiver.txt"), "utf8"), "receiver delta\n");
+    const operations = readFileSync(guarded.PI_WORKSPACE_TEST_GIT_LOG, "utf8").trim().split("\n").map(JSON.parse);
+    assert.ok(operations.some(args => args.includes("fetch") && args.some(arg => arg.startsWith("--negotiation-tip="))));
+    const blob = git(f.source, "rev-parse", `${base}:large-base.bin`);
+    // Use a separate independent loose mirror for the negative control.
+    const damaged = path.join(f.root, "damaged.git");
+    git(f.root, "clone", "--bare", "--no-hardlinks", f.source, damaged);
+    git(damaged, "update-ref", "refs/heads/main", base);
+    rmSync(path.join(damaged, "objects", blob.slice(0, 2), blob.slice(2)));
+    const conservative = workspaceTesting.sourceCapacityPlan(f.source, receiver, intent, 4096, damaged);
+    assert.deepEqual(conservative.sourceImportBaseCommits, []);
+    assert.equal(conservative.sourceImportBytes, full.sourceImportBytes);
+  } finally { f.close(); }
+});
