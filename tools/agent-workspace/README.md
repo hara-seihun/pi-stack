@@ -262,3 +262,5 @@ is admission accounting, not a filesystem quota or authority to resume stopped w
 Focused proof: `node --test tools/agent-workspace/growth-lifecycle.test.mjs`.
 Managed-host read-only process observer proof:
 `node tools/agent-workspace/growth-process-installed.mjs` (private disposable fixture).
+
+Retirement shares one 25-second observation/lock budget; exhausted dependency observation returns `growth-observation-timeout`, never permission to retire. Dependency topology streams only registry identity/path/type columns, not cache or creation payloads. Unreadable alternate-object metadata refuses rather than disappearing from the dependency graph.

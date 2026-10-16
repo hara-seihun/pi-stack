@@ -830,7 +830,10 @@ function systemdReferences(workspacePath, snapshot = systemdSnapshot()) {
 function gitDependencySnapshot(database) {
   const alternates = [];
   const linkedWorktrees = [];
-  for (const record of listRecords(database)) {
+  // Stream only topology; cache/creation JSON is large and irrelevant here.
+  const rows = database.prepare("SELECT id,path,checkout_type AS checkoutType FROM workspace ORDER BY path,id").iterate();
+  for (const record of rows) {
+    if (inspectionDeadline !== undefined && Date.now() >= inspectionDeadline) growthError("growth-observation-timeout", "dependency observation budget exhausted");
     if (!existsSync(record.path)) continue;
     let commonDirectory = path.join(record.path, ".git");
     if (record.checkoutType === "worktree") {
@@ -843,7 +846,7 @@ function gitDependencySnapshot(database) {
     const alternatesPath = path.join(objectDirectory, "info", "alternates");
     if (!existsSync(alternatesPath)) continue;
     let contents;
-    try { contents = readFileSync(alternatesPath, "utf8"); } catch { continue; }
+    contents = readFileSync(alternatesPath, "utf8");
     for (const alternate of contents.split("\n").filter(Boolean)) {
       alternates.push({
         recordId: record.id,
@@ -2952,12 +2955,12 @@ function retainedParent(database, workspacePath) {
 function assertGrowthWritable(database, record) {
   if (recordRetainsCustody(database,record.id) || retainedParent(database,record.path)) growthError("growth-admission-required", "workspace or shared Git parent retains custody; fresh resume-growth admission required");
 }
-function withGrowthBorrowerLocks(database,record,action) {
+function withGrowthBorrowerLocks(database,record,action,deadline) {
   const dependencies = gitDependencySnapshot(database);
   const ids = new Set([...dependencies.alternates.filter(value => value.recordId !== record.id && within(record.path,value.objectDirectory)),
     ...dependencies.linkedWorktrees.filter(value => value.recordId !== record.id && within(record.path,value.commonDirectory))].map(value => value.recordId));
   const borrowers = [...ids].sort().map(id => recordBy(database,{id}));
-  const next = index => index === borrowers.length ? action() : withWorkspaceLock(database,borrowers[index].path,()=>next(index+1),borrowers[index].groupId);
+  const next = index => index === borrowers.length ? action() : withWorkspaceLock(database,borrowers[index].path,()=>next(index+1),borrowers[index].groupId,deadline);
   return next(0);
 }
 function retainedCustodyResult(record) {
@@ -3151,7 +3154,8 @@ function retireGrowthCommand(database, args, statePath) {
   if (evidenceSha256 !== required(args, "disposition-sha256")) growthError("growth-evidence-changed", "disposition bytes do not match the expected SHA256");
   let disposition;
   try { disposition = JSON.parse(evidence); } catch { growthError("invalid-growth-disposition", "disposition must be JSON"); }
-  withWorkspaceLock(database, selected.path, () => {
+  const deadline = Date.now()+25_000;
+  duringInspection(deadline,()=>withWorkspaceLock(database, selected.path, () => {
     const record = recordBy(database, {id:selected.id});
     if (!["active", "referenced", "blocked", "repair-required"].includes(record.state)) growthError("invalid-growth-state", `cannot retire growth from ${record.state}`);
     if (record.owner !== required(args, "owner") || !record.owner || !record.durableSourceCommit) growthError("stale-growth-disposition", "current owning identity and immutable source required");
@@ -3162,7 +3166,8 @@ function retireGrowthCommand(database, args, statePath) {
       if (retainedGrowth(plan)) growthError("growth-already-retired", "growth is already retired; no replay");
       const cached = cachedWorkspaceAllocation(database, record.id, record.path, row.device_id);
       if (!cached.ok) growthError("growth-sample-required", cached.error);
-      const safety = duringInspection(Date.now()+40_000, () => growthSafety(database, record));
+      const safety = growthSafety(database, record);
+      if (Date.now() >= deadline) growthError("growth-observation-timeout", "retirement observation budget exhausted");
       validateRetirement(disposition, binding, safety);
       const next = {...plan, growthLifecycle:{kind:"retired-future-growth", remainingGrowthBytes:0,
         retainedUse:disposition.retainedUse, dispositionSha256:evidenceSha256, retiredAt:Date.now()}};
@@ -3188,8 +3193,8 @@ function retireGrowthCommand(database, args, statePath) {
         print({ok:true, kind:"retired-future-growth", sequence:Number(journal.lastInsertRowid),
           record:creationRecord(database, record.id), dispositionSha256:evidenceSha256, safety}, bool(args,"json"));
       } catch (error) { database.exec("ROLLBACK"); throw error; }
-    }));
-  }, selected.groupId);
+    },deadline),deadline);
+  }, selected.groupId,deadline));
 }
 
 function measureCapacityCommand(database, args, statePath) {
@@ -3405,7 +3410,7 @@ Records outlive the directory, so status explains what became of a checkout that
 `);
 }
 
-export const workspaceTesting = { allocatedWorkspaceBytes, workspaceAllocationSample, cachedWorkspaceAllocation, remainingCapacityBytes, capacityRequirement, capacityReservations, sourceCapacityPlan, cacheTargets, dockerEndpointScope, dockerSnapshot, groupReconciliation, maintainReferenceClone, parseSystemdUnits, pruneReleased, systemdManagerSnapshot, systemdReferences, ownerThreadDatabases, threadSnapshot };
+export const workspaceTesting = { allocatedWorkspaceBytes, workspaceAllocationSample, cachedWorkspaceAllocation, remainingCapacityBytes, capacityRequirement, capacityReservations, gitDependencySnapshot, sourceCapacityPlan, cacheTargets, dockerEndpointScope, dockerSnapshot, groupReconciliation, maintainReferenceClone, parseSystemdUnits, pruneReleased, systemdManagerSnapshot, systemdReferences, ownerThreadDatabases, threadSnapshot };
 
 export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
   if (argv[0] === "growth-process-snapshot") {

@@ -112,3 +112,18 @@ for (const lease of ['valid','expired']) test(`retained growth CLI ${lease} leas
  db.close();
  } finally {for(const key of Object.keys(process.env)) if(!(key in beforeEnv)) delete process.env[key];Object.assign(process.env,beforeEnv);rmSync(root,{recursive:true,force:true});}
 });
+
+test('dependency topology streams identities without reading unrelated registry payloads',()=>{
+ const db=new DatabaseSync(':memory:');
+ db.exec('CREATE TABLE workspace(id TEXT,path TEXT,checkout_type TEXT,cache_paths TEXT,creation_request TEXT)');
+ db.prepare('INSERT INTO workspace VALUES(?,?,?,?,?)').run('missing','/nonexistent-topology-test-record','clone','malformed cache JSON','malformed request JSON');
+ let iterated=false;
+ const bounded={prepare(sql){
+   assert.match(sql,/^SELECT id,path,checkout_type AS checkoutType FROM workspace /);
+   assert.doesNotMatch(sql,/cache_paths|creation_request|SELECT \*/);
+   const statement=db.prepare(sql);
+   return {iterate(){iterated=true;return statement.iterate();},all(){assert.fail('topology must stream rows');}};
+ }};
+ assert.deepEqual(workspaceTesting.gitDependencySnapshot(bounded),{alternates:[],linkedWorktrees:[]});
+ assert.equal(iterated,true);db.close();
+});
