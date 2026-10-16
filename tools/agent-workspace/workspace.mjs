@@ -1808,17 +1808,45 @@ function sourceCheckoutCapacity(repository, sourceCommit, intent, blockSize, spa
   if (!Number.isSafeInteger(blockSize) || blockSize <= 0) fail("source capacity estimate unknown: invalid filesystem allocation unit");
   assertSourceCheckoutFilters(repository);
   const { entries, selected } = sourceTree(repository, sourceCommit, sparsePatterns);
-  let constructionBytes = 16 * 1024 ** 2;
-  for (const { size, name } of entries) {
+  for (const { name } of entries) {
     if (name.endsWith(".gitattributes") && /(?:working-tree-encoding|filter)=/u.test(git(repository, ["show", `${sourceCommit}:${name}`]))) {
       fail("source capacity estimate unknown: checkout attribute transformation");
     }
-    const materialized = selected === null || selected.has(name);
-    const blobBytes = materialized && size !== undefined ? 2 * Math.ceil(Number(size) / blockSize) * blockSize : 0;
-    constructionBytes += blobBytes + 4 * blockSize + Buffer.byteLength(name) * 2;
   }
-  if (!Number.isSafeInteger(constructionBytes)) fail("source capacity estimate exceeds supported byte range");
-  return { ...intent, estimate: selected === null ? "whole-tree-upper-bound" : "git-sparse-upper-bound", constructionBytes, sourceImportBytes: 0, sourceCommit };
+  const checkoutAllocation = checkoutConstructionCapacity(entries, selected, blockSize);
+  return { ...intent, estimate: selected === null ? "whole-tree-upper-bound" : "git-sparse-upper-bound",
+    constructionBytes: checkoutAllocation.totalBytes, checkoutAllocation, checkoutPricingVersion: 4, sourceImportBytes: 0, sourceCommit };
+}
+
+function checkoutConstructionCapacity(entries, selected, blockSize) {
+  if (!Number.isSafeInteger(blockSize) || blockSize <= 0) fail("invalid filesystem allocation unit");
+  let indexBytes = 0, materializedBlobBytes = 0, materializedMetadataBytes = 0;
+  const topologyDirectories = new Set(), materializedDirectories = new Set();
+  for (const { name, size } of entries) {
+    // Excluded files occupy records in a shared index, not separate inodes.
+    // Four uncompressed index/tree records cover index rewrites and the
+    // temporary same-topology selector. Keep full path bytes even for v4 indexes.
+    indexBytes += 4 * (128 + Buffer.byteLength(name));
+    const materialized = selected === null || selected.has(name);
+    for (let at = name.indexOf("/"); at !== -1; at = name.indexOf("/", at + 1)) {
+      const directory = name.slice(0, at);
+      topologyDirectories.add(directory);
+      if (materialized) materializedDirectories.add(directory);
+    }
+    if (materialized) {
+      materializedBlobBytes += size === undefined ? 0 : 2 * Math.ceil(Number(size) / blockSize) * blockSize;
+      materializedMetadataBytes += 4 * blockSize;
+    }
+  }
+  // The selector writes a Git tree object for every source directory. Only
+  // selected paths need filesystem directories in the checkout/staging tree.
+  const topologyBytes = topologyDirectories.size * 4 * blockSize;
+  materializedMetadataBytes += materializedDirectories.size * 4 * blockSize;
+  const fixedBytes = 16 * 1024 ** 2;
+  const totalBytes = fixedBytes + indexBytes + topologyBytes + materializedMetadataBytes + materializedBlobBytes;
+  if (!Number.isSafeInteger(totalBytes)) fail("source capacity estimate exceeds supported byte range");
+  return { fixedBytes, indexBytes, topologyBytes, materializedMetadataBytes, materializedBlobBytes,
+    sourcePaths: entries.length, sourceDirectories: topologyDirectories.size, materializedDirectories: materializedDirectories.size, totalBytes };
 }
 
 function importBaseCommits(repository, sourceCommit, mirror) {
@@ -2382,7 +2410,7 @@ function prepareSourceValue(database, args, request) {
   if (sourceJobDirectory !== null) writeSourceJobProgress(sourceJobDirectory, { phase: "forecasting", commit: sourceCommit });
   const blockSize = statfsSync(root).bsize;
   const forecastPath = `${request.receipt}.forecast.json`;
-  const inputs = { version: 3, repository, sourceCommit, intent, sparsePatterns, blockSize, stamp: objectStoreStamp(mirror) };
+  const inputs = { version: 4, repository, sourceCommit, intent, sparsePatterns, blockSize, stamp: objectStoreStamp(mirror) };
   const cached = existsSync(forecastPath) ? JSON.parse(readFileSync(forecastPath, "utf8")) : null;
   const fingerprint = sourceJobId("source-forecast", inputs);
   let plan = cached !== null && cached.fingerprint === fingerprint ? cached.plan : intent === null
@@ -2415,7 +2443,7 @@ function prepareCreationSource(database, args, input) {
     if (resolved.status !== 0) fail("source capacity estimate unknown: remote commit is absent from durable mirror custody; remote import remains unestimated");
     sourceCommit = resolved.stdout;
   }
-  const request = { ...input, sourceCommit, args: [...args.named] };
+  const request = { ...input, sourceCommit, args: [...args.named], capacityPricingVersion: 4 };
   const key = createHash("sha256").update(JSON.stringify(request)).digest("hex");
   const directory = path.join(path.dirname(input.statePath), "source-preparations");
   const receipt = path.join(directory, `${key}.json`);
@@ -3437,7 +3465,7 @@ Records outlive the directory, so status explains what became of a checkout that
 `);
 }
 
-export const workspaceTesting = { allocatedWorkspaceBytes, workspaceAllocationSample, cachedWorkspaceAllocation, remainingCapacityBytes, capacityRequirement, capacityReservations, gitDependencySnapshot, sourceCapacityPlan, cacheTargets, dockerEndpointScope, dockerSnapshot, groupReconciliation, maintainReferenceClone, parseSystemdUnits, pruneReleased, systemdManagerSnapshot, systemdReferences, ownerThreadDatabases, threadSnapshot };
+export const workspaceTesting = { checkoutConstructionCapacity, allocatedWorkspaceBytes, workspaceAllocationSample, cachedWorkspaceAllocation, remainingCapacityBytes, capacityRequirement, capacityReservations, gitDependencySnapshot, sourceCapacityPlan, cacheTargets, dockerEndpointScope, dockerSnapshot, groupReconciliation, maintainReferenceClone, parseSystemdUnits, pruneReleased, systemdManagerSnapshot, systemdReferences, ownerThreadDatabases, threadSnapshot };
 
 export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
   if (argv[0] === "growth-process-snapshot") {
