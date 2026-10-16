@@ -32,7 +32,10 @@ try {
     }
     checks.push({ ...(await checkBroker(config.broker.root)), loadedPid: pid, actualCredentialMetadata: { oauth, unset, transfers }, listeners: broker.listeners.length });
   } else if (config.broker.kind === 'separate-stack-owner') {
-    checks.push({ component: 'shared-broker', scope: 'separate-stack-owner', owner: config.broker.owner });
+    if (typeof config.broker.guard !== 'string') throw Error('Separate employee broker guard is not installed');
+    const observed = JSON.parse(execFileSync(process.execPath, [config.broker.guard], { encoding: 'utf8', timeout: 10000 }));
+    if (observed.ok !== true) throw Error('Separate employee broker has not passed its installed guard');
+    checks.push({ component: 'shared-broker', scope: 'separate-stack-owner', owner: config.broker.owner, proof: observed });
   } else throw Error('Unknown host broker role');
   const legacy = realpathSync('/srv/pi/pi-orchestrator');
   if (legacy !== config.legacyRoot) throw Error('Legacy selected source changed');

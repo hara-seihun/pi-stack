@@ -88,3 +88,7 @@ pi-orchestrator usage-evidence --ledger /absolute/ledger.sqlite3
 ```
 
 Peer account-transfer/path configuration remains in the credential owner's explicit config. Tokens enter through files, never command arguments. Core owns boot and activation; source changes alone do not activate services or switch live routes.
+
+## Subscription-only inference
+
+All nonvoice hosted inference uses the shared subscription pool/broker. Ambient API keys, personal auth.json API entries, request overrides and generic metered providers cannot authorize it. A missing, malformed or exhausted subscription route is an explicit error, never an API fallback. Concrete runtime adapter enforcement covers direct SDK and CLI with extensions disabled; dedicated realtime/telephone voice remains separate. Exact configured local-GPU engine routes remain available. `deploy/subscription-only-broker`, `deploy/subscription-only-legacy`, `deploy/runtime-subscription-only` and immutable artifact installation own scoped deployment without enabling retired services. `sudo node /usr/local/lib/pi-subscription-only/check.mjs` checks selected/loaded source, configured grants and credential metadata plus offline causal tests on each installed host.
