@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import {retireGeneratedOnly} from './generated-retirement.mjs';
+import {retireGeneratedOnly,generatedStagingRoots} from './generated-retirement.mjs';
 import {digest} from './growth-lifecycle.mjs';
 
 export class CacheRetirementError extends Error {constructor(code,detail){super(detail);this.code=code;}}
@@ -15,6 +15,11 @@ export function validateCacheRequest(request){
  if(!bindingKeys.filter(x=>!['updatedAt','leaseExpiresAt'].includes(x)).every(x=>typeof request.binding[x]==='string'&&request.binding[x])||!Number.isSafeInteger(request.binding.updatedAt)||!Number.isSafeInteger(request.binding.leaseExpiresAt))refuse('invalid-cache-request','complete identity and lifecycle binding required');
  return request;
 }
+export function cacheGeneratedRequest(request) {
+ validateCacheRequest(request);
+ return {kind:'retire-generated-only',operationId:'cache-'+request.operationId,ownerEvidence:request.ownerEvidence,binding:Object.fromEntries(['id','path','owner','sourceCommit','durableSourceCommit','head','device','inode'].map(k=>[k,request.binding[k]])),paths:[request.cachePath]};
+}
+export function cacheStagingRoots(request,stateDirectory) {return generatedStagingRoots(cacheGeneratedRequest(request),stateDirectory);}
 export function retireWorkspaceCache(context,request){
  try{
   validateCacheRequest(request);
@@ -26,7 +31,7 @@ export function retireWorkspaceCache(context,request){
   };
   current();
   const operation='cache-'+request.operationId;
-  const inner={kind:'retire-generated-only',operationId:operation,ownerEvidence:request.ownerEvidence,binding:Object.fromEntries(['id','path','owner','sourceCommit','durableSourceCommit','head','device','inode'].map(k=>[k,request.binding[k]])),paths:[request.cachePath]};
+  const inner=cacheGeneratedRequest(request);
   const db=context.database,sha=digest(JSON.stringify(request));
   db.exec('CREATE TABLE IF NOT EXISTS workspace_cache_retirement(operation_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, request_sha256 TEXT NOT NULL, original_json TEXT NOT NULL)');
   const prior=db.prepare('SELECT request_sha256 FROM workspace_cache_retirement WHERE operation_id=?').get(operation);

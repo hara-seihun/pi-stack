@@ -5,7 +5,7 @@ import path from 'node:path';
 import {tmpdir} from 'node:os';
 import {execFileSync,spawnSync} from 'node:child_process';
 import {DatabaseSync} from 'node:sqlite';
-import {retireWorkspaceCache} from './cache-retirement.mjs';
+import {retireWorkspaceCache,cacheStagingRoots} from './cache-retirement.mjs';
 import {currentStackQueueReferences,queueReferenceSql,operatorJobFromCgroup,isSourceOnlyRead} from './cache-queue.mjs';
 import {main,workspaceTesting} from './workspace.mjs';
 
@@ -48,7 +48,7 @@ test('staged interruption resumes same operation without deleting recreated or s
 }));
 test('current canonical queue inventory includes reserved tools/escaped JSON/uncertain custody and fails honestly',()=>{
  const read=p=>p.endsWith('host.json')?{hostId:'host',installationId:'one'}:p.endsWith('registry.json')?{installationId:'one',domains:[{id:'hara',hostId:'host',unixUser:'pi2-hara'}]}:{domainId:'hara',database:'stack'};
- const result=currentStackQueueReferences(['/source'],{resourceKind:'source',read,execute:(_name,args)=>{const sql=args.at(-1);assert.match(sql,/tool_call/);assert.match(sql,/tc.result IS NULL/);assert.match(sql,/jsonb_path_query/);assert.match(sql,/cessation_evidence IS NULL/);assert.match(sql,/uncertain/);return {status:0,stdout:'[{"kind":"tool_call","id":"reserved","state":"unfinished"}]'};}});
+ const result=currentStackQueueReferences(['/source'],{resourceKind:'source',read,execute:(_name,args)=>{const sql=args.at(-1);assert.match(sql,/tool_call/);assert.match(sql,/tc.result IS NULL/);assert.match(sql,/jsonb_path_exists/);assert.match(sql,/cessation_evidence IS NULL/);assert.match(sql,/uncertain/);return {status:0,stdout:'[{"kind":"tool_call","id":"reserved","state":"unfinished"}]'};}});
  assert.equal(result.references[0].id,'reserved');assert.equal(currentStackQueueReferences(['/source'],{resourceKind:'source',read,execute:()=>({status:2,stdout:''})}).errors.length,1);
  assert.equal(operatorJobFromCgroup('0::/pi-stack-next.slice/pi-stack-next-job-11111111-2222-3333-4444-555555555555-1.service'),'11111111-2222-3333-4444-555555555555');
  assert.match(queueReferenceSql("/source/'quoted",null,"source"),/''quoted/);
@@ -82,3 +82,9 @@ test('known source read differs from cache read, aliased target and unresolved B
  const alias=path.join(f.root,'aliased-source');fs.symlinkSync(path.join(f.cache,'dependency'),alias);assert.equal(isSourceOnlyRead({toolName:'read',targetPath:alias},roots),false);
 }));
 
+
+test('literal JSON path lookup and old pending cache staging identity remain exact',()=>fixture(f=>{
+ const sql=queueReferenceSql('/source/a.[x]\\b',null,'generated-cache');assert.match(sql,/flag \"q\"/);assert.doesNotMatch(sql,/Memoize|body::text|jsonb_path_query/);
+ const request={...f.r,operationId:'caption-build-f4b1-58b-1040',cachePath:'.converge-cache'};
+ assert.equal(path.basename(cacheStagingRoots(request,f.base)[0]),'9d2e97ab18ff9c33fc9970608c2b566f575a64055e3dc197c9f9d3a02c3de235');
+}));

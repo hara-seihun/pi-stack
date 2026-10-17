@@ -412,3 +412,18 @@ per-entry unlink/rmdir. It never recursively deletes unlisted/recreated content;
 deadline expiry retains deleting intent and the same-operation continuation.
 Single-member retirement validates at its rename/deletion boundary; repeated
 pre-journal authorization and redundant whole-manifest comparison are eliminated.
+
+For pending staging, use read-only
+`cache-safety --id ID --path PATH --owner OWNER --request FILE --request-sha256 SHA --json`
+with the SAME retained request. It derives the original stage identity through the
+same engine transform, observes source+stage runtime/queued/Git references, and
+makes no plan, lease, journal or cache transition. It never infers that an absent
+original cache means retirement completed. Existing `--cache RELATIVE` mode is
+an initial cache-path observation and cannot substitute for pending-stage proof.
+
+The current path lookup uses literal-q jsonb_path_exists predicates over exact
+eligible payloads. Literal punctuation is data, not a regular expression. Five
+positive/control path roots over one92-candidate READONLY snapshot matched the
+prior string-leaf predicate with zero mismatches. The installed eligible-ID
+baseline also passed; this predicate change is an equivalent optimization, not
+a claim that it caused every historical query-timeout recovery.

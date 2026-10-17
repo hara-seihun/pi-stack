@@ -8,7 +8,8 @@ export function queueReferenceSql(root,selfJobId,resourceKind){
  if(!['source','physical-checkout','generated-cache'].includes(resourceKind))throw new Error('explicit source or generated-cache resource kind required');
  const roots=Array.isArray(root)?root:[root];
  if(selfJobId!==null&&!/^[a-f0-9-]{36}$/.test(selfJobId))throw new Error('invalid physical operator identity');
- const self=selfJobId===null?'NULL':literal(selfJobId),needles='ARRAY['+roots.map(literal).join(',')+']';
+ const self=selfJobId===null?'NULL':literal(selfJobId);
+ const pathPredicate=roots.map(root=>`jsonb_path_exists(b.body,${literal('strict $.** ? (@.type() == "string" && @ like_regex '+JSON.stringify(root)+' flag "q")')}::jsonpath)`).join(' OR ');
  const physical=resourceKind!=='source';
  const sourceOperations="'conversation.send','conversation.create','agent.continue','conversation.rename','conversation.cancel','conversation.close','delegation.track','delegation.update','delegation.review','delegation.close','delegation.setDoneCondition','delegation.sweep','input.deliveryFailure','manager.check','manager.response.remind','provider.resume'";
  const sourceOperationPredicate=`command_type IN (${sourceOperations})`;
@@ -27,8 +28,7 @@ export function queueReferenceSql(root,selfJobId,resourceKind){
  UNION ALL SELECT arguments FROM tool_call WHERE p.kind='tool_call' AND id=p.id
  UNION ALL SELECT request_body FROM operation WHERE p.kind='operation' AND id=p.id OFFSET 0
  ) b
- CROSS JOIN LATERAL (SELECT b.body WHERE EXISTS (SELECT 1 FROM unnest(${needles}) n(needle) WHERE position(substring(to_jsonb(needle)::text FROM 2 FOR length(to_jsonb(needle)::text)-2) IN b.body::text)>0) OFFSET 0) matching
- WHERE ${filter} AND EXISTS (SELECT 1 FROM jsonb_path_query(matching.body,'strict $.** ? (@.type() == "string")') s(value),unnest(${needles}) n(needle) WHERE position(needle IN (s.value #>> '{}'))>0) LIMIT 65
+ WHERE ${filter} AND (${pathPredicate}) LIMIT 65
  ) r; ROLLBACK;`;
 }
 export function currentStackQueueReferences(roots,{resourceKind,cacheRoots,read=p=>JSON.parse(fs.readFileSync(p,'utf8')),execute=(name,args,options)=>spawnSync(name,args,options)}={}){

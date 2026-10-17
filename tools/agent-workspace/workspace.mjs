@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import {cacheStagingRoots} from './cache-retirement.mjs';
 import {referenceSummaries} from './generated-retirement.mjs';
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -3458,11 +3459,24 @@ function workspaceCacheSafety(database,selected,stages,cacheRoots) {
   return {errors:[...growth.errors,...native.errors],references:[...growth.references,...native.references],retainedBorrowers:growth.retainedBorrowers,observedAt:Date.now()};
 }
 function cacheSafetyCommand(database,args,statePath) {
-  assertOnly(args,["id","path","owner","cache","json"]);
+  assertOnly(args,["id","path","owner","cache","request","request-sha256","json"]);
   const selected=growthSelected(database,args),deadline=Date.now()+35_000;
   if(selected.owner!==required(args,"owner")) throw new CacheRetirementError("cache-owner-changed","registered owner mismatch");
-  const raw=duringInspection(deadline,()=>withWorkspaceLock(database,selected.path,()=>withGrowthBorrowerLocks(database,selected,()=>workspaceCacheSafety(database,selected,[],[path.join(selected.path,required(args,"cache"))]),deadline),selected.groupId,deadline));
-  const observation={workspaceId:selected.id,path:selected.path,observedAt:raw.observedAt,errors:raw.errors,references:referenceSummaries(raw.references),retainedBorrowers:referenceSummaries(raw.retainedBorrowers),effect:"none",scope:"read-only borrower observation; no cache classification/inode retirement qualification"};
+  let relative,stages=[];
+  if(one(args,"request")!==undefined) {
+    if(one(args,"cache")!==undefined) throw new CacheRetirementError("invalid-cache-request","choose exact cache path or exact request, never both");
+    const file=required(args,"request"),stat=lstatSync(file);
+    if(!path.isAbsolute(file)||realpathSync(file)!==file||!stat.isFile()||stat.nlink!==1||stat.size>65536||within(selected.path,file)) throw new CacheRetirementError("invalid-cache-request","independent single-link exact request required");
+    const bytes=readFileSync(file);if(digest(bytes)!==required(args,"request-sha256"))throw new CacheRetirementError("cache-request-changed","request bytes changed");
+    const request=JSON.parse(bytes);validateCacheRequest(request);
+    if(request.binding.id!==selected.id||request.binding.path!==selected.path||request.binding.owner!==selected.owner)throw new CacheRetirementError("cache-owner-changed","request does not select original workspace");
+    relative=request.cachePath;stages=cacheStagingRoots(request,path.dirname(statePath));
+  }else{
+    if(one(args,"request-sha256")!==undefined)throw new CacheRetirementError("invalid-cache-request","request hash requires exact request file");
+    relative=required(args,"cache");if(path.isAbsolute(relative)||path.posix.normalize(relative)!==relative||relative.split('/').some(p=>p==='..'))throw new CacheRetirementError("invalid-cache-request","exact relative cache required");
+  }
+  const raw=duringInspection(deadline,()=>withWorkspaceLock(database,selected.path,()=>withGrowthBorrowerLocks(database,selected,()=>workspaceCacheSafety(database,selected,stages,[path.join(selected.path,relative),...stages]),deadline),selected.groupId,deadline));
+  const observation={workspaceId:selected.id,path:selected.path,stagingRoots:stages,observedAt:raw.observedAt,errors:raw.errors,references:referenceSummaries(raw.references),retainedBorrowers:referenceSummaries(raw.retainedBorrowers),effect:"none",scope:"read-only borrower observation; no cache classification/inode retirement qualification"};
   print({ok:true,value:{kind:raw.errors.length?"safety-unknown":raw.references.length||raw.retainedBorrowers.length?"protected":"unreferenced",...observation}},true);
 }
 function leaseReleaseDisposition(item) {
@@ -3789,7 +3803,7 @@ function help() {
   agent-workspace reprice-capacity (--id ID|--path PATH) --intent source-only|budgeted --headroom-gib N --growth-mib N [--json]
   Active reduction additionally requires --id ID --path PATH --owner OWNER --reduction FILE --reduction-sha256 SHA256
   agent-workspace growth-status --id ID --path PATH [--json]
-  agent-workspace cache-safety --id ID --path PATH --owner OWNER --cache RELATIVE --json
+  agent-workspace cache-safety --id ID --path PATH --owner OWNER (--cache RELATIVE|--request FILE --request-sha256 SHA) --json
   agent-workspace cache-plan --id ID --path PATH --owner OWNER --cache RELATIVE --classification node-dependencies|declared-build-cache --operation-id ID --evidence TEXT --json
   agent-workspace retire-cache --id ID --path PATH --owner OWNER --request FILE --request-sha256 SHA --json
   agent-workspace retire-source-materialization --id ID --path PATH --owner OWNER --request ABS_FILE --request-sha256 SHA --json
@@ -3950,14 +3964,14 @@ if (process.argv[1] !== undefined && existsSync(process.argv[1])
         process.stdout.write(`${JSON.stringify({ ok: false, error: {
           code: error.code, field: error.field, requested: error.requested, recorded: error.recorded,
         } })}\n`);
-      } else if (["reassign", "retire-source-materialization", "materialization-process-snapshot", "retire-growth", "growth-status", "resume-growth"].includes(process.argv[2]) || error instanceof GrowthLifecycleError || error instanceof MaterializationError) {
+      } else if (["reassign", "cache-safety", "retire-source-materialization", "materialization-process-snapshot", "retire-growth", "growth-status", "resume-growth"].includes(process.argv[2]) || error instanceof GrowthLifecycleError || error instanceof MaterializationError || error instanceof CacheRetirementError) {
         process.stdout.write(`${JSON.stringify({ ok: false, error: {
-          code: error instanceof GrowthLifecycleError || error instanceof MaterializationError ? error.code : error instanceof ResourceBusyError ? "resource-busy" : error instanceof CliError ? "invalid-request" : "lifecycle-failed",
+          code: error instanceof GrowthLifecycleError || error instanceof MaterializationError || error instanceof CacheRetirementError ? error.code : error instanceof ResourceBusyError ? "resource-busy" : error instanceof CliError ? "invalid-request" : "lifecycle-failed",
           detail: error instanceof Error ? error.message : String(error),
         } })}\n`);
       }
     }
     process.stderr.write(`agent-workspace: ${error instanceof Error ? error.message : String(error)}\n`);
-    process.exit(error instanceof ResourceBusyError ? 75 : (error instanceof CliError || error instanceof GrowthLifecycleError || error instanceof MaterializationError) ? 2 : 1);
+    process.exit(error instanceof ResourceBusyError ? 75 : (error instanceof CliError || error instanceof GrowthLifecycleError || error instanceof MaterializationError || error instanceof CacheRetirementError) ? 2 : 1);
   }
 }
