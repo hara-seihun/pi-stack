@@ -44,7 +44,7 @@ export function toolSettlementSql(ids) {
  relation_keys AS MATERIALIZED (SELECT jsonb_build_object('runs',coalesce(jsonb_agg(run_id),'[]'::jsonb),'calls',coalesce(jsonb_agg(provider_call_id),'[]'::jsonb)) AS vars FROM candidates),
  matching_child_ids AS MATERIALIZED (SELECT id FROM job WHERE operation_id IN (${selected})
  OR jsonb_path_exists(spec,'$ ? (@.admitted.parentJobId == $runs[*] || @.parentJobId == $runs[*] || @.admitted.toolCallId == $calls[*])',(SELECT vars FROM relation_keys)) LIMIT 65),
- children AS MATERIALIZED (SELECT j.id,j.state,j.kind,j.operation_id,j.ownership_receipt,j.cessation_evidence,
+ children AS MATERIALIZED (SELECT j.id,j.state,j.kind,j.operation_id,j.result,j.ownership_receipt,j.cessation_evidence,
  j.spec#>>'{admitted,parentJobId}' AS parent_run,j.spec->>'parentJobId' AS parent_job,j.spec#>>'{admitted,toolCallId}' AS provider_call
  FROM matching_child_ids m CROSS JOIN LATERAL (SELECT * FROM job WHERE id=m.id OFFSET 0) j)
  SELECT json_build_object('candidates',coalesce((SELECT json_agg(c) FROM candidates c),'[]'::json),'children',coalesce((SELECT json_agg(c) FROM children c),'[]'::json)); ROLLBACK;`;
@@ -74,6 +74,27 @@ function terminalDistinctSibling(child,c) {
  return owner&&typeof owner.invocationId==='string'&&owner.invocationId.length>0&&typeof owner.unit==='string'&&owner.unit.length>0
   &&absence?.kind==='cgroup-empty'&&isDeepStrictEqual(absence.owner,owner);
 }
+function terminalDeclaredChildren(c,details,evidence) {
+ if(!Array.isArray(details.children))return null;
+ if(details.children.length===0)return new Set();
+ if(details.phase!=='recovered-tool-terminal-observation'||details.children.length!==1
+  ||c.request_body?.name!=='bash'||c.tool_result.terminate!==false
+  ||details.error?.code!=='outcome_uncertain'||details.error.resourceId!==c.id)return null;
+ const declared=details.children[0],child=evidence.children.find(x=>x.id===declared.jobId),material=details.knownMaterial;
+ if(!child||child.operation_id!==c.id||child.provider_call!==c.provider_call_id
+  ||child.parent_run!==c.run_id||child.kind!=='tool-bash'||declared.kind!==child.kind
+  ||child.state!=='completed'||declared.state!==child.state||child.result?.exitCode!==0
+  ||!isDeepStrictEqual(declared.result,child.result)||!isDeepStrictEqual(declared.ownershipReceipt,child.ownership_receipt)
+  ||!isDeepStrictEqual(declared.cessationEvidence,child.cessation_evidence))return null;
+ const owner=child.ownership_receipt,absence=child.cessation_evidence,process=child.result.processOutcome;
+ if(!owner||typeof owner.unit!=='string'||!owner.unit||typeof owner.invocationId!=='string'||!owner.invocationId
+  ||absence?.kind!=='cgroup-empty'||!isDeepStrictEqual(absence.owner,owner)||absence.result!=='success'||absence.exitCode!==0
+  ||process?.state!=='recorded'||process.cause!=='exit'||process.exit?.kind!=='exited'||process.exit.code!==0
+  ||!Number.isSafeInteger(process.startedAt)||!Number.isSafeInteger(process.exitedAt)||process.exitedAt<process.startedAt
+  ||material?.kind!=='completed-original-bash-child'||material.jobId!==child.id||material.exitCode!==0
+  ||!isDeepStrictEqual(material.result,child.result))return null;
+ return new Set([child.id]);
+}
 export function settledToolOperationIds(evidence) {
  if(!evidence||!Array.isArray(evidence.candidates)||!Array.isArray(evidence.children)||evidence.children.length>=65)throw new Error('tool settlement observation incomplete');
  if(evidence.children.some(child=>!evidence.candidates.some(c=>child.id===c.run_id||child.operation_id===c.id||child.parent_run===c.run_id||child.parent_job===c.run_id||child.provider_call===c.provider_call_id)))throw new Error('tool child relationship projection incomplete');
@@ -82,14 +103,15 @@ export function settledToolOperationIds(evidence) {
   const result=c.tool_result,details=result?.details,original=details?.originalOperation,absence=c.cessation_evidence,owner=c.ownership_receipt;
   if(c.state!=='uncertain'||c.command_type!=='agent.tool'||result?.isError!==true||details?.error?.retry!=='never'
    ||!terminalProjectionMatches(c,details)||details.operationId!==c.id
-   ||details.replay!==false||!Array.isArray(details.children)||details.children.length!==0
+   ||details.replay!==false||!Array.isArray(details.children)
    ||(!isDeepStrictEqual(c.operation_result,result)&&!isDeepStrictEqual(c.operation_result,original))
    ||original?.kind!=='execution-interrupted'||original.jobId!==c.run_id
    ||!['interrupted','failed','cancelled','completed'].includes(c.owner_state)
    ||absence?.kind!=='absent'||!owner||typeof owner.invocationId!=='string'||!owner.invocationId||typeof owner.unit!=='string'||!owner.unit
    ||!isDeepStrictEqual(absence.owner,owner)||!isDeepStrictEqual(original.observation,absence)
    ||absence.proof?.kind!=='service-invocation-ended'||absence.proof.invocationId!==owner.invocationId||absence.proof.unit!==owner.unit)continue;
-  if(evidence.children.some(child=>child.id!==c.run_id&&(child.operation_id===c.id||child.parent_run===c.run_id||child.parent_job===c.run_id||child.provider_call===c.provider_call_id)&&!terminalDistinctSibling(child,c)))continue;
+  const completedChildren=terminalDeclaredChildren(c,details,evidence);if(completedChildren===null)continue;
+  if(evidence.children.some(child=>!completedChildren.has(child.id)&&child.id!==c.run_id&&(child.operation_id===c.id||child.parent_run===c.run_id||child.parent_job===c.run_id||child.provider_call===c.provider_call_id)&&!terminalDistinctSibling(child,c)))continue;
   settled.add(c.id);
  }
  return settled;
