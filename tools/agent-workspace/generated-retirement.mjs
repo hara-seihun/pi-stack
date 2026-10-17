@@ -1,4 +1,4 @@
-import {constants,fstatSync,lstatSync,readdirSync,realpathSync,renameSync,rmSync,mkdirSync,openSync,closeSync,fsyncSync,readlinkSync,unlinkSync,rmdirSync} from 'node:fs';
+import {constants,fchmodSync,fstatSync,lstatSync,readdirSync,realpathSync,renameSync,rmSync,mkdirSync,openSync,closeSync,fsyncSync,readlinkSync,unlinkSync,rmdirSync} from 'node:fs';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
 
@@ -66,6 +66,7 @@ function removeManifest(context,stage,files) {
    const pinned=fstatSync(fd,{bigint:true});if(String(pinned.dev)!==expected.device||String(pinned.ino)!==expected.inode)refuse('generated-identity-changed','staging directory changed during open');
    const descriptor='/proc/self/fd/'+fd,names=readdirSync(descriptor);
    for(const name of names)if(!known.has(path.join(relative,name)))refuse('generated-identity-changed','unlisted staging entry');
+   if(pinned.uid===BigInt(process.getuid())&&(pinned.mode&0o200n)===0n)fchmodSync(fd,Number(pinned.mode&0o7777n)|0o200);
    for(const name of names)visit(path.join(relative,name),descriptor+'/'+name);
    const latest=optionalStat(target);if(latest===null||String(latest.dev)!==expected.device||String(latest.ino)!==expected.inode)refuse('generated-identity-changed','staging directory replaced during removal');
    if(context.deadline!==undefined&&Date.now()>=context.deadline)refuse('generated-io-error','bounded deletion paused; resume the same pending operation');
@@ -169,14 +170,7 @@ function execute(context,request) {
       if(!manifestRemoval&&!remainingInventorySafe(e.files,remaining)) refuse('generated-identity-changed','staging changed before removal');
       authorize(context,request);
       context.beforeRemoval?.(e);
-      if(manifestRemoval)removeManifest(context,e.stage,e.files);
-      else for(const entry of [...remaining].sort((a,b)=>b.path.length-a.path.length)) {
-        if(context.deadline!==undefined&&Date.now()>=context.deadline) refuse('generated-io-error','bounded deletion paused; resume the same pending operation');
-        const target=path.join(e.stage,entry.path),stat=optionalStat(target);if(stat===null)continue;
-        const current={...entry,...identity(stat),type:stat.isSymbolicLink()?'symlink':stat.isDirectory()?'directory':stat.isFile()?'file':'special',size:String(stat.size),blocks:String(stat.blocks),mtime:String(stat.mtimeNs),...(stat.isSymbolicLink()?{linkTarget:readlinkSync(target)}:{})};
-        if(!sameEntry(entry,current))refuse('generated-identity-changed','staging entry changed during bounded deletion');
-        if(entry.type==='directory')rmdirSync(target);else unlinkSync(target);
-      }
+      removeManifest(context,e.stage,e.files);
       syncDirectory(stageRoot);
       context.afterRemoval?.(e);
     }

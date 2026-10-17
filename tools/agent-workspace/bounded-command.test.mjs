@@ -16,7 +16,7 @@ test('an inherited grandchild pipe cannot extend timeout or survive owned group 
  const script="const{spawn}=require('node:child_process');const child=spawn(process.execPath,['-e','setTimeout(()=>{},2000)'],{stdio:['ignore','inherit','inherit']});console.log(child.pid);setInterval(()=>{},1000)";
  const start=Date.now(),result=boundedCommand(process.execPath,['-e',script],options);assert.equal(result.error.code,'ETIMEDOUT');assert.ok(Date.now()-start<500);
  const child=Number(result.stdout.trim());assert.ok(child>0);
- try{assert.match(fs.readFileSync('/proc/'+child+'/stat','utf8'),/\) [ZX] /);}catch(error){if(error.code!=='ENOENT')throw error;}
+ const until=Date.now()+200;for(;;){try{const stat=fs.readFileSync('/proc/'+child+'/stat','utf8');if(/\) [ZX] /.test(stat))break;if(Date.now()>=until)assert.fail('owned child did not cease after SIGKILL');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5);}catch(error){if(error.code==='ENOENT')break;throw error;}}
 });
 test('bounded success and output failure stay distinct',()=>{
  const success=boundedCommand(process.execPath,['-e',"console.log('[]')"],{...options,timeout:1000});assert.equal(success.status,0);assert.equal(success.stdout.trim(),'[]');

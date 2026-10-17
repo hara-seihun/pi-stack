@@ -5,9 +5,11 @@ import path from 'node:path';
 import {tmpdir} from 'node:os';
 import {execFileSync,spawnSync} from 'node:child_process';
 import {DatabaseSync} from 'node:sqlite';
-import {retireWorkspaceCache,cacheStagingRoots} from './cache-retirement.mjs';
+const {retireWorkspaceCache,cacheStagingRoots}=await import(process.env.CACHE_RETIREMENT_MODULE || './cache-retirement.mjs');
 import {currentStackQueueReferences,queueReferenceSql,operatorJobFromCgroup,isSourceOnlyRead} from './cache-queue.mjs';
 import {main,workspaceTesting} from './workspace.mjs';
+import {retireGeneratedOnly} from './generated-retirement.mjs';
+import {cacheGeneratedRequest} from './cache-retirement.mjs';
 
 function fixture(action){
  const base=fs.mkdtempSync(path.join(tmpdir(),'cache-retire-')),root=path.join(base,'source'),state=path.join(base,'state.sqlite3');fs.mkdirSync(root);
@@ -114,4 +116,17 @@ for(const mutation of ['unlisted','replacement'])test('FD-anchored manifest reti
  const result=retireWorkspaceCache(f.c,f.r);assert.equal(result.ok,false);assert.equal(result.error.code,'generated-identity-changed');
  assert.equal(fs.readFileSync(path.join(stage,mutation==='unlisted'?'new-evidence':'dependency'),'utf8'),mutation==='unlisted'?'preserve':'replacement');
  assert.equal(fs.readFileSync(path.join(stage,'dependency'),'utf8'),mutation==='unlisted'?'rebuildable':'replacement');
+}));
+
+ test('owned readonly cache directories retire through pinned manifest without source or foreign permission changes',()=>fixture(f=>{
+ const nested=path.join(f.cache,'readonly');fs.mkdirSync(nested);fs.writeFileSync(path.join(nested,'manifest.json'),'generated');fs.chmodSync(nested,0o500);f.c.beforeRemoval=e=>fs.chmodSync(e.stage,0o500);
+ const before=preserved(f);try{const result=retireWorkspaceCache(f.c,f.r);assert.equal(result.ok,true,JSON.stringify(result));assert.equal(fs.existsSync(f.cache),false);assert.deepEqual(preserved(f),before);}
+ finally{for(const root of [f.cache,...cacheStagingRoots(f.r,f.base)])for(const target of [root,path.join(root,'readonly')])if(fs.existsSync(target))fs.chmodSync(target,0o700);}
+}));
+
+test('source-materialization counterpart keeps whole-source qualification and retires owned readonly staged directories',()=>fixture(f=>{
+ const nested=path.join(f.cache,'readonly');fs.mkdirSync(nested);fs.writeFileSync(path.join(nested,'manifest.json'),'generated');fs.chmodSync(nested,0o500);
+ const request=cacheGeneratedRequest(f.r),context={...f.c,journalKind:'generated-only-retirement',declarations:()=>['node_modules'],binding:()=>request.binding,custody:()=>{},beforeRemoval:e=>fs.chmodSync(e.stage,0o500)};
+ try{const result=retireGeneratedOnly(context,request);assert.equal(result.ok,true,JSON.stringify(result));assert.equal(fs.existsSync(f.cache),false);assert.equal(fs.readFileSync(path.join(f.root,'source.ts'),'utf8'),'dirty irreplaceable');}
+ finally{for(const root of [f.cache,...cacheStagingRoots(f.r,f.base)])for(const target of [root,path.join(root,'readonly')])if(fs.existsSync(target))fs.chmodSync(target,0o700);}
 }));
