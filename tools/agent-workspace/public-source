@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+(( $# == 3 )) || { echo 'usage: bash tools/agent-workspace/public-source REMOTE_URL PUBLIC_PARENT SOURCE_COMMIT' >&2; exit 64; }
+remote=$1; parent=$2; source=$3
+[[ $parent =~ ^[0-9a-f]{40}$ && $source =~ ^[0-9a-f]{40}$ ]] || { echo 'explicit immutable parent/source commits required' >&2; exit 64; }
+root=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$root"
+git cat-file -e "$parent^{commit}"
+git cat-file -e "$source^{commit}"
+index=$(mktemp /tmp/workspace-public-index.XXXXXXXX)
+rm "$index"
+trap 'rm -f "$index"' EXIT
+export GIT_INDEX_FILE=$index
+git read-tree "$parent"
+# This separate index intentionally differs from working HEAD; change only component entries.
+git rm -rf --cached --ignore-unmatch tools/agent-workspace >/dev/null
+git read-tree --prefix=tools/agent-workspace/ "$source:tools/agent-workspace"
+tree=$(git write-tree)
+projection=$(printf 'Publish exact agent-workspace component source\n' | git commit-tree "$tree" -p "$parent")
+git diff --quiet "$source" "$projection" -- tools/agent-workspace
+git diff --quiet "$parent" "$projection" -- . ':!tools/agent-workspace'
+git update-ref refs/heads/agent/workspace-component-public "$projection"
+git push "$remote" "$projection:refs/heads/main"
+printf 'source %s\npublic %s\ncomponent-tree %s\n' "$source" "$projection" "$(git rev-parse "$source:tools/agent-workspace")"

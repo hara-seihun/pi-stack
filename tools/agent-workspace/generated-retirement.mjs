@@ -1,4 +1,4 @@
-import {lstatSync,readdirSync,realpathSync,renameSync,rmSync,mkdirSync,openSync,closeSync,fsyncSync} from 'node:fs';
+import {lstatSync,readdirSync,realpathSync,renameSync,rmSync,mkdirSync,openSync,closeSync,fsyncSync,readlinkSync} from 'node:fs';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
 
@@ -33,18 +33,20 @@ function checkAncestors(root,relative) {
     if(s.isSymbolicLink()||!s.isDirectory()) refuse('unsafe-generated-path','aliased ancestor');
   }
 }
-function inventory(root,device) {
+function inventory(root,device,policy,deadline) {
+  if(policy!==undefined && policy!=="unlink-cache-links") refuse("unsafe-generated-path","unknown inventory policy");
   const entries=[];const pending=[''];
   while(pending.length) {
+    if(deadline!==undefined && Date.now()>=deadline) refuse('generated-io-error','inventory deadline exhausted');
     if(entries.length>=100000) refuse("generated-io-error","inventory exceeds bounded 100000 entries; split declared paths");
     const relative=pending.pop(),absolute=path.join(root,relative),s=lstatSync(absolute,{bigint:true});
-    if(s.isSymbolicLink()||(!s.isDirectory()&&!s.isFile())||String(s.dev)!==device||s.isFile()&&s.nlink!==1n||relative.split(path.sep).some(v=>v==='.git'||v==='.converge')) refuse('unsafe-generated-path',`symlink, protected evidence, shared inode, mount or special file: ${absolute}`);
-    entries.push({path:relative,...identity(s),type:s.isDirectory()?'directory':'file',size:String(s.size),blocks:String(s.blocks),mtime:String(s.mtimeNs)});
+    if((s.isSymbolicLink()&&policy!=="unlink-cache-links")||(!s.isDirectory()&&!s.isFile()&&!s.isSymbolicLink())||String(s.dev)!==device||s.isFile()&&s.nlink!==1n&&policy!=="unlink-cache-links"||relative.split(path.sep).some(v=>v==='.git'||v==='.converge')) refuse('unsafe-generated-path',`symlink, protected evidence, shared inode, mount or special file: ${absolute}`);
+    entries.push({path:relative,...identity(s),type:s.isSymbolicLink()?'symlink':s.isDirectory()?'directory':'file',...(s.isSymbolicLink()?{linkTarget:readlinkSync(absolute)}:{}),...(s.isFile()&&s.nlink!==1n?{shared:true}:{}),size:String(s.size),blocks:String(s.blocks),mtime:String(s.mtimeNs)});
     if(s.isDirectory()) for(const name of readdirSync(absolute).sort().reverse()) pending.push(path.join(relative,name));
   }
   return entries.sort((a,b)=>a.path.localeCompare(b.path));
 }
-function sameInventory(a,b) {return equal(a.map(e=>e.type==='directory'?{...e,mtime:'',size:'',blocks:''}:e),b.map(e=>e.type==='directory'?{...e,mtime:'',size:'',blocks:''}:e));}
+function sameInventory(a,b) {const comparable=e=>{const {shared,...rest}=e;return e.type==='directory'?{...rest,mtime:'',size:'',blocks:''}:rest;};return equal(a.map(comparable),b.map(comparable));}
 function remainingInventorySafe(original,remaining) {
   const known=new Map(original.map(e=>[e.path,e]));
   return remaining.every(e=>{const old=known.get(e.path);return old!==undefined&&sameInventory([old],[e]);});
@@ -52,6 +54,7 @@ function remainingInventorySafe(original,remaining) {
 export function generatedStagingRoots(request,stateDirectory) {
   return request.paths.map(relative=>path.join(stateDirectory,'generated-retirement',hash([request.operationId,relative])));
 }
+export function referenceSummaries(values) {const keys=new Set(['kind','resourceClass','type','id','pid','startTime','startTicks','uid','state','domainId','workspaceId','threadId','conversationId','assignmentId','jobId','operationId','unit','name','containerId','root','path','roots','cwd','field','mode','fd','access','owner','groupId']);return values.map(value=>Object.fromEntries(Object.entries(value).filter(([key])=>keys.has(key))));}
 function authorize(context,request) {
   const declarations=context.declarations();
   if(!Array.isArray(declarations)||request.paths.some(relative=>!declarations.some(d=>d===relative||typeof d==='string'&&d.startsWith('**/')&&relative.split('/').at(-1)===d.slice(3)))) refuse('unsafe-generated-path','selected output is no longer declared');
@@ -60,7 +63,7 @@ function authorize(context,request) {
   const safety=context.safety(generatedStagingRoots(request,context.stateDirectory));
   if(!safety||!Array.isArray(safety.errors)||!Array.isArray(safety.references)||!Array.isArray(safety.retainedBorrowers)) refuse('generated-safety-unknown','invalid safety result');
   if(safety.errors.length) refuse('generated-safety-unknown',JSON.stringify(safety.errors));
-  if(safety.references.length||safety.retainedBorrowers.length) refuse('generated-reference-active','runtime, thread or Git borrower remains');
+  if(safety.references.length||safety.retainedBorrowers.length) refuse('generated-reference-active',JSON.stringify({references:referenceSummaries(safety.references),retainedBorrowers:referenceSummaries(safety.retainedBorrowers)}));
   context.custody();
 }
 
@@ -71,6 +74,7 @@ export function retireGeneratedOnly(context,request) {
 }
 function execute(context,request) {
   const paths=validateGeneratedRequest(request),root=request.binding.path;
+  const snapshot=target=>inventory(target,request.binding.device,context.inventoryPolicy,context.deadline);
   authorize(context,request);
   const db=context.database,sha=hash(request);
   db.exec('PRAGMA synchronous=FULL');
@@ -90,15 +94,15 @@ function execute(context,request) {
       if(context.tracked(target)) refuse('unsafe-generated-path',`tracked or unknown Git path: ${relative}`);
       const stat=optionalStat(target);
       if(!stat) refuse('unsafe-generated-path',`initial target missing: ${relative}`);
-      const files=inventory(target,request.binding.device);
-      return {relative,stage:path.join(stageRoot,hash([request.operationId,relative])),files,phase:'planned',logicalBytes:files.filter(f=>f.type==='file').reduce((s,f)=>s+Number(f.size),0),allocatedBytes:files.reduce((s,f)=>s+Number(f.blocks)*512,0)};
+      const files=snapshot(target);
+      return {relative,stage:path.join(stageRoot,hash([request.operationId,relative])),files,phase:'planned',logicalBytes:files.filter(f=>f.type==='file').reduce((s,f)=>s+Number(f.size),0),allocatedBytes:files.reduce((s,f)=>s+(f.shared?0:Number(f.blocks)*512),0)};
     });
     authorize(context,request);
     mkdirSync(stageRoot,{recursive:true,mode:0o700});
     syncDirectory(path.dirname(stageRoot));
     if(realpathSync(stageRoot)!==stageRoot||String(lstatSync(stageRoot,{bigint:true}).dev)!==request.binding.device) refuse('unsafe-generated-path','staging must be unaliased and on same filesystem');
     if(entries.some(e=>optionalStat(e.stage))) refuse('generated-operation-conflict','staging path already exists');
-    journal={kind:'generated-only-retirement',request,entries,state:'pending'};
+    journal={kind:context.journalKind??'generated-only-retirement',request,entries,state:'pending'};
     db.prepare('INSERT INTO workspace_generated_retirement VALUES(?,?,?,?)').run(request.operationId,request.binding.id,sha,JSON.stringify(journal));
   }
   const save=()=>db.prepare('UPDATE workspace_generated_retirement SET journal_json=? WHERE operation_id=?').run(JSON.stringify(journal),request.operationId);
@@ -111,11 +115,11 @@ function execute(context,request) {
     const staged=optionalStat(e.stage),source=optionalStat(target);
     if(staged) {
       if(source) refuse('generated-identity-changed','source recreated during retirement');
-      const remaining=inventory(e.stage,request.binding.device);
+      const remaining=snapshot(e.stage);
       if(!remainingInventorySafe(e.files,remaining)) refuse('generated-identity-changed','staging content changed');
       if(e.phase==='planned'&&!sameInventory(e.files,remaining)) refuse('generated-identity-changed','unconfirmed rename content differs');
     } else if(e.phase==='planned') {
-      if(!source||!sameInventory(e.files,inventory(target,request.binding.device))||context.tracked(target)) refuse('generated-identity-changed','generated content changed before effect');
+      if(!source||!sameInventory(e.files,snapshot(target))||context.tracked(target)) refuse('generated-identity-changed','generated content changed before effect');
     } else if(e.phase!=='deleting') refuse('generated-identity-changed','staging disappeared without deletion intent');
   }
   for(const e of journal.entries) {
@@ -125,7 +129,7 @@ function execute(context,request) {
     if(e.phase==='planned') {
       if(!optionalStat(e.stage)) {
         checkAncestors(root,e.relative);
-        if(!sameInventory(e.files,inventory(target,request.binding.device))||context.tracked(target)) refuse('generated-identity-changed','generated content changed at rename');
+        if(!sameInventory(e.files,snapshot(target))||context.tracked(target)) refuse('generated-identity-changed','generated content changed at rename');
         context.invalidate();
         renameSync(target,e.stage);syncDirectory(path.dirname(target));syncDirectory(stageRoot);
         context.afterRename?.(e);
@@ -133,7 +137,7 @@ function execute(context,request) {
       e.phase='deleting';save();
     }
     if(optionalStat(e.stage)) {
-      const remaining=inventory(e.stage,request.binding.device);
+      const remaining=snapshot(e.stage);
       if(!remainingInventorySafe(e.files,remaining)) refuse('generated-identity-changed','staging changed before removal');
       authorize(context,request);
       context.beforeRemoval?.(e);
@@ -143,6 +147,6 @@ function execute(context,request) {
     e.phase='removed';save();
   }
   journal.state='completed';
-  journal.result={kind:'generated-only-retired',operationId:request.operationId,workspaceId:request.binding.id,removedPaths:paths,removedLogicalBytes:journal.entries.reduce((s,e)=>s+e.logicalBytes,0),removedAllocatedBytes:journal.entries.reduce((s,e)=>s+e.allocatedBytes,0),measurement:'sum of observed single-link inode blocks before retirement; not filesystem free-space delta',workspacePreserved:true};
+  journal.result={kind:context.journalKind==='workspace-cache-retirement'?'workspace-cache-retired':'generated-only-retired',...(context.journalKind==='workspace-cache-retirement'?{cacheState:{kind:'retired-regenerable',paths,sourceIntentDisposition:'retained in canonical input/task and durable source; regenerate dependencies under a new admitted writing lease'}}:{}),operationId:request.operationId,workspaceId:request.binding.id,removedPaths:paths,removedLogicalBytes:journal.entries.reduce((s,e)=>s+e.logicalBytes,0),removedAllocatedBytes:journal.entries.reduce((s,e)=>s+e.allocatedBytes,0),measurement:'sum of observed unshared inode blocks before retirement; shared hardlinks excluded; not filesystem free-space delta',workspacePreserved:true};
   save();return {...journal.result,replayed:false};
 }

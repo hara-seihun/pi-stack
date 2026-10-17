@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import {referenceSummaries} from './generated-retirement.mjs';
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -28,6 +29,8 @@ import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import { runSourceJob, readSourceJobRequest, writeSourceJobProgress, finishSourceJob, sourceJobId } from "./source-job.mjs";
 import { capacityRecovery } from "./capacity-recovery.mjs";
+import { retireWorkspaceCache, validateCacheRequest, CacheRetirementError } from "./cache-retirement.mjs";
+import { currentStackQueueReferences } from "./cache-queue.mjs";
 import { retireSourceMaterialization, validateMaterializationRequest, MaterializationError } from "./source-materialization.mjs";
 import { jobObserveCommand, observeWorkspaceJob } from "./job-observation.mjs";
 import { GrowthLifecycleError, digest, growthError, retainedGrowth, validateRetirement, validateReduction } from "./growth-lifecycle.mjs";
@@ -1180,6 +1183,15 @@ function removeEmptyWorkspaceContainer(record) {
   }
 }
 
+function stackQueueSafety(roots,safety,resourceKind) {
+  if(process.env.NODE_TEST_CONTEXT!==undefined && process.env.PI_WORKSPACE_TEST_EXTERNAL_SAFETY==="empty") {const observed=safety?.currentStackQueue??{errors:[],references:[],observedAt:Date.now()};return {...observed,references:observed.references.filter(ref=>resourceKind==="source"||ref.resourceClass!=="source-intent")};}
+  return currentStackQueueReferences(roots,{resourceKind});
+}
+function stackQueueInspection(queued) {
+  if(queued.errors.length) return {classification:"blocked",reason:`current Stack queue observation unavailable: ${queued.errors.join("; ")}`,processes:[],containers:[],systemdUnits:[],currentStackQueueProtected:true};
+  if(queued.references.length) return {classification:"referenced",reason:"current/queued/uncertain Stack workspace custody remains",currentStackReferences:queued.references,processes:[],containers:[],systemdUnits:[],currentStackQueueProtected:true};
+  return null;
+}
 function inspectRecord(record, options = {}) {
   if (record.state === "creating") {
     return { classification: "blocked", reason: "creation is pending; repeat the original create command to resume", processes: [], containers: [], systemdUnits: [] };
@@ -1189,6 +1201,8 @@ function inspectRecord(record, options = {}) {
   if (record.leaseExpiresAt > now && !options.ignoreLease) {
     return { classification: "active", reason: `lease valid until ${new Date(record.leaseExpiresAt).toISOString()}`, processes: [], containers: [], systemdUnits: [] };
   }
+  const stackProtection=stackQueueInspection(stackQueueSafety([record.path],options.safety,options.terminalSourceTransfer===true?"physical-checkout":"source"));
+  if(stackProtection!==null) return stackProtection;
   const threads = (options.safety?.threads ?? []).filter((thread) => within(record.path, thread.cwd));
   if (threads.length > 0) {
     return { classification: "referenced", reason: `${threads.length} thread(s) with unfinished custody use this checkout: ${threads.map((thread) => thread.id).join(", ")}`,
@@ -1242,6 +1256,7 @@ function reconcileRecord(database, record, options) {
   let safety = options.safety;
   let inspection = inspectRecord(record, { ignoreLease: options.ignoreLease, safety, deadline: options.deadline });
   if (inspection.classification === "active") return { record, inspection, action: "none" };
+  if (inspection.currentStackQueueProtected) return {record,inspection,action:"none"};
   if (inspection.classification === "missing") {
     if (options.execute) {
       updateState(database, record, "released", inspection.reason);
@@ -1331,7 +1346,8 @@ function groupReconciliation(database, records, options) {
   }
 
   let inspections = records.map((record) => inspectRecord(record,
-    groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline })));
+    groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline,terminalSourceTransfer:options.terminalSourceTransfer===true })));
+  if(inspections.some(inspection=>inspection.currentStackQueueProtected)) return records.map((record,index)=>({record,inspection:inspections[index],action:"none"}));
   if (options.execute && options.reapExpired && !options.preserveRuntime && inspections.some((inspection) => inspection.classification === "referenced")) {
     const current = records.map((record) => recordBy(database, { id: record.id }));
     if (!options.ignoreLease && current.some((record) => record.leaseExpiresAt > Date.now())) {
@@ -1343,7 +1359,7 @@ function groupReconciliation(database, records, options) {
     killProcessReferences(inspections.flatMap((inspection) => inspection.processes));
     safety = safetySnapshot(database);
     inspections = records.map((record) => inspectRecord(record,
-      groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline })));
+      groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline,terminalSourceTransfer:options.terminalSourceTransfer===true })));
   }
 
   const preserveKnownSource = options.reapExpired && options.preserveRuntime
@@ -1352,7 +1368,7 @@ function groupReconciliation(database, records, options) {
   if (options.execute && !preserveKnownSource && !inspections.some((inspection) => ["referenced", "blocked"].includes(inspection.classification))) {
     safety = freshThreadSafety(safety);
     inspections = records.map((record) => inspectRecord(record,
-      groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline })));
+      groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline,terminalSourceTransfer:options.terminalSourceTransfer===true })));
   }
   if (options.execute && !preserveKnownSource && !inspections.some((inspection) => ["referenced", "blocked"].includes(inspection.classification))) {
     records.forEach((record, index) => {
@@ -1361,13 +1377,13 @@ function groupReconciliation(database, records, options) {
       }
     });
     inspections = records.map((record) => inspectRecord(record,
-      groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline })));
+      groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline,terminalSourceTransfer:options.terminalSourceTransfer===true })));
   }
 
   if (options.execute && !preserveKnownSource && !inspections.some((inspection) => ["referenced", "blocked"].includes(inspection.classification))) {
     safety = freshThreadSafety(safety);
     inspections = records.map((record) => inspectRecord(record,
-      groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline })));
+      groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline,terminalSourceTransfer:options.terminalSourceTransfer===true })));
   }
   const releasable = inspections.every((inspection) => ["missing", "reclaimable"].includes(inspection.classification));
   if (!releasable) {
@@ -1461,6 +1477,8 @@ function reconcileRecords(database, selected, options) {
     try {
       results.push(...withWorkspaceLock(database, selectedRecord.path, () => {
         const current = recordsInGroup(database, recordBy(database, { id: selectedRecord.id }));
+        const queuedProtection=stackQueueInspection(stackQueueSafety(current.map(record=>record.path),options.safety,options.terminalSourceTransfer===true?"physical-checkout":"source"));
+        if(queuedProtection!==null) return current.map(record=>({record,inspection:queuedProtection,action:"none"}));
         const maintenance = duringInspection(options.deadline, () => new Map(current.map((record) => [record.id, generatedOnlySourceCustody(database, record.id) || recordRetainsCustody(database, record.id) || retainedParent(database, record.path) ? "retained-custody" : maintainReferenceClone(record.path, options.execute, options.statePath)])));
         const reconciled = current.length > 1 ? groupReconciliation(database, current, options)
           : current.length === 1 ? [reconcileRecord(database, current[0], options)] : [];
@@ -1487,7 +1505,7 @@ function print(value, json) {
   const items = Array.isArray(value) ? value : [value];
   if (items.every((item) => item?.record !== undefined && item?.inspection !== undefined)) {
     for (const item of items) {
-      process.stdout.write(`${item.record.id}\t${item.inspection.classification}\t${item.record.path}\t${item.action}\t${item.inspection.reason}\n`);
+      process.stdout.write(`${item.record.id}\t${item.inspection.classification}\t${item.record.path}\t${item.action}\t${item.inspection.reason}${item.leaseRelease?`\tlease:${item.leaseRelease.kind}\tphysical:${item.physicalDisposition.kind}`:""}\n`);
     }
     return;
   }
@@ -3050,7 +3068,7 @@ function heartbeatCommand(database, args) {
 
 function generatedOnlySourceCustody(database, id) {
   if (!database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_generated_retirement'").get()) return false;
-  return database.prepare("SELECT 1 FROM workspace_generated_retirement WHERE workspace_id=?").get(id) !== undefined;
+  return database.prepare("SELECT 1 FROM workspace_generated_retirement WHERE workspace_id=? AND json_extract(journal_json,'$.kind')!='workspace-cache-retirement'").get(id) !== undefined;
 }
 function generatedRetirementPending(database, id) {
   if (!database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_generated_retirement'").get()) return false;
@@ -3178,7 +3196,8 @@ function releaseCommand(database, args, statePath) {
     ignoreLease: true,
     statePath,
     safety: safetySnapshot(database),
-  });
+    terminalSourceTransfer:true,
+  }).map(leaseReleaseDisposition);
   print(result.length === 1 ? result[0] : result, bool(args, "json"));
 }
 
@@ -3374,8 +3393,9 @@ function materializationProcessReferences(roots) {
   const snapshot = processSnapshot(true, roots, "all");
   return roots.flatMap(root => processReferences(root, snapshot).map(reference => ({...reference, root})));
 }
-function materializationSafety(database, parent, roots) {
-  if (!Array.isArray(roots) || roots.length !== 2 || roots.some(root => typeof root !== "string" || !path.isAbsolute(root)))
+function materializationSafety(database, parent, roots, resourceKind, cacheRoots) {
+  if(!["source","generated-cache"].includes(resourceKind)) throw new MaterializationError("materialization-safety-unknown","explicit resource kind required");
+  if (!Array.isArray(roots) || (resourceKind==="source"?roots.length!==2:roots.length<1||roots.length>65) || roots.some(root => typeof root !== "string" || !path.isAbsolute(root)))
     throw new MaterializationError("materialization-safety-unknown", "exact original and staging roots required");
   if (process.env.PI_WORKSPACE_TEST_EXTERNAL_SAFETY !== undefined || process.env.NODE_TEST_CONTEXT !== undefined)
     throw new MaterializationError("materialization-safety-unknown", "native materialization safety has no test override");
@@ -3395,11 +3415,93 @@ function materializationSafety(database, parent, roots) {
     value.recordId !== parent.id && roots.some(root =>
       typeof value.objectDirectory === "string" && within(root, value.objectDirectory) ||
       typeof value.commonDirectory === "string" && within(root, value.commonDirectory)));
-  return {errors: [docker.error, systemd.error].filter(value => value !== undefined),
-    references: [...processes, ...roots.flatMap(root => [...dockerReferences(root, docker).references, ...systemdReferences(root, systemd).references]),
+  const queued=currentStackQueueReferences(roots,{resourceKind,cacheRoots});
+  return {errors: [docker.error, systemd.error,...queued.errors].filter(value => value !== undefined),
+    references: [...processes,...queued.references, ...roots.flatMap(root => [...dockerReferences(root, docker).references, ...systemdReferences(root, systemd).references]),
       ...threads.filter(thread => typeof thread.cwd !== "string" || roots.some(root => within(root, thread.cwd)))],
     retainedBorrowers, observedAt: Date.now()};
 }
+function cacheBinding(database, id) {
+  const record=recordBy(database,{id});
+  if (!["active","referenced","blocked","repair-required"].includes(record.state)) throw new CacheRetirementError("cache-lifecycle-protected", "workspace lifecycle is not retained/ended");
+  const stat=lstatSync(record.path,{bigint:true});
+  return {id:record.id,path:record.path,owner:record.owner,sourceCommit:record.sourceCommit,durableSourceCommit:record.durableSourceCommit,
+    head:git(record.path,["rev-parse","HEAD"]),device:String(stat.dev),inode:String(stat.ino),updatedAt:record.updatedAt,leaseExpiresAt:record.leaseExpiresAt};
+}
+function classifyWorkspaceCache(record, request) {
+  const relative=request.cachePath;
+  const target=path.join(record.path,relative);
+  const tracked=command("git",["-C",record.path,"ls-files","-z","--",`:(top,literal)${relative}`]);
+  if(tracked.status!==0 || tracked.stdout) throw new CacheRetirementError("cache-source-protected","selected output contains tracked source");
+  const ignored=command("git",["-C",record.path,"check-ignore","--quiet","--",relative+"/"]);
+  if(ignored.status!==0) throw new CacheRetirementError("unclassified-cache","selected cache must be Git-ignored");
+  const declared=[...record.cachePaths,...repositoryManifestCachePaths(record.path)];
+  if(!declared.some(d=>d===relative || d.startsWith("**/") && path.basename(relative)===d.slice(3))) throw new CacheRetirementError("unclassified-cache","selected path is not an existing generated declaration");
+  if(request.classification==="declared-build-cache") {
+    if(!repositoryManifestCachePaths(record.path).includes(relative)) throw new CacheRetirementError("unclassified-cache","build output requires an exact tracked repository cache declaration");
+  } else {
+    if(path.basename(relative)!=="node_modules") throw new CacheRetirementError("unclassified-cache","node dependency class requires exact node_modules root");
+    let directory=path.dirname(relative),qualified=false;
+    while(true){
+      const prefix=directory==="."?"":directory+"/";
+      const manifest=command("git",["-C",record.path,"cat-file","-e",`HEAD:${prefix}package.json`]);
+      if(manifest.status===0 && ["package-lock.json","bun.lock","bun.lockb","pnpm-lock.yaml","yarn.lock"].some(lock=>command("git",["-C",record.path,"cat-file","-e",`HEAD:${prefix}${lock}`]).status===0)){qualified=true;break;}
+      if(directory===".") break; directory=path.dirname(directory);
+    }
+    if(!qualified) throw new CacheRetirementError("unclassified-cache","tracked package manifest and lockfile required");
+  }
+  if(existsSync(target) && (lstatSync(target).isSymbolicLink() || !lstatSync(target).isDirectory())) throw new CacheRetirementError("unclassified-cache","cache root must be a directory, never an alias");
+}
+function workspaceCacheSafety(database,selected,stages,cacheRoots) {
+  const growth=growthSafety(database,recordBy(database,{id:selected.id}));
+  const native=materializationSafety(database,selected,[selected.path,...stages],"generated-cache",cacheRoots);
+  return {errors:[...growth.errors,...native.errors],references:[...growth.references,...native.references],retainedBorrowers:growth.retainedBorrowers,observedAt:Date.now()};
+}
+function cacheSafetyCommand(database,args,statePath) {
+  assertOnly(args,["id","path","owner","cache","json"]);
+  const selected=growthSelected(database,args),deadline=Date.now()+35_000;
+  if(selected.owner!==required(args,"owner")) throw new CacheRetirementError("cache-owner-changed","registered owner mismatch");
+  const raw=duringInspection(deadline,()=>withWorkspaceLock(database,selected.path,()=>withGrowthBorrowerLocks(database,selected,()=>workspaceCacheSafety(database,selected,[],[path.join(selected.path,required(args,"cache"))]),deadline),selected.groupId,deadline));
+  const observation={workspaceId:selected.id,path:selected.path,observedAt:raw.observedAt,errors:raw.errors,references:referenceSummaries(raw.references),retainedBorrowers:referenceSummaries(raw.retainedBorrowers),effect:"none",scope:"read-only borrower observation; no cache classification/inode retirement qualification"};
+  print({ok:true,value:{kind:raw.errors.length?"safety-unknown":raw.references.length||raw.retainedBorrowers.length?"protected":"unreferenced",...observation}},true);
+}
+function leaseReleaseDisposition(item) {
+  return {...item,leaseRelease:item.record.leaseExpiresAt===0?{kind:"released",expiresAt:0}:{kind:"active",expiresAt:item.record.leaseExpiresAt},physicalDisposition:existsSync(item.record.path)?{kind:"retained",reason:item.inspection.reason}:{kind:"removed"}};
+}
+function workspaceCacheCommand(database,args,statePath,planning) {
+  const flags=planning?["id","path","owner","cache","classification","operation-id","evidence","json"]:["id","path","owner","request","request-sha256","json"];
+  assertOnly(args,flags);
+  const selected=growthSelected(database,args);
+  const deadline=Date.now()+35_000;
+  try {
+    if(selected.owner!==required(args,"owner")) throw new CacheRetirementError("cache-owner-changed","registered owner mismatch");
+    let request;
+    if(planning) request={kind:"retire-workspace-cache",operationId:required(args,"operation-id"),binding:cacheBinding(database,selected.id),cachePath:required(args,"cache"),classification:required(args,"classification"),ownerEvidence:required(args,"evidence")};
+    else {
+      const file=required(args,"request"),stat=lstatSync(file);
+      if(!path.isAbsolute(file)||realpathSync(file)!==file||!stat.isFile()||stat.nlink!==1||stat.size>65536||within(selected.path,file)) throw new CacheRetirementError("invalid-cache-request","independent single-link request <=64KiB required");
+      const bytes=readFileSync(file);if(digest(bytes)!==required(args,"request-sha256")) throw new CacheRetirementError("cache-request-changed","request bytes changed");
+      request=JSON.parse(bytes);
+    }
+    validateCacheRequest(request);
+    if(request.binding.id!==selected.id||request.binding.path!==selected.path||request.binding.owner!==selected.owner) throw new CacheRetirementError("cache-owner-changed","request does not select original workspace");
+    const result=duringInspection(deadline,()=>withWorkspaceLock(database,selected.path,()=>withGrowthBorrowerLocks(database,selected,()=>{
+      classifyWorkspaceCache(recordBy(database,{id:selected.id}),request);
+      const binding=()=>cacheBinding(database,selected.id);
+      if(binding().leaseExpiresAt>Date.now()) throw new CacheRetirementError("cache-writing-lease","writing lease still active");
+      const safety=stages=>workspaceCacheSafety(database,selected,stages,[path.join(selected.path,request.cachePath),...stages]);
+      if(planning) return {ok:true,value:{request,requestSha256:digest(JSON.stringify(request)),effect:"none",nextCommand:"retire-cache with an independently retained exact request and its byte SHA256"}};
+      return retireWorkspaceCache({database,stateDirectory:path.dirname(statePath),deadline,binding,
+        classify:r=>classifyWorkspaceCache(recordBy(database,{id:selected.id}),r),safety,
+        tracked:target=>{const rel=path.relative(selected.path,target);const r=command("git",["-C",selected.path,"ls-files","-z","--",`:(top,literal)${rel}`]);return r.status!==0||Boolean(r.stdout);},
+        original:()=>({record:recordBy(database,{id:selected.id}),capacity:database.prepare("SELECT * FROM workspace_capacity WHERE workspace_id=?").get(selected.id)??null,measurement:database.prepare("SELECT * FROM workspace_capacity_measurement WHERE workspace_id=?").get(selected.id)??null}),
+        invalidate:()=>database.prepare("DELETE FROM workspace_capacity_measurement WHERE workspace_id=?").run(selected.id),
+      },request);
+    },deadline),selected.groupId,deadline));
+    print(result,true);if(!result.ok)process.exitCode=2;
+  }catch(error){print({ok:false,error:{code:error.code??"cache-retirement-io-error",detail:String(error.message)}},true);process.exitCode=2;}
+}
+
 function retireSourceMaterializationCommand(database, args, statePath) {
   assertOnly(args, ["id", "path", "owner", "request", "request-sha256", "repository", "json"]);
   if (!bool(args, "json")) throw new MaterializationError("materialization-invalid-request", "--json is required");
@@ -3430,7 +3532,7 @@ function retireSourceMaterializationCommand(database, args, statePath) {
         const current = lstatSync(record.path, {bigint: true});
         return {id: record.id, path: record.path, owner: record.owner, head: git(record.path, ["rev-parse", "HEAD"]), device: String(current.dev), inode: String(current.ino)};
       },
-      safety: roots => materializationSafety(database, recordBy(database, {id: selected.id}), roots),
+      safety: roots => materializationSafety(database, recordBy(database, {id: selected.id}), roots,"source"),
       invalidate: () => database.prepare("DELETE FROM workspace_capacity_measurement WHERE workspace_id=?").run(selected.id),
     }, request), deadline), selected.groupId, deadline));
   print(result, true);
@@ -3592,12 +3694,14 @@ function maintainCommand(database, args) {
 }
 
 function statusCommand(database, args) {
-  assertOnly(args, ["root", "json", "path", "owner", "limit", "after"]);
+  assertOnly(args, ["root", "json", "id", "path", "owner", "limit", "after"]);
   const root = one(args, "root");
   const pathFilter = one(args, "path");
   const ownerFilter = one(args, "owner");
+  const idFilter = one(args, "id");
   const predicates = [];
   const parameters = [];
+  if(idFilter!==undefined){predicates.push("id = ?");parameters.push(idFilter);}
   if (root !== undefined) {
     predicates.push("root = ?");
     parameters.push(path.resolve(root));
@@ -3685,6 +3789,9 @@ function help() {
   agent-workspace reprice-capacity (--id ID|--path PATH) --intent source-only|budgeted --headroom-gib N --growth-mib N [--json]
   Active reduction additionally requires --id ID --path PATH --owner OWNER --reduction FILE --reduction-sha256 SHA256
   agent-workspace growth-status --id ID --path PATH [--json]
+  agent-workspace cache-safety --id ID --path PATH --owner OWNER --cache RELATIVE --json
+  agent-workspace cache-plan --id ID --path PATH --owner OWNER --cache RELATIVE --classification node-dependencies|declared-build-cache --operation-id ID --evidence TEXT --json
+  agent-workspace retire-cache --id ID --path PATH --owner OWNER --request FILE --request-sha256 SHA --json
   agent-workspace retire-source-materialization --id ID --path PATH --owner OWNER --request ABS_FILE --request-sha256 SHA --json
   agent-workspace retire-growth --id ID --path PATH --owner OWNER --disposition FILE --disposition-sha256 SHA [--json]
   agent-workspace resume-growth (--id ID|--path PATH) --owner OWNER --expected-plan-sha256 SHA --intent budgeted --headroom-gib N --growth-mib N [--json]
@@ -3706,14 +3813,14 @@ Records outlive the directory, so status explains what became of a checkout that
 `);
 }
 
-export const workspaceTesting = { inspectRecord, capacityRefusalDetails, checkoutConstructionCapacity, allocatedWorkspaceBytes, workspaceAllocationSample, cachedWorkspaceAllocation, remainingCapacityBytes, capacityRequirement, capacityReservations, gitDependencySnapshot, sourceCapacityPlan, cacheTargets, dockerEndpointScope, dockerSnapshot, groupReconciliation, maintainReferenceClone, parseSystemdUnits, pruneReleased, systemdManagerSnapshot, systemdReferences, ownerThreadDatabases, threadSnapshot };
+export const workspaceTesting = { leaseReleaseDisposition, reconcileRecord, stackQueueInspection, classifyWorkspaceCache, cacheBinding, inspectRecord, capacityRefusalDetails, checkoutConstructionCapacity, allocatedWorkspaceBytes, workspaceAllocationSample, cachedWorkspaceAllocation, remainingCapacityBytes, capacityRequirement, capacityReservations, gitDependencySnapshot, sourceCapacityPlan, cacheTargets, dockerEndpointScope, dockerSnapshot, groupReconciliation, maintainReferenceClone, parseSystemdUnits, pruneReleased, systemdManagerSnapshot, systemdReferences, ownerThreadDatabases, threadSnapshot };
 
 export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
   if (argv[0] === "materialization-process-snapshot") {
     if (process.getuid?.() !== 0) throw new MaterializationError("materialization-safety-unknown", "all-FD observation requires root");
     const args = parseArgs(argv.slice(1)); assertOnly(args, ["path"]);
     const roots = many(args, "path");
-    if (roots.length !== 2 || roots.some(root => !path.isAbsolute(root))) throw new MaterializationError("materialization-invalid-request", "exact original/stage paths required");
+    if (roots.length < 1 || roots.length > 65 || roots.some(root => !path.isAbsolute(root))) throw new MaterializationError("materialization-invalid-request", "exact original/stage paths required");
     print(materializationProcessReferences(roots), true); return;
   }
   if (argv[0] === "growth-process-snapshot") {
@@ -3786,7 +3893,7 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
   }
   const database = openRegistry(statePath);
   try {
-    if (!["status", "list", "maintain", "cancel-creation", "finalize-creation", "reassign", "release", "retire-source-materialization", "growth-status", "retire-growth", "resume-growth"].includes(commandName)
+    if (!["status", "list", "maintain", "cancel-creation", "finalize-creation", "reassign", "release", "retire-source-materialization", "cache-plan", "retire-cache", "cache-safety", "growth-status", "retire-growth", "resume-growth"].includes(commandName)
       && (commandName !== "reconcile" || bool(args, "execute"))) {
       const scopedRoot = commandName === "reconcile" ? one(args, "root") : undefined;
       const scopedIds = scopedRoot === undefined ? undefined
@@ -3809,6 +3916,8 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
     else if (commandName === "reconcile") reconcileCommand(database, args, statePath);
     else if (commandName === "measure-capacity") measureCapacityCommand(database, args, statePath);
     else if (commandName === "growth-status") growthStatusCommand(database, args, statePath);
+    else if (commandName === "cache-safety") cacheSafetyCommand(database,args,statePath);
+    else if (commandName === "cache-plan" || commandName === "retire-cache") workspaceCacheCommand(database,args,statePath,commandName === "cache-plan");
     else if (commandName === "retire-source-materialization") retireSourceMaterializationCommand(database, args, statePath);
     else if (commandName === "retire-growth") retireGrowthCommand(database, args, statePath);
     else if (commandName === "resume-growth") repriceCapacityCommand(database, args, statePath, true);

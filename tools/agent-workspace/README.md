@@ -336,3 +336,73 @@ custody. A qualified release journals the original record, capacity plan and saf
 inspection, preserves retirement history, removes only the released checkout and
 returns its terminal record. Group retention needs a per-member disposition and is
 refused here. Repeating an already completed release is safe.
+
+### Retire a classified cache without disposing source
+
+`cache-plan` binds one exact registered ended/expired workspace and one relative
+cache directory. `retire-cache` consumes that independently retained request and
+its byte SHA256. Neither command cleans source or edits the original lifecycle,
+capacity plan, creation/repricing/retirement histories or Git custody.
+
+```sh
+agent-workspace cache-plan --id ID --path ABS_WORKSPACE --owner OWNER \
+  --cache node_modules --classification node-dependencies \
+  --operation-id UNIQUE_ID --evidence 'Ended owner/use evidence' --json > plan.json
+jq '.value.request' plan.json > request.json
+sha256sum request.json
+agent-workspace retire-cache --id ID --path ABS_WORKSPACE --owner OWNER \
+  --request ABS_REQUEST_FILE --request-sha256 EXACT_BYTE_SHA --json
+```
+
+Keep plan/request outside the workspace. A plan is a no-effect request, not a
+safety or physical-capacity result. Run each selected directory independently.
+`node-dependencies` requires an existing declared ignored `node_modules` tree
+and tracked package manifest/lockfile. `declared-build-cache` additionally requires
+that exact relative output in the tracked `.agent-workspace-caches` at HEAD.
+Tracked content, source/evidence paths, aliased roots, unregistered/registered Git
+borrowers and active leases refuse. Dirty/unpublished source and unclassified
+ignored evidence outside the selected cache remain byte-for-byte in place.
+Dependency symlinks are unlinked without following them; shared hardlinks never
+claim freed physical blocks. The existing generated-retirement engine retains
+inode inventory and restart-safe staging/deletion intent. Original record/plan/
+measurement are separately journaled; the live measurement is invalidated, never
+converted into implicit capacity credit. Recreated output is not removed by a
+completed-operation replay. A new output needs a new request and operation ID.
+
+Fresh all-UID read/write-FD, process, native/container/systemd, Legacy queued-thread
+and current Stack PostgreSQL queued/uncertain/tool-call reference observations
+protect every cache-removal consumer, including release/reconcile and source
+materialization. A canonical queue error is a protected typed result, never an
+empty queue. Physical operator exemption is derived from its exact cgroup job and
+indexed original-operation/parent-job custody, not a caller-selected exclusion.
+
+Each operation has a35s observation/lock budget and100000-entry inventory limit;
+limit or safety failures retain the request/journal for an explicit same-operation
+continuation. Exit0 means completed, exit2 is explicit refusal/error. Reported
+unshared blocks are the pre-removal inventory, not actual filesystem recovery:
+measure free bytes separately. `node tools/agent-workspace/cache-retirement-installed.mjs`
+runs a disposable native read-FD refusal then cache-only preservation proof.
+
+`cache-safety --id ID --path PATH --owner OWNER --cache RELATIVE --json` is the read-only current
+borrower observation. It reports exact IDs/kinds and unknowns, without cache
+classification, inode qualification or retirement. Reference errors retain those
+same identifiers rather than a generic denial. Canonical text inputs/deliveries
+and completed tool history are source intent; actual admitted native jobs,
+reserved tool calls, uncertain native operations and unclassified operations
+remain physical consumers. No canonical task/input/history is changed.
+
+An explicit owner `release` separates lease completion from physical disposition.
+Its JSON includes `leaseRelease` and `physicalDisposition`. Durable/pushed source
+qualification may transfer the mutable checkout after that terminal request;
+pure prose intent remains with canonical input/task and exact durable source.
+Dirty/unpublished/unclassified data and native/runtime/Git borrowers still retain
+it. Automatic expiry alone does not authorize this source-intent transfer.
+Completed cache journals explicitly record `retired-regenerable`; later dependency
+regeneration needs an admitted writing lease. Full source materialization retains
+its own strict source-custody contract.
+
+For public source from private integrated ancestry, fetch the exact public parent,
+then use `bash tools/agent-workspace/public-source REMOTE_URL PUBLIC_PARENT SOURCE_COMMIT`.
+It projects only this component through a separate index, proves other public
+paths unchanged, and uses one ordinary fast-forward push. Its private source
+parents never transfer; a divergent public head is an explicit Git error.
