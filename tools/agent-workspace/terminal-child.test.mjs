@@ -22,6 +22,8 @@ const paths={
  'missing provider':e=>e.children[0].provider_call=null,
  'different operation':e=>e.children[0].operation_id='other',
  'different parent':e=>e.children[0].parent_run='other',
+ 'different canonical assignment':e=>{e.candidates[0].assignment_id='parent';e.children[0].assignment_id='foreign';},
+ 'different canonical conversation':e=>{e.candidates[0].conversation_id='parent';e.children[0].conversation_id='foreign';},
  'unknown native kind':e=>e.children[0].kind='unknown',
  'missing canonical result':e=>delete e.children[0].result,
  'changed canonical result':e=>e.children[0].result.output='changed',

@@ -19,7 +19,7 @@ test('actual PostgreSQL classifier distinguishes retained uncertainty from live,
 CREATE TABLE operation(id text,state text,command_type text,request_body jsonb,origin jsonb,result jsonb);
 CREATE TABLE tool_call(id text,run_id text,provider_call_id text,operation_id text,result jsonb,tool_name text,arguments jsonb);
 CREATE TABLE input(id text,state text,run_id text,content text,attachments jsonb,source jsonb);\n`;
-  const names=['settled-nochild','settled-projected','settled-known-applied','known-applied-wrong-content','unsettled','live-owner','missing-cessation','mismatched-owner','mismatched-proof','unknown-owner-state','unknown-proof','nonterminal-result','known-child','live-child','unknown-child','parent-linked-child','call-linked-child','terminal-distinct-sibling','live-distinct-sibling','missing-proof-sibling','wrong-owner-sibling','same-provider-terminal-child','settled-completed-child','declared-child-live','declared-child-mismatch','source-intent'];
+  const names=['settled-nochild','settled-projected','settled-known-applied','known-applied-wrong-content','unsettled','live-owner','missing-cessation','mismatched-owner','mismatched-proof','unknown-owner-state','unknown-proof','nonterminal-result','known-child','live-child','unknown-child','parent-linked-child','call-linked-child','terminal-distinct-sibling','live-distinct-sibling','missing-proof-sibling','wrong-owner-sibling','same-provider-terminal-child','settled-completed-child','declared-child-live','declared-child-mismatch','same-assignment-scope','same-conversation-scope','unknown-kind-scope','missing-scope','direct-operation-foreign-scope','source-intent'];
   for(const name of names){
    const id='operation-'+name,ownerId='owner-'+name,provider='call-'+name,ownership={unit:'fixture.service',invocationId:'a'.repeat(32),hostId:'fixture',bootId:'fixture',generation:1,release:'fixture'};
    const absence={at:1,kind:'absent',owner:ownership,proof:{kind:'service-invocation-ended',unit:ownership.unit,invocationId:ownership.invocationId}};
@@ -64,6 +64,16 @@ CREATE TABLE input(id text,state text,run_id text,content text,attachments jsonb
    const child={admitted:{parentJobId:'owner-'+name,toolCallId:name==='same-provider-terminal-child'?'call-'+name:'different-provider-'+name}};
    sql+=`INSERT INTO job VALUES(${literal('child-'+name)},${literal(name==='live-distinct-sibling'?'running':'completed')},${json(child)},'other-operation',${json(owner)},${name==='missing-proof-sibling'?'NULL':json(absence)},'tool-bash',NULL);\n`;
   }
+  sql+='ALTER TABLE job ADD COLUMN assignment_id text;ALTER TABLE job ADD COLUMN conversation_id text;';
+  sql+=`UPDATE job SET assignment_id='assignment-'||id,conversation_id='conversation-'||id WHERE id LIKE 'owner-%';
+   UPDATE job SET assignment_id='assignment-'||(spec#>>'{admitted,parentJobId}'),conversation_id='conversation-'||(spec#>>'{admitted,parentJobId}') WHERE spec#>>'{admitted,parentJobId}' IS NOT NULL;`;
+  for(const name of ['same-assignment-scope','same-conversation-scope','unknown-kind-scope','missing-scope','direct-operation-foreign-scope']){
+   const run='owner-'+name,spec={admitted:{parentJobId:run,toolCallId:'different-'+name}};
+   const assignment=name==='same-assignment-scope'?'assignment-'+run:name==='missing-scope'?null:'foreign-assignment';
+   const conversation=name==='same-conversation-scope'?'conversation-'+run:'foreign-conversation';
+   sql+=`INSERT INTO job VALUES(${literal('scope-child-'+name)},'unreachable',${json(spec)},${literal(name==='direct-operation-foreign-scope'?'operation-'+name:'foreign-operation')},NULL,NULL,${literal(name==='unknown-kind-scope'?'unknown-native-kind':'tool-bash')},NULL,${assignment===null?'NULL':literal(assignment)},${literal(conversation)});\n`;
+  }
+
   const query=sql=>pg('psql',['-X','-qAt','--host',root,'--username','fixture','--dbname','postgres','--set=ON_ERROR_STOP=1','--command',sql]);
   sql+=`INSERT INTO job VALUES('source-job-without-spec-discriminator','running','{"cwd":"/fixture/source"}',NULL,NULL,NULL,'agent-run',NULL);\n`;
   query(sql);

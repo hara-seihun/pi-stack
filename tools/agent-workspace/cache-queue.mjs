@@ -39,12 +39,12 @@ export function toolSettlementSql(ids) {
  return `BEGIN READ ONLY; SET LOCAL statement_timeout='4000ms';
  WITH candidates AS MATERIALIZED (
  SELECT o.id,o.state,o.command_type,o.result AS operation_result,o.request_body,tc.run_id,tc.provider_call_id,tc.result AS tool_result,
- j.state AS owner_state,j.ownership_receipt,j.cessation_evidence
+ j.assignment_id,j.conversation_id,j.state AS owner_state,j.ownership_receipt,j.cessation_evidence
  FROM operation o JOIN tool_call tc ON tc.operation_id=o.id JOIN job j ON j.id=tc.run_id WHERE o.id IN (${selected})),
  relation_keys AS MATERIALIZED (SELECT jsonb_build_object('runs',coalesce(jsonb_agg(run_id),'[]'::jsonb),'calls',coalesce(jsonb_agg(provider_call_id),'[]'::jsonb)) AS vars FROM candidates),
  matching_child_ids AS MATERIALIZED (SELECT id FROM job WHERE operation_id IN (${selected})
- OR jsonb_path_exists(spec,'$ ? (@.admitted.parentJobId == $runs[*] || @.parentJobId == $runs[*] || @.admitted.toolCallId == $calls[*])',(SELECT vars FROM relation_keys)) LIMIT 65),
- children AS MATERIALIZED (SELECT j.id,j.state,j.kind,j.operation_id,CASE WHEN j.operation_id IN (${selected}) THEN j.result ELSE NULL END AS result,j.ownership_receipt,j.cessation_evidence,
+ OR ((kind IS DISTINCT FROM 'tool-bash' OR assignment_id IS NULL OR conversation_id IS NULL OR assignment_id IN (SELECT assignment_id FROM candidates) OR conversation_id IN (SELECT conversation_id FROM candidates)) AND jsonb_path_exists(spec,'$ ? (@.admitted.parentJobId == $runs[*] || @.parentJobId == $runs[*] || @.admitted.toolCallId == $calls[*])',(SELECT vars FROM relation_keys))) LIMIT 65),
+ children AS MATERIALIZED (SELECT j.id,j.state,j.kind,j.operation_id,j.assignment_id,j.conversation_id,CASE WHEN j.operation_id IN (${selected}) THEN j.result ELSE NULL END AS result,j.ownership_receipt,j.cessation_evidence,
  j.spec#>>'{admitted,parentJobId}' AS parent_run,j.spec->>'parentJobId' AS parent_job,j.spec#>>'{admitted,toolCallId}' AS provider_call
  FROM matching_child_ids m CROSS JOIN LATERAL (SELECT * FROM job WHERE id=m.id OFFSET 0) j)
  SELECT json_build_object('candidates',coalesce((SELECT json_agg(c) FROM candidates c),'[]'::json),'children',coalesce((SELECT json_agg(c) FROM children c),'[]'::json)); ROLLBACK;`;
@@ -82,6 +82,7 @@ function terminalDeclaredChildren(c,details,evidence) {
   ||details.error?.code!=='outcome_uncertain'||details.error.resourceId!==c.id)return null;
  const declared=details.children[0],child=evidence.children.find(x=>x.id===declared.jobId),material=details.knownMaterial;
  if(!child||child.operation_id!==c.id||child.provider_call!==c.provider_call_id
+  ||child.assignment_id!==c.assignment_id||child.conversation_id!==c.conversation_id
   ||child.parent_run!==c.run_id||child.kind!=='tool-bash'||declared.kind!==child.kind
   ||child.state!=='completed'||declared.state!==child.state||child.result?.exitCode!==0
   ||!isDeepStrictEqual(declared.result,child.result)||!isDeepStrictEqual(declared.ownershipReceipt,child.ownership_receipt)
