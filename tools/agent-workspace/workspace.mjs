@@ -3131,7 +3131,7 @@ function terminalRetentionRelease(database, selected, args, statePath) {
           reason:safety.errors.length ? `cannot prove terminal retention safety: ${safety.errors.join("; ")}` : "runtime/thread/process/borrower writing references remain",
           processes:safety.references, containers:[], systemdUnits:[]};
       }
-      return inspectRecord(record, {ignoreLease:true, safety:safetySnapshot(database), deadline});
+      return inspectRecord(record, {ignoreLease:true, safety:safetySnapshot(database), deadline,terminalSourceTransfer:true});
     };
     return withGrowthBorrowerLocks(database, record, () => {
       let inspection = observe();

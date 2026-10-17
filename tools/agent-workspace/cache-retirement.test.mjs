@@ -81,3 +81,4 @@ test('known source read differs from cache read, aliased target and unresolved B
  assert.equal(isSourceOnlyRead({toolName:'read',targetPath:path.join(f.cache,'dependency')},roots),false);assert.equal(isSourceOnlyRead({toolName:'bash',targetPath:source},roots),false);assert.equal(isSourceOnlyRead({toolName:'read',targetPath:'source.ts'},roots),false);
  const alias=path.join(f.root,'aliased-source');fs.symlinkSync(path.join(f.cache,'dependency'),alias);assert.equal(isSourceOnlyRead({toolName:'read',targetPath:alias},roots),false);
 }));
+

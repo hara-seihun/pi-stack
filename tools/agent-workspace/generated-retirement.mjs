@@ -1,4 +1,4 @@
-import {lstatSync,readdirSync,realpathSync,renameSync,rmSync,mkdirSync,openSync,closeSync,fsyncSync,readlinkSync} from 'node:fs';
+import {lstatSync,readdirSync,realpathSync,renameSync,rmSync,mkdirSync,openSync,closeSync,fsyncSync,readlinkSync,unlinkSync,rmdirSync} from 'node:fs';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
 
@@ -38,7 +38,7 @@ function inventory(root,device,policy,deadline) {
   const entries=[];const pending=[''];
   while(pending.length) {
     if(deadline!==undefined && Date.now()>=deadline) refuse('generated-io-error','inventory deadline exhausted');
-    if(entries.length>=100000) refuse("generated-io-error","inventory exceeds bounded 100000 entries; split declared paths");
+    if(entries.length>=1000000) refuse("generated-io-error","inventory exceeds bounded 1000000 entries; split declared paths");
     const relative=pending.pop(),absolute=path.join(root,relative),s=lstatSync(absolute,{bigint:true});
     if((s.isSymbolicLink()&&policy!=="unlink-cache-links")||(!s.isDirectory()&&!s.isFile()&&!s.isSymbolicLink())||String(s.dev)!==device||s.isFile()&&s.nlink!==1n&&policy!=="unlink-cache-links"||relative.split(path.sep).some(v=>v==='.git'||v==='.converge')) refuse('unsafe-generated-path',`symlink, protected evidence, shared inode, mount or special file: ${absolute}`);
     entries.push({path:relative,...identity(s),type:s.isSymbolicLink()?'symlink':s.isDirectory()?'directory':'file',...(s.isSymbolicLink()?{linkTarget:readlinkSync(absolute)}:{}),...(s.isFile()&&s.nlink!==1n?{shared:true}:{}),size:String(s.size),blocks:String(s.blocks),mtime:String(s.mtimeNs)});
@@ -46,10 +46,11 @@ function inventory(root,device,policy,deadline) {
   }
   return entries.sort((a,b)=>a.path.localeCompare(b.path));
 }
-function sameInventory(a,b) {const comparable=e=>{const {shared,...rest}=e;return e.type==='directory'?{...rest,mtime:'',size:'',blocks:''}:rest;};return equal(a.map(comparable),b.map(comparable));}
+function sameEntry(a,b) {return a.path===b.path&&a.device===b.device&&a.inode===b.inode&&a.type===b.type&&a.linkTarget===b.linkTarget&&(a.type==='directory'||a.size===b.size&&a.blocks===b.blocks&&a.mtime===b.mtime);}
+function sameInventory(a,b) {return a.length===b.length&&a.every((entry,index)=>sameEntry(entry,b[index]));}
 function remainingInventorySafe(original,remaining) {
   const known=new Map(original.map(e=>[e.path,e]));
-  return remaining.every(e=>{const old=known.get(e.path);return old!==undefined&&sameInventory([old],[e]);});
+  return remaining.every(e=>{const old=known.get(e.path);return old!==undefined&&sameEntry(old,e);});
 }
 export function generatedStagingRoots(request,stateDirectory) {
   return request.paths.map(relative=>path.join(stateDirectory,'generated-retirement',hash([request.operationId,relative])));
@@ -97,7 +98,6 @@ function execute(context,request) {
       const files=snapshot(target);
       return {relative,stage:path.join(stageRoot,hash([request.operationId,relative])),files,phase:'planned',logicalBytes:files.filter(f=>f.type==='file').reduce((s,f)=>s+Number(f.size),0),allocatedBytes:files.reduce((s,f)=>s+(f.shared?0:Number(f.blocks)*512),0)};
     });
-    authorize(context,request);
     mkdirSync(stageRoot,{recursive:true,mode:0o700});
     syncDirectory(path.dirname(stageRoot));
     if(realpathSync(stageRoot)!==stageRoot||String(lstatSync(stageRoot,{bigint:true}).dev)!==request.binding.device) refuse('unsafe-generated-path','staging must be unaliased and on same filesystem');
@@ -109,7 +109,7 @@ function execute(context,request) {
   if(journal.state==='completed') return {...journal.result,replayed:true};
   if(realpathSync(stageRoot)!==stageRoot) refuse('unsafe-generated-path','staging aliased');
   // Validate every still-live member before the first effect, including on resume.
-  for(const e of journal.entries) {
+  for(const e of journal.entries.length===1?[]:journal.entries) {
     if(e.phase==='removed') continue;
     const target=path.join(root,e.relative);checkAncestors(root,e.relative);
     const staged=optionalStat(e.stage),source=optionalStat(target);
@@ -141,7 +141,14 @@ function execute(context,request) {
       if(!remainingInventorySafe(e.files,remaining)) refuse('generated-identity-changed','staging changed before removal');
       authorize(context,request);
       context.beforeRemoval?.(e);
-      rmSync(e.stage,{recursive:true});syncDirectory(stageRoot);
+      for(const entry of [...remaining].sort((a,b)=>b.path.length-a.path.length)) {
+        if(context.deadline!==undefined&&Date.now()>=context.deadline) refuse('generated-io-error','bounded deletion paused; resume the same pending operation');
+        const target=path.join(e.stage,entry.path),stat=optionalStat(target);if(stat===null)continue;
+        const current={...entry,...identity(stat),type:stat.isSymbolicLink()?'symlink':stat.isDirectory()?'directory':stat.isFile()?'file':'special',size:String(stat.size),blocks:String(stat.blocks),mtime:String(stat.mtimeNs),...(stat.isSymbolicLink()?{linkTarget:readlinkSync(target)}:{})};
+        if(!sameEntry(entry,current))refuse('generated-identity-changed','staging entry changed during bounded deletion');
+        if(entry.type==='directory')rmdirSync(target);else unlinkSync(target);
+      }
+      syncDirectory(stageRoot);
       context.afterRemoval?.(e);
     }
     e.phase='removed';save();

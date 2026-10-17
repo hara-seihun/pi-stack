@@ -376,7 +376,7 @@ materialization. A canonical queue error is a protected typed result, never an
 empty queue. Physical operator exemption is derived from its exact cgroup job and
 indexed original-operation/parent-job custody, not a caller-selected exclusion.
 
-Each operation has a35s observation/lock budget and100000-entry inventory limit;
+Each operation has a35s observation/lock budget and1000000-entry inventory limit;
 limit or safety failures retain the request/journal for an explicit same-operation
 continuation. Exit0 means completed, exit2 is explicit refusal/error. Reported
 unshared blocks are the pre-removal inventory, not actual filesystem recovery:
@@ -406,3 +406,9 @@ then use `bash tools/agent-workspace/public-source REMOTE_URL PUBLIC_PARENT SOUR
 It projects only this component through a separate index, proves other public
 paths unchanged, and uses one ordinary fast-forward push. Its private source
 parents never transfer; a divergent public head is an explicit Git error.
+
+Large cache retirement uses a bounded manifest with direct inode comparisons and
+per-entry unlink/rmdir. It never recursively deletes unlisted/recreated content;
+deadline expiry retains deleting intent and the same-operation continuation.
+Single-member retirement validates at its rename/deletion boundary; repeated
+pre-journal authorization and redundant whole-manifest comparison are eliminated.
