@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+if (( EUID != 0 )) && [[ ${PI_STACK_DEPLOY_NO_SUDO:-0} != 1 ]]; then
+  exec sudo -n --preserve-env=PI_STACK_TOOLS_DEST,PI_STACK_RELEASES_ROOT,PI_STACK_HOST_LOCK_PATH,PI_STACK_DEPLOY_TIMEOUT_SECONDS,PI_STACK_PUBLICATION_REQUEST bash "$(realpath "$0")" "$@"
+fi
 root=$(cd "$(dirname "$0")/../.." && pwd)
 source "$root/deploy/lib"
 pi_stack_enter_deployment "$0" "$root" "$@"

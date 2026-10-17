@@ -2,6 +2,16 @@
 
 `agent-workspace` owns temporary Git clones and worktrees used by agents. It gives every checkout a lease, records its owner and durable source commit, blocks new allocation when disk or inode reserves are low, and removes a checkout only after proving that it has no unique local work. Processes, active systemd units, Docker containers, and durable work in this Unix person's thread databases count as live owners.
 
+## Terminal release and bounded queue observation
+
+An explicit ordinary release transfers source intent to its durable Git/task custody; every single/group physical inspection keeps that resource scope. Actual reserved tools, native executions, unknown operations, FD/cwd readers and Git borrowers still retain the checkout. Dirty/unpublished source remains protected.
+
+Canonical queue observation requires an absolute `deadline` and retains the 4000ms PostgreSQL statement cap. Its client process uses a hard-kill timeout bounded by that deadline and at most6000ms. Output uses private regular descriptors so a descendant's inherited pipe cannot extend the wait; failed commands terminate their owned process group. A failed/late observation returns unknown safety, never an empty authoritative queue.
+
+`retire-growth --id ID --path PATH` requires both bindings. `release (--id ID|--path PATH) --end-retention` requires exactly one selector. Shared CLI contracts drive selector validation and these help forms. A `future-growth-not-retired` error supplies executable measurement/status commands, the explicit owner-disposition schema, and command templates with named unset file/hash inputs; no disposition or owner evidence is invented.
+
+Cache deleting continuations retain the original journal/request/stage/manifest. After fresh native/queue/Git authorization, checked removal pins directory FDs, validates inode/type/content against that manifest, and visits only actual remaining names. Unknown names and replaced directories refuse; symlinks unlink without traversal. It does not repeatedly snapshot all already-removed leaves. Deadline expiry retains pending/deleting and actual partial progress for the same request. The35s operation budget remains unchanged.
+
 ## Checks
 
 `node tools/agent-workspace/check.mjs` checks component deployment and partitions the lifecycle fixtures into 24 disjoint index shards. Each fixture runs exactly once; each shard has a 55-second deadline and shares the root check runner's concurrency budget. Fine-grained shards keep Git/SQLite-backed fixture batches bounded without increasing deadlines or dropping custody contracts.

@@ -48,8 +48,8 @@ test('staged interruption resumes same operation without deleting recreated or s
 }));
 test('current canonical queue inventory includes reserved tools/escaped JSON/uncertain custody and fails honestly',()=>{
  const read=p=>p.endsWith('host.json')?{hostId:'host',installationId:'one'}:p.endsWith('registry.json')?{installationId:'one',domains:[{id:'hara',hostId:'host',unixUser:'pi2-hara'}]}:{domainId:'hara',database:'stack'};
- const result=currentStackQueueReferences(['/source'],{resourceKind:'source',read,execute:(_name,args)=>{const sql=args.at(-1);assert.match(sql,/tool_call/);assert.match(sql,/tc.result IS NULL/);assert.match(sql,/jsonb_path_exists/);assert.match(sql,/cessation_evidence IS NULL/);assert.match(sql,/uncertain/);return {status:0,stdout:'[{"kind":"tool_call","id":"reserved","state":"unfinished"}]'};}});
- assert.equal(result.references[0].id,'reserved');assert.equal(currentStackQueueReferences(['/source'],{resourceKind:'source',read,execute:()=>({status:2,stdout:''})}).errors.length,1);
+ const result=currentStackQueueReferences(['/source'],{resourceKind:'source',deadline:Date.now()+10000,read,execute:(_name,args)=>{const sql=args.at(-1);assert.match(sql,/tool_call/);assert.match(sql,/tc.result IS NULL/);assert.match(sql,/jsonb_path_exists/);assert.match(sql,/cessation_evidence IS NULL/);assert.match(sql,/uncertain/);return {status:0,stdout:'[{"kind":"tool_call","id":"reserved","state":"unfinished"}]'};}});
+ assert.equal(result.references[0].id,'reserved');assert.equal(currentStackQueueReferences(['/source'],{resourceKind:'source',deadline:Date.now()+10000,read,execute:()=>({status:2,stdout:''})}).errors.length,1);
  assert.equal(operatorJobFromCgroup('0::/pi-stack-next.slice/pi-stack-next-job-11111111-2222-3333-4444-555555555555-1.service'),'11111111-2222-3333-4444-555555555555');
  assert.match(queueReferenceSql("/source/'quoted",null,"source"),/''quoted/);
 });
@@ -94,4 +94,24 @@ test('already-deleting continuation performs one final fresh native authorizatio
  assert.equal(JSON.parse(f.db.prepare('SELECT journal_json FROM workspace_generated_retirement').get().journal_json).entries[0].phase,'deleting');
  let observations=0;f.c.safety=()=>{observations++;return {errors:[],references:[],retainedBorrowers:[],observedAt:Date.now()};};
  assert.equal(retireWorkspaceCache(f.c,f.r).ok,true);assert.equal(observations,1);
+}));
+
+test('same deleting manifest makes bounded progress and resumes without a full remaining-tree snapshot',()=>fixture(f=>{
+ for(let i=0;i<100;i++)fs.writeFileSync(path.join(f.cache,'leaf-'+i),'regenerable');
+ let removed=0;f.c.afterEntryRemoval=(_relative,execution)=>{if(++removed===5)execution.deadline=Date.now()-1;};
+ const result=retireWorkspaceCache(f.c,f.r);assert.equal(result.ok,false);assert.match(result.error.detail,/bounded deletion paused/);
+ const row=JSON.parse(f.db.prepare('SELECT journal_json FROM workspace_generated_retirement').get().journal_json);assert.equal(row.entries[0].phase,'deleting');assert.equal(row.state,'pending');
+ assert.equal(fs.readdirSync(row.entries[0].stage).length,96);
+ delete f.c.afterEntryRemoval;f.c.deadline=Date.now()+5000;
+ assert.equal(retireWorkspaceCache(f.c,f.r).ok,true);assert.equal(fs.existsSync(row.entries[0].stage),false);assert.equal(fs.readFileSync(path.join(f.root,'source.ts'),'utf8'),'dirty irreplaceable');
+}));
+for(const mutation of ['unlisted','replacement'])test('FD-anchored manifest retirement protects '+mutation,()=>fixture(f=>{
+ const stage=cacheStagingRoots(f.r,f.base)[0];
+ f.c.beforeRemoval=()=>{
+  if(mutation==='unlisted')fs.writeFileSync(path.join(stage,'new-evidence'),'preserve');
+  else{fs.renameSync(stage,stage+'-preserved');fs.mkdirSync(stage);fs.writeFileSync(path.join(stage,'dependency'),'replacement');}
+ };
+ const result=retireWorkspaceCache(f.c,f.r);assert.equal(result.ok,false);assert.equal(result.error.code,'generated-identity-changed');
+ assert.equal(fs.readFileSync(path.join(stage,mutation==='unlisted'?'new-evidence':'dependency'),'utf8'),mutation==='unlisted'?'preserve':'replacement');
+ assert.equal(fs.readFileSync(path.join(stage,'dependency'),'utf8'),mutation==='unlisted'?'rebuildable':'replacement');
 }));

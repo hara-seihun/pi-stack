@@ -65,3 +65,19 @@ test('terminal safety consumer still protects process, thread, container and sys
   {...base,systemd:{error:'cannot inspect units'}}
  ])assert.ok(['referenced','blocked'].includes(workspaceTesting.inspectRecord({...record,leaseExpiresAt:0},{safety,ignoreLease:true}).classification));
 }));
+
+test('ordinary single checkout carries terminal physical scope through every reconciliation observation',()=>fixture(({source,root,db,record})=>{
+ db.prepare('DELETE FROM workspace_capacity WHERE workspace_id=?').run(record.id);
+ const safety={processes:[],threads:[],docker:{available:false,containers:[]},systemd:{available:false,units:[]},gitAlternates:[],linkedWorktrees:[],currentStackQueue:{errors:[],references:[{kind:'input',resourceClass:'source-intent',id:'canonical-retained-prose'}],observedAt:Date.now()}};
+ const result=workspaceTesting.reconcileRecord(db,{...record,leaseExpiresAt:0},{execute:true,ignoreLease:true,reapExpired:false,preserveRuntime:true,safety,statePath:path.join(root,'registry.sqlite3'),terminalSourceTransfer:true,deadline:Date.now()+5000});
+ assert.equal(result.action,'released',JSON.stringify(result));assert.equal(existsSync(source),false);
+}));
+test('future-growth prerequisite supplies executable bound-selector actions and explicit disposition schema',()=>fixture(({db,record,plan,release,run,source})=>{
+ const priced=JSON.stringify({...JSON.parse(plan),growthLifecycle:undefined});db.prepare('UPDATE workspace_capacity SET plan_json=? WHERE workspace_id=?').run(priced,record.id);
+ let caught;try{release('fixture',digest(priced));}catch(error){caught=error;}
+ assert.equal(caught?.code,'future-growth-not-retired');assert.equal(caught.nextAction.kind,'retire-future-growth-required');
+ const status=caught.nextAction.steps.find(step=>step.argv?.[1]==='growth-status');assert.deepEqual(status.argv,['agent-workspace','growth-status','--id',record.id,'--path',source,'--json']);
+ assert.equal(caught.nextAction.steps.find(step=>step.kind==='prepare-disposition').schema.properties.growthWriters.const,'none');
+ assert.throws(()=>run(['retire-growth','--id',record.id,'--owner','fixture','--json']),error=>error.code==='invalid-workspace-selector'&&error.nextAction.selector.kind==='all');
+ assert.throws(()=>run(['release','--id',record.id,'--path',source,'--end-retention','--owner','fixture','--expected-plan-sha256',digest(priced),'--json']),error=>error.code==='invalid-workspace-selector'&&error.nextAction.selector.kind==='exactly-one');
+}));

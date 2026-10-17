@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import {selectedArguments,selectorSyntax,futureGrowthAction} from './cli-contract.mjs';
 import {cacheStagingRoots} from './cache-retirement.mjs';
 import {referenceSummaries} from './generated-retirement.mjs';
 import { spawn, spawnSync } from "node:child_process";
@@ -549,10 +550,9 @@ function registerWorkspace(database, input, inspectedInfo) {
 }
 
 function selectorFrom(args) {
-  const id = one(args, "id");
-  const selectedPath = one(args, "path");
-  if ((id === undefined) === (selectedPath === undefined)) fail("supply exactly one of --id or --path");
-  return id === undefined ? { path: selectedPath } : { id };
+  const selected=selectedArguments('release',{id:one(args,'id'),path:one(args,'path')});
+  if(!selected.ok)throw Object.assign(new GrowthLifecycleError(selected.error.code,selected.error.detail),{nextAction:selected.error.nextAction});
+  return selected.value;
 }
 
 function updateState(database, record, state, detail) {
@@ -1184,9 +1184,9 @@ function removeEmptyWorkspaceContainer(record) {
   }
 }
 
-function stackQueueSafety(roots,safety,resourceKind) {
+function stackQueueSafety(roots,safety,resourceKind,deadline) {
   if(process.env.NODE_TEST_CONTEXT!==undefined && process.env.PI_WORKSPACE_TEST_EXTERNAL_SAFETY==="empty") {const observed=safety?.currentStackQueue??{errors:[],references:[],observedAt:Date.now()};return {...observed,references:observed.references.filter(ref=>resourceKind==="source"||ref.resourceClass!=="source-intent")};}
-  return currentStackQueueReferences(roots,{resourceKind});
+  return currentStackQueueReferences(roots,{resourceKind,deadline});
 }
 function stackQueueInspection(queued) {
   if(queued.errors.length) return {classification:"blocked",reason:`current Stack queue observation unavailable: ${queued.errors.join("; ")}`,processes:[],containers:[],systemdUnits:[],currentStackQueueProtected:true};
@@ -1202,7 +1202,7 @@ function inspectRecord(record, options = {}) {
   if (record.leaseExpiresAt > now && !options.ignoreLease) {
     return { classification: "active", reason: `lease valid until ${new Date(record.leaseExpiresAt).toISOString()}`, processes: [], containers: [], systemdUnits: [] };
   }
-  const stackProtection=stackQueueInspection(stackQueueSafety([record.path],options.safety,options.terminalSourceTransfer===true?"physical-checkout":"source"));
+  const stackProtection=stackQueueInspection(stackQueueSafety([record.path],options.safety,options.terminalSourceTransfer===true?"physical-checkout":"source",options.deadline));
   if(stackProtection!==null) return stackProtection;
   const threads = (options.safety?.threads ?? []).filter((thread) => within(record.path, thread.cwd));
   if (threads.length > 0) {
@@ -1255,7 +1255,7 @@ function inspectRecord(record, options = {}) {
 function reconcileRecord(database, record, options) {
   if (generatedOnlySourceCustody(database, record.id) || recordRetainsCustody(database, record.id) || retainedParent(database,record.path)) return retainedCustodyResult(record);
   let safety = options.safety;
-  let inspection = inspectRecord(record, { ignoreLease: options.ignoreLease, safety, deadline: options.deadline });
+  let inspection = inspectRecord(record, { ignoreLease: options.ignoreLease, safety, deadline: options.deadline, terminalSourceTransfer: options.terminalSourceTransfer === true });
   if (inspection.classification === "active") return { record, inspection, action: "none" };
   if (inspection.currentStackQueueProtected) return {record,inspection,action:"none"};
   if (inspection.classification === "missing") {
@@ -1273,7 +1273,7 @@ function reconcileRecord(database, record, options) {
     removeDockerReferences(inspection.containers);
     killProcessReferences(inspection.processes);
     safety = safetySnapshot(database);
-    inspection = inspectRecord({ ...current, state: "reclaiming" }, { ignoreLease: true, safety, deadline: options.deadline });
+    inspection = inspectRecord({ ...current, state: "reclaiming" }, { ignoreLease: true, safety, deadline: options.deadline, terminalSourceTransfer: options.terminalSourceTransfer === true });
   }
   if (inspection.classification === "referenced" || inspection.classification === "blocked") {
     if (options.execute) updateState(database, record, inspection.classification, inspection.reason);
@@ -1287,13 +1287,13 @@ function reconcileRecord(database, record, options) {
   let removedCaches = [];
   if (options.execute) {
     safety = freshThreadSafety(safety);
-    inspection = inspectRecord(record, { ignoreLease: true, safety, deadline: options.deadline });
+    inspection = inspectRecord(record, { ignoreLease: true, safety, deadline: options.deadline, terminalSourceTransfer: options.terminalSourceTransfer === true });
     if (inspection.classification === "referenced" || inspection.classification === "blocked") {
       updateState(database, record, inspection.classification, inspection.reason);
       return { record, inspection, action: "none" };
     }
     removedCaches = stripCaches(record, options.statePath, () => database.prepare("DELETE FROM workspace_capacity_measurement WHERE workspace_id=?").run(record.id));
-    inspection = inspectRecord(record, { ignoreLease: true, safety, deadline: options.deadline });
+    inspection = inspectRecord(record, { ignoreLease: true, safety, deadline: options.deadline, terminalSourceTransfer: options.terminalSourceTransfer === true });
   }
   if (inspection.classification === "repair-required") {
     if (options.execute) updateState(database, record, "repair-required", inspection.reason);
@@ -1303,7 +1303,7 @@ function reconcileRecord(database, record, options) {
   if (!options.execute) return { record, inspection, action: "would-release" };
   const current = recordBy(database, { id: record.id });
   if (!options.ignoreLease && current.leaseExpiresAt > Date.now()) return { record: current, inspection: inspectRecord(current), action: "lease-renewed" };
-  const latest = inspectRecord(current, { ignoreLease: true, safety: freshThreadSafety(safety), deadline: options.deadline });
+  const latest = inspectRecord(current, { ignoreLease: true, safety: freshThreadSafety(safety), deadline: options.deadline, terminalSourceTransfer: options.terminalSourceTransfer === true });
   if (latest.classification !== "reclaimable") {
     updateState(database, current, latest.classification, latest.reason);
     return { record: current, inspection: latest, action: "none" };
@@ -1478,7 +1478,7 @@ function reconcileRecords(database, selected, options) {
     try {
       results.push(...withWorkspaceLock(database, selectedRecord.path, () => {
         const current = recordsInGroup(database, recordBy(database, { id: selectedRecord.id }));
-        const queuedProtection=stackQueueInspection(stackQueueSafety(current.map(record=>record.path),options.safety,options.terminalSourceTransfer===true?"physical-checkout":"source"));
+        const queuedProtection=stackQueueInspection(stackQueueSafety(current.map(record=>record.path),options.safety,options.terminalSourceTransfer===true?"physical-checkout":"source",options.deadline));
         if(queuedProtection!==null) return current.map(record=>({record,inspection:queuedProtection,action:"none"}));
         const maintenance = duringInspection(options.deadline, () => new Map(current.map((record) => [record.id, generatedOnlySourceCustody(database, record.id) || recordRetainsCustody(database, record.id) || retainedParent(database, record.path) ? "retained-custody" : maintainReferenceClone(record.path, options.execute, options.statePath)])));
         const reconciled = current.length > 1 ? groupReconciliation(database, current, options)
@@ -3112,7 +3112,7 @@ function terminalRetentionRelease(database, selected, args, statePath) {
     if (!row || digest(row.plan_json) !== expectedPlan || record.owner !== owner) {
       growthError("stale-retention-release", "owner or capacity plan changed; read the current binding");
     }
-    if (!retainedGrowth(JSON.parse(row.plan_json))) growthError("invalid-retention-release", "future growth is not retired");
+    if (!retainedGrowth(JSON.parse(row.plan_json))) throw Object.assign(new GrowthLifecycleError("future-growth-not-retired", "future growth is not retired"),{nextAction:futureGrowthAction(record)});
     if (generatedOnlySourceCustody(database, record.id)) growthError("retention-release-source-custody", "separate generated/source materialization retention remains");
     if (record.groupId !== null) growthError("retention-release-group", "group retention requires an explicit disposition for every member");
     if (record.leaseExpiresAt !== 0) growthError("retention-release-active", "a writing lease remains");
@@ -3190,7 +3190,9 @@ function releaseCommand(database, args, statePath) {
   const updatedAt = Date.now();
   for (const candidate of records) statement.run(updatedAt, candidate.id);
   const current = records.map((candidate) => recordBy(database, { id: candidate.id }));
-  const result = reconcileRecords(database, current, {
+  const deadline=Date.now()+35_000;
+  const result = duringInspection(deadline,()=>reconcileRecords(database, current, {
+    deadline,
     execute: true,
     reapExpired: bool(args, "reap-expired"),
     preserveRuntime: bool(args, "preserve-runtime"),
@@ -3198,7 +3200,7 @@ function releaseCommand(database, args, statePath) {
     statePath,
     safety: safetySnapshot(database),
     terminalSourceTransfer:true,
-  }).map(leaseReleaseDisposition);
+  })).map(leaseReleaseDisposition);
   print(result.length === 1 ? result[0] : result, bool(args, "json"));
 }
 
@@ -3331,6 +3333,8 @@ function growthBinding(database, record) {
 }
 
 function growthSelected(database, args) {
+  const selected=selectedArguments('retire-growth',{id:one(args,'id'),path:one(args,'path')});
+  if(!selected.ok)throw Object.assign(new GrowthLifecycleError(selected.error.code,selected.error.detail),{nextAction:selected.error.nextAction});
   const record = recordBy(database, { id: required(args, "id") });
   if (record.path !== path.resolve(required(args, "path"))) growthError("growth-identity-changed", "id and path do not name the same workspace");
   return record;
@@ -3416,7 +3420,7 @@ function materializationSafety(database, parent, roots, resourceKind, cacheRoots
     value.recordId !== parent.id && roots.some(root =>
       typeof value.objectDirectory === "string" && within(root, value.objectDirectory) ||
       typeof value.commonDirectory === "string" && within(root, value.commonDirectory)));
-  const queued=currentStackQueueReferences(roots,{resourceKind,cacheRoots});
+  const queued=currentStackQueueReferences(roots,{resourceKind,cacheRoots,deadline:inspectionDeadline});
   return {errors: [docker.error, systemd.error,...queued.errors].filter(value => value !== undefined),
     references: [...processes,...queued.references, ...roots.flatMap(root => [...dockerReferences(root, docker).references, ...systemdReferences(root, systemd).references]),
       ...threads.filter(thread => typeof thread.cwd !== "string" || roots.some(root => within(root, thread.cwd)))],
@@ -3796,18 +3800,18 @@ function help() {
   agent-workspace finalize-creation (--id ID|--path PATH)
   agent-workspace heartbeat (--id ID|--path PATH) [--lease-seconds N]
   agent-workspace release (--id ID|--path PATH) [--reap-expired] [--preserve-runtime]
-  agent-workspace release (--id ID|--path PATH) --end-retention --owner OWNER --expected-plan-sha256 SHA [--json]
+  agent-workspace release ${selectorSyntax("release")} --end-retention --owner OWNER --expected-plan-sha256 SHA [--json]
   agent-workspace reconcile [--root PATH] [--execute] [--reap-expired] [--preserve-runtime]
                             [--budget-ms 20000] [--max-groups 32] [--after ID|start]
   agent-workspace measure-capacity [--root PATH | --path PATH | --id ID] [--budget-ms 40000] [--json]
   agent-workspace reprice-capacity (--id ID|--path PATH) --intent source-only|budgeted --headroom-gib N --growth-mib N [--json]
   Active reduction additionally requires --id ID --path PATH --owner OWNER --reduction FILE --reduction-sha256 SHA256
-  agent-workspace growth-status --id ID --path PATH [--json]
+  agent-workspace growth-status ${selectorSyntax("growth-status")} [--json]
   agent-workspace cache-safety --id ID --path PATH --owner OWNER (--cache RELATIVE|--request FILE --request-sha256 SHA) --json
   agent-workspace cache-plan --id ID --path PATH --owner OWNER --cache RELATIVE --classification node-dependencies|declared-build-cache --operation-id ID --evidence TEXT --json
   agent-workspace retire-cache --id ID --path PATH --owner OWNER --request FILE --request-sha256 SHA --json
   agent-workspace retire-source-materialization --id ID --path PATH --owner OWNER --request ABS_FILE --request-sha256 SHA --json
-  agent-workspace retire-growth --id ID --path PATH --owner OWNER --disposition FILE --disposition-sha256 SHA [--json]
+  agent-workspace retire-growth ${selectorSyntax("retire-growth")} --owner OWNER --disposition FILE --disposition-sha256 SHA [--json]
   agent-workspace resume-growth (--id ID|--path PATH) --owner OWNER --expected-plan-sha256 SHA --intent budgeted --headroom-gib N --growth-mib N [--json]
   agent-workspace maintain [--root PATH | --path PATH] [--execute] [--json]
   agent-workspace status [--root PATH] [--path SUBSTRING] [--owner SUBSTRING] [--limit 100] [--after CURSOR|start] [--json]
@@ -3968,6 +3972,7 @@ if (process.argv[1] !== undefined && existsSync(process.argv[1])
         process.stdout.write(`${JSON.stringify({ ok: false, error: {
           code: error instanceof GrowthLifecycleError || error instanceof MaterializationError || error instanceof CacheRetirementError ? error.code : error instanceof ResourceBusyError ? "resource-busy" : error instanceof CliError ? "invalid-request" : "lifecycle-failed",
           detail: error instanceof Error ? error.message : String(error),
+          ...(error.nextAction === undefined ? {} : {nextAction:error.nextAction}),
         } })}\n`);
       }
     }

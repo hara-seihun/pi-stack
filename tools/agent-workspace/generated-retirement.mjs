@@ -1,4 +1,4 @@
-import {lstatSync,readdirSync,realpathSync,renameSync,rmSync,mkdirSync,openSync,closeSync,fsyncSync,readlinkSync,unlinkSync,rmdirSync} from 'node:fs';
+import {constants,fstatSync,lstatSync,readdirSync,realpathSync,renameSync,rmSync,mkdirSync,openSync,closeSync,fsyncSync,readlinkSync,unlinkSync,rmdirSync} from 'node:fs';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
 
@@ -52,6 +52,29 @@ function remainingInventorySafe(original,remaining) {
   const known=new Map(original.map(e=>[e.path,e]));
   return remaining.every(e=>{const old=known.get(e.path);return old!==undefined&&sameEntry(old,e);});
 }
+function removeManifest(context,stage,files) {
+ const known=new Map(files.map(entry=>[entry.path,entry]));
+ const visit=(relative,target)=>{
+  if(context.deadline!==undefined&&Date.now()>=context.deadline)refuse('generated-io-error','bounded deletion paused; resume the same pending operation');
+  const expected=known.get(relative),stat=optionalStat(target);if(stat===null)return;
+  if(!expected)refuse('generated-identity-changed','unlisted staging entry');
+  const current={path:relative,...identity(stat),type:stat.isSymbolicLink()?'symlink':stat.isDirectory()?'directory':stat.isFile()?'file':'special',size:String(stat.size),blocks:String(stat.blocks),mtime:String(stat.mtimeNs),...(stat.isSymbolicLink()?{linkTarget:readlinkSync(target)}:{})};
+  if(!sameEntry(expected,current))refuse('generated-identity-changed','staging entry changed during bounded deletion');
+  if(expected.type!=='directory'){unlinkSync(target);context.afterEntryRemoval?.(relative,context);return;}
+  const fd=openSync(target,constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW);
+  try {
+   const pinned=fstatSync(fd,{bigint:true});if(String(pinned.dev)!==expected.device||String(pinned.ino)!==expected.inode)refuse('generated-identity-changed','staging directory changed during open');
+   const descriptor='/proc/self/fd/'+fd,names=readdirSync(descriptor);
+   for(const name of names)if(!known.has(path.join(relative,name)))refuse('generated-identity-changed','unlisted staging entry');
+   for(const name of names)visit(path.join(relative,name),descriptor+'/'+name);
+   const latest=optionalStat(target);if(latest===null||String(latest.dev)!==expected.device||String(latest.ino)!==expected.inode)refuse('generated-identity-changed','staging directory replaced during removal');
+   if(context.deadline!==undefined&&Date.now()>=context.deadline)refuse('generated-io-error','bounded deletion paused; resume the same pending operation');
+   rmdirSync(target);context.afterEntryRemoval?.(relative,context);
+  } finally {closeSync(fd);}
+ };
+ visit('',stage);
+}
+
 export function generatedStagingRoots(request,stateDirectory) {
   return request.paths.map(relative=>path.join(stateDirectory,'generated-retirement',hash([request.operationId,relative])));
 }
@@ -141,11 +164,13 @@ function execute(context,request) {
       e.phase='deleting';save();
     }
     if(optionalStat(e.stage)) {
-      const remaining=snapshot(e.stage);
-      if(!remainingInventorySafe(e.files,remaining)) refuse('generated-identity-changed','staging changed before removal');
+      const manifestRemoval=context.journalKind==='workspace-cache-retirement';
+      const remaining=manifestRemoval?null:snapshot(e.stage);
+      if(!manifestRemoval&&!remainingInventorySafe(e.files,remaining)) refuse('generated-identity-changed','staging changed before removal');
       authorize(context,request);
       context.beforeRemoval?.(e);
-      for(const entry of [...remaining].sort((a,b)=>b.path.length-a.path.length)) {
+      if(manifestRemoval)removeManifest(context,e.stage,e.files);
+      else for(const entry of [...remaining].sort((a,b)=>b.path.length-a.path.length)) {
         if(context.deadline!==undefined&&Date.now()>=context.deadline) refuse('generated-io-error','bounded deletion paused; resume the same pending operation');
         const target=path.join(e.stage,entry.path),stat=optionalStat(target);if(stat===null)continue;
         const current={...entry,...identity(stat),type:stat.isSymbolicLink()?'symlink':stat.isDirectory()?'directory':stat.isFile()?'file':'special',size:String(stat.size),blocks:String(stat.blocks),mtime:String(stat.mtimeNs),...(stat.isSymbolicLink()?{linkTarget:readlinkSync(target)}:{})};

@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import {spawnSync} from 'node:child_process';
+import {boundedCommand} from './bounded-command.mjs';
 
 const literal=value=>"'"+value.replaceAll("'","''")+"'";
 export function operatorJobFromCgroup(text){return text.match(/pi-stack-next-job-([a-f0-9-]{36})-\d+\.service(?:\/|$)/m)?.[1]??null;}
@@ -31,8 +31,9 @@ export function queueReferenceSql(root,selfJobId,resourceKind){
  WHERE ${filter} AND (${pathPredicate}) LIMIT 65
  ) r; ROLLBACK;`;
 }
-export function currentStackQueueReferences(roots,{resourceKind,cacheRoots,read=p=>JSON.parse(fs.readFileSync(p,'utf8')),execute=(name,args,options)=>spawnSync(name,args,options)}={}){
+export function currentStackQueueReferences(roots,{resourceKind,cacheRoots,deadline,read=p=>JSON.parse(fs.readFileSync(p,'utf8')),execute=boundedCommand}={}){
  try{
+  if(!Number.isSafeInteger(deadline))throw new Error('explicit absolute queue observation deadline required');
   if(!['source','physical-checkout','generated-cache'].includes(resourceKind))throw new Error('explicit source or generated-cache resource kind required');
   if(resourceKind==='generated-cache'&&(!Array.isArray(cacheRoots)||!cacheRoots.length||cacheRoots.some(p=>!path.isAbsolute(p))))throw new Error('exact generated cache resource roots required');
   if(!Array.isArray(roots)||!roots.length||roots.some(p=>typeof p!=='string'||!path.isAbsolute(p)))throw new Error('exact absolute reference roots required');
@@ -45,8 +46,10 @@ export function currentStackQueueReferences(roots,{resourceKind,cacheRoots,read=
   for(const domain of domains){
    const config=read('/etc/pi-stack-next/domains/'+domain.id+'.json');
    if(!/^[a-z][a-z0-9-]{0,23}$/.test(domain.id)||domain.unixUser!=='pi2-'+domain.id||config.domainId!==domain.id||!/^[a-z][a-z0-9_]{0,62}$/.test(config.database))throw new Error('canonical queue configuration invalid');
-   const result=execute('sudo',['-n','-u',domain.unixUser,'psql','-X','-qAt','--no-password','--host','/run/pi-stack-next/'+domain.id+'/pg','--username',domain.unixUser,'--dbname',config.database,'--set=ON_ERROR_STOP=1','--command',queueReferenceSql(roots,selfJobId,resourceKind)],{encoding:'utf8',timeout:6000,maxBuffer:262144,env:{...process.env,PGCONNECT_TIMEOUT:'2'}});
+   const remaining=deadline-Date.now();if(remaining<=0)throw new Error('canonical queue operation deadline exhausted before '+domain.id);
+   const result=execute('sudo',['-n','-u',domain.unixUser,'psql','-X','-qAt','--no-password','--host','/run/pi-stack-next/'+domain.id+'/pg','--username',domain.unixUser,'--dbname',config.database,'--set=ON_ERROR_STOP=1','--command',queueReferenceSql(roots,selfJobId,resourceKind)],{encoding:'utf8',timeout:Math.min(6000,remaining),maxBuffer:262144,env:{...process.env,PGCONNECT_TIMEOUT:'2'}});
    if(result.status!==0||result.error)throw new Error('canonical queue unavailable: '+domain.id+': '+String(result.error?.code??result.stderr??result.status).slice(0,1500));
+   if(Date.now()>=deadline)throw new Error('canonical queue operation deadline exhausted after '+domain.id);
    const rows=JSON.parse(result.stdout);if(!Array.isArray(rows)||rows.length>=65||rows.some(r=>!r||typeof r.id!=='string'||!['job','input','operation','tool_call'].includes(r.kind)||typeof r.state!=='string'))throw new Error('canonical queue observation incomplete: '+domain.id);
    references.push(...rows.filter(r=>resourceKind!=='generated-cache'||!isSourceOnlyRead(r,cacheRoots)).map(r=>({...r,domainId:domain.id,roots}))); observations.push({domainId:domain.id,roots,count:rows.length});
   }
