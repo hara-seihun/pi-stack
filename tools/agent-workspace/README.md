@@ -427,3 +427,10 @@ positive/control path roots over one92-candidate READONLY snapshot matched the
 prior string-leaf predicate with zero mismatches. The installed eligible-ID
 baseline also passed; this predicate change is an equivalent optimization, not
 a claim that it caused every historical query-timeout recovery.
+
+For an already-deleting cache journal, binding/manifest inspection is read-only;
+the complete native/FD/queue/Git verdict is taken once at the actual unlink
+boundary. A previously completed rename does not trigger another native verdict.
+A planned rename retains its separate boundary authorization. Source retirement
+keeps its initial authorization. This removes repeated no-effect observation
+cost without relaxing the35s budget or physical/reference/replacement checks.

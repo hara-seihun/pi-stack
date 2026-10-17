@@ -56,11 +56,14 @@ export function generatedStagingRoots(request,stateDirectory) {
   return request.paths.map(relative=>path.join(stateDirectory,'generated-retirement',hash([request.operationId,relative])));
 }
 export function referenceSummaries(values) {const keys=new Set(['kind','resourceClass','type','id','pid','startTime','startTicks','uid','state','domainId','workspaceId','threadId','conversationId','assignmentId','jobId','operationId','unit','name','containerId','root','path','roots','cwd','field','mode','fd','access','owner','groupId']);return values.map(value=>Object.fromEntries(Object.entries(value).filter(([key])=>keys.has(key))));}
-function authorize(context,request) {
+function authorizeBinding(context,request) {
   const declarations=context.declarations();
   if(!Array.isArray(declarations)||request.paths.some(relative=>!declarations.some(d=>d===relative||typeof d==='string'&&d.startsWith('**/')&&relative.split('/').at(-1)===d.slice(3)))) refuse('unsafe-generated-path','selected output is no longer declared');
   const current=context.binding();
   if(!equal(current,request.binding)) refuse('generated-identity-changed','workspace/head/source/root binding changed');
+}
+function authorize(context,request) {
+  authorizeBinding(context,request);
   const safety=context.safety(generatedStagingRoots(request,context.stateDirectory));
   if(!safety||!Array.isArray(safety.errors)||!Array.isArray(safety.references)||!Array.isArray(safety.retainedBorrowers)) refuse('generated-safety-unknown','invalid safety result');
   if(safety.errors.length) refuse('generated-safety-unknown',JSON.stringify(safety.errors));
@@ -76,7 +79,7 @@ export function retireGeneratedOnly(context,request) {
 function execute(context,request) {
   const paths=validateGeneratedRequest(request),root=request.binding.path;
   const snapshot=target=>inventory(target,request.binding.device,context.inventoryPolicy,context.deadline);
-  authorize(context,request);
+  if(context.journalKind==='workspace-cache-retirement')authorizeBinding(context,request);else authorize(context,request);
   const db=context.database,sha=hash(request);
   db.exec('PRAGMA synchronous=FULL');
   db.exec('CREATE TABLE IF NOT EXISTS workspace_generated_retirement(operation_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,request_sha256 TEXT NOT NULL,journal_json TEXT NOT NULL)');
@@ -124,10 +127,11 @@ function execute(context,request) {
   }
   for(const e of journal.entries) {
     if(e.phase==='removed') continue;
-    authorize(context,request);
     const target=path.join(root,e.relative);
+    if(optionalStat(e.stage)&&optionalStat(target))refuse('generated-identity-changed','source recreated during retirement');
     if(e.phase==='planned') {
       if(!optionalStat(e.stage)) {
+        authorize(context,request);
         checkAncestors(root,e.relative);
         if(!sameInventory(e.files,snapshot(target))||context.tracked(target)) refuse('generated-identity-changed','generated content changed at rename');
         context.invalidate();

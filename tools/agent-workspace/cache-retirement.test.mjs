@@ -88,3 +88,10 @@ test('literal JSON path lookup and old pending cache staging identity remain exa
  const request={...f.r,operationId:'caption-build-f4b1-58b-1040',cachePath:'.converge-cache'};
  assert.equal(path.basename(cacheStagingRoots(request,f.base)[0]),'9d2e97ab18ff9c33fc9970608c2b566f575a64055e3dc197c9f9d3a02c3de235');
 }));
+
+test('already-deleting continuation performs one final fresh native authorization before actual deletion',()=>fixture(f=>{
+ f.c.beforeRemoval=()=>{throw Error('cessation after persisted deleting intent');};assert.equal(retireWorkspaceCache(f.c,f.r).ok,false);delete f.c.beforeRemoval;
+ assert.equal(JSON.parse(f.db.prepare('SELECT journal_json FROM workspace_generated_retirement').get().journal_json).entries[0].phase,'deleting');
+ let observations=0;f.c.safety=()=>{observations++;return {errors:[],references:[],retainedBorrowers:[],observedAt:Date.now()};};
+ assert.equal(retireWorkspaceCache(f.c,f.r).ok,true);assert.equal(observations,1);
+}));
