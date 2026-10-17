@@ -3182,6 +3182,77 @@ function terminalRetentionRelease(database, selected, args, statePath) {
   }, selected.groupId, deadline));
 }
 
+function releaseSettlement(database, workspaceId) {
+  if (!database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_release_attempt'").get()) return { kind: "unset" };
+  const row = database.prepare("SELECT receipt_json FROM workspace_release_attempt WHERE workspace_id=? ORDER BY sequence DESC LIMIT 1").get(workspaceId);
+  return row === undefined ? { kind: "unset" } : JSON.parse(row.receipt_json);
+}
+
+function beginOrdinaryRelease(database, records, args) {
+  const previous = records.map(record => releaseSettlement(database, record.id));
+  if (previous.some(receipt => receipt.kind === "owned-retention")) {
+    const requestId = previous[0].requestId;
+    if (previous.some(receipt => receipt.kind !== "owned-retention" || receipt.requestId !== requestId))
+      fail("ordinary release group changed while original settlement is retained");
+    const rows = database.prepare("SELECT workspace_id,request_json FROM workspace_release_attempt WHERE request_id=?").all(requestId);
+    if (rows.length !== records.length) fail("ordinary release retained group membership changed");
+    for (const record of records) {
+      const row = rows.find(row => row.workspace_id === record.id);
+      if (row === undefined) fail("ordinary release retained group membership changed");
+      const original = JSON.parse(row.request_json);
+      if (original.record.owner !== record.owner || original.record.path !== record.path || original.record.sourceCommit !== record.sourceCommit
+        || original.settle.includes("--reap-expired") !== bool(args,"reap-expired")
+        || original.settle.includes("--preserve-runtime") !== bool(args,"preserve-runtime"))
+        fail("ordinary release retained request binding changed; inspect original status settlement before continuing");
+    }
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      for (const record of records) database.prepare("UPDATE workspace SET lease_expires_at=0,state='repair-required',updated_at=?,detail=? WHERE id=?")
+        .run(Date.now(), `ordinary release ${requestId}: owned retention until a complete verdict is recorded`, record.id);
+      database.exec("COMMIT");
+    } catch (error) { database.exec("ROLLBACK"); throw error; }
+    return requestId;
+  }
+  const requestId = randomUUID(), startedAt = Date.now();
+  database.exec(`CREATE TABLE IF NOT EXISTS workspace_release_attempt (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+    request_json TEXT NOT NULL, receipt_json TEXT NOT NULL, UNIQUE(request_id, workspace_id));
+    CREATE INDEX IF NOT EXISTS workspace_release_record ON workspace_release_attempt(workspace_id, sequence)`);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    for (const record of records) {
+      const settle = ["agent-workspace", "release", "--id", record.id,
+        ...(bool(args, "reap-expired") ? ["--reap-expired"] : []),
+        ...(bool(args, "preserve-runtime") ? ["--preserve-runtime"] : []), "--json"];
+      const receipt = { kind: "owned-retention", requestId, workspaceId: record.id, owner: record.owner, startedAt,
+        reason: "Release has no completed safety/physical verdict; the registered owner retains settlement responsibility",
+        physicalDisposition: { kind: "unsettled" },
+        nextAction: { observe: ["agent-workspace", "status", "--id", record.id, "--json"], settle } };
+      database.prepare("INSERT INTO workspace_release_attempt(request_id,workspace_id,request_json,receipt_json) VALUES(?,?,?,?)")
+        .run(requestId, record.id, JSON.stringify({ record, settle }), JSON.stringify(receipt));
+      database.prepare("UPDATE workspace SET lease_expires_at=0,state='repair-required',updated_at=?,detail=? WHERE id=?")
+        .run(startedAt, `ordinary release ${requestId}: owned retention until a complete verdict is recorded`, record.id);
+    }
+    database.exec("COMMIT");
+    return requestId;
+  } catch (error) { database.exec("ROLLBACK"); throw error; }
+}
+
+function finishOrdinaryRelease(database, requestId, results) {
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    for (const result of results) {
+      const receipt = { kind: "completed", requestId, workspaceId: result.record.id, owner: result.record.owner,
+        completedAt: Date.now(), result };
+      const changed = database.prepare("UPDATE workspace_release_attempt SET receipt_json=? WHERE request_id=? AND workspace_id=? AND json_extract(receipt_json,'$.kind')='owned-retention'")
+        .run(JSON.stringify(receipt), requestId, result.record.id).changes;
+      if (changed !== 1) throw new Error("ordinary release settlement identity changed");
+    }
+    database.exec("COMMIT");
+  } catch (error) { database.exec("ROLLBACK"); throw error; }
+  return results.map(result => ({ ...result, releaseSettlement: releaseSettlement(database, result.record.id) }));
+}
+
 function releaseCommand(database, args, statePath) {
   assertOnly(args, ["id", "path", "reap-expired", "preserve-runtime", "json", "end-retention", "owner", "expected-plan-sha256"]);
   if (bool(args, "end-retention")) {
@@ -3201,9 +3272,7 @@ function releaseCommand(database, args, statePath) {
     print(results.length === 1 ? results[0] : results, bool(args,"json"));
     return;
   }
-  const statement = database.prepare("UPDATE workspace SET lease_expires_at = 0, updated_at = ?, detail = 'owner released lease' WHERE id = ?");
-  const updatedAt = Date.now();
-  for (const candidate of records) statement.run(updatedAt, candidate.id);
+  const requestId = beginOrdinaryRelease(database, records, args);
   const current = records.map((candidate) => recordBy(database, { id: candidate.id }));
   const deadline=Date.now()+35_000;
   const result = duringInspection(deadline,()=>reconcileRecords(database, current, {
@@ -3216,7 +3285,8 @@ function releaseCommand(database, args, statePath) {
     safety: safetySnapshot(database),
     terminalSourceTransfer:true,
   })).map(leaseReleaseDisposition);
-  print(result.length === 1 ? result[0] : result, bool(args, "json"));
+  const settled = finishOrdinaryRelease(database, requestId, result);
+  print(settled.length === 1 ? settled[0] : settled, bool(args, "json"));
 }
 
 // A released workspace whose tree is gone is history, not state. Keep a month
@@ -3776,7 +3846,7 @@ function statusCommand(database, args) {
   const records = rows.slice(0, limit).map(row => {
     const { cachePaths, ...record } = rowToRecord({ ...row, cache_paths: "[]", creation_request: "null" });
     delete record.creation;
-    return { ...record, capacity: recordedCapacity(database, row.id), cacheDeclarationBytes: row.cache_bytes, creationRequestBytes: row.creation_bytes };
+    return { ...record, releaseSettlement: releaseSettlement(database, row.id), capacity: recordedCapacity(database, row.id), cacheDeclarationBytes: row.cache_bytes, creationRequestBytes: row.creation_bytes };
   });
   const last = rows[Math.min(rows.length, limit) - 1];
   const nextAfter = hasMore && last ? Buffer.from(JSON.stringify([last.root, last.path, last.id])).toString("base64url") : null;
@@ -3834,9 +3904,12 @@ function help() {
   agent-workspace retire-growth ${selectorSyntax("retire-growth")} --owner OWNER --disposition FILE --disposition-sha256 SHA [--json]
   agent-workspace resume-growth ${selectorSyntax("resume-growth")} --owner OWNER --expected-plan-sha256 SHA --intent source-only|budgeted --headroom-gib N --growth-mib N [--json]
   agent-workspace maintain [--root PATH | --path PATH] [--execute] [--json]
-  agent-workspace status [--root PATH] [--path SUBSTRING] [--owner SUBSTRING] [--limit 100] [--after CURSOR|start] [--json]
+  agent-workspace status [--root PATH] [--path SUBSTRING] [--owner SUBSTRING] [--limit 1..500 (initial page 100)] [--after CURSOR|start] [--json]
   agent-workspace list ...                    alias for status
 
+Status JSON returns nextAfter; repeat the same filters with --after nextAfter until nextAfter is null.
+Ordinary release commits owned-retention before inspection; status reports its original requestId/owner and explicit unsettled physical disposition after a caller interruption.
+The registered owner retains settlement responsibility; release never replays another command in the caller batch.
 The registry defaults to ${DEFAULT_STATE}. Set PI_WORKSPACE_STATE to move it.
 Repeat --cache to declare ignored generated paths that release may remove; these extend the default cache set.
 Use a Git ref the source repository can fetch, such as refs/heads/main or a branch name, not origin/main.

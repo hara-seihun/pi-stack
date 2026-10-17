@@ -10,6 +10,14 @@ A retired source-only plan can explicitly resume as source-only or expand to bud
 
 Ordinary release honors unique/dirty/unpublished source custody before detaching generated caches. Explicit generated-only retirement retains its separate resource contract. If local tracking refs are stale, bounded read-only exact branch-head observations can prove remote custody without fetching or altering the checkout; unavailable/mismatched/unproven heads remain protected. Release JSON distinguishes lease release, source physical disposition and cache detachment-for-retirement (never inferred free bytes).
 
+## Interrupted ordinary release
+
+Before dropping any single/group writing lease, ordinary release atomically records an original request identity and registered owner, an explicit `owned-retention` receipt, and `repair-required` state. This commit precedes native/queue/Git inspection and physical work. A caller deadline, TERM, or whole-process KILL cannot leave the previous ACTIVE/lease0/no-result combination. No signal handler, longer caller timeout, polling worker, or Stack-runtime change is required.
+
+`status --id ID --json` returns `releaseSettlement`: `unset`, `owned-retention` (physical disposition explicitly `unsettled`, exact observe/settle argv), or `completed` with the actual terminal result. A stopped caller's owner still owns settlement. The exact same supported release request resumes that retained identity with fresh normal safety/source checks; changed owner/source/group/policy bindings are explicit errors. A new dirty/unpublished edit remains protected. Group peers commit their retention together. Final result persistence precedes stdout, so loss of the response does not lose its disposition. These receipts never authorize replaying the caller's surrounding batch or external effects.
+
+`status --limit` accepts integers **1..500**, with initial page size100. JSON `nextAfter` feeds `--after` with the same filters; stop at null. Status does not execute, renew, retry, or settle a release.
+
 ## Terminal release and bounded queue observation
 
 An explicit ordinary release transfers source intent to its durable Git/task custody; every single/group physical inspection keeps that resource scope. Actual reserved tools, native executions, unknown operations, FD/cwd readers and Git borrowers still retain the checkout. Dirty/unpublished source remains protected.
@@ -21,6 +29,12 @@ Canonical queue observation requires an absolute `deadline` and retains the 4000
 Cache deleting continuations retain the original journal/request/stage/manifest. After fresh native/queue/Git authorization, checked removal pins directory FDs, validates inode/type/content against that manifest, and visits only actual remaining names. Unknown names and replaced directories refuse; symlinks unlink without traversal. It does not repeatedly snapshot all already-removed leaves. Deadline expiry retains pending/deleting and actual partial progress for the same request. The35s operation budget remains unchanged.
 
 Owned read-only staged directories (including0500 package payloads) are handled by the owning engine: after all normal authorization and manifest/name/inode checks, an already pinned directory FD may gain only its owner-write bit when its numeric UID equals the executing UID. No source directory, unlisted inode, symlink target or foreign-owned directory gains permissions. The same checked-removal primitive serves qualified source materializations. A permission failure outside that case retains the original pending journal. An administrator can deliberately execute the SAME CLI/request under a finite UID-preserving CAP_DAC_OVERRIDE unit, preserving original HOME, registry, Git trust and native guards; changing to root instead can invalidate linked-worktree Git trust and is not a substitute for those checks.
+
+## Terminal uncertain tools and queue observation
+
+An immutable uncertain operation remains uncertain. It stops counting as a potential executing workspace consumer only after the supported terminal tool projection, exact original operation/run binding, matching ceased-owner receipt/proof and a complete zero-admitted-child observation agree. Both the retained-original and terminal-projected operation-result forms are recognized. Live, queued, missing-proof, changed-binding, known/unknown child and genuine source-intent references remain protected.
+
+The queue query selects reserved/current-run tool-call IDs before fetching their payloads. A serialized exact-string prefilter precedes recursive JSON path matching; it never substitutes for that match. Terminal-tool evidence is fetched for the bounded returned operation IDs in a separate read-only query and classified once as data, rather than repeatedly joining full JSON receipts against every historical job. Child lookup still covers operation, parent-run, parent-job and provider-call bindings. Both reads keep the4000ms SQL cap and the original whole-operation deadline; incomplete/failed evidence is unknown safety. No database index/configuration or runtime mutation is needed.
 
 ## Checks
 
