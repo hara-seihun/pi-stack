@@ -44,7 +44,7 @@ export function toolSettlementSql(ids) {
  relation_keys AS MATERIALIZED (SELECT jsonb_build_object('runs',coalesce(jsonb_agg(run_id),'[]'::jsonb),'calls',coalesce(jsonb_agg(provider_call_id),'[]'::jsonb)) AS vars FROM candidates),
  matching_child_ids AS MATERIALIZED (SELECT id FROM job WHERE operation_id IN (${selected})
  OR jsonb_path_exists(spec,'$ ? (@.admitted.parentJobId == $runs[*] || @.parentJobId == $runs[*] || @.admitted.toolCallId == $calls[*])',(SELECT vars FROM relation_keys)) LIMIT 65),
- children AS MATERIALIZED (SELECT j.id,j.state,j.kind,j.operation_id,j.result,j.ownership_receipt,j.cessation_evidence,
+ children AS MATERIALIZED (SELECT j.id,j.state,j.kind,j.operation_id,CASE WHEN j.operation_id IN (${selected}) THEN j.result ELSE NULL END AS result,j.ownership_receipt,j.cessation_evidence,
  j.spec#>>'{admitted,parentJobId}' AS parent_run,j.spec->>'parentJobId' AS parent_job,j.spec#>>'{admitted,toolCallId}' AS provider_call
  FROM matching_child_ids m CROSS JOIN LATERAL (SELECT * FROM job WHERE id=m.id OFFSET 0) j)
  SELECT json_build_object('candidates',coalesce((SELECT json_agg(c) FROM candidates c),'[]'::json),'children',coalesce((SELECT json_agg(c) FROM children c),'[]'::json)); ROLLBACK;`;
