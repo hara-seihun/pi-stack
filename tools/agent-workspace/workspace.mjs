@@ -979,9 +979,23 @@ function gitDisposition(record, nestedWorkspaces = []) {
     : [];
   const candidates = [...refs, "HEAD"];
   const durableSource = record.durableSourceCommit === null ? [] : [record.durableSourceCommit];
+  const freshlyObserved=[];
+  const initiallyMissing=candidates.some(ref=>Number(git(record.path,["rev-list","--count",ref,"--not","--remotes",...durableSource]))>0);
+  if(initiallyMissing&&refs.length){
+    const knownHeads=new Map(refs.map(ref=>[ref,git(record.path,["rev-parse",ref])]));
+    const remotes=git(record.path,["remote"]).split("\n").filter(Boolean);
+    for(const remote of remotes){
+      const observed=command("git",["-C",record.path,"ls-remote","--heads",remote,...refs],{timeout:4000});
+      if(observed.status!==0)return {safe:false,sourceRetention:true,reason:`remote custody observation unavailable for ${remote}; checkout and generated caches retained`,head};
+      for(const line of observed.stdout.split("\n").filter(Boolean)){
+        const [sha,ref]=line.split(/\s+/u);if(!/^[a-f0-9]{40,64}$/u.test(sha)||!knownHeads.has(ref))return {safe:false,sourceRetention:true,reason:"remote custody observation malformed; checkout and generated caches retained",head};
+        if(knownHeads.get(ref)===sha)freshlyObserved.push(sha);
+      }
+    }
+  }
   const local = [];
   for (const ref of candidates) {
-    const count = Number(git(record.path, ["rev-list", "--count", ref, "--not", "--remotes", ...durableSource]));
+    const count = Number(git(record.path, ["rev-list", "--count", ref, "--not", "--remotes", ...durableSource, ...freshlyObserved]));
     if (count > 0) local.push(`${ref}:${count}`);
   }
   if (local.length > 0) return { safe: false, sourceRetention: true, reason: `checkout has commits absent from remote refs: ${local.join(", ")}`, head };
@@ -1258,6 +1272,10 @@ function reconcileRecord(database, record, options) {
   let inspection = inspectRecord(record, { ignoreLease: options.ignoreLease, safety, deadline: options.deadline, terminalSourceTransfer: options.terminalSourceTransfer === true });
   if (inspection.classification === "active") return { record, inspection, action: "none" };
   if (inspection.currentStackQueueProtected) return {record,inspection,action:"none"};
+  if(inspection.sourceRetention===true){
+    if(options.execute)updateState(database,record,"repair-required",inspection.reason);
+    return {record,inspection,action:"none",removedCaches:[]};
+  }
   if (inspection.classification === "missing") {
     if (options.execute) {
       updateState(database, record, "released", inspection.reason);
@@ -1279,11 +1297,6 @@ function reconcileRecord(database, record, options) {
     if (options.execute) updateState(database, record, inspection.classification, inspection.reason);
     return { record, inspection, action: "none" };
   }
-  if (options.execute && options.reapExpired && options.preserveRuntime
-    && inspection.classification === "repair-required" && inspection.sourceRetention) {
-    updateState(database, record, "repair-required", inspection.reason);
-    return { record, inspection, action: "none" };
-  }
   let removedCaches = [];
   if (options.execute) {
     safety = freshThreadSafety(safety);
@@ -1292,27 +1305,28 @@ function reconcileRecord(database, record, options) {
       updateState(database, record, inspection.classification, inspection.reason);
       return { record, inspection, action: "none" };
     }
+    if(inspection.sourceRetention===true){updateState(database,record,"repair-required",inspection.reason);return {record,inspection,action:"none",removedCaches:[]};}
     removedCaches = stripCaches(record, options.statePath, () => database.prepare("DELETE FROM workspace_capacity_measurement WHERE workspace_id=?").run(record.id));
     inspection = inspectRecord(record, { ignoreLease: true, safety, deadline: options.deadline, terminalSourceTransfer: options.terminalSourceTransfer === true });
   }
   if (inspection.classification === "repair-required") {
     if (options.execute) updateState(database, record, "repair-required", inspection.reason);
-    return { record, inspection, action: removedCaches.length > 0 ? `removed-caches:${removedCaches.join(",")}` : "none" };
+    return { record, inspection, removedCaches, action: removedCaches.length > 0 ? `removed-caches:${removedCaches.join(",")}` : "none" };
   }
-  if (inspection.classification !== "reclaimable") return { record, inspection, action: "none" };
+  if (inspection.classification !== "reclaimable") return { record, inspection, removedCaches, action: "none" };
   if (!options.execute) return { record, inspection, action: "would-release" };
   const current = recordBy(database, { id: record.id });
   if (!options.ignoreLease && current.leaseExpiresAt > Date.now()) return { record: current, inspection: inspectRecord(current), action: "lease-renewed" };
   const latest = inspectRecord(current, { ignoreLease: true, safety: freshThreadSafety(safety), deadline: options.deadline, terminalSourceTransfer: options.terminalSourceTransfer === true });
   if (latest.classification !== "reclaimable") {
     updateState(database, current, latest.classification, latest.reason);
-    return { record: current, inspection: latest, action: "none" };
+    return { record: current, inspection: latest, removedCaches, action: "none" };
   }
   updateState(database, current, "reclaiming", latest.reason);
   removeWorkspace(current, options.statePath);
   removeEmptyWorkspaceContainer(current);
   updateState(database, current, "released", inspection.reason);
-  return { record: current, inspection, action: "released" };
+  return { record: current, inspection, removedCaches, action: "released" };
 }
 
 function recordsInGroup(database, record) {
@@ -1363,15 +1377,14 @@ function groupReconciliation(database, records, options) {
       groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline,terminalSourceTransfer:options.terminalSourceTransfer===true })));
   }
 
-  const preserveKnownSource = options.reapExpired && options.preserveRuntime
-    && inspections.some((inspection) => inspection.classification === "repair-required" && inspection.sourceRetention);
+  const preserveKnownSource = inspections.some((inspection)=>inspection.sourceRetention===true);
   const removedCaches = new Map();
-  if (options.execute && !preserveKnownSource && !inspections.some((inspection) => ["referenced", "blocked"].includes(inspection.classification))) {
+  if (options.execute && !preserveKnownSource && !inspections.some((inspection) => ["referenced", "blocked"].includes(inspection.classification)||inspection.sourceRetention===true)) {
     safety = freshThreadSafety(safety);
     inspections = records.map((record) => inspectRecord(record,
       groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline,terminalSourceTransfer:options.terminalSourceTransfer===true })));
   }
-  if (options.execute && !preserveKnownSource && !inspections.some((inspection) => ["referenced", "blocked"].includes(inspection.classification))) {
+  if (options.execute && !preserveKnownSource && !inspections.some((inspection) => ["referenced", "blocked"].includes(inspection.classification)||inspection.sourceRetention===true)) {
     records.forEach((record, index) => {
       if (inspections[index].classification !== "missing") {
         removedCaches.set(record.id, stripCaches(record, options.statePath, () => database.prepare("DELETE FROM workspace_capacity_measurement WHERE workspace_id=?").run(record.id)));
@@ -1381,7 +1394,7 @@ function groupReconciliation(database, records, options) {
       groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline,terminalSourceTransfer:options.terminalSourceTransfer===true })));
   }
 
-  if (options.execute && !preserveKnownSource && !inspections.some((inspection) => ["referenced", "blocked"].includes(inspection.classification))) {
+  if (options.execute && !preserveKnownSource && !inspections.some((inspection) => ["referenced", "blocked"].includes(inspection.classification)||inspection.sourceRetention===true)) {
     safety = freshThreadSafety(safety);
     inspections = records.map((record) => inspectRecord(record,
       groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline,terminalSourceTransfer:options.terminalSourceTransfer===true })));
@@ -1398,6 +1411,7 @@ function groupReconciliation(database, records, options) {
     return records.map((record, index) => ({
       record,
       inspection: inspections[index],
+      removedCaches:removedCaches.get(record.id)??[],
       action: (removedCaches.get(record.id) ?? []).length > 0
         ? `removed-caches:${removedCaches.get(record.id).join(",")}`
         : "none",
@@ -1431,7 +1445,7 @@ function groupReconciliation(database, records, options) {
       updateState(database, record, "released", `workspace group ${groupId} released: ${inspection.reason}`);
     });
   for (const record of records) removeEmptyWorkspaceContainer(record);
-  return records.map((record, index) => ({ record, inspection: inspections[index], action: "released-group" }));
+  return records.map((record, index) => ({ record, inspection: inspections[index], removedCaches:removedCaches.get(record.id)??[], action: "released-group" }));
 }
 
 function blockedReconciliation(database, records, error, execute) {
@@ -1442,6 +1456,7 @@ function blockedReconciliation(database, records, error, execute) {
     return {
       record: current,
       inspection: { classification: "blocked", reason: detail, processes: [], containers: [], systemdUnits: [] },
+      cacheDisposition:{kind:"unknown",reason:"interrupted reconciliation; no cache-effect inference"},
       action: "none",
     };
   });
@@ -3225,9 +3240,10 @@ function pruneReleased(database, now = Date.now(), root) {
 }
 
 function repriceCapacityCommand(database, args, statePath, resume = false) {
+  const commandName=resume?"resume-growth":"reprice-capacity";
   assertOnly(args, ["id", "path", "intent", "headroom-gib", "growth-mib", "json", ...(resume ? ["owner", "expected-plan-sha256"] : ["owner", "reduction", "reduction-sha256"])]);
   const intent = capacityIntent(args);
-  if (intent === null) fail("reprice-capacity requires explicit intent, headroom and remaining growth");
+  if (intent === null) growthError("invalid-capacity-request", `${commandName} requires explicit intent, headroom and remaining growth`);
   const reducing = !resume && args.named.has("reduction");
   let reduction = null;
   let reductionSha256 = null;
@@ -3237,7 +3253,10 @@ function repriceCapacityCommand(database, args, statePath, resume = false) {
     if (reductionSha256 !== required(args, "reduction-sha256")) growthError("growth-evidence-changed", "reduction bytes changed");
     try { reduction = JSON.parse(bytes); } catch { growthError("invalid-growth-reduction", "reduction must be JSON"); }
   } else if (!resume && (args.named.has("owner") || args.named.has("reduction-sha256"))) growthError("invalid-growth-reduction", "reduction evidence is required with reduction options");
-  const selected = reducing ? growthSelected(database, args) : recordBy(database, selectorFrom(args));
+  const selection=selectedArguments(commandName,{id:one(args,'id'),path:one(args,'path')});
+  if(!reducing&&!selection.ok)throw Object.assign(new GrowthLifecycleError(selection.error.code,selection.error.detail),{nextAction:selection.error.nextAction});
+  const selected = reducing ? growthSelected(database, args) : recordBy(database, selection.value.id===undefined?{path:selection.value.path}:{id:selection.value.id});
+  if(resume&&selection.value.path!==undefined&&selected.path!==path.resolve(selection.value.path))growthError("growth-identity-changed", "resume-growth id and path do not name the same workspace");
   return withWorkspaceLock(database, selected.path, () => {
     const record = recordBy(database, { id: selected.id });
     if (!["active", "referenced", "blocked", "repair-required"].includes(record.state)) fail(`workspace cannot reprice capacity from state ${record.state}`);
@@ -3248,8 +3267,8 @@ function repriceCapacityCommand(database, args, statePath, resume = false) {
     if (retainedParent(database,record.path)) growthError("growth-admission-required", "shared Git parent requires resume-growth admission");
     if (retired !== resume) growthError("growth-admission-required", retired ? "use explicit resume-growth admission" : "growth is not retired");
     if (resume && (record.owner !== required(args, "owner") || digest(row.plan_json) !== required(args, "expected-plan-sha256"))) growthError("stale-growth-disposition", "resume owner or plan changed");
-    const expandingBudget = ["source-only", "budgeted"].includes(oldPlan.intent) && (intent.intent === "budgeted" || (reducing && intent.intent === oldPlan.intent));
-    if (oldPlan.intent !== "unestimated" && !expandingBudget) fail("capacity repricing accepts unestimated plans or source-only/budgeted to budgeted expansion");
+    const expandingBudget = ["source-only", "budgeted"].includes(oldPlan.intent) && (intent.intent === "budgeted" || (reducing && intent.intent === oldPlan.intent) || (resume && oldPlan.intent === "source-only" && intent.intent === "source-only"));
+    if (oldPlan.intent !== "unestimated" && !expandingBudget) growthError("invalid-capacity-transition", resume ? "resume-growth accepts retired source-only to source-only or source-only/budgeted to budgeted admission" : "reprice-capacity accepts unestimated plans or source-only/budgeted to budgeted expansion");
     capacityRequirement(oldPlan, []);
     if (record.durableSourceCommit === null) fail("capacity repricing requires immutable source custody");
     const creationRequest = database.prepare("SELECT creation_request FROM workspace WHERE id=?").get(record.id).creation_request;
@@ -3484,7 +3503,8 @@ function cacheSafetyCommand(database,args,statePath) {
   print({ok:true,value:{kind:raw.errors.length?"safety-unknown":raw.references.length||raw.retainedBorrowers.length?"protected":"unreferenced",...observation}},true);
 }
 function leaseReleaseDisposition(item) {
-  return {...item,leaseRelease:item.record.leaseExpiresAt===0?{kind:"released",expiresAt:0}:{kind:"active",expiresAt:item.record.leaseExpiresAt},physicalDisposition:existsSync(item.record.path)?{kind:"retained",reason:item.inspection.reason}:{kind:"removed"}};
+  const cacheDisposition=item.cacheDisposition!==undefined?item.cacheDisposition:item.removedCaches===undefined?{kind:"not-attempted"}:item.removedCaches.length?{kind:"detached-for-retirement",paths:item.removedCaches,physicalReclaim:"not-measured"}:{kind:"none-selected",paths:[]};
+  return {...item,cacheDisposition,leaseRelease:item.record.leaseExpiresAt===0?{kind:"released",expiresAt:0}:{kind:"active",expiresAt:item.record.leaseExpiresAt},physicalDisposition:existsSync(item.record.path)?{kind:"retained",reason:item.inspection.reason}:{kind:"removed"}};
 }
 function workspaceCacheCommand(database,args,statePath,planning) {
   const flags=planning?["id","path","owner","cache","classification","operation-id","evidence","json"]:["id","path","owner","request","request-sha256","json"];
@@ -3812,7 +3832,7 @@ function help() {
   agent-workspace retire-cache --id ID --path PATH --owner OWNER --request FILE --request-sha256 SHA --json
   agent-workspace retire-source-materialization --id ID --path PATH --owner OWNER --request ABS_FILE --request-sha256 SHA --json
   agent-workspace retire-growth ${selectorSyntax("retire-growth")} --owner OWNER --disposition FILE --disposition-sha256 SHA [--json]
-  agent-workspace resume-growth (--id ID|--path PATH) --owner OWNER --expected-plan-sha256 SHA --intent budgeted --headroom-gib N --growth-mib N [--json]
+  agent-workspace resume-growth ${selectorSyntax("resume-growth")} --owner OWNER --expected-plan-sha256 SHA --intent source-only|budgeted --headroom-gib N --growth-mib N [--json]
   agent-workspace maintain [--root PATH | --path PATH] [--execute] [--json]
   agent-workspace status [--root PATH] [--path SUBSTRING] [--owner SUBSTRING] [--limit 100] [--after CURSOR|start] [--json]
   agent-workspace list ...                    alias for status

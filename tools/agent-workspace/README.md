@@ -2,6 +2,14 @@
 
 `agent-workspace` owns temporary Git clones and worktrees used by agents. It gives every checkout a lease, records its owner and durable source commit, blocks new allocation when disk or inode reserves are low, and removes a checkout only after proving that it has no unique local work. Processes, active systemd units, Docker containers, and durable work in this Unix person's thread databases count as live owners.
 
+## Resuming a retired writing budget
+
+`resume-growth (--id ID [--path PATH]|--path PATH)` requires explicit owner, current plan SHA, intent, remaining growth and headroom. If both selectors are supplied they must name the same original workspace. Shared CLI contracts generate its help and selector errors; errors name `resume-growth`.
+
+A retired source-only plan can explicitly resume as source-only or expand to budgeted; a retired budgeted plan resumes as budgeted. Fresh allocation/capacity admission, original owner/current plan, existing headroom and all original retained history remain required. A source-only resume does not manufacture a budgeted intent, lower admission floors or authorize dependency installation.
+
+Ordinary release honors unique/dirty/unpublished source custody before detaching generated caches. Explicit generated-only retirement retains its separate resource contract. If local tracking refs are stale, bounded read-only exact branch-head observations can prove remote custody without fetching or altering the checkout; unavailable/mismatched/unproven heads remain protected. Release JSON distinguishes lease release, source physical disposition and cache detachment-for-retirement (never inferred free bytes).
+
 ## Terminal release and bounded queue observation
 
 An explicit ordinary release transfers source intent to its durable Git/task custody; every single/group physical inspection keeps that resource scope. Actual reserved tools, native executions, unknown operations, FD/cwd readers and Git borrowers still retain the checkout. Dirty/unpublished source remains protected.
