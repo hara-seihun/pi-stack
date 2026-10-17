@@ -322,7 +322,7 @@ operation; the measured journal owns the released reservation.
 
 Retiring future growth preserves source/runtime custody. Plain release and automatic
 reconciliation keep that retention. When the owner finishes using the checkout,
-`growth-status --id ID --json` supplies its current plan hash. Use:
+`growth-status --id ID --path PATH --json` supplies its current plan hash. Use:
 
 ```sh
 agent-workspace release --id ID --end-retention --owner OWNER --expected-plan-sha256 SHA --json
