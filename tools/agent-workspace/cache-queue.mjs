@@ -41,12 +41,12 @@ export function toolSettlementSql(ids) {
  SELECT o.id,o.state,o.command_type,o.result AS operation_result,o.request_body,tc.run_id,tc.provider_call_id,tc.result AS tool_result,
  j.state AS owner_state,j.ownership_receipt,j.cessation_evidence
  FROM operation o JOIN tool_call tc ON tc.operation_id=o.id JOIN job j ON j.id=tc.run_id WHERE o.id IN (${selected})),
- children AS MATERIALIZED (SELECT j.id,j.operation_id,p.parent_run,p.parent_job,p.provider_call FROM job j
- CROSS JOIN LATERAL (SELECT t."parentJobId" AS parent_job,a."parentJobId" AS parent_run,a."toolCallId" AS provider_call
- FROM jsonb_to_record(j.spec) t(admitted jsonb,"parentJobId" text)
- LEFT JOIN LATERAL jsonb_to_record(t.admitted) a("parentJobId" text,"toolCallId" text) ON TRUE OFFSET 0) p
- WHERE j.operation_id IN (${selected}) OR p.parent_run IN (SELECT run_id FROM candidates)
- OR p.parent_job IN (SELECT run_id FROM candidates) OR p.provider_call IN (SELECT provider_call_id FROM candidates) LIMIT 65)
+ relation_keys AS MATERIALIZED (SELECT jsonb_build_object('runs',coalesce(jsonb_agg(run_id),'[]'::jsonb),'calls',coalesce(jsonb_agg(provider_call_id),'[]'::jsonb)) AS vars FROM candidates),
+ matching_child_ids AS MATERIALIZED (SELECT id FROM job WHERE operation_id IN (${selected})
+ OR jsonb_path_exists(spec,'$ ? (@.admitted.parentJobId == $runs[*] || @.parentJobId == $runs[*] || @.admitted.toolCallId == $calls[*])',(SELECT vars FROM relation_keys)) LIMIT 65),
+ children AS MATERIALIZED (SELECT j.id,j.state,j.kind,j.operation_id,j.ownership_receipt,j.cessation_evidence,
+ j.spec#>>'{admitted,parentJobId}' AS parent_run,j.spec->>'parentJobId' AS parent_job,j.spec#>>'{admitted,toolCallId}' AS provider_call
+ FROM matching_child_ids m CROSS JOIN LATERAL (SELECT * FROM job WHERE id=m.id OFFSET 0) j)
  SELECT json_build_object('candidates',coalesce((SELECT json_agg(c) FROM candidates c),'[]'::json),'children',coalesce((SELECT json_agg(c) FROM children c),'[]'::json)); ROLLBACK;`;
 }
 function terminalProjectionMatches(c,details) {
@@ -67,8 +67,16 @@ function terminalProjectionMatches(c,details) {
  default:return false;
  }
 }
+function terminalDistinctSibling(child,c) {
+ if(typeof child.operation_id!=='string'||!child.operation_id||child.operation_id===c.id||child.provider_call===c.provider_call_id||typeof child.provider_call!=='string'||!child.provider_call)return false;
+ if(!['completed','failed','cancelled','interrupted'].includes(child.state)||!['tool-bash','tool-browser','editor'].includes(child.kind))return false;
+ const owner=child.ownership_receipt,absence=child.cessation_evidence;
+ return owner&&typeof owner.invocationId==='string'&&owner.invocationId.length>0&&typeof owner.unit==='string'&&owner.unit.length>0
+  &&absence?.kind==='cgroup-empty'&&isDeepStrictEqual(absence.owner,owner);
+}
 export function settledToolOperationIds(evidence) {
  if(!evidence||!Array.isArray(evidence.candidates)||!Array.isArray(evidence.children)||evidence.children.length>=65)throw new Error('tool settlement observation incomplete');
+ if(evidence.children.some(child=>!evidence.candidates.some(c=>child.id===c.run_id||child.operation_id===c.id||child.parent_run===c.run_id||child.parent_job===c.run_id||child.provider_call===c.provider_call_id)))throw new Error('tool child relationship projection incomplete');
  const settled=new Set();
  for(const c of evidence.candidates){
   const result=c.tool_result,details=result?.details,original=details?.originalOperation,absence=c.cessation_evidence,owner=c.ownership_receipt;
@@ -81,7 +89,7 @@ export function settledToolOperationIds(evidence) {
    ||absence?.kind!=='absent'||!owner||typeof owner.invocationId!=='string'||!owner.invocationId||typeof owner.unit!=='string'||!owner.unit
    ||!isDeepStrictEqual(absence.owner,owner)||!isDeepStrictEqual(original.observation,absence)
    ||absence.proof?.kind!=='service-invocation-ended'||absence.proof.invocationId!==owner.invocationId||absence.proof.unit!==owner.unit)continue;
-  if(evidence.children.some(child=>child.id!==c.run_id&&(child.operation_id===c.id||child.parent_run===c.run_id||child.parent_job===c.run_id||child.provider_call===c.provider_call_id)))continue;
+  if(evidence.children.some(child=>child.id!==c.run_id&&(child.operation_id===c.id||child.parent_run===c.run_id||child.parent_job===c.run_id||child.provider_call===c.provider_call_id)&&!terminalDistinctSibling(child,c)))continue;
   settled.add(c.id);
  }
  return settled;

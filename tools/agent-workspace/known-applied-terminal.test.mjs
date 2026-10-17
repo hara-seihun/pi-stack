@@ -4,3 +4,14 @@ test('known-applied terminal exact field variant is action-scoped and never esta
 const changes={phase:d=>d.phase='unknown',agentRun:d=>d.originalAgentRunId='other',modelRun:d=>d.originalModelRun={kind:'known',id:'fabricated'},provider:d=>d.providerCallId='other',error:d=>d.error.code='other',resource:d=>d.error.resourceId='other',retry:d=>d.error.retry='always',replay:d=>d.replay=true,children:d=>d.children=['unknown'],cessation:d=>d.cessationEvidence={kind:'unknown'},effect:d=>d.knownEffect.kind='unknown',completion:d=>d.knownEffect.originalCallCompletion='success',path:d=>d.knownEffect.path='/other',hash:d=>d.knownEffect.sha256='b'.repeat(64),commit:d=>d.knownEffect.commit='invalid',export:d=>d.knownEffect.exported='relative',repository:d=>d.knownEffect.repository=null,evidence:d=>d.knownEffect.evidence=undefined};
 for(const [name,mutate] of Object.entries(changes))test('known-applied protects changed '+name,()=>{const e=evidence();mutate(e.candidates[0].tool_result.details);assert.equal(settledToolOperationIds(e).size,0);});
 for(const field of ['operation_id','parent_run','parent_job','provider_call'])test('known-applied protects actual '+field+' child edge',()=>{const e=evidence();e.children=[{id:'child',[field]:field==='operation_id'?'operation':field==='provider_call'?'provider':'agent-run'}];assert.equal(settledToolOperationIds(e).size,0);});
+
+test('only exactly proved terminal distinct-provider siblings stop pinning an unrelated call',()=>{
+ const e=evidence(),owner={unit:'sibling.service',invocationId:'b'.repeat(32)};
+ const sibling={id:'sibling',kind:'tool-bash',state:'completed',parent_run:'agent-run',operation_id:'different-operation',provider_call:'different-provider',ownership_receipt:owner,cessation_evidence:{kind:'cgroup-empty',owner}};
+ e.children=[sibling];assert.deepEqual([...settledToolOperationIds(e)],['operation']);
+ for(const change of [{provider_call:'provider'},{provider_call:null},{state:'running'},{state:'unknown'},{kind:'unknown'},{operation_id:'operation'},{operation_id:null},{cessation_evidence:null},{cessation_evidence:{kind:'absent',owner}},{cessation_evidence:{kind:'cgroup-empty',owner:{...owner,invocationId:'changed'}}}]){
+  e.children=[{...sibling,...change}];assert.equal(settledToolOperationIds(e).size,0,JSON.stringify(change));
+ }
+});
+
+test('unprojectable child evidence remains explicit unknown',()=>{const e=evidence();e.children=[{id:'unknown-child',parent_run:'[\"agent-run\"]'}];assert.throws(()=>settledToolOperationIds(e),/projection incomplete/);});
