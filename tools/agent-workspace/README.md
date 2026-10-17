@@ -42,6 +42,8 @@ An immutable uncertain operation remains uncertain. It stops counting as a poten
 
 The explicit known-applied-file terminal variant preserves an unknown original model run and the immutable uncertain operation. Its original agent run/provider call/cessation, exact requested path/content SHA, durable-file effect binding and terminal no-replay/no-child proof must agree. Unknown phases and mismatched evidence remain protected. Child projection extracts each job's top-level relation fields once before matching all operation/parent-run/parent-job/provider-call edges; both reads retain the4000ms cap.
 
+Physical queue observation uses the canonical relational job kind before fetching payloads: agent-run job specs need not repeat that discriminator. Physical scope selects only reserved tool IDs; completed current-run tools retain source scope. This removes unnecessary completed-tool and resident-agent payload work without dropping native execution or unknown-kind consumers.
+
 The queue query selects reserved/current-run tool-call IDs before fetching their payloads. A serialized exact-string prefilter precedes recursive JSON path matching; it never substitutes for that match. Terminal-tool evidence is fetched for the bounded returned operation IDs in a separate read-only query and classified once as data, rather than repeatedly joining full JSON receipts against every historical job. Child lookup still covers operation, parent-run, parent-job and provider-call bindings. Both reads keep the4000ms SQL cap and the original whole-operation deadline; incomplete/failed evidence is unknown safety. No database index/configuration or runtime mutation is needed.
 
 ## Checks

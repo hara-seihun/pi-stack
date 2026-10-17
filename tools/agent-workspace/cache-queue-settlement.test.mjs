@@ -15,7 +15,7 @@ test('actual PostgreSQL classifier distinguishes retained uncertainty from live,
  try{
   pg('initdb',['-D',data,'--username=fixture','--no-locale','--auth=trust','--no-sync']);
   pg('pg_ctl',['-D',data,'-l',path.join(root,'postgres.log'),'-o',`-F -k ${root} -c listen_addresses='' -c max_connections=10 -c shared_buffers=8MB`,'-w','start']);started=true;
-  let sql=`CREATE TABLE job(id text,state text,spec jsonb,operation_id text,ownership_receipt jsonb,cessation_evidence jsonb);
+  let sql=`CREATE TABLE job(id text,state text,spec jsonb,operation_id text,ownership_receipt jsonb,cessation_evidence jsonb,kind text);
 CREATE TABLE operation(id text,state text,command_type text,request_body jsonb,origin jsonb,result jsonb);
 CREATE TABLE tool_call(id text,run_id text,provider_call_id text,operation_id text,result jsonb,tool_name text,arguments jsonb);
 CREATE TABLE input(id text,state text,run_id text,content text,attachments jsonb,source jsonb);\n`;
@@ -42,17 +42,18 @@ CREATE TABLE input(id text,state text,run_id text,content text,attachments jsonb
     if(name==='known-applied-wrong-content')details.knownEffect.sha256='b'.repeat(64);
    }
    sql+=`INSERT INTO operation VALUES(${literal(id)},'uncertain',${literal(name==='source-intent'?'conversation.send':'agent.tool')},${json(body)},'{}',${json(name==='settled-projected'?result:original)});\n`;
-   sql+=`INSERT INTO job VALUES(${literal(ownerId)},${literal(state)},'{"kind":"agent-run"}',NULL,${json(ownership)},${cessation===null?'NULL':json(cessation)});\n`;
+   sql+=`INSERT INTO job VALUES(${literal(ownerId)},${literal(state)},'{"kind":"agent-run"}',NULL,${json(ownership)},${cessation===null?'NULL':json(cessation)},'agent-run');\n`;
    sql+=`INSERT INTO tool_call VALUES(${literal('tool-'+name)},${literal(ownerId)},${literal(provider)},${literal(id)},${result===null?'NULL':json(result)},'bash',${json(body.arguments)});\n`;
    if(['known-child','live-child','unknown-child','parent-linked-child','call-linked-child'].includes(name)){
     const spec=name==='parent-linked-child'?{admitted:{parentJobId:ownerId}}:name==='call-linked-child'?{admitted:{toolCallId:provider}}:{};
-    sql+=`INSERT INTO job VALUES(${literal('child-'+name)},${literal(name==='live-child'?'running':name==='unknown-child'?'unreachable':'completed')},${json(spec)},${['parent-linked-child','call-linked-child'].includes(name)?'NULL':literal(id)},NULL,'{}');\n`;
+    sql+=`INSERT INTO job VALUES(${literal('child-'+name)},${literal(name==='live-child'?'running':name==='unknown-child'?'unreachable':'completed')},${json(spec)},${['parent-linked-child','call-linked-child'].includes(name)?'NULL':literal(id)},NULL,'{}','bash');\n`;
    }
   }
   const query=sql=>pg('psql',['-X','-qAt','--host',root,'--username','fixture','--dbname','postgres','--set=ON_ERROR_STOP=1','--command',sql]);
+  sql+=`INSERT INTO job VALUES('source-job-without-spec-discriminator','running','{"cwd":"/fixture/source"}',NULL,NULL,NULL,'agent-run');\n`;
   query(sql);
   const lines=['physical-checkout','source'].map(kind=>{const rows=JSON.parse(query(queueReferenceSql('/fixture/source',null,kind)));const ids=rows.filter(r=>r.kind==='operation'&&r.state==='uncertain'&&r.resourceClass==='execution').map(r=>r.id);const settled=settledToolOperationIds(JSON.parse(query(toolSettlementSql(ids))));return rows.filter(r=>!settled.has(r.id));});
-  assert.equal(lines.length,2);const [physical,source]=lines;
+  assert.equal(lines.length,2);const [physical,source]=lines;assert.equal(physical.some(x=>x.id==='source-job-without-spec-discriminator'),false);assert.equal(source.some(x=>x.id==='source-job-without-spec-discriminator'),true);
   for(const [name,rows] of [['physical',physical],['source',source]]){
    const ids=new Set(rows.filter(x=>x.kind==='operation').map(x=>x.id));assert.equal(ids.has('operation-settled-nochild'),false,name);assert.equal(ids.has('operation-settled-projected'),false,name);assert.equal(ids.has('operation-settled-known-applied'),false,name);
    for(const key of names.filter(x=>x!=='settled-nochild'&&x!=='settled-projected'&&x!=='settled-known-applied'&&x!=='source-intent'))assert.equal(ids.has('operation-'+key),true,`${name}/${key}`);
