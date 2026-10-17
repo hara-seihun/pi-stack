@@ -26,8 +26,9 @@ import { homedir, tmpdir, userInfo } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
-import { runSourceJob, readSourceJobRequest, writeSourceJobProgress, finishSourceJob, sourceJobId, observeSourceJob } from "./source-job.mjs";
+import { runSourceJob, readSourceJobRequest, writeSourceJobProgress, finishSourceJob, sourceJobId } from "./source-job.mjs";
 import { capacityRecovery } from "./capacity-recovery.mjs";
+import { jobObserveCommand, observeWorkspaceJob } from "./job-observation.mjs";
 import { GrowthLifecycleError, digest, growthError, retainedGrowth, validateRetirement } from "./growth-lifecycle.mjs";
 
 class SourcePreparationRequired extends Error {}
@@ -2579,8 +2580,9 @@ function createCommand(database, args, statePath) {
       const active = command("systemctl", ["--user", "show", attempt.unit, "--property=ActiveState", "--value"], { timeout: 2500 });
       if (active.status === 0 && ["active", "activating", "deactivating"].includes(active.stdout)) {
         print({ ok: true, state: "creating", id: pending.id, path: destination,
-          jobId: entry.name, progressPath: path.join(job, "progress.json"),
-          nextAction: "Repeat this exact create request to observe the durable checkout job" }, true);
+          jobId: entry.name, jobKind: "checkout", progressPath: path.join(job, "progress.json"),
+          observeCommand: jobObserveCommand(entry.name),
+          nextAction: "Use job-status for read-only checkout observation; repeat create only to recover interrupted or failed work" }, true);
         process.exitCode = 75;
         return;
       }
@@ -2627,7 +2629,7 @@ function createWorkspace(database, args, statePath) {
     const preparation = withResourceLock(statePath, `source-preparation:${destination}`, () =>
       prepareCreationSource(database, args, { statePath, root, destination, repository, ref, upstream, mirror, intent, sparsePatterns }));
     if (preparation.state !== "ready") {
-      print({ ok: true, state: "preparing", jobId: preparation.jobId, progressPath: preparation.progressPath, resultPath: preparation.resultPath,
+      print({ ok: true, state: "preparing", jobKind: "source", jobId: preparation.jobId, progressPath: preparation.progressPath, resultPath: preparation.resultPath,
         observeCommand: `agent-workspace source-status --job-id ${preparation.jobId} --json`,
         nextAction: "Use source-status for authoritative terminal observation; repeat this exact create request to continue admission" }, true);
       process.exitCode = 75;
@@ -2726,8 +2728,9 @@ function createWorkspace(database, args, statePath) {
       fail(`checkout failed (${job.error.code}): ${job.error.message}; repeat the same create request to retry`);
     }
     print({ ok: true, state: "creating", id: row.id, path: destination,
-      jobId: job.jobId, progressPath: job.progressPath,
-      nextAction: "Repeat this exact create request to observe the durable checkout job" }, true);
+      jobId: job.jobId, jobKind: "checkout", progressPath: job.progressPath,
+      observeCommand: jobObserveCommand(job.jobId),
+      nextAction: "Use job-status for read-only checkout observation; repeat create only to recover interrupted or failed work" }, true);
     process.exitCode = 75;
     return;
   }
@@ -3431,6 +3434,7 @@ function help() {
   process.stdout.write(`Usage:
   agent-workspace create --root PATH --name NAME --repo URL [--ref GIT_REF] [--mode writer|review] [--group ID] [--cache PATH,...] [--creation-timeout-seconds 300] [--sparse-pattern PATTERN ...]
                          [--intent source-only|budgeted --headroom-gib N --growth-mib N]
+  agent-workspace job-status --job-id SHA256 [--json]
   agent-workspace source-status --job-id SHA256 [--json]
   agent-workspace register --path PATH [--owner ID] [--source-commit SHA] [--group ID] [--cache PATH,...] [--cache-owned OUTPUT=TRACKED_SOURCE] [--replace-cache]
   agent-workspace reassign --id ID --path PATH --from-owner ID --from-source-commit SHA|unset --from-state STATE
@@ -3454,7 +3458,7 @@ function help() {
 The registry defaults to ${DEFAULT_STATE}. Set PI_WORKSPACE_STATE to move it.
 Repeat --cache to declare ignored generated paths that release may remove; these extend the default cache set.
 Use a Git ref the source repository can fetch, such as refs/heads/main or a branch name, not origin/main.
-Clone checkout is a durable systemd user job; exit 75 with state creating means repeat the exact request.
+Clone checkout is a durable systemd user job; exit 75 with state creating includes a read-only job-status command.
 Checkout budgets scale with immutable path count and construction bytes; --creation-timeout-seconds accepts 1–86400.
 A caller timeout cannot interrupt it. New clones publish atomically; failed/interrupted staging is removed.
 Use repeatable --sparse-pattern PATTERN (Git non-cone patterns) to materialize only selected source paths.
@@ -3490,12 +3494,10 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
   }
   const args = parseArgs(rest);
   if (args.positional.length > 0) fail(`unexpected argument: ${args.positional[0]}`);
-  if (commandName === "source-status") {
+  if (commandName === "source-status" || commandName === "job-status") {
     assertOnly(args, ["job-id", "json"]);
     const jobId = required(args, "job-id");
-    if (!/^[0-9a-f]{64}$/u.test(jobId)) fail("--job-id must be a full source job SHA256");
-    const directory = path.join(path.dirname(statePath), "source-preparations", "jobs", jobId);
-    const result = observeSourceJob(directory);
+    const result = observeWorkspaceJob(statePath, jobId, commandName === "source-status" ? "source" : null);
     print({ jobId, ...result }, true);
     process.exitCode = result.state === "pending" ? 75 : result.state === "ready" ? 0 : 2;
     return;
