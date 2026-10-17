@@ -2,6 +2,12 @@
 
 `agent-workspace` owns temporary Git clones and worktrees used by agents. It gives every checkout a lease, records its owner and durable source commit, blocks new allocation when disk or inode reserves are low, and removes a checkout only after proving that it has no unique local work. Processes, active systemd units, Docker containers, and durable work in this Unix person's thread databases count as live owners.
 
+## Complete repricing observation
+
+Active reduction runs inside one explicit bounded operation: `--budget-ms 25000`, an integer from1 to40000. Workspace/group/capacity fence acquisition and Git observations share its absolute deadline. The final complete allocated-block walk under those fences gets the remaining budget minus2000ms for validation/commit and the same2000000-entry ceiling as explicit capacity measurement. Exhaustion returns an error before plan mutation; it never credits a partial walk. The original cached sample remains immutable, and accounting uses the maximum of cached and complete fresh allocation. All source/owner/lease/borrower/sample/plan/capacity and8GiB guards remain.
+
+Single-selector command errors name the actual command and distinguish both-supplied mutually exclusive flags from missing/invalid input. Heartbeat and release both reject ID+path; their rejection does not change a lease or release source.
+
 ## Resuming a retired writing budget
 
 `resume-growth (--id ID [--path PATH]|--path PATH)` requires explicit owner, current plan SHA, intent, remaining growth and headroom. If both selectors are supplied they must name the same original workspace. Shared CLI contracts generate its help and selector errors; errors name `resume-growth`.
@@ -33,6 +39,8 @@ Owned read-only staged directories (including0500 package payloads) are handled 
 ## Terminal uncertain tools and queue observation
 
 An immutable uncertain operation remains uncertain. It stops counting as a potential executing workspace consumer only after the supported terminal tool projection, exact original operation/run binding, matching ceased-owner receipt/proof and a complete zero-admitted-child observation agree. Both the retained-original and terminal-projected operation-result forms are recognized. Live, queued, missing-proof, changed-binding, known/unknown child and genuine source-intent references remain protected.
+
+The explicit known-applied-file terminal variant preserves an unknown original model run and the immutable uncertain operation. Its original agent run/provider call/cessation, exact requested path/content SHA, durable-file effect binding and terminal no-replay/no-child proof must agree. Unknown phases and mismatched evidence remain protected. Child projection extracts each job's top-level relation fields once before matching all operation/parent-run/parent-job/provider-call edges; both reads retain the4000ms cap.
 
 The queue query selects reserved/current-run tool-call IDs before fetching their payloads. A serialized exact-string prefilter precedes recursive JSON path matching; it never substitutes for that match. Terminal-tool evidence is fetched for the bounded returned operation IDs in a separate read-only query and classified once as data, rather than repeatedly joining full JSON receipts against every historical job. Child lookup still covers operation, parent-run, parent-job and provider-call bindings. Both reads keep the4000ms SQL cap and the original whole-operation deadline; incomplete/failed evidence is unknown safety. No database index/configuration or runtime mutation is needed.
 

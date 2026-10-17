@@ -549,8 +549,8 @@ function registerWorkspace(database, input, inspectedInfo) {
   return record;
 }
 
-function selectorFrom(args) {
-  const selected=selectedArguments('release',{id:one(args,'id'),path:one(args,'path')});
+function selectorFrom(args, command) {
+  const selected=selectedArguments(command,{id:one(args,'id'),path:one(args,'path')});
   if(!selected.ok)throw Object.assign(new GrowthLifecycleError(selected.error.code,selected.error.detail),{nextAction:selected.error.nextAction});
   return selected.value;
 }
@@ -3005,7 +3005,7 @@ function completeCreation(database, id, repository, leaseSeconds, detail, args) 
 
 function finalizeCreationCommand(database, args, statePath) {
   assertOnly(args, ["id", "path", "json"]);
-  const record = recordBy(database, selectorFrom(args));
+  const record = recordBy(database, selectorFrom(args, 'finalize-creation'));
   if (record.state === "active") {
     print(creationRecord(database, record.id), bool(args, "json"));
     return;
@@ -3040,7 +3040,7 @@ function finalizeCreationCommand(database, args, statePath) {
 
 function cancelCreationCommand(database, args) {
   assertOnly(args, ["id", "path", "json"]);
-  const record = recordBy(database, selectorFrom(args));
+  const record = recordBy(database, selectorFrom(args, 'cancel-creation'));
   if (record.state !== "creating") fail(`workspace cannot cancel creation from state ${record.state}`);
   const statePath = registryPaths.get(database);
   const jobs = path.join(path.dirname(statePath), "checkout-jobs", record.id);
@@ -3068,7 +3068,7 @@ function cancelCreationCommand(database, args) {
 
 function heartbeatCommand(database, args) {
   assertOnly(args, ["id", "path", "lease-seconds", "json"]);
-  const record = recordBy(database, selectorFrom(args));
+  const record = recordBy(database, selectorFrom(args, 'heartbeat'));
   if (["released", "reclaiming", "creating"].includes(record.state)) fail(`workspace cannot renew from state ${record.state}`);
   if (!existsSync(record.path)) fail(`workspace path is absent: ${record.path}`);
   const now = Date.now();
@@ -3257,7 +3257,7 @@ function releaseCommand(database, args, statePath) {
   assertOnly(args, ["id", "path", "reap-expired", "preserve-runtime", "json", "end-retention", "owner", "expected-plan-sha256"]);
   if (bool(args, "end-retention")) {
     if (bool(args, "reap-expired")) growthError("invalid-retention-release", "terminal retained release never stops runtime references");
-    const result = terminalRetentionRelease(database, recordBy(database, selectorFrom(args)), args, statePath);
+    const result = terminalRetentionRelease(database, recordBy(database, selectorFrom(args, 'release')), args, statePath);
     print(result, bool(args, "json"));
     if (!result.ok) process.exitCode = 2;
     return;
@@ -3265,7 +3265,7 @@ function releaseCommand(database, args, statePath) {
   if (one(args, "owner") !== undefined || one(args, "expected-plan-sha256") !== undefined) {
     growthError("invalid-retention-release", "owner/plan binding requires explicit --end-retention");
   }
-  const record = recordBy(database, selectorFrom(args));
+  const record = recordBy(database, selectorFrom(args, 'release'));
   const records = recordsInGroup(database, record);
   if (records.some(candidate => generatedOnlySourceCustody(database, candidate.id) || recordRetainsCustody(database, candidate.id) || retainedParent(database,candidate.path))) {
     const results = records.map(retainedCustodyResult);
@@ -3311,7 +3311,10 @@ function pruneReleased(database, now = Date.now(), root) {
 
 function repriceCapacityCommand(database, args, statePath, resume = false) {
   const commandName=resume?"resume-growth":"reprice-capacity";
-  assertOnly(args, ["id", "path", "intent", "headroom-gib", "growth-mib", "json", ...(resume ? ["owner", "expected-plan-sha256"] : ["owner", "reduction", "reduction-sha256"])]);
+  assertOnly(args, ["id", "path", "intent", "headroom-gib", "growth-mib", "budget-ms", "json", ...(resume ? ["owner", "expected-plan-sha256"] : ["owner", "reduction", "reduction-sha256"])]);
+  const budgetMs = numberFlag(args, "budget-ms", 25_000);
+  if (!Number.isSafeInteger(budgetMs) || budgetMs < 1 || budgetMs > 40_000) growthError("invalid-observation-budget", "--budget-ms must be an integer between 1 and 40000");
+  const deadline = Date.now() + budgetMs;
   const intent = capacityIntent(args);
   if (intent === null) growthError("invalid-capacity-request", `${commandName} requires explicit intent, headroom and remaining growth`);
   const reducing = !resume && args.named.has("reduction");
@@ -3327,7 +3330,7 @@ function repriceCapacityCommand(database, args, statePath, resume = false) {
   if(!reducing&&!selection.ok)throw Object.assign(new GrowthLifecycleError(selection.error.code,selection.error.detail),{nextAction:selection.error.nextAction});
   const selected = reducing ? growthSelected(database, args) : recordBy(database, selection.value.id===undefined?{path:selection.value.path}:{id:selection.value.id});
   if(resume&&selection.value.path!==undefined&&selected.path!==path.resolve(selection.value.path))growthError("growth-identity-changed", "resume-growth id and path do not name the same workspace");
-  return withWorkspaceLock(database, selected.path, () => {
+  return duringInspection(deadline, () => withWorkspaceLock(database, selected.path, () => {
     const record = recordBy(database, { id: selected.id });
     if (!["active", "referenced", "blocked", "repair-required"].includes(record.state)) fail(`workspace cannot reprice capacity from state ${record.state}`);
     const row = database.prepare("SELECT device_id,plan_json FROM workspace_capacity WHERE workspace_id=?").get(record.id);
@@ -3353,7 +3356,7 @@ function repriceCapacityCommand(database, args, statePath, resume = false) {
       const sample = JSON.parse(database.prepare("SELECT measurement_json FROM workspace_capacity_measurement WHERE workspace_id=?").get(record.id).measurement_json);
       // Recheck actual allocation under the same filesystem fence. Keep the bound
       // cache immutable, and never credit a deletion behind that cache implicitly.
-      const currentSample = reducing ? workspaceAllocationSample(record.path, row.device_id) : sample;
+      const currentSample = reducing ? workspaceAllocationSample(record.path, row.device_id, {deadline:deadline - 2_000,maxEntries:2_000_000}) : sample;
       if (!currentSample.ok) growthError("growth-sample-required", currentSample.error);
       const accountedBytes = Math.max(sample.bytes, currentSample.bytes);
       const sampledGrowthBytes = Math.max(0, accountedBytes - capacityAllocationBaseline(plan, record.state));
@@ -3395,9 +3398,9 @@ function repriceCapacityCommand(database, args, statePath, resume = false) {
           .run(record.id, Date.now(), row.plan_json, JSON.stringify(plan), JSON.stringify(sample));
         database.exec("COMMIT");
       } catch (error) { database.exec("ROLLBACK"); throw error; }
-    });
+    }, deadline);
     print(creationRecord(database, record.id), bool(args, "json"));
-  }, selected.groupId);
+  }, selected.groupId, deadline));
 }
 
 
@@ -3703,7 +3706,7 @@ function measureCapacityCommand(database, args, statePath) {
   const budgetMs = numberFlag(args, "budget-ms", 40_000);
   if (!Number.isSafeInteger(budgetMs) || budgetMs < 1 || budgetMs > 300_000) fail("--budget-ms must be between 1 and 300000");
   const deadline = Date.now() + budgetMs;
-  const selected = one(args, "id") !== undefined || one(args, "path") !== undefined ? recordBy(database, selectorFrom(args)).id : null;
+  const selected = one(args, "id") !== undefined || one(args, "path") !== undefined ? recordBy(database, selectorFrom(args, 'measure-capacity')).id : null;
   const root = one(args, "root") === undefined ? null : path.resolve(one(args, "root"));
   return withResourceLock(statePath, "capacity-measurement", () => {
     const rows = database.prepare(`SELECT w.id,w.path,w.state,w.group_id,c.device_id,c.plan_json FROM workspace w
@@ -3744,7 +3747,7 @@ function reconcileCommand(database, args, statePath) {
   const execute = bool(args, "execute");
   if (execute) pruneReleased(database, Date.now(), one(args, "root"));
   let records;
-  if (one(args, "id") !== undefined || one(args, "path") !== undefined) records = [recordBy(database, selectorFrom(args))];
+  if (one(args, "id") !== undefined || one(args, "path") !== undefined) records = [recordBy(database, selectorFrom(args, 'reconcile'))];
   else records = listRecords(database, one(args, "root"));
   records = records.filter((record) => record.state !== "released" || existsSync(record.path));
   const scope = one(args, "root") === undefined ? "*" : path.resolve(one(args, "root"));
@@ -3786,7 +3789,7 @@ function reconcileCommand(database, args, statePath) {
 function maintainCommand(database, args) {
   assertOnly(args, ["root", "id", "path", "execute", "json"]);
   const records = one(args, "id") !== undefined || one(args, "path") !== undefined
-    ? [recordBy(database, selectorFrom(args))] : listRecords(database, one(args, "root"));
+    ? [recordBy(database, selectorFrom(args, 'maintain'))] : listRecords(database, one(args, "root"));
   const results = [];
   for (const record of records) {
     try {
@@ -3888,14 +3891,15 @@ function help() {
   agent-workspace adopt --root PATH [--mode writer|review] [--nested-groups] [--cache PATH,...] [--cache-owned OUTPUT=TRACKED_SOURCE] [--replace-cache] [--execute]
   agent-workspace cancel-creation (--id ID|--path PATH)
   agent-workspace finalize-creation (--id ID|--path PATH)
-  agent-workspace heartbeat (--id ID|--path PATH) [--lease-seconds N]
+  agent-workspace heartbeat ${selectorSyntax("heartbeat")} [--lease-seconds N]
   agent-workspace release (--id ID|--path PATH) [--reap-expired] [--preserve-runtime]
   agent-workspace release ${selectorSyntax("release")} --end-retention --owner OWNER --expected-plan-sha256 SHA [--json]
   agent-workspace reconcile [--root PATH] [--execute] [--reap-expired] [--preserve-runtime]
                             [--budget-ms 20000] [--max-groups 32] [--after ID|start]
   agent-workspace measure-capacity [--root PATH | --path PATH | --id ID] [--budget-ms 40000] [--json]
-  agent-workspace reprice-capacity (--id ID|--path PATH) --intent source-only|budgeted --headroom-gib N --growth-mib N [--json]
+  agent-workspace reprice-capacity ${selectorSyntax("reprice-capacity")} --intent source-only|budgeted --headroom-gib N --growth-mib N [--json]
   Active reduction additionally requires --id ID --path PATH --owner OWNER --reduction FILE --reduction-sha256 SHA256
+                            [--budget-ms 25000]
   agent-workspace growth-status ${selectorSyntax("growth-status")} [--json]
   agent-workspace cache-safety --id ID --path PATH --owner OWNER (--cache RELATIVE|--request FILE --request-sha256 SHA) --json
   agent-workspace cache-plan --id ID --path PATH --owner OWNER --cache RELATIVE --classification node-dependencies|declared-build-cache --operation-id ID --evidence TEXT --json
@@ -4016,7 +4020,7 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
     else if (commandName === "reassign") reassignCommand(database, args);
     else if (commandName === "adopt") adoptCommand(database, args, statePath);
     else if (["heartbeat", "release", "cancel-creation", "finalize-creation"].includes(commandName)) {
-      const record = recordBy(database, selectorFrom(args));
+      const record = recordBy(database, selectorFrom(args, commandName));
       withWorkspaceLock(database, record.path, () => {
         if (commandName === "heartbeat") heartbeatCommand(database, args);
         else if (commandName === "cancel-creation") cancelCreationCommand(database, args);

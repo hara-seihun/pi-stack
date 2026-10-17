@@ -1,5 +1,5 @@
 const selectors={single:{kind:'exactly-one',flags:['id','path']},bound:{kind:'all',flags:['id','path']}};
-export const cliContracts={release:{selector:selectors.single},'retire-growth':{selector:selectors.bound},'growth-status':{selector:selectors.bound},'resume-growth':{selector:{kind:'one-or-both',flags:['id','path']}},'reprice-capacity':{selector:selectors.single}};
+export const cliContracts={heartbeat:{selector:selectors.single},'cancel-creation':{selector:selectors.single},'finalize-creation':{selector:selectors.single},'measure-capacity':{selector:selectors.single},reconcile:{selector:selectors.single},maintain:{selector:selectors.single},release:{selector:selectors.single},'retire-growth':{selector:selectors.bound},'growth-status':{selector:selectors.bound},'resume-growth':{selector:{kind:'one-or-both',flags:['id','path']}},'reprice-capacity':{selector:selectors.single}};
 export function selectorSyntax(command) {
  const s=cliContracts[command].selector,parts=s.flags.map(key=>'--'+key+' '+key.toUpperCase());
  if(s.kind==='exactly-one')return '('+parts.join('|')+')';
@@ -11,7 +11,8 @@ export function selectedArguments(command,values) {
  const contract=cliContracts[command];if(!contract)return {ok:false,error:{code:'invalid-selector-contract',detail:command}};
  const selected=Object.fromEntries(contract.selector.flags.filter(key=>values[key]!==undefined).map(key=>[key,values[key]]));
  let valid;switch(contract.selector.kind){case 'exactly-one':valid=Object.keys(selected).length===1;break;case 'all':valid=Object.keys(selected).length===contract.selector.flags.length;break;case 'one-or-both':valid=Object.keys(selected).length>=1;break;default:return {ok:false,error:{code:'invalid-selector-contract',detail:command}};}
- if(!valid||Object.values(selected).some(value=>typeof value!=='string'||value.length===0))return {ok:false,error:{code:'invalid-workspace-selector',detail:command+' requires '+selectorSyntax(command),nextAction:{kind:'correct-arguments',command,selector:contract.selector}}};
+ const both=contract.selector.kind==='exactly-one'&&Object.keys(selected).length>1;
+ if(!valid||Object.values(selected).some(value=>typeof value!=='string'||value.length===0))return {ok:false,error:{code:'invalid-workspace-selector',detail:both?command+' accepts exactly one selector; --id and --path were both supplied; use '+selectorSyntax(command):command+' requires '+selectorSyntax(command),nextAction:{kind:'correct-arguments',command,selector:contract.selector}}};
  return {ok:true,value:selected};
 }
 export function futureGrowthAction(record) {

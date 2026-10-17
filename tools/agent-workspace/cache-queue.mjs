@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import {createHash} from 'node:crypto';
 import path from 'node:path';
 import {isDeepStrictEqual} from 'node:util';
 import {boundedCommand} from './bounded-command.mjs';
@@ -37,14 +38,34 @@ export function toolSettlementSql(ids) {
  const selected=ids.map(literal).join(',');
  return `BEGIN READ ONLY; SET LOCAL statement_timeout='4000ms';
  WITH candidates AS MATERIALIZED (
- SELECT o.id,o.state,o.command_type,o.result AS operation_result,tc.run_id,tc.provider_call_id,tc.result AS tool_result,
+ SELECT o.id,o.state,o.command_type,o.result AS operation_result,o.request_body,tc.run_id,tc.provider_call_id,tc.result AS tool_result,
  j.state AS owner_state,j.ownership_receipt,j.cessation_evidence
  FROM operation o JOIN tool_call tc ON tc.operation_id=o.id JOIN job j ON j.id=tc.run_id WHERE o.id IN (${selected})),
- children AS MATERIALIZED (SELECT id,operation_id,spec#>>'{admitted,parentJobId}' AS parent_run,spec->>'parentJobId' AS parent_job,
- spec#>>'{admitted,toolCallId}' AS provider_call FROM job
- WHERE operation_id IN (${selected}) OR spec#>>'{admitted,parentJobId}' IN (SELECT run_id FROM candidates)
- OR spec->>'parentJobId' IN (SELECT run_id FROM candidates) OR spec#>>'{admitted,toolCallId}' IN (SELECT provider_call_id FROM candidates) LIMIT 65)
+ children AS MATERIALIZED (SELECT j.id,j.operation_id,p.parent_run,p.parent_job,p.provider_call FROM job j
+ CROSS JOIN LATERAL (SELECT t."parentJobId" AS parent_job,a."parentJobId" AS parent_run,a."toolCallId" AS provider_call
+ FROM jsonb_to_record(j.spec) t(admitted jsonb,"parentJobId" text)
+ LEFT JOIN LATERAL jsonb_to_record(t.admitted) a("parentJobId" text,"toolCallId" text) ON TRUE OFFSET 0) p
+ WHERE j.operation_id IN (${selected}) OR p.parent_run IN (SELECT run_id FROM candidates)
+ OR p.parent_job IN (SELECT run_id FROM candidates) OR p.provider_call IN (SELECT provider_call_id FROM candidates) LIMIT 65)
  SELECT json_build_object('candidates',coalesce((SELECT json_agg(c) FROM candidates c),'[]'::json),'children',coalesce((SELECT json_agg(c) FROM children c),'[]'::json)); ROLLBACK;`;
+}
+function terminalProjectionMatches(c,details) {
+ switch(details?.phase) {
+ case 'recovered-tool-terminal-observation':return details.originalRunId===c.run_id;
+ case 'recovered-known-applied-tool-terminal-observation': {
+  const effect=details.knownEffect,request=c.request_body;
+  return details.originalAgentRunId===c.run_id&&isDeepStrictEqual(details.originalModelRun,{kind:'unknown'})
+   &&details.providerCallId===c.provider_call_id&&c.tool_result.terminate===false
+   &&details.error?.code==='outcome_uncertain'&&details.error.resourceId===c.id
+   &&isDeepStrictEqual(details.cessationEvidence,c.cessation_evidence)
+   &&effect?.kind==='known-applied-file'&&effect.originalCallCompletion==='not-established'
+   &&request?.name==='write'&&typeof request.arguments?.content==='string'&&effect.path===request.arguments.path
+   &&[effect.path,effect.exported,effect.repository,effect.evidence].every(p=>typeof p==='string'&&path.isAbsolute(p))
+   &&typeof effect.commit==='string'&&/^[a-f0-9]{40}$/.test(effect.commit)
+   &&effect.sha256===createHash('sha256').update(request.arguments.content,'utf8').digest('hex');
+ }
+ default:return false;
+ }
 }
 export function settledToolOperationIds(evidence) {
  if(!evidence||!Array.isArray(evidence.candidates)||!Array.isArray(evidence.children)||evidence.children.length>=65)throw new Error('tool settlement observation incomplete');
@@ -52,7 +73,7 @@ export function settledToolOperationIds(evidence) {
  for(const c of evidence.candidates){
   const result=c.tool_result,details=result?.details,original=details?.originalOperation,absence=c.cessation_evidence,owner=c.ownership_receipt;
   if(c.state!=='uncertain'||c.command_type!=='agent.tool'||result?.isError!==true||details?.error?.retry!=='never'
-   ||details?.phase!=='recovered-tool-terminal-observation'||details.operationId!==c.id||details.originalRunId!==c.run_id
+   ||!terminalProjectionMatches(c,details)||details.operationId!==c.id
    ||details.replay!==false||!Array.isArray(details.children)||details.children.length!==0
    ||(!isDeepStrictEqual(c.operation_result,result)&&!isDeepStrictEqual(c.operation_result,original))
    ||original?.kind!=='execution-interrupted'||original.jobId!==c.run_id

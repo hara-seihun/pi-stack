@@ -66,7 +66,13 @@ for (const [priorIntent, nextIntent] of [['source-only','budgeted'],['source-onl
  assert.throws(()=>run(['reprice-capacity','--id',r3.id,'--intent','budgeted','--growth-mib','64','--headroom-gib','8','--json']),{code:'workspace-capacity-refused'});
  assert.equal(db.prepare('SELECT plan_json FROM workspace_capacity WHERE workspace_id=?').get(r3.id).plan_json,JSON.stringify(freshPlan));untouched();
  const otherBefore=db.prepare('SELECT * FROM workspace WHERE id=?').get(r2.id);
- const result=reduce(d);const next=result.capacity;
+ assert.throws(()=>reduce(d,['--budget-ms','500']),{code:'growth-sample-required'});untouched();
+ for(let i=0;i<80;i++)writeFileSync(path.join(source,'clock-leaf-'+i),'all allocated entries counted');
+ const realNow=Date.now;let clock=realNow(),result;
+ try{Date.now=()=>clock+=20;result=reduce(d);}finally{Date.now=realNow;}
+ const next=result.capacity;
+ assert.ok(next.repricing.currentMeasurement.completedAt-next.repricing.currentMeasurement.startedAt>500);
+
  assert.equal(next.growthBytes,61612032-10416128+64*M);assert.equal(next.repricing.currentMeasurement.ok,true);assert.ok(next.repricing.currentMeasurement.bytes>0);assert.equal(next.repricing.currentMeasurement.inode,String(stats.ino));assert.equal(next.completedAllocationBytes,plan.completedAllocationBytes);assert.equal(next.sourceImportBytes,plan.sourceImportBytes);assert.equal(next.constructionBytes,plan.constructionBytes);assert.equal(next.sourceCommit,plan.sourceCommit);assert.equal(next.headroomBytes,plan.headroomBytes);assert.equal(next.growthLifecycle,undefined);
  assert.equal(next.admission.reservedBytes,1000000*M);assert.ok(next.admission.requiredBytes>=8*1024**3+1000000*M+64*M);
  assert.equal(next.admission.kind,'monotone-reduction');assert.equal(next.admission.newWritesAuthorized,false);
