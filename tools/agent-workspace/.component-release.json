@@ -1,0 +1,7 @@
+{
+  "component": "agent-workspace",
+  "baseline": "6ed8f2d5ea262bdddebc0d7e5df498624085b0d8",
+  "sourceCommit": "0cc3c0a926e476cdf17b44ad0e1ee11f61de716e",
+  "deployedAt": 1792196354833,
+  "scope": "tools-only; other tool bodies and dependency links retained"
+}

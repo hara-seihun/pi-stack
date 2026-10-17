@@ -28,8 +28,9 @@ import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import { runSourceJob, readSourceJobRequest, writeSourceJobProgress, finishSourceJob, sourceJobId } from "./source-job.mjs";
 import { capacityRecovery } from "./capacity-recovery.mjs";
+import { retireSourceMaterialization, validateMaterializationRequest, MaterializationError } from "./source-materialization.mjs";
 import { jobObserveCommand, observeWorkspaceJob } from "./job-observation.mjs";
-import { GrowthLifecycleError, digest, growthError, retainedGrowth, validateRetirement } from "./growth-lifecycle.mjs";
+import { GrowthLifecycleError, digest, growthError, retainedGrowth, validateRetirement, validateReduction } from "./growth-lifecycle.mjs";
 
 class SourcePreparationRequired extends Error {}
 let sourcePreparationMode = null;
@@ -588,7 +589,8 @@ function within(root, candidate) {
   return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }
 
-function processSnapshot(strict = false, workspacePath = null) {
+function processSnapshot(strict = false, workspacePath = null, fdAccess = "write") {
+  if (!["write", "all"].includes(fdAccess)) growthError("growth-writer-unknown", "unknown FD observation mode");
   if (!existsSync("/proc")) { if (strict) growthError("growth-writer-unknown", "/proc unavailable"); return []; }
   const ignored = processAncestry();
   const uid = process.getuid?.();
@@ -618,7 +620,7 @@ function processSnapshot(strict = false, workspacePath = null) {
           if (workspacePath && path.isAbsolute(target) && (Array.isArray(workspacePath) ? workspacePath : [workspacePath]).some(root => within(root, target))) {
             const flags = readFileSync(`${root}/fdinfo/${fd}`, "utf8").match(/^flags:\s+([0-7]+)$/mu)?.[1];
             if (flags === undefined) growthError("growth-writer-unknown", `unknown fd flags ${pid}/${fd}`);
-            if ((parseInt(flags,8) & 3) !== 0) writableFiles.push(target);
+            if (fdAccess === "all" || (parseInt(flags,8) & 3) !== 0) writableFiles.push(target);
           }
         }
       }
@@ -1236,7 +1238,7 @@ function inspectRecord(record, options = {}) {
 }
 
 function reconcileRecord(database, record, options) {
-  if (recordRetainsCustody(database, record.id) || retainedParent(database,record.path)) return retainedCustodyResult(record);
+  if (generatedOnlySourceCustody(database, record.id) || recordRetainsCustody(database, record.id) || retainedParent(database,record.path)) return retainedCustodyResult(record);
   let safety = options.safety;
   let inspection = inspectRecord(record, { ignoreLease: options.ignoreLease, safety, deadline: options.deadline });
   if (inspection.classification === "active") return { record, inspection, action: "none" };
@@ -1315,7 +1317,7 @@ function groupInspectionOptions(record, records, options) {
 }
 
 function groupReconciliation(database, records, options) {
-  if (records.some(record => recordRetainsCustody(database, record.id) || retainedParent(database,record.path))) return records.map(retainedCustodyResult);
+  if (records.some(record => generatedOnlySourceCustody(database, record.id) || recordRetainsCustody(database, record.id) || retainedParent(database,record.path))) return records.map(retainedCustodyResult);
   const now = Date.now();
   let safety = options.safety;
   const groupId = records[0]?.groupId;
@@ -1459,7 +1461,7 @@ function reconcileRecords(database, selected, options) {
     try {
       results.push(...withWorkspaceLock(database, selectedRecord.path, () => {
         const current = recordsInGroup(database, recordBy(database, { id: selectedRecord.id }));
-        const maintenance = duringInspection(options.deadline, () => new Map(current.map((record) => [record.id, maintainReferenceClone(record.path, options.execute, options.statePath)])));
+        const maintenance = duringInspection(options.deadline, () => new Map(current.map((record) => [record.id, generatedOnlySourceCustody(database, record.id) || recordRetainsCustody(database, record.id) || retainedParent(database, record.path) ? "retained-custody" : maintainReferenceClone(record.path, options.execute, options.statePath)])));
         const reconciled = current.length > 1 ? groupReconciliation(database, current, options)
           : current.length === 1 ? [reconcileRecord(database, current[0], options)] : [];
         return reconciled.map((result) => ({
@@ -2037,7 +2039,30 @@ function capacityReservations(database, device, reservedPath, measure) {
   return { priced, headroomBytes, unpricedDormant, ...(measurementFailures.length ? { measurementFailures } : {}) };
 }
 
-function assertCapacity(root, args, database, reservedPath, plan) {
+// Diagnostic projection only: the admission decision still uses capacityRequirement.
+// Preserve absent source estimates explicitly, and never infer import bytes from
+// requested future growth. These are the SAME reservations used by the refusal.
+function capacityRefusalDetails(plan, reservations) {
+  const requiredBytes = capacityRequirement(plan, reservations.priced, reservations.headroomBytes);
+  const unestimated = plan.intent === "unestimated";
+  return {
+    requiredBytes,
+    constructionBytes: unestimated ? 0 : plan.constructionBytes,
+    growthBytes: plan.growthBytes,
+    requestedHeadroomBytes: plan.headroomBytes,
+    sharedHeadroomBytes: reservations.headroomBytes,
+    effectiveHeadroomBytes: Math.max(plan.headroomBytes, reservations.headroomBytes,
+      unestimated ? plan.constructionBytes : 0),
+    otherReservationsBytes: reservations.priced.reduce((sum, bytes) => sum + bytes, 0),
+    otherReservationBytes: [...reservations.priced],
+    unpricedDormant: reservations.unpricedDormant,
+    measurementFailures: reservations.measurementFailures === undefined ? [] : reservations.measurementFailures,
+    sourceImport: plan.sourceImportBytes === undefined ? { state: "unset" } : { state: "set", bytes: plan.sourceImportBytes },
+    sourceForecast: unestimated ? { state: "unset" } : { state: "set", plan },
+  };
+}
+
+function assertCapacity(root, args, database, reservedPath, plan, replacedPlan) {
   mkdirSync(root, { recursive: true });
   const maxCount = numberFlag(args, "max-count", DEFAULT_MAX_COUNT);
   if (maxCount > 0) {
@@ -2056,11 +2081,36 @@ function assertCapacity(root, args, database, reservedPath, plan) {
   const freeBytes = stats.bavail * stats.bsize;
   const minimum = Math.ceil(numberFlag(args, "min-free-gib", DEFAULT_MIN_FREE_GIB) * 1024 ** 3);
   const requirement = capacityRequirement(plan ?? { intent: "unestimated", constructionBytes: minimum, headroomBytes: 0, growthBytes: 0 }, reservations.priced, reservations.headroomBytes);
-  if (freeBytes < requirement) throw Object.assign(new CliError(`${(freeBytes / 1024 ** 3).toFixed(2)} GiB is free; ${(requirement / 1024 ** 3).toFixed(2)} GiB is required${plan?.intent !== undefined && plan.intent !== "unestimated" ? " (source forecast + declared growth + operating headroom + other reservations)" : " (unestimated full work + other reservations)"}`), { code: "workspace-capacity-refused", capacity: { freeBytes, requiredBytes: requirement, device, observedAt: Date.now() } });
+  let reductionEvidence;
+  if (replacedPlan !== undefined) {
+    // Both requirements use ONE physical observation and ONE unchanged set of
+    // other reservations. This retires existing liability; it creates no space
+    // and grants no new writes even when the host is already oversubscribed.
+    const previousRequiredBytes = capacityRequirement(replacedPlan, reservations.priced, reservations.headroomBytes);
+    const deficitBytesBefore = Math.max(0, previousRequiredBytes - freeBytes);
+    const deficitBytesAfter = Math.max(0, requirement - freeBytes);
+    if (plan.constructionBytes !== 0 || replacedPlan.constructionBytes !== 0 ||
+        plan.growthBytes >= replacedPlan.growthBytes || requirement >= previousRequiredBytes ||
+        plan.headroomBytes < Math.max(replacedPlan.headroomBytes, 8 * 1024 ** 3) ||
+        deficitBytesAfter > deficitBytesBefore) {
+      growthError("unsafe-growth-reduction", "replacement must strictly lower existing liability without worsening the capacity deficit");
+    }
+    reductionEvidence = {kind:"monotone-reduction", previousRequiredBytes, deficitBytesBefore, deficitBytesAfter,
+      releasedReservationBytes:previousRequiredBytes-requirement, newWritesAuthorized:false};
+  }
+  if (replacedPlan === undefined && freeBytes < requirement) {
+    const capacity = { freeBytes, requiredBytes: requirement, device, observedAt: Date.now(),
+      breakdown: capacityRefusalDetails(plan ?? { intent: "unestimated", constructionBytes: minimum, headroomBytes: 0, growthBytes: 0 }, reservations) };
+    // The guarded create wrapper preserves stderr but not thrown object fields.
+    // Carry the complete typed observation in both retained forecast and stderr,
+    // without another filesystem/reservation read or a new admission attempt.
+    throw Object.assign(new CliError(`${(freeBytes / 1024 ** 3).toFixed(2)} GiB is free; ${(requirement / 1024 ** 3).toFixed(2)} GiB is required${plan?.intent !== undefined && plan.intent !== "unestimated" ? " (source forecast + declared growth + operating headroom + other reservations)" : " (unestimated full work + other reservations)"}\ncapacity-detail: ${JSON.stringify(capacity)}`),
+      { code: "workspace-capacity-refused", capacity });
+  }
   const freeInodes = stats.files > 0 ? 100 * stats.ffree / stats.files : 100;
   const minFreeInodes = numberFlag(args, "min-free-inodes-percent", DEFAULT_MIN_FREE_INODES_PERCENT);
   if (freeInodes < minFreeInodes) fail(`${freeInodes.toFixed(2)}% of inodes are free; ${minFreeInodes.toFixed(2)}% is required`);
-  return { freeBytes, requiredBytes: requirement, reservedBytes: reservations.priced.reduce((sum, bytes) => sum + bytes, 0),
+  return { ...reductionEvidence, freeBytes, requiredBytes: requirement, reservedBytes: reservations.priced.reduce((sum, bytes) => sum + bytes, 0),
     sharedHeadroomBytes: reservations.headroomBytes, unpricedDormant: reservations.unpricedDormant,
     ...(reservations.measurementFailures ? { measurementFailures: reservations.measurementFailures } : {}) };
 }
@@ -2998,7 +3048,16 @@ function heartbeatCommand(database, args) {
   print(renewed.length === 1 ? renewed[0] : renewed, bool(args, "json"));
 }
 
+function generatedOnlySourceCustody(database, id) {
+  if (!database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_generated_retirement'").get()) return false;
+  return database.prepare("SELECT 1 FROM workspace_generated_retirement WHERE workspace_id=?").get(id) !== undefined;
+}
+function generatedRetirementPending(database, id) {
+  if (!database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_generated_retirement'").get()) return false;
+  return database.prepare("SELECT 1 FROM workspace_generated_retirement WHERE workspace_id=? AND json_extract(journal_json,'$.state')='pending'").get(id) !== undefined;
+}
 function recordRetainsCustody(database, id) {
+  if (generatedRetirementPending(database, id)) return true;
   const row = database.prepare("SELECT plan_json FROM workspace_capacity WHERE workspace_id=?").get(id);
   return row !== undefined && retainedGrowth(JSON.parse(row.plan_json));
 }
@@ -3024,11 +3083,86 @@ function retainedCustodyResult(record) {
   return {record, action:"none", inspection:{classification:"blocked", reason:"explicit retained source/runtime custody; resume-growth admission required before cleanup or writing", processes:[], containers:[], systemdUnits:[]}};
 }
 
+function terminalRetentionRelease(database, selected, args, statePath) {
+  const owner = required(args, "owner");
+  const expectedPlan = required(args, "expected-plan-sha256");
+  const deadline = Date.now() + 25_000;
+  return duringInspection(deadline, () => withWorkspaceLock(database, selected.path, () => {
+    const record = recordBy(database, {id:selected.id});
+    const row = database.prepare("SELECT plan_json FROM workspace_capacity WHERE workspace_id=?").get(record.id);
+    if (!row || digest(row.plan_json) !== expectedPlan || record.owner !== owner) {
+      growthError("stale-retention-release", "owner or capacity plan changed; read the current binding");
+    }
+    if (!retainedGrowth(JSON.parse(row.plan_json))) growthError("invalid-retention-release", "future growth is not retired");
+    if (generatedOnlySourceCustody(database, record.id)) growthError("retention-release-source-custody", "separate generated/source materialization retention remains");
+    if (record.groupId !== null) growthError("retention-release-group", "group retention requires an explicit disposition for every member");
+    if (record.leaseExpiresAt !== 0) growthError("retention-release-active", "a writing lease remains");
+    if (record.state === "released" && !existsSync(record.path)) {
+      return {ok:true, record, action:"already-released", inspection:{classification:"missing", reason:"terminal retained release already completed", processes:[], containers:[], systemdUnits:[]}};
+    }
+    if (!["active", "referenced", "blocked", "repair-required", "reclaiming"].includes(record.state)) {
+      growthError("invalid-retention-release", `cannot end retention from ${record.state}`);
+    }
+    if (retainedParent(database, record.path)) growthError("retention-release-parent", "shared Git parent still retains custody");
+    const protect = inspection => ({ok:false, record:recordBy(database,{id:record.id}), action:"none", inspection,
+      error:{code:"retention-release-protected", message:inspection.reason}});
+    const observe = () => {
+      if (existsSync(record.path)) {
+        const safety = growthSafety(database, record);
+        if (safety.errors.length || safety.references.length) return {classification:"blocked",
+          reason:safety.errors.length ? `cannot prove terminal retention safety: ${safety.errors.join("; ")}` : "runtime/thread/process/borrower writing references remain",
+          processes:safety.references, containers:[], systemdUnits:[]};
+      }
+      return inspectRecord(record, {ignoreLease:true, safety:safetySnapshot(database), deadline});
+    };
+    return withGrowthBorrowerLocks(database, record, () => {
+      let inspection = observe();
+      if (["referenced", "blocked", "active"].includes(inspection.classification) || inspection.sourceRetention) return protect(inspection);
+      let removedCaches = [];
+      if (inspection.classification === "repair-required") {
+        removedCaches = stripCaches(record, statePath, () => database.prepare("DELETE FROM workspace_capacity_measurement WHERE workspace_id=?").run(record.id));
+      }
+      inspection = observe();
+      if (!["reclaimable", "missing"].includes(inspection.classification)) return {...protect(inspection), removedCaches};
+      if (Date.now() >= deadline) growthError("retention-release-timeout", "terminal retention safety budget exhausted");
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        const current = recordBy(database, {id:record.id});
+        const currentPlan = database.prepare("SELECT plan_json FROM workspace_capacity WHERE workspace_id=?").get(record.id);
+        if (current.owner !== owner || current.leaseExpiresAt !== 0 || current.updatedAt !== record.updatedAt || currentPlan?.plan_json !== row.plan_json) {
+          growthError("stale-retention-release", "record or plan changed before terminal release");
+        }
+        database.exec(`CREATE TABLE IF NOT EXISTS workspace_retention_release (
+          sequence INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT NOT NULL, occurred_at INTEGER NOT NULL,
+          record_json TEXT NOT NULL, plan_json TEXT NOT NULL, inspection_json TEXT NOT NULL)`);
+        database.prepare("INSERT INTO workspace_retention_release(workspace_id,occurred_at,record_json,plan_json,inspection_json) VALUES(?,?,?,?,?)")
+          .run(record.id, Date.now(), JSON.stringify(record), row.plan_json, JSON.stringify(inspection));
+        updateState(database, current, "reclaiming", "owner ended retained custody; terminal release qualified");
+        database.exec("COMMIT");
+      } catch (error) { database.exec("ROLLBACK"); throw error; }
+      if (inspection.classification !== "missing") removeWorkspace(record, statePath);
+      removeEmptyWorkspaceContainer(record);
+      updateState(database, record, "released", `owner ended retained custody: ${inspection.reason}`);
+      return {ok:true, record:recordBy(database,{id:record.id}), action:"released", inspection, removedCaches};
+    }, deadline);
+  }, selected.groupId, deadline));
+}
+
 function releaseCommand(database, args, statePath) {
-  assertOnly(args, ["id", "path", "reap-expired", "preserve-runtime", "json"]);
+  assertOnly(args, ["id", "path", "reap-expired", "preserve-runtime", "json", "end-retention", "owner", "expected-plan-sha256"]);
+  if (bool(args, "end-retention")) {
+    if (bool(args, "reap-expired")) growthError("invalid-retention-release", "terminal retained release never stops runtime references");
+    const result = terminalRetentionRelease(database, recordBy(database, selectorFrom(args)), args, statePath);
+    print(result, bool(args, "json"));
+    if (!result.ok) process.exitCode = 2;
+    return;
+  }
+  if (one(args, "owner") !== undefined || one(args, "expected-plan-sha256") !== undefined) {
+    growthError("invalid-retention-release", "owner/plan binding requires explicit --end-retention");
+  }
   const record = recordBy(database, selectorFrom(args));
   const records = recordsInGroup(database, record);
-  if (records.some(candidate => recordRetainsCustody(database, candidate.id) || retainedParent(database,candidate.path))) {
+  if (records.some(candidate => generatedOnlySourceCustody(database, candidate.id) || recordRetainsCustody(database, candidate.id) || retainedParent(database,candidate.path))) {
     const results = records.map(retainedCustodyResult);
     print(results.length === 1 ? results[0] : results, bool(args,"json"));
     return;
@@ -3069,10 +3203,19 @@ function pruneReleased(database, now = Date.now(), root) {
 }
 
 function repriceCapacityCommand(database, args, statePath, resume = false) {
-  assertOnly(args, ["id", "path", "intent", "headroom-gib", "growth-mib", "json", ...(resume ? ["owner", "expected-plan-sha256"] : [])]);
+  assertOnly(args, ["id", "path", "intent", "headroom-gib", "growth-mib", "json", ...(resume ? ["owner", "expected-plan-sha256"] : ["owner", "reduction", "reduction-sha256"])]);
   const intent = capacityIntent(args);
   if (intent === null) fail("reprice-capacity requires explicit intent, headroom and remaining growth");
-  const selected = recordBy(database, selectorFrom(args));
+  const reducing = !resume && args.named.has("reduction");
+  let reduction = null;
+  let reductionSha256 = null;
+  if (reducing) {
+    const bytes = readFileSync(required(args, "reduction"), "utf8");
+    reductionSha256 = digest(bytes);
+    if (reductionSha256 !== required(args, "reduction-sha256")) growthError("growth-evidence-changed", "reduction bytes changed");
+    try { reduction = JSON.parse(bytes); } catch { growthError("invalid-growth-reduction", "reduction must be JSON"); }
+  } else if (!resume && (args.named.has("owner") || args.named.has("reduction-sha256"))) growthError("invalid-growth-reduction", "reduction evidence is required with reduction options");
+  const selected = reducing ? growthSelected(database, args) : recordBy(database, selectorFrom(args));
   return withWorkspaceLock(database, selected.path, () => {
     const record = recordBy(database, { id: selected.id });
     if (!["active", "referenced", "blocked", "repair-required"].includes(record.state)) fail(`workspace cannot reprice capacity from state ${record.state}`);
@@ -3083,7 +3226,7 @@ function repriceCapacityCommand(database, args, statePath, resume = false) {
     if (retainedParent(database,record.path)) growthError("growth-admission-required", "shared Git parent requires resume-growth admission");
     if (retired !== resume) growthError("growth-admission-required", retired ? "use explicit resume-growth admission" : "growth is not retired");
     if (resume && (record.owner !== required(args, "owner") || digest(row.plan_json) !== required(args, "expected-plan-sha256"))) growthError("stale-growth-disposition", "resume owner or plan changed");
-    const expandingBudget = ["source-only", "budgeted"].includes(oldPlan.intent) && intent.intent === "budgeted";
+    const expandingBudget = ["source-only", "budgeted"].includes(oldPlan.intent) && (intent.intent === "budgeted" || (reducing && intent.intent === oldPlan.intent));
     if (oldPlan.intent !== "unestimated" && !expandingBudget) fail("capacity repricing accepts unestimated plans or source-only/budgeted to budgeted expansion");
     capacityRequirement(oldPlan, []);
     if (record.durableSourceCommit === null) fail("capacity repricing requires immutable source custody");
@@ -3097,19 +3240,43 @@ function repriceCapacityCommand(database, args, statePath, resume = false) {
       const measurement = cachedWorkspaceAllocation(database, record.id, record.path, row.device_id);
       if (!measurement.ok) fail(`capacity repricing requires a fresh allocated-block sample: ${measurement.error}; run measure-capacity first`);
       const sample = JSON.parse(database.prepare("SELECT measurement_json FROM workspace_capacity_measurement WHERE workspace_id=?").get(record.id).measurement_json);
-      const sampledGrowthBytes = Math.max(0, sample.bytes - capacityAllocationBaseline(plan, record.state));
+      // Recheck actual allocation under the same filesystem fence. Keep the bound
+      // cache immutable, and never credit a deletion behind that cache implicitly.
+      const currentSample = reducing ? workspaceAllocationSample(record.path, row.device_id) : sample;
+      if (!currentSample.ok) growthError("growth-sample-required", currentSample.error);
+      const accountedBytes = Math.max(sample.bytes, currentSample.bytes);
+      const sampledGrowthBytes = Math.max(0, accountedBytes - capacityAllocationBaseline(plan, record.state));
       plan.growthBytes += sampledGrowthBytes;
       capacityRequirement(plan, []);
-      if (expandingBudget && (plan.headroomBytes < oldPlan.headroomBytes || (!resume && plan.growthBytes < oldPlan.growthBytes))) {
+      if (reducing) {
+        validateReduction(reduction, growthBinding(database, record).binding, required(args, "owner"), intent.growthBytes);
+        if (!expandingBudget || plan.growthBytes >= oldPlan.growthBytes || plan.headroomBytes < Math.max(oldPlan.headroomBytes, 8 * 1024 ** 3)) {
+          growthError("unsafe-growth-reduction", "reduction must lower total future budget, preserve headroom and retain the 8 GiB floor");
+        }
+      }
+      if (expandingBudget && (plan.headroomBytes < oldPlan.headroomBytes || (!resume && !reducing && plan.growthBytes < oldPlan.growthBytes))) {
         fail("budget expansion cannot reduce headroom or total growth budget");
       }
       plan.repricing = { priorIntent: oldPlan.intent, sampledGrowthBytes, remainingGrowthBytes: intent.growthBytes,
         measurementStartedAt: sample.startedAt, measurementCompletedAt: sample.completedAt, marginBytes: measurement.marginBytes };
-      plan.admission = assertCapacity(record.root, args, database, record.path, {
+      if (reducing) {
+        plan.repricing.reduction = { ...reduction, sha256: reductionSha256 };
+        plan.repricing.currentMeasurement = currentSample;
+      }
+      if (!reducing) plan.admission = assertCapacity(record.root, args, database, record.path, {
         ...plan, constructionBytes: 0, growthBytes: remainingCapacityBytes(plan, record.state, measurement),
       });
       database.exec("BEGIN IMMEDIATE");
       try {
+        if (reducing) {
+          const current = recordBy(database, {id:record.id});
+          validateReduction(reduction, growthBinding(database, current).binding, required(args, "owner"), intent.growthBytes);
+          const fresh = cachedWorkspaceAllocation(database, record.id, record.path, row.device_id);
+          if (!fresh.ok) growthError("growth-sample-required", fresh.error);
+          plan.admission = assertCapacity(record.root, args, database, record.path,
+            {...plan, constructionBytes:0, growthBytes:remainingCapacityBytes(plan, current.state, fresh)},
+            {...oldPlan, constructionBytes:0, growthBytes:remainingCapacityBytes(oldPlan, current.state, fresh)});
+        }
         const changed = database.prepare("UPDATE workspace_capacity SET plan_json=? WHERE workspace_id=? AND plan_json=?")
           .run(JSON.stringify(plan), record.id, row.plan_json).changes;
         if (changed !== 1) fail("capacity repricing conflicts with another plan change");
@@ -3201,6 +3368,73 @@ function growthSafety(database, record) {
     // Borrowing Git objects is retention, not a growth writer in the parent's checkout.
     retainedBorrowers,
     observedAt:Date.now()};
+}
+
+function materializationProcessReferences(roots) {
+  const snapshot = processSnapshot(true, roots, "all");
+  return roots.flatMap(root => processReferences(root, snapshot).map(reference => ({...reference, root})));
+}
+function materializationSafety(database, parent, roots) {
+  if (!Array.isArray(roots) || roots.length !== 2 || roots.some(root => typeof root !== "string" || !path.isAbsolute(root)))
+    throw new MaterializationError("materialization-safety-unknown", "exact original and staging roots required");
+  if (process.env.PI_WORKSPACE_TEST_EXTERNAL_SAFETY !== undefined || process.env.NODE_TEST_CONTEXT !== undefined)
+    throw new MaterializationError("materialization-safety-unknown", "native materialization safety has no test override");
+  let processes;
+  if (process.getuid?.() === 0) processes = materializationProcessReferences(roots);
+  else {
+    const observed = command("sudo", ["-n", process.execPath, new URL(import.meta.url).pathname,
+      "materialization-process-snapshot", ...roots.flatMap(root => ["--path", root])], {timeout: 10000});
+    if (observed.status !== 0) throw new MaterializationError("materialization-safety-unknown", `privileged all-FD observer failed: ${observed.stderr}`);
+    try { processes = JSON.parse(observed.stdout); } catch { throw new MaterializationError("materialization-safety-unknown", "invalid process observation JSON"); }
+    if (!Array.isArray(processes) || processes.some(row => !row || !Number.isSafeInteger(row.pid) || !Array.isArray(row.matches)))
+      throw new MaterializationError("materialization-safety-unknown", "invalid process observations");
+  }
+  const docker = dockerSnapshot(), systemd = systemdSnapshot(), threads = threadSnapshot();
+  const dependencies = gitDependencySnapshot(database);
+  const retainedBorrowers = [...dependencies.alternates, ...dependencies.linkedWorktrees].filter(value =>
+    value.recordId !== parent.id && roots.some(root =>
+      typeof value.objectDirectory === "string" && within(root, value.objectDirectory) ||
+      typeof value.commonDirectory === "string" && within(root, value.commonDirectory)));
+  return {errors: [docker.error, systemd.error].filter(value => value !== undefined),
+    references: [...processes, ...roots.flatMap(root => [...dockerReferences(root, docker).references, ...systemdReferences(root, systemd).references]),
+      ...threads.filter(thread => typeof thread.cwd !== "string" || roots.some(root => within(root, thread.cwd)))],
+    retainedBorrowers, observedAt: Date.now()};
+}
+function retireSourceMaterializationCommand(database, args, statePath) {
+  assertOnly(args, ["id", "path", "owner", "request", "request-sha256", "repository", "json"]);
+  if (!bool(args, "json")) throw new MaterializationError("materialization-invalid-request", "--json is required");
+  const selected = growthSelected(database, args), requestPath = required(args, "request");
+  const repository = one(args, "repository");
+  if (repository !== undefined && (repository !== "owi-link/converge" || !["https://github.com/owi-link/converge.git", "git@github.com:owi-link/converge.git", "ssh://git@github.com/owi-link/converge.git"].includes(selected.repository)))
+    throw new MaterializationError("materialization-custody-required", "explicit Converge repository scope does not match registered parent");
+  if (!path.isAbsolute(requestPath) || path.normalize(requestPath) !== requestPath || realpathSync(requestPath) !== requestPath)
+    throw new MaterializationError("materialization-invalid-request", "unaliased absolute request path required");
+  const stat = lstatSync(requestPath);
+  if (!stat.isFile() || stat.nlink !== 1 || stat.size > 65536)
+    throw new MaterializationError("materialization-invalid-request", "single-link request file <=64KiB required");
+  const bytes = readFileSync(requestPath);
+  if (digest(bytes) !== required(args, "request-sha256")) throw new MaterializationError("materialization-evidence-changed", "request SHA256 mismatch");
+  let request;
+  try { request = JSON.parse(bytes); } catch { throw new MaterializationError("materialization-invalid-request", "request must be JSON"); }
+  validateMaterializationRequest(request);
+  if (request.parent.id !== selected.id || request.parent.path !== selected.path || request.parent.owner !== required(args, "owner") || selected.owner !== request.parent.owner)
+    throw new MaterializationError("materialization-identity-changed", "id/path/owning release mismatch");
+  if (within(selected.path, requestPath)) throw new MaterializationError("materialization-invalid-request", "request must be independently retained outside parent");
+  const deadline = Date.now() + 150000;
+  const result = duringInspection(deadline, () => withWorkspaceLock(database, selected.path, () =>
+    withResourceLock(statePath, `source-materialization:${request.source.path}`, () => retireSourceMaterialization({
+      database, stateDirectory: path.dirname(statePath),
+      parentBinding: () => {
+        const record = recordBy(database, {id: selected.id});
+        if (["creating", "reclaiming", "released"].includes(record.state)) throw new MaterializationError("materialization-identity-changed", "parent lifecycle changed");
+        const current = lstatSync(record.path, {bigint: true});
+        return {id: record.id, path: record.path, owner: record.owner, head: git(record.path, ["rev-parse", "HEAD"]), device: String(current.dev), inode: String(current.ino)};
+      },
+      safety: roots => materializationSafety(database, recordBy(database, {id: selected.id}), roots),
+      invalidate: () => database.prepare("DELETE FROM workspace_capacity_measurement WHERE workspace_id=?").run(selected.id),
+    }, request), deadline), selected.groupId, deadline));
+  print(result, true);
+  if (!result.ok) process.exitCode = 2;
 }
 
 function retireGrowthCommand(database, args, statePath) {
@@ -3444,11 +3678,14 @@ function help() {
   agent-workspace finalize-creation (--id ID|--path PATH)
   agent-workspace heartbeat (--id ID|--path PATH) [--lease-seconds N]
   agent-workspace release (--id ID|--path PATH) [--reap-expired] [--preserve-runtime]
+  agent-workspace release (--id ID|--path PATH) --end-retention --owner OWNER --expected-plan-sha256 SHA [--json]
   agent-workspace reconcile [--root PATH] [--execute] [--reap-expired] [--preserve-runtime]
                             [--budget-ms 20000] [--max-groups 32] [--after ID|start]
   agent-workspace measure-capacity [--root PATH | --path PATH | --id ID] [--budget-ms 40000] [--json]
   agent-workspace reprice-capacity (--id ID|--path PATH) --intent source-only|budgeted --headroom-gib N --growth-mib N [--json]
+  Active reduction additionally requires --id ID --path PATH --owner OWNER --reduction FILE --reduction-sha256 SHA256
   agent-workspace growth-status --id ID --path PATH [--json]
+  agent-workspace retire-source-materialization --id ID --path PATH --owner OWNER --request ABS_FILE --request-sha256 SHA --json
   agent-workspace retire-growth --id ID --path PATH --owner OWNER --disposition FILE --disposition-sha256 SHA [--json]
   agent-workspace resume-growth (--id ID|--path PATH) --owner OWNER --expected-plan-sha256 SHA --intent budgeted --headroom-gib N --growth-mib N [--json]
   agent-workspace maintain [--root PATH | --path PATH] [--execute] [--json]
@@ -3469,9 +3706,16 @@ Records outlive the directory, so status explains what became of a checkout that
 `);
 }
 
-export const workspaceTesting = { checkoutConstructionCapacity, allocatedWorkspaceBytes, workspaceAllocationSample, cachedWorkspaceAllocation, remainingCapacityBytes, capacityRequirement, capacityReservations, gitDependencySnapshot, sourceCapacityPlan, cacheTargets, dockerEndpointScope, dockerSnapshot, groupReconciliation, maintainReferenceClone, parseSystemdUnits, pruneReleased, systemdManagerSnapshot, systemdReferences, ownerThreadDatabases, threadSnapshot };
+export const workspaceTesting = { inspectRecord, capacityRefusalDetails, checkoutConstructionCapacity, allocatedWorkspaceBytes, workspaceAllocationSample, cachedWorkspaceAllocation, remainingCapacityBytes, capacityRequirement, capacityReservations, gitDependencySnapshot, sourceCapacityPlan, cacheTargets, dockerEndpointScope, dockerSnapshot, groupReconciliation, maintainReferenceClone, parseSystemdUnits, pruneReleased, systemdManagerSnapshot, systemdReferences, ownerThreadDatabases, threadSnapshot };
 
 export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
+  if (argv[0] === "materialization-process-snapshot") {
+    if (process.getuid?.() !== 0) throw new MaterializationError("materialization-safety-unknown", "all-FD observation requires root");
+    const args = parseArgs(argv.slice(1)); assertOnly(args, ["path"]);
+    const roots = many(args, "path");
+    if (roots.length !== 2 || roots.some(root => !path.isAbsolute(root))) throw new MaterializationError("materialization-invalid-request", "exact original/stage paths required");
+    print(materializationProcessReferences(roots), true); return;
+  }
   if (argv[0] === "growth-process-snapshot") {
     if (process.getuid?.() !== 0) growthError("growth-writer-unknown", "privileged process observation requires root");
     const args = parseArgs(argv.slice(1));
@@ -3542,7 +3786,7 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
   }
   const database = openRegistry(statePath);
   try {
-    if (!["status", "list", "maintain", "cancel-creation", "finalize-creation", "reassign", "release", "growth-status", "retire-growth", "resume-growth"].includes(commandName)
+    if (!["status", "list", "maintain", "cancel-creation", "finalize-creation", "reassign", "release", "retire-source-materialization", "growth-status", "retire-growth", "resume-growth"].includes(commandName)
       && (commandName !== "reconcile" || bool(args, "execute"))) {
       const scopedRoot = commandName === "reconcile" ? one(args, "root") : undefined;
       const scopedIds = scopedRoot === undefined ? undefined
@@ -3565,6 +3809,7 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
     else if (commandName === "reconcile") reconcileCommand(database, args, statePath);
     else if (commandName === "measure-capacity") measureCapacityCommand(database, args, statePath);
     else if (commandName === "growth-status") growthStatusCommand(database, args, statePath);
+    else if (commandName === "retire-source-materialization") retireSourceMaterializationCommand(database, args, statePath);
     else if (commandName === "retire-growth") retireGrowthCommand(database, args, statePath);
     else if (commandName === "resume-growth") repriceCapacityCommand(database, args, statePath, true);
     else if (commandName === "reprice-capacity") repriceCapacityCommand(database, args, statePath);
@@ -3596,14 +3841,14 @@ if (process.argv[1] !== undefined && existsSync(process.argv[1])
         process.stdout.write(`${JSON.stringify({ ok: false, error: {
           code: error.code, field: error.field, requested: error.requested, recorded: error.recorded,
         } })}\n`);
-      } else if (["reassign", "retire-growth", "growth-status", "resume-growth"].includes(process.argv[2]) || error instanceof GrowthLifecycleError) {
+      } else if (["reassign", "retire-source-materialization", "materialization-process-snapshot", "retire-growth", "growth-status", "resume-growth"].includes(process.argv[2]) || error instanceof GrowthLifecycleError || error instanceof MaterializationError) {
         process.stdout.write(`${JSON.stringify({ ok: false, error: {
-          code: error instanceof GrowthLifecycleError ? error.code : error instanceof ResourceBusyError ? "resource-busy" : error instanceof CliError ? "invalid-request" : "lifecycle-failed",
+          code: error instanceof GrowthLifecycleError || error instanceof MaterializationError ? error.code : error instanceof ResourceBusyError ? "resource-busy" : error instanceof CliError ? "invalid-request" : "lifecycle-failed",
           detail: error instanceof Error ? error.message : String(error),
         } })}\n`);
       }
     }
     process.stderr.write(`agent-workspace: ${error instanceof Error ? error.message : String(error)}\n`);
-    process.exit(error instanceof ResourceBusyError ? 75 : (error instanceof CliError || error instanceof GrowthLifecycleError) ? 2 : 1);
+    process.exit(error instanceof ResourceBusyError ? 75 : (error instanceof CliError || error instanceof GrowthLifecycleError || error instanceof MaterializationError) ? 2 : 1);
   }
 }

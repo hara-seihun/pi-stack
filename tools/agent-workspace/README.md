@@ -118,9 +118,9 @@ agent-workspace reprice-capacity --path /absolute/checkout \
 
 Use source-only when the continuing work is only source edits; choose budgeted and enough growth for continuing installs/builds. Here `growth-mib` declares **additional remaining writes**, not a replacement total that forgets consumed growth. The tool requires a fresh successful root-identity-bound sample and immutable Git source custody. It forecasts the original source at its recorded sparse selection from the existing object store (no history import or import charge), uses that conservative checkout-only source upper bound as baseline, and sets the growth budget to measured growth plus the requested remaining allowance. Admission applies the same 64 MiB/1% measurement margin. Repricing all completed unestimated rows removes their shared 30 GiB guard in favor of the maximum explicitly requested floor; other rows retain their own floors and remaining growth.
 
-For source-only → budgeted or budgeted → budgeted expansion, the existing source forecast, import accounting and completion baseline stay unchanged. Measured growth is added to the explicitly requested **remaining** allowance, with the same credit margin. Neither total growth budget nor headroom may decrease. This changes mutable operating admission, not immutable submitted execution/proof source. For example, a source-only checkout admitted with 512 MiB can request `--intent budgeted --headroom-gib 8 --growth-mib 2048` before installing dependencies; it need not be cloned again.
+For source-only → budgeted or budgeted → budgeted expansion, the existing source forecast, import accounting and completion baseline stay unchanged. Measured growth is added to the explicitly requested **remaining** allowance, with the same credit margin. Without explicit active-reduction evidence neither total growth budget nor headroom may decrease. This changes mutable operating admission, not immutable submitted execution/proof source. For example, a source-only checkout admitted with 512 MiB can request `--intent budgeted --headroom-gib 8 --growth-mib 2048` before installing dependencies; it need not be cloned again.
 
-Only active/referenced/blocked/repair-required rows with an unestimated plan or a source-only/budgeted → budgeted transition may reprice. Pending, reclaiming, released, unpriced, unsupported transitions and unmeasurable rows fail without mutation. The checkout/group and filesystem fences cover pricing and fresh-cache validation; admission excludes only the replaced reservation and accounts for every other live row. A compare-and-swap and `workspace_capacity_repricing` journal atomically preserve the previous plan, new plan and exact sample. Disk/inode refusal leaves the original budget, source and checkout intact. Dirty, live and unpublished work remain protected. This is a budget declaration, not evidence that work is published or deletable. Refresh after large manual deletion before repricing; never manufacture admission by editing the ledger.
+Ordinary repricing accepts active/referenced/blocked/repair-required rows with an unestimated plan or a source-only/budgeted → budgeted transition. The explicit active reduction below additionally accepts source-only → source-only. Pending, reclaiming, released, unpriced, unsupported transitions and unmeasurable rows fail without mutation. The checkout/group and filesystem fences cover pricing and fresh-cache validation; admission excludes only the replaced reservation and accounts for every other live row. A compare-and-swap and `workspace_capacity_repricing` journal atomically preserve the previous plan, new plan and exact sample. Disk/inode refusal leaves the original budget, source and checkout intact. Dirty, live and unpublished work remain protected. This is a budget declaration, not evidence that work is published or deletable. Refresh after large manual deletion before repricing; never manufacture admission by editing the ledger.
 
 ## Finding out what became of a checkout
 
@@ -268,3 +268,71 @@ Managed-host read-only process observer proof:
 `node tools/agent-workspace/growth-process-installed.mjs` (private disposable fixture).
 
 Retirement shares one 25-second observation/lock budget; exhausted dependency observation returns `growth-observation-timeout`, never permission to retire. Dependency topology streams only registry identity/path/type columns, not cache or creation payloads. Unreadable alternate-object metadata refuses rather than disappearing from the dependency graph.
+
+
+### Measured active future-growth reduction
+
+An active owning writer may reduce its declared **remaining** growth without retiring
+its writing lease or losing source custody. First run `measure-capacity`, then obtain
+`growth-status --id ID --path PATH --json`. Use the returned exact `binding` in a JSON
+file with `kind: "reduce-active-future-growth"`, positive `remainingGrowthBytes`,
+`reason`, `ownerEvidence` and current epoch-millisecond `observedAt`. The owner evidence
+must account for that writer's remaining work; this is not permission to discount
+another workspace or work outside its allocation. Hash the exact JSON bytes.
+
+```
+agent-workspace reprice-capacity --id ID --path PATH --owner OWNER \
+  --intent source-only --headroom-gib 8 --growth-mib 64 \
+  --reduction /absolute/reduction.json --reduction-sha256 SHA256 --json
+```
+
+This opt-in extends the existing repricing interface, not a second ledger. It requires
+an active unexpired owning lease, positive remaining allowance, a lower total growth
+budget, immutable source and an exact current plan/sample/root/HEAD/borrower binding.
+Actual allocation is remeasured inside the filesystem fence. The larger of the bound
+cache and this current measurement is used, so an unrefreshed deletion cannot silently
+create credit. Both measurements remain in the evidence. The total becomes measured
+growth above the unchanged completion baseline plus the
+requested remaining allowance. Existing conservative measurement credit margins are
+retained, so released reservation is **not** simply old allowance minus new allowance.
+The source/import/construction baseline, other writers, original sample, workspace row
+and writing lease do not change. The existing workspace/group and filesystem fences,
+SQLite CAS/journal, inode admission and all other reservations still apply; the
+previous headroom cannot fall, and reduction additionally retains an 8 GiB minimum.
+The full declaration and SHA are retained in the repricing journal's new plan.
+Stale/foreign evidence, expired lease, invalid amount, retired source or unsafe admission
+refuses without mutation. Changed input after success needs a fresh binding; an old
+reduction is never replayed. Zero-future-growth retirement remains `retire-growth`.
+
+
+A pure active reduction is admitted by **monotonicity**, not as a fresh capacity grant.
+Within the same filesystem fence and SQLite transaction, the tool compares old and new
+whole-host requirements using one filesystem observation and the same set of other
+reservations. The future bill and total requirement must strictly decrease; the
+capacity deficit must not worsen. The response records both requirements/deficits and
+`newWritesAuthorized: false`. It may succeed while already oversubscribed because it
+removes an existing liability without allocating space or expanding the writer's budget.
+The existing headroom (at least 8 GiB), inode guard, baseline, source and writing lease
+remain protected. Headroom increases which outweigh the savings, nondecreases and stale
+or foreign declarations refuse. Fresh allocations and budget increases still require
+full absolute free-space admission. No nominal or manual credit is inferred from this
+operation; the measured journal owns the released reservation.
+
+### Ending completed retained custody
+
+Retiring future growth preserves source/runtime custody. Plain release and automatic
+reconciliation keep that retention. When the owner finishes using the checkout,
+`growth-status --id ID --json` supplies its current plan hash. Use:
+
+```sh
+agent-workspace release --id ID --end-retention --owner OWNER --expected-plan-sha256 SHA --json
+```
+
+This is terminal release, with no writing/growth admission. It requires retired
+future growth, a retired writing lease, current owner/plan binding and no runtime,
+thread, process, registered or unregistered borrower, dirty or unpublished source
+obligation. It never stops references. A protected result exits2 and preserves
+custody. A qualified release journals the original record, capacity plan and safety
+inspection, preserves retirement history, removes only the released checkout and
+returns its terminal record. Group retention needs a per-member disposition and is
+refused here. Repeating an already completed release is safe.

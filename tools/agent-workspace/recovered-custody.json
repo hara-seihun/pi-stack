@@ -1,0 +1,100 @@
+{
+  "kind": "observed-installed-component-custody-recovery",
+  "sourceRepository": "/home/kenan/projects/pi-stack",
+  "knownGitParent": "786ae55a4fe169cdfb65fc7158d025d5ec1be604",
+  "originalInstalledCommit": "0cc3c0a926e476cdf17b44ad0e1ee11f61de716e",
+  "originalGitObject": "unavailable; not forged",
+  "observedInstalledRoot": "/srv/pi/.pi-stack-releases/tools/0cc3c0a926e476cdf17b44ad0e1ee11f61de716e/agent-workspace",
+  "recoveredGitCommit": "e40d65f22ae4c8110d47ac551de98e74c3fee4ec",
+  "recoveredTree": "1deff9525a2e81da877bab5f865115de72f300cb",
+  "inventory": {
+    ".component-release.json": {
+      "mode": "100644",
+      "sha256": "0a345153ddaaaeb579e01e2a1b0e6a73e244c933b17cae4af26d34e9670397c4"
+    },
+    "README.md": {
+      "mode": "100644",
+      "sha256": "a8fcabfff29aa3555bc55771fe26d30710c3e7001aa9edc9fdd9a4121072f49f"
+    },
+    "capacity-recovery.mjs": {
+      "mode": "100644",
+      "sha256": "60d39048ae9d89f7c7be4d5de555d6373f37ac740f56003d55daea8c654159aa"
+    },
+    "capacity-recovery.test.mjs": {
+      "mode": "100644",
+      "sha256": "6b73e1b7ba7163f0cf8578bd55d7e7a64f61cabea9f4c7a35719fd7de3320896"
+    },
+    "check.mjs": {
+      "mode": "100644",
+      "sha256": "cc7c0d4a8f6ce726c759a31e766dcd2ac0dbdcddf8e2c984bd0daf0d6612ade3"
+    },
+    "checkout-job.mjs": {
+      "mode": "100644",
+      "sha256": "df7b9b309e23a9cec402c61ea0fe745eb664cb3a445acb6c20fb0fe8905d3507"
+    },
+    "checkout-job.test.mjs": {
+      "mode": "100644",
+      "sha256": "bd14181e78d17e3c12b037b246623425ca231ae29160286f9dc46d23d5625eb2"
+    },
+    "deploy.test.mjs": {
+      "mode": "100644",
+      "sha256": "266d529f82f65c3a92486b06aaa0eaf3e5b2a4b438e4231f1c37703429ae7c6e"
+    },
+    "growth-lifecycle.mjs": {
+      "mode": "100644",
+      "sha256": "8ac608d6279843675b57f7e85dcc3e3b1c26aef2a97252642c404e79b4167b9b"
+    },
+    "growth-lifecycle.test.mjs": {
+      "mode": "100644",
+      "sha256": "0c91c4a97136821e40705b75d3eadbe4fe8d38f0bd7145856b2019c8f89315bc"
+    },
+    "growth-process-installed.mjs": {
+      "mode": "100644",
+      "sha256": "60565c61546565c4355448b613ea926f28861defa43036446ea2f1fb31fd35c2"
+    },
+    "job-observation.mjs": {
+      "mode": "100644",
+      "sha256": "2ebe85aa9571b2addb47a023c548a954e7983b0aa96993bed697c13b07e9e104"
+    },
+    "job-observation.test.mjs": {
+      "mode": "100644",
+      "sha256": "ac7a8d06ee23e01c997764ded98e39855534e4133e2d154f13aa6a4a04e0ed67"
+    },
+    "main": {
+      "mode": "120000",
+      "sha256": "5dc6a4d8fbaf3d5c590b2607adb9f1aa8a0fcb668d2b47db597f512d93362af4"
+    },
+    "package.json": {
+      "mode": "100644",
+      "sha256": "b161c1f2ee2787a50ae14daa746fb5d46882c15851358d11d45307d307688342"
+    },
+    "source-job.mjs": {
+      "mode": "100644",
+      "sha256": "5a3738f43ef8801bd24c6c9c3d22051dcd89f3c6275191832d0f3930d944e488"
+    },
+    "source-job.test.mjs": {
+      "mode": "100644",
+      "sha256": "81275e263a47d16b09fdd468f792ed74a7aec9b24d4df04d02d79f481ebcf766"
+    },
+    "test.mjs": {
+      "mode": "100644",
+      "sha256": "6fcb14b45db4d23e1d93bf5cf82311fbdd4f3c5e4d0975a86159b5b8968ace18"
+    },
+    "user-manager-installed.mjs": {
+      "mode": "100644",
+      "sha256": "12ce87252ccb5823b89b8b5f278222da4be29a6b2242797d1d98b0a6d546fc8b"
+    },
+    "workspace.mjs": {
+      "mode": "100755",
+      "sha256": "9f81330cd75c8eadfd34343925cf8583e629ad775c40d3ca64dd2c2a60197129"
+    }
+  },
+  "componentRelease": {
+    "component": "agent-workspace",
+    "baseline": "6ed8f2d5ea262bdddebc0d7e5df498624085b0d8",
+    "sourceCommit": "0cc3c0a926e476cdf17b44ad0e1ee11f61de716e",
+    "deployedAt": 1792196354833,
+    "scope": "tools-only; other tool bodies and dependency links retained"
+  },
+  "originalToolsTarget": "/srv/pi/.pi-stack-releases/tools/0cc3c0a926e476cdf17b44ad0e1ee11f61de716e"
+}

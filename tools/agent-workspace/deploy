@@ -10,10 +10,16 @@ commit=$(git -C "$root" rev-parse HEAD)
   echo 'component deployment requires an existing managed tools release' >&2; exit 66;
 }
 baseline=$(<"$dest/.pi-stack-commit")
-git -C "$root" merge-base --is-ancestor "$baseline" "$commit" || {
-  echo "candidate must descend from selected tools source $baseline" >&2; exit 65;
-}
-git -C "$root" diff --quiet "$baseline" "$commit" -- tools ':!tools/agent-workspace' config/tools.json || {
+comparison=$baseline
+if git -C "$root" cat-file -e "$baseline^{commit}" 2>/dev/null; then
+  git -C "$root" merge-base --is-ancestor "$baseline" "$commit" || {
+    echo "candidate must descend from selected tools source $baseline" >&2; exit 65;
+  }
+else
+  comparison=$(node -e 'const fs=require("node:fs"); console.log(JSON.parse(fs.readFileSync(process.argv[1],"utf8")).recoveredGitCommit)' "$root/tools/agent-workspace/recovered-custody.json")
+  node "$root/tools/agent-workspace/recovered-base.mjs" "$root" "$dest" "$comparison" "$baseline" || exit 65
+fi
+git -C "$root" diff --quiet "$comparison" "$commit" -- tools ':!tools/agent-workspace' config/tools.json || {
   echo 'component deployment refuses changes to other tools or their manifest; use the full release owner' >&2; exit 65;
 }
 stage=$(mktemp -d "${TMPDIR:-/tmp}/pi-workspace-tools.XXXXXXXX")

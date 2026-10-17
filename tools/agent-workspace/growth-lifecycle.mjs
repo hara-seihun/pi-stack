@@ -43,3 +43,21 @@ export function validateRetirement(disposition, binding, safety, now = Date.now(
   if (safety.errors.length) growthError('growth-writer-unknown', safety.errors.join('; '));
   if (safety.references.length) growthError('growth-writer-active', 'runtime/thread/process references remain; no read-only assumption permitted');
 }
+
+// Active reduction is not retirement: keep the writer, lease, baseline and source.
+export function validateReduction(value, binding, owner, remainingGrowthBytes, now = Date.now()) {
+  if (value?.kind !== 'reduce-active-future-growth' ||
+      !Number.isSafeInteger(remainingGrowthBytes) || remainingGrowthBytes <= 0 ||
+      value.remainingGrowthBytes !== remainingGrowthBytes ||
+      typeof value.reason !== 'string' || !value.reason.trim() ||
+      typeof value.ownerEvidence !== 'string' || !value.ownerEvidence.trim()) {
+    growthError('invalid-growth-reduction', 'explicit positive remaining allowance and owner evidence required');
+  }
+  if (!owner || owner !== binding.owner || binding.state !== 'active' || binding.leaseExpiresAt <= now ||
+      value.binding === null || typeof value.binding !== 'object' ||
+      Object.keys(binding).some(key => value.binding[key] !== binding[key]) ||
+      Object.keys(value.binding).some(key => !(key in binding)) ||
+      !Number.isSafeInteger(value.observedAt) || value.observedAt > now || now - value.observedAt > 15 * 60_000) {
+    growthError('stale-growth-reduction', 'active owning lease, source, plan, sample and root must match a fresh binding');
+  }
+}
