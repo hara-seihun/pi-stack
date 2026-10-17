@@ -268,3 +268,22 @@ Managed-host read-only process observer proof:
 `node tools/agent-workspace/growth-process-installed.mjs` (private disposable fixture).
 
 Retirement shares one 25-second observation/lock budget; exhausted dependency observation returns `growth-observation-timeout`, never permission to retire. Dependency topology streams only registry identity/path/type columns, not cache or creation payloads. Unreadable alternate-object metadata refuses rather than disappearing from the dependency graph.
+
+### Ending completed retained custody
+
+Retiring future growth preserves source/runtime custody. Plain release and automatic
+reconciliation keep that retention. When the owner finishes using the checkout,
+`growth-status --id ID --json` supplies its current plan hash. Use:
+
+```sh
+agent-workspace release --id ID --end-retention --owner OWNER --expected-plan-sha256 SHA --json
+```
+
+This is terminal release, with no writing/growth admission. It requires retired
+future growth, a retired writing lease, current owner/plan binding and no runtime,
+thread, process, registered or unregistered borrower, dirty or unpublished source
+obligation. It never stops references. A protected result exits2 and preserves
+custody. A qualified release journals the original record, capacity plan and safety
+inspection, preserves retirement history, removes only the released checkout and
+returns its terminal record. Group retention needs a per-member disposition and is
+refused here. Repeating an already completed release is safe.

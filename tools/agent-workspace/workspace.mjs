@@ -1459,7 +1459,7 @@ function reconcileRecords(database, selected, options) {
     try {
       results.push(...withWorkspaceLock(database, selectedRecord.path, () => {
         const current = recordsInGroup(database, recordBy(database, { id: selectedRecord.id }));
-        const maintenance = duringInspection(options.deadline, () => new Map(current.map((record) => [record.id, maintainReferenceClone(record.path, options.execute, options.statePath)])));
+        const maintenance = duringInspection(options.deadline, () => new Map(current.map((record) => [record.id, recordRetainsCustody(database, record.id) || retainedParent(database, record.path) ? "retained-custody" : maintainReferenceClone(record.path, options.execute, options.statePath)])));
         const reconciled = current.length > 1 ? groupReconciliation(database, current, options)
           : current.length === 1 ? [reconcileRecord(database, current[0], options)] : [];
         return reconciled.map((result) => ({
@@ -3024,8 +3024,82 @@ function retainedCustodyResult(record) {
   return {record, action:"none", inspection:{classification:"blocked", reason:"explicit retained source/runtime custody; resume-growth admission required before cleanup or writing", processes:[], containers:[], systemdUnits:[]}};
 }
 
+function terminalRetentionRelease(database, selected, args, statePath) {
+  const owner = required(args, "owner");
+  const expectedPlan = required(args, "expected-plan-sha256");
+  const deadline = Date.now() + 25_000;
+  return duringInspection(deadline, () => withWorkspaceLock(database, selected.path, () => {
+    const record = recordBy(database, {id:selected.id});
+    const row = database.prepare("SELECT plan_json FROM workspace_capacity WHERE workspace_id=?").get(record.id);
+    if (!row || digest(row.plan_json) !== expectedPlan || record.owner !== owner) {
+      growthError("stale-retention-release", "owner or capacity plan changed; read the current binding");
+    }
+    if (!retainedGrowth(JSON.parse(row.plan_json))) growthError("invalid-retention-release", "future growth is not retired");
+    if (record.groupId !== null) growthError("retention-release-group", "group retention requires an explicit disposition for every member");
+    if (record.leaseExpiresAt !== 0) growthError("retention-release-active", "a writing lease remains");
+    if (record.state === "released" && !existsSync(record.path)) {
+      return {ok:true, record, action:"already-released", inspection:{classification:"missing", reason:"terminal retained release already completed", processes:[], containers:[], systemdUnits:[]}};
+    }
+    if (!["active", "referenced", "blocked", "repair-required", "reclaiming"].includes(record.state)) {
+      growthError("invalid-retention-release", `cannot end retention from ${record.state}`);
+    }
+    if (retainedParent(database, record.path)) growthError("retention-release-parent", "shared Git parent still retains custody");
+    const protect = inspection => ({ok:false, record:recordBy(database,{id:record.id}), action:"none", inspection,
+      error:{code:"retention-release-protected", message:inspection.reason}});
+    const observe = () => {
+      if (existsSync(record.path)) {
+        const safety = growthSafety(database, record);
+        if (safety.errors.length || safety.references.length) return {classification:"blocked",
+          reason:safety.errors.length ? `cannot prove terminal retention safety: ${safety.errors.join("; ")}` : "runtime/thread/process/borrower writing references remain",
+          processes:safety.references, containers:[], systemdUnits:[]};
+      }
+      return inspectRecord(record, {ignoreLease:true, safety:safetySnapshot(database), deadline});
+    };
+    return withGrowthBorrowerLocks(database, record, () => {
+      let inspection = observe();
+      if (["referenced", "blocked", "active"].includes(inspection.classification) || inspection.sourceRetention) return protect(inspection);
+      let removedCaches = [];
+      if (inspection.classification === "repair-required") {
+        removedCaches = stripCaches(record, statePath, () => database.prepare("DELETE FROM workspace_capacity_measurement WHERE workspace_id=?").run(record.id));
+      }
+      inspection = observe();
+      if (!["reclaimable", "missing"].includes(inspection.classification)) return {...protect(inspection), removedCaches};
+      if (Date.now() >= deadline) growthError("retention-release-timeout", "terminal retention safety budget exhausted");
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        const current = recordBy(database, {id:record.id});
+        const currentPlan = database.prepare("SELECT plan_json FROM workspace_capacity WHERE workspace_id=?").get(record.id);
+        if (current.owner !== owner || current.leaseExpiresAt !== 0 || current.updatedAt !== record.updatedAt || currentPlan?.plan_json !== row.plan_json) {
+          growthError("stale-retention-release", "record or plan changed before terminal release");
+        }
+        database.exec(`CREATE TABLE IF NOT EXISTS workspace_retention_release (
+          sequence INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT NOT NULL, occurred_at INTEGER NOT NULL,
+          record_json TEXT NOT NULL, plan_json TEXT NOT NULL, inspection_json TEXT NOT NULL)`);
+        database.prepare("INSERT INTO workspace_retention_release(workspace_id,occurred_at,record_json,plan_json,inspection_json) VALUES(?,?,?,?,?)")
+          .run(record.id, Date.now(), JSON.stringify(record), row.plan_json, JSON.stringify(inspection));
+        updateState(database, current, "reclaiming", "owner ended retained custody; terminal release qualified");
+        database.exec("COMMIT");
+      } catch (error) { database.exec("ROLLBACK"); throw error; }
+      if (inspection.classification !== "missing") removeWorkspace(record, statePath);
+      removeEmptyWorkspaceContainer(record);
+      updateState(database, record, "released", `owner ended retained custody: ${inspection.reason}`);
+      return {ok:true, record:recordBy(database,{id:record.id}), action:"released", inspection, removedCaches};
+    }, deadline);
+  }, selected.groupId, deadline));
+}
+
 function releaseCommand(database, args, statePath) {
-  assertOnly(args, ["id", "path", "reap-expired", "preserve-runtime", "json"]);
+  assertOnly(args, ["id", "path", "reap-expired", "preserve-runtime", "json", "end-retention", "owner", "expected-plan-sha256"]);
+  if (bool(args, "end-retention")) {
+    if (bool(args, "reap-expired")) growthError("invalid-retention-release", "terminal retained release never stops runtime references");
+    const result = terminalRetentionRelease(database, recordBy(database, selectorFrom(args)), args, statePath);
+    print(result, bool(args, "json"));
+    if (!result.ok) process.exitCode = 2;
+    return;
+  }
+  if (one(args, "owner") !== undefined || one(args, "expected-plan-sha256") !== undefined) {
+    growthError("invalid-retention-release", "owner/plan binding requires explicit --end-retention");
+  }
   const record = recordBy(database, selectorFrom(args));
   const records = recordsInGroup(database, record);
   if (records.some(candidate => recordRetainsCustody(database, candidate.id) || retainedParent(database,candidate.path))) {
@@ -3444,6 +3518,7 @@ function help() {
   agent-workspace finalize-creation (--id ID|--path PATH)
   agent-workspace heartbeat (--id ID|--path PATH) [--lease-seconds N]
   agent-workspace release (--id ID|--path PATH) [--reap-expired] [--preserve-runtime]
+  agent-workspace release (--id ID|--path PATH) --end-retention --owner OWNER --expected-plan-sha256 SHA [--json]
   agent-workspace reconcile [--root PATH] [--execute] [--reap-expired] [--preserve-runtime]
                             [--budget-ms 20000] [--max-groups 32] [--after ID|start]
   agent-workspace measure-capacity [--root PATH | --path PATH | --id ID] [--budget-ms 40000] [--json]
@@ -3469,7 +3544,7 @@ Records outlive the directory, so status explains what became of a checkout that
 `);
 }
 
-export const workspaceTesting = { checkoutConstructionCapacity, allocatedWorkspaceBytes, workspaceAllocationSample, cachedWorkspaceAllocation, remainingCapacityBytes, capacityRequirement, capacityReservations, gitDependencySnapshot, sourceCapacityPlan, cacheTargets, dockerEndpointScope, dockerSnapshot, groupReconciliation, maintainReferenceClone, parseSystemdUnits, pruneReleased, systemdManagerSnapshot, systemdReferences, ownerThreadDatabases, threadSnapshot };
+export const workspaceTesting = { inspectRecord, checkoutConstructionCapacity, allocatedWorkspaceBytes, workspaceAllocationSample, cachedWorkspaceAllocation, remainingCapacityBytes, capacityRequirement, capacityReservations, gitDependencySnapshot, sourceCapacityPlan, cacheTargets, dockerEndpointScope, dockerSnapshot, groupReconciliation, maintainReferenceClone, parseSystemdUnits, pruneReleased, systemdManagerSnapshot, systemdReferences, ownerThreadDatabases, threadSnapshot };
 
 export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
   if (argv[0] === "growth-process-snapshot") {
