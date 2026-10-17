@@ -482,3 +482,11 @@ boundary. A previously completed rename does not trigger another native verdict.
 A planned rename retains its separate boundary authorization. Source retirement
 keeps its initial authorization. This removes repeated no-effect observation
 cost without relaxing the35s budget or physical/reference/replacement checks.
+
+### Canonical terminal proof variants
+
+Known-applied file observations have two closed wire forms: originalAgentRunId plus explicit unknown originalModelRun and exported-file custody; or originalRunId plus explicit exact UTF8 byte count and original-target/durable-Git custody. Both require exact provider, operation, request target/hash, ceased owner, original interruption and no-replay/no-original-completion claims. Mixed metadata is rejected, not defaulted.
+
+Completed native Bash declarations have explicit inline-result custody or canonical bash_job result-reference custody. A reference is resolved from the same bounded canonical query, requiring exact child/operation/provider/parent/assignment/conversation, completed process0 and matching cgroup-empty owner proof. Missing, mixed, unknown, live or mismatched declarations are protected. Neither variant rewrites original operation uncertainty.
+
+Component public-source publication pushes its immutable projected object directly; it does not manufacture a local workspace branch. Existing branches remain preserved in their independent durable repositories. This removes unnecessary local-only public projection refs that otherwise honestly prevent ordinary source release.

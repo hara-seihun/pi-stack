@@ -19,7 +19,7 @@ test('actual PostgreSQL classifier distinguishes retained uncertainty from live,
 CREATE TABLE operation(id text,state text,command_type text,request_body jsonb,origin jsonb,result jsonb);
 CREATE TABLE tool_call(id text,run_id text,provider_call_id text,operation_id text,result jsonb,tool_name text,arguments jsonb);
 CREATE TABLE input(id text,state text,run_id text,content text,attachments jsonb,source jsonb);\n`;
-  const names=['settled-nochild','settled-projected','settled-known-applied','known-applied-wrong-content','unsettled','live-owner','missing-cessation','mismatched-owner','mismatched-proof','unknown-owner-state','unknown-proof','nonterminal-result','known-child','live-child','unknown-child','parent-linked-child','call-linked-child','terminal-distinct-sibling','live-distinct-sibling','missing-proof-sibling','wrong-owner-sibling','same-provider-terminal-child','settled-completed-child','declared-child-live','declared-child-mismatch','same-assignment-scope','same-conversation-scope','unknown-kind-scope','missing-scope','direct-operation-foreign-scope','source-intent'];
+  const names=['settled-nochild','settled-projected','settled-known-applied','known-applied-wrong-content','unsettled','live-owner','missing-cessation','mismatched-owner','mismatched-proof','unknown-owner-state','unknown-proof','nonterminal-result','known-child','live-child','unknown-child','parent-linked-child','call-linked-child','terminal-distinct-sibling','live-distinct-sibling','missing-proof-sibling','wrong-owner-sibling','same-provider-terminal-child','settled-completed-child','declared-child-live','declared-child-mismatch','same-assignment-scope','same-conversation-scope','unknown-kind-scope','missing-scope','direct-operation-foreign-scope','settled-direct-write','direct-write-wrong-bytes','settled-reference-child','reference-child-live','source-intent'];
   for(const name of names){
    const id='operation-'+name,ownerId='owner-'+name,provider='call-'+name,ownership={unit:'fixture.service',invocationId:'a'.repeat(32),hostId:'fixture',bootId:'fixture',generation:1,release:'fixture'};
    const absence={at:1,kind:'absent',owner:ownership,proof:{kind:'service-invocation-ended',unit:ownership.unit,invocationId:ownership.invocationId}};
@@ -33,22 +33,24 @@ CREATE TABLE input(id text,state text,run_id text,content text,attachments jsonb
    if(name==='unknown-owner-state')state='unreachable';if(name==='unknown-proof')cessation.proof.kind='unknown';
    if(name==='nonterminal-result')result={isError:false,details:{phase:'in-progress'}};
    const body={name:'bash',arguments:{command:'git -C /fixture/source status'}};
-   if(name==='settled-known-applied'||name==='known-applied-wrong-content'){
+   if(['settled-known-applied','known-applied-wrong-content','settled-direct-write','direct-write-wrong-bytes'].includes(name)){
     body.name='write';body.arguments={path:'/fixture/source/file',content:'original requested bytes'};
     delete details.originalRunId;details.phase='recovered-known-applied-tool-terminal-observation';details.originalAgentRunId=ownerId;
     details.originalModelRun={kind:'unknown'};details.providerCallId=provider;details.cessationEvidence=structuredClone(absence);
     details.error={code:'outcome_uncertain',retry:'never',resourceId:id};result.terminate=false;
     details.knownEffect={kind:'known-applied-file',path:body.arguments.path,sha256:createHash('sha256').update(body.arguments.content).digest('hex'),exported:'/fixture/export',repository:'/fixture/repository',evidence:'/fixture/evidence',commit:'a'.repeat(40),originalCallCompletion:'not-established'};
+    if(['settled-direct-write','direct-write-wrong-bytes'].includes(name)){delete details.originalAgentRunId;delete details.originalModelRun;delete details.knownEffect.exported;details.originalRunId=ownerId;details.knownEffect.bytes=Buffer.byteLength(body.arguments.content)+(name==='direct-write-wrong-bytes'?1:0);}
     if(name==='known-applied-wrong-content')details.knownEffect.sha256='b'.repeat(64);
    }
-   if(['settled-completed-child','declared-child-live','declared-child-mismatch'].includes(name)){
+   if(['settled-completed-child','declared-child-live','declared-child-mismatch','settled-reference-child','reference-child-live'].includes(name)){
     const nativeOwner={unit:'native.service',invocationId:'c'.repeat(32)},nativeAbsence={kind:'cgroup-empty',owner:nativeOwner,result:'success',exitCode:0};
     const nativeResult={exitCode:0,output:'retained original',processOutcome:{state:'recorded',cause:'exit',exit:{kind:'exited',code:0},startedAt:100,exitedAt:200}};
     details.error={code:'outcome_uncertain',retry:'never',resourceId:id};result.terminate=false;
     details.children=[{jobId:'child-'+name,kind:'tool-bash',state:'completed',result:nativeResult,ownershipReceipt:nativeOwner,cessationEvidence:nativeAbsence}];
     details.knownMaterial={kind:'completed-original-bash-child',jobId:'child-'+name,exitCode:0,result:nativeResult};
+    if(['settled-reference-child','reference-child-live'].includes(name)){details.toolCallId=provider;delete details.knownMaterial;details.children=[{jobId:'child-'+name,kind:'tool-bash',state:'completed',cessation:nativeAbsence,resultReference:{kind:'bash_job',jobId:'child-'+name}}];}
     const actual=name==='declared-child-mismatch'?{...nativeResult,output:'different'}:nativeResult;
-    sql+=`INSERT INTO job VALUES(${literal('child-'+name)},${literal(name==='declared-child-live'?'running':'completed')},${json({admitted:{parentJobId:ownerId,toolCallId:provider}})},${literal(id)},${json(nativeOwner)},${json(nativeAbsence)},'tool-bash',${json(actual)});\n`;
+    sql+=`INSERT INTO job VALUES(${literal('child-'+name)},${literal(['declared-child-live','reference-child-live'].includes(name)?'running':'completed')},${json({admitted:{parentJobId:ownerId,toolCallId:provider}})},${literal(id)},${json(nativeOwner)},${json(nativeAbsence)},'tool-bash',${json(actual)});\n`;
    }
    sql+=`INSERT INTO operation VALUES(${literal(id)},'uncertain',${literal(name==='source-intent'?'conversation.send':'agent.tool')},${json(body)},'{}',${json(name==='settled-projected'?result:original)});\n`;
    sql+=`INSERT INTO job VALUES(${literal(ownerId)},${literal(state)},'{"kind":"agent-run"}',NULL,${json(ownership)},${cessation===null?'NULL':json(cessation)},'agent-run',NULL);\n`;
@@ -80,8 +82,8 @@ CREATE TABLE input(id text,state text,run_id text,content text,attachments jsonb
   const lines=['physical-checkout','source'].map(kind=>{const rows=JSON.parse(query(queueReferenceSql('/fixture/source',null,kind)));const ids=rows.filter(r=>r.kind==='operation'&&r.state==='uncertain'&&r.resourceClass==='execution').map(r=>r.id);const settled=settledToolOperationIds(JSON.parse(query(toolSettlementSql(ids))));return rows.filter(r=>!settled.has(r.id));});
   assert.equal(lines.length,2);const [physical,source]=lines;assert.equal(physical.some(x=>x.id==='source-job-without-spec-discriminator'),false);assert.equal(source.some(x=>x.id==='source-job-without-spec-discriminator'),true);
   for(const [name,rows] of [['physical',physical],['source',source]]){
-   const ids=new Set(rows.filter(x=>x.kind==='operation').map(x=>x.id));assert.equal(ids.has('operation-settled-nochild'),false,name);assert.equal(ids.has('operation-settled-projected'),false,name);assert.equal(ids.has('operation-settled-known-applied'),false,name);assert.equal(ids.has('operation-terminal-distinct-sibling'),false,name);assert.equal(ids.has('operation-settled-completed-child'),false,name);
-   for(const key of names.filter(x=>x!=='settled-nochild'&&x!=='settled-projected'&&x!=='settled-known-applied'&&x!=='terminal-distinct-sibling'&&x!=='settled-completed-child'&&x!=='source-intent'))assert.equal(ids.has('operation-'+key),true,`${name}/${key}`);
+   const ids=new Set(rows.filter(x=>x.kind==='operation').map(x=>x.id));assert.equal(ids.has('operation-settled-nochild'),false,name);assert.equal(ids.has('operation-settled-projected'),false,name);assert.equal(ids.has('operation-settled-known-applied'),false,name);assert.equal(ids.has('operation-terminal-distinct-sibling'),false,name);assert.equal(ids.has('operation-settled-completed-child'),false,name);assert.equal(ids.has('operation-settled-direct-write'),false,name);assert.equal(ids.has('operation-settled-reference-child'),false,name);
+   for(const key of names.filter(x=>x!=='settled-nochild'&&x!=='settled-projected'&&x!=='settled-known-applied'&&x!=='terminal-distinct-sibling'&&x!=='settled-completed-child'&&x!=='settled-direct-write'&&x!=='settled-reference-child'&&x!=='source-intent'))assert.equal(ids.has('operation-'+key),true,`${name}/${key}`);
    assert.equal(ids.has('operation-source-intent'),name==='source');
   }
   if(process.env.WORKSPACE_RELEASE_PROOF_DIR){fs.mkdirSync(process.env.WORKSPACE_RELEASE_PROOF_DIR,{recursive:true});fs.writeFileSync(path.join(process.env.WORKSPACE_RELEASE_PROOF_DIR,'queue-fixture.json'),JSON.stringify({cases:names,physical,source,scope:'isolated disposable PostgreSQL; no application database or external effect'},null,2)+'\n');}

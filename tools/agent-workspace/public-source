@@ -19,6 +19,5 @@ tree=$(git write-tree)
 projection=$(printf 'Publish exact agent-workspace component source\n' | git commit-tree "$tree" -p "$parent")
 git diff --quiet "$source" "$projection" -- tools/agent-workspace
 git diff --quiet "$parent" "$projection" -- . ':!tools/agent-workspace'
-git update-ref refs/heads/agent/workspace-component-public "$projection"
 git push "$remote" "$projection:refs/heads/main"
 printf 'source %s\npublic %s\ncomponent-tree %s\n' "$source" "$projection" "$(git rev-parse "$source:tools/agent-workspace")"

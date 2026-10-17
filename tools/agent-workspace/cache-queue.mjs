@@ -54,13 +54,19 @@ function terminalProjectionMatches(c,details) {
  case 'recovered-tool-terminal-observation':return details.originalRunId===c.run_id;
  case 'recovered-known-applied-tool-terminal-observation': {
   const effect=details.knownEffect,request=c.request_body;
-  return details.originalAgentRunId===c.run_id&&isDeepStrictEqual(details.originalModelRun,{kind:'unknown'})
+  const exported=Object.hasOwn(details,'originalAgentRunId');
+  const variant=exported
+   ? details.originalAgentRunId===c.run_id&&!Object.hasOwn(details,'originalRunId')&&isDeepStrictEqual(details.originalModelRun,{kind:'unknown'})
+     &&typeof effect?.exported==='string'&&path.isAbsolute(effect.exported)
+   : details.originalRunId===c.run_id&&!Object.hasOwn(details,'originalModelRun')&&!Object.hasOwn(effect??{},'exported')
+     &&typeof request?.arguments?.content==='string'&&Number.isSafeInteger(effect?.bytes)&&effect.bytes===Buffer.byteLength(request.arguments.content,'utf8');
+  return variant
    &&details.providerCallId===c.provider_call_id&&c.tool_result.terminate===false
    &&details.error?.code==='outcome_uncertain'&&details.error.resourceId===c.id
    &&isDeepStrictEqual(details.cessationEvidence,c.cessation_evidence)
    &&effect?.kind==='known-applied-file'&&effect.originalCallCompletion==='not-established'
    &&request?.name==='write'&&typeof request.arguments?.content==='string'&&effect.path===request.arguments.path
-   &&[effect.path,effect.exported,effect.repository,effect.evidence].every(p=>typeof p==='string'&&path.isAbsolute(p))
+   &&[effect.path,effect.repository,effect.evidence].every(p=>typeof p==='string'&&path.isAbsolute(p))
    &&typeof effect.commit==='string'&&/^[a-f0-9]{40}$/.test(effect.commit)
    &&effect.sha256===createHash('sha256').update(request.arguments.content,'utf8').digest('hex');
  }
@@ -84,16 +90,21 @@ function terminalDeclaredChildren(c,details,evidence) {
  if(!child||child.operation_id!==c.id||child.provider_call!==c.provider_call_id
   ||child.assignment_id!==c.assignment_id||child.conversation_id!==c.conversation_id
   ||child.parent_run!==c.run_id||child.kind!=='tool-bash'||declared.kind!==child.kind
-  ||child.state!=='completed'||declared.state!==child.state||child.result?.exitCode!==0
-  ||!isDeepStrictEqual(declared.result,child.result)||!isDeepStrictEqual(declared.ownershipReceipt,child.ownership_receipt)
-  ||!isDeepStrictEqual(declared.cessationEvidence,child.cessation_evidence))return null;
+  ||child.state!=='completed'||declared.state!==child.state||child.result?.exitCode!==0)return null;
+ const reference=Object.hasOwn(declared,'resultReference');
+ const variant=reference
+  ? !['result','ownershipReceipt','cessationEvidence'].some(key=>Object.hasOwn(declared,key))&&!Object.hasOwn(details,'knownMaterial')
+    &&details.toolCallId===c.provider_call_id&&isDeepStrictEqual(declared.resultReference,{kind:'bash_job',jobId:child.id})
+    &&isDeepStrictEqual(declared.cessation,child.cessation_evidence)
+  : !Object.hasOwn(declared,'cessation')&&isDeepStrictEqual(declared.result,child.result)
+    &&isDeepStrictEqual(declared.ownershipReceipt,child.ownership_receipt)&&isDeepStrictEqual(declared.cessationEvidence,child.cessation_evidence)
+    &&material?.kind==='completed-original-bash-child'&&material.jobId===child.id&&material.exitCode===0&&isDeepStrictEqual(material.result,child.result);
+ if(!variant)return null;
  const owner=child.ownership_receipt,absence=child.cessation_evidence,process=child.result.processOutcome;
  if(!owner||typeof owner.unit!=='string'||!owner.unit||typeof owner.invocationId!=='string'||!owner.invocationId
   ||absence?.kind!=='cgroup-empty'||!isDeepStrictEqual(absence.owner,owner)||absence.result!=='success'||absence.exitCode!==0
   ||process?.state!=='recorded'||process.cause!=='exit'||process.exit?.kind!=='exited'||process.exit.code!==0
-  ||!Number.isSafeInteger(process.startedAt)||!Number.isSafeInteger(process.exitedAt)||process.exitedAt<process.startedAt
-  ||material?.kind!=='completed-original-bash-child'||material.jobId!==child.id||material.exitCode!==0
-  ||!isDeepStrictEqual(material.result,child.result))return null;
+  ||!Number.isSafeInteger(process.startedAt)||!Number.isSafeInteger(process.exitedAt)||process.exitedAt<process.startedAt)return null;
  return new Set([child.id]);
 }
 export function settledToolOperationIds(evidence) {
